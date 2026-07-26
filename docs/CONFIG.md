@@ -47,11 +47,50 @@ If you switch to a smaller model and see a spike in `unprocessed`, this is the c
 
 | Key | Default | Why |
 |---|---|---|
-| `max_edge` | `1600` | Long edge sent to the model. CLAUDE.md §5.1 notes ~1600 px is ample for identification; full-resolution frames cost markedly more vision tokens without improving accuracy. Set to `0` to disable resizing. |
+| `max_edge` | `1280` | Long edge sent to the model. Lower than the ~1600 px CLAUDE.md §5.1 suggests — see the runtime limit below, which makes 1600 unsafe. Set to `0` to disable resizing. |
+| `fallback_edges` | `[1024, 768]` | Tried in order when generation returns empty. |
 | `jpeg_quality` | `92` | High enough that re-encoding does not soften the fine plumage and scale detail that identification depends on. |
 
 Resizing happens inside `images.staged_pixels`, which is also the enforcement point for
 the no-metadata rule — see below.
+
+### The prompt-token ceiling (important)
+
+`mlx-vlm` 0.6.7 driving Qwen3-VL stops generating once the prompt passes roughly 2,100
+tokens: the model emits a single EOS token and returns an empty string. Measured on
+`Qwen3-VL-30B-A3B-Instruct-4bit` with a full bird prompt, varying only image size:
+
+| Long edge | Prompt tokens | Outcome |
+|---|---|---|
+| 768 | 1,217 | generates normally |
+| 1,300 | 1,940 | generates normally |
+| 1,400 | 2,109 | generates normally |
+| 1,450 | 2,183 | **empty** |
+| 1,600 | 2,483 | **empty** |
+
+This is far below Qwen3-VL's real context window, so it is a defect in the runtime
+rather than a model limit, and 0.6.7 is the latest published release. It reproduces on
+`Qwen3-VL-2B-Instruct-4bit` too, so it is not specific to the MoE build.
+
+Two consequences worth knowing:
+
+- At `temperature = 0` the failure is silent and total — an empty reply. Raising the
+  temperature to 0.7 makes the model generate, but it then tends to ignore the schema
+  and invent its own keys, which surfaces as `taxon: Field required` validation errors.
+  Neither is a usable workaround.
+- Vision tokens dominate the budget, so **image size is the lever, not prompt wording**.
+  Shortening a taxon prompt buys back roughly 800 tokens; halving the image buys back
+  far more.
+
+`max_edge` plus `fallback_edges` handle this: identification is retried at each
+successively smaller size until generation succeeds, because the exact threshold shifts
+with image aspect ratio. `ImageResult.image_max_edge` records the size that actually
+worked, so silent degradation is visible in the results.
+
+The tradeoff is real. Less resolution means less detail for small-in-frame subjects —
+distant birds and partly submerged reptiles are the cases that suffer. If accuracy on
+those is poor, shorten the prompts to free budget for pixels rather than raising
+`max_edge` past the ceiling.
 
 ---
 

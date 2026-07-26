@@ -25,9 +25,18 @@ class ModelConfig(_Base):
 
 
 class ImageConfig(_Base):
-    # Long edge sent to the model. ~1600px is ample for ID per CLAUDE.md §5.1 and
-    # keeps vision-token cost (and therefore runtime) down.
-    max_edge: int = 1600
+    # Long edge sent to the model.
+    #
+    # mlx-vlm 0.6.7 + Qwen3-VL collapses to an immediate EOS once the prompt passes
+    # roughly 2.1k tokens (measured: 2109 generates fine, 2183 returns one token).
+    # That is far below the model's real context window, so it is a bug in the
+    # runtime rather than a model limit. Vision tokens dominate that budget, so the
+    # image size is the practical lever: 1280px keeps a full taxon prompt near
+    # ~1.8k tokens with usable headroom.
+    max_edge: int = 1280
+    # Tried in order if generation comes back empty. The exact threshold shifts with
+    # image aspect ratio, so a fixed size alone is not reliable.
+    fallback_edges: list[int] = Field(default_factory=lambda: [1024, 768])
     jpeg_quality: int = 92
 
 

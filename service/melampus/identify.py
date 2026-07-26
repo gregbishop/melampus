@@ -125,16 +125,28 @@ class Identifier:
                 error=f"unreadable: {exc}", model=self.backend.name,
             )
 
-        try:
-            with staged_pixels(
-                path, self.config.image.max_edge, self.config.image.jpeg_quality
-            ) as staged:
-                return self._identify_staged(staged, path.name, content)
-        except Exception as exc:  # noqa: BLE001 - one bad file must not abort a batch
-            return ImageResult(
-                file=path.name, content_hash=content, status="error",
-                error=f"{type(exc).__name__}: {exc}", model=self.backend.name,
-            )
+        # Try progressively smaller images. See ImageConfig.max_edge: the runtime
+        # returns an empty generation once the prompt grows past ~2.1k tokens, and
+        # vision tokens are the dominant term, so shrinking the image is the lever.
+        edges = [self.config.image.max_edge, *self.config.image.fallback_edges]
+        last: ImageResult | None = None
+        for edge in edges:
+            try:
+                with staged_pixels(path, edge, self.config.image.jpeg_quality) as staged:
+                    result = self._identify_staged(staged, path.name, content)
+            except Exception as exc:  # noqa: BLE001 - one bad file must not abort a batch
+                return ImageResult(
+                    file=path.name, content_hash=content, status="error",
+                    error=f"{type(exc).__name__}: {exc}", model=self.backend.name,
+                    image_max_edge=edge,
+                )
+            result.image_max_edge = edge
+            if result.status == "ok":
+                return result
+            last = result
+
+        assert last is not None
+        return last
 
     def _identify_staged(self, staged: Path, display_name: str, content: str) -> ImageResult:
         total = 0.0

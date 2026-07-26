@@ -121,3 +121,4 @@ class ImageResult(BaseModel):
     retries: int = 0
     seconds: float = 0.0
     model: str = ""
+    image_max_edge: int = 0

@@ -102,6 +102,15 @@ Abstention is a first-class outcome. A bird facing away, a submerged reptile, or
 flower with no visible reproductive parts should abstain, because **a wrong keyword is
 worse than no keyword** — a polluted 20-year catalog is very expensive to clean.
 
+### Known runtime limit
+
+`mlx-vlm` 0.6.7 stops generating — returns a single EOS token and an empty string —
+once the prompt exceeds roughly 2,100 tokens, far below Qwen3-VL's real context window.
+Vision tokens dominate that budget, so images are sent at 1280 px rather than the
+1600 px CLAUDE.md §5.1 suggests, with an automatic retry ladder at 1024 and 768 px.
+If you see a run come back mostly `unprocessed`, this is almost certainly the cause.
+Full measurements and the reasoning are in [docs/CONFIG.md](docs/CONFIG.md).
+
 ## No metadata reaches the model
 
 Only pixels are ever sent. This is enforced structurally rather than by convention, so
