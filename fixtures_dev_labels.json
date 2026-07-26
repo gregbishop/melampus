@@ -1,0 +1,39 @@
+{
+ "_about": {
+  "source": "Independent visual identification by Claude (Fable 5) of each dev-set frame.",
+  "caveat": "This is a REFERENCE set, not ground truth. It measures agreement with another vision model, not correctness. Rows with reference_confidence 'low' should be treated as unreliable and are the ones most likely to be wrong.",
+  "leakage_rule": "These labels are used ONLY for scoring after inference. They are never placed in a prompt, and no filename or metadata is ever sent to the model.",
+  "expected_outcome_values": {
+   "identify": "a species-level ID is reasonably expected",
+   "abstain": "diagnostic features are not visible; correct behaviour is abstain:true",
+   "none": "no organism present; correct behaviour is taxon:none"
+  }
+ },
+ "labels": [
+  {"file": "_A1A2472.jpg", "taxon": "reptile", "common_name": "American Alligator", "scientific_name": "Alligator mississippiensis", "reference_confidence": "medium", "expected_outcome": "identify", "notes": "Only head above water, dawn light, tiny in frame. American Crocodile not fully excluded on visible features."},
+  {"file": "0A1A2478.jpg", "taxon": "bird", "common_name": "Anhinga", "scientific_name": "Anhinga anhinga", "reference_confidence": "high", "expected_outcome": "identify", "notes": "Male, silhouetted on dead branch at dawn. Long thin bill, long fanned tail, pale wing streaking."},
+  {"file": "0A1A2521.jpg", "taxon": "bird", "common_name": "Tricolored Heron", "scientific_name": "Egretta tricolor", "reference_confidence": "high", "expected_outcome": "identify", "notes": "Backlit wading. White belly against dark body is the diagnostic vs Little Blue Heron."},
+  {"file": "0A1A2572.jpg", "taxon": "bird", "common_name": "Boat-tailed Grackle", "scientific_name": "Quiscalus major", "reference_confidence": "medium", "expected_outcome": "identify", "notes": "Two brown birds (female/juvenile) in mangrove, heavily backlit. Common Grackle not fully excluded."},
+  {"file": "0A1A2601.jpg", "taxon": "bird", "common_name": "Boat-tailed Grackle", "scientific_name": "Quiscalus major", "reference_confidence": "medium", "expected_outcome": "identify", "notes": "Juvenile/female, dark with warm brown head, perched on twig."},
+  {"file": "0A1A2661.jpg", "taxon": "bird", "common_name": "Boat-tailed Grackle", "scientific_name": "Quiscalus major", "reference_confidence": "medium", "expected_outcome": "identify", "notes": "Female/juvenile perched atop mangrove, warm brown throat."},
+  {"file": "0A1A2829.jpg", "taxon": "bird", "common_name": "Tricolored Heron", "scientific_name": "Egretta tricolor", "reference_confidence": "high", "expected_outcome": "identify", "notes": "Adult hunting; white belly, rufous neck, white foreneck stripe all visible."},
+  {"file": "0A1A3076.jpg", "taxon": "bird", "common_name": "Tricolored Heron", "scientific_name": "Egretta tricolor", "reference_confidence": "high", "expected_outcome": "identify", "notes": "Front-on with prey in bill. Behaviour: feeding."},
+  {"file": "0A1A3141.jpg", "taxon": "bird", "common_name": "Green Heron", "scientific_name": "Butorides virescens", "reference_confidence": "high", "expected_outcome": "identify", "notes": "Adult perched in mangrove, chestnut neck, dark cap, yellow eye and legs."},
+  {"file": "0A1A3309.jpg", "taxon": "bird", "common_name": "Tricolored Heron", "scientific_name": "Egretta tricolor", "reference_confidence": "high", "expected_outcome": "identify", "notes": "Striking at water, wings partly spread. Behaviour: feeding."},
+  {"file": "0A1A3491.jpg", "taxon": "bird", "common_name": "Tricolored Heron", "scientific_name": "Egretta tricolor", "reference_confidence": "high", "expected_outcome": "identify", "notes": "Crouched low, bill at water surface."},
+  {"file": "0A1A3605.jpg", "taxon": "bird", "common_name": "Tricolored Heron", "scientific_name": "Egretta tricolor", "reference_confidence": "high", "expected_outcome": "identify", "notes": "Wading with small fish in bill. Behaviour: feeding."},
+  {"file": "0A1A3748.jpg", "taxon": "bird", "common_name": "Common Ground Dove", "scientific_name": "Columbina passerina", "reference_confidence": "low", "expected_outcome": "abstain", "notes": "Small dove on gravel track, facing directly away, distant. Scaled pattern and short tail suggest ground dove but no diagnostic view. Abstention is the defensible answer here."},
+  {"file": "0A1A3850.jpg", "taxon": "bird", "common_name": "Anhinga", "scientific_name": "Anhinga anhinga", "reference_confidence": "high", "expected_outcome": "identify", "notes": "Male, neck extended, silvery wing panels clear."},
+  {"file": "0A1A3874.jpg", "taxon": "bird", "common_name": "Anhinga", "scientific_name": "Anhinga anhinga", "reference_confidence": "high", "expected_outcome": "identify", "notes": "Male perched over water in dead branches."},
+  {"file": "0A1A3898.jpg", "taxon": "bird", "common_name": "Tricolored Heron", "scientific_name": "Egretta tricolor", "reference_confidence": "high", "expected_outcome": "identify", "notes": "Preening, head down. Behaviour: preening."},
+  {"file": "0A1A4060.jpg", "taxon": "bird", "common_name": "Tricolored Heron", "scientific_name": "Egretta tricolor", "reference_confidence": "high", "expected_outcome": "identify", "notes": "Preening on branch, rufous neck visible."},
+  {"file": "0A1A4114.jpg", "taxon": "bird", "common_name": "Double-crested Cormorant", "scientific_name": "Nannopterum auritum", "reference_confidence": "high", "expected_outcome": "identify", "notes": "Swimming low in water; orange gular skin, hooked bill, blue-green eye."},
+  {"file": "0A1A4117.jpg", "taxon": "indeterminate", "common_name": null, "scientific_name": null, "reference_confidence": "low", "expected_outcome": "abstain", "notes": "Heavily defocused dark shape in water, probably the alligator. No diagnostic feature resolvable. Correct answer is abstain."},
+  {"file": "0A1A4139.jpg", "taxon": "bird", "common_name": "Tricolored Heron", "scientific_name": "Egretta tricolor", "reference_confidence": "high", "expected_outcome": "identify", "notes": "Standing on mangrove edge, slightly soft."},
+  {"file": "0A1A4157.jpg", "taxon": "none", "common_name": null, "scientific_name": null, "reference_confidence": "high", "expected_outcome": "none", "notes": "Completely out-of-focus frame, no organism present at all. Should return taxon:none."},
+  {"file": "0A1A4175.jpg", "taxon": "bird", "common_name": "Snowy Egret", "scientific_name": "Egretta thula", "reference_confidence": "high", "expected_outcome": "identify", "notes": "Close portrait; black bill, yellow lores, shaggy nape plumes."},
+  {"file": "0A1A4177.jpg", "taxon": "bird", "common_name": "Snowy Egret", "scientific_name": "Egretta thula", "reference_confidence": "high", "expected_outcome": "identify", "notes": "Head and breast, dark background."},
+  {"file": "0A1A4186.jpg", "taxon": "bird", "common_name": "Snowy Egret", "scientific_name": "Egretta thula", "reference_confidence": "high", "expected_outcome": "identify", "notes": "Close portrait, yellow foot just visible at frame bottom."},
+  {"file": "0A1A4197.jpg", "taxon": "bird", "common_name": "Snowy Egret", "scientific_name": "Egretta thula", "reference_confidence": "high", "expected_outcome": "identify", "notes": "Close portrait, bright yellow lores and dark bill."}
+ ]
+}

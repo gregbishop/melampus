@@ -229,6 +229,78 @@ Melampus > Notable > Out of range
   "yielding is not allowed" errors in LrC plugins. Get model inference and network calls *fully
   completed* before opening a write transaction.
 
+### 5.4 Usability — treat this as a hard requirement, not polish
+
+The goal is a plugin that feels like a native Lightroom feature. If it feels like a science
+project, it won't get used. These are requirements, not nice-to-haves.
+
+**5.4.1 The service must be invisible.** This is the single biggest usability risk in the
+two-process architecture. The user must never open a terminal to tag photos.
+
+- On invocation, the plugin health-checks the service. If it isn't running, the plugin **starts it
+  itself** and waits, with a progress message. It does not error out and tell the user to go run
+  something.
+- Ship the Python side as a frozen self-contained binary (PyInstaller or equivalent) so no Python
+  install, venv, or pip step is required by the end user. **VERIFY** how large the bundle gets with
+  MLX plus the model runtime, and whether the model weights should ship separately (they should —
+  download on first run with a progress bar, don't bundle multi-GB weights).
+- macOS will Gatekeeper-block an unsigned bundled binary. Detect that failure specifically and show
+  actionable instructions, not a generic error. **VERIFY** current macOS behavior.
+- Idle-shutdown after a configurable timeout so a loaded VLM isn't holding memory indefinitely.
+- If the service genuinely can't start, the error message must state the cause and the fix in plain
+  language. Never surface a stack trace or a raw port-binding error to the user.
+
+**5.4.2 Minimal menu surface.** Do not ship a dozen menu items. Plugin menus are a flat, ugly
+namespace and clutter there makes a tool feel unfinished. Exactly these:
+
+- `Melampus: Analyze Selected Photos` — the one thing people do
+- `Melampus: Review Queue` — jumps to the needs-review collection
+- `Melampus: Settings…`
+- `Melampus: Log Corrections`
+
+Everything else (force-reprocess, clear state, diagnostics, export observations) goes inside the
+Settings dialog under an "Advanced" or "Maintenance" section, not on the menu.
+
+**5.4.3 Use Lightroom's own UI for review. Do not build a custom review browser.**
+
+This is the most important design call in Phase 2. LrC's grid, loupe, filmstrip, and keyboard
+shortcuts are already an excellent triage interface that the user has years of muscle memory in.
+A hand-rolled dialog will be worse. Instead:
+
+- **Auto-create smart collections on first run**, under a `Melampus` collection set:
+  - `Needs Review` — medium/low confidence or abstained
+  - `Notable — Out of Range` — range-flagged, the interesting pile
+  - `High Confidence` — auto-tagged, spot-check only
+  - `Unprocessed` — hasn't been run yet
+  - `Best of Burst` — top-ranked frame per burst group
+- **A custom metadata panel section** showing species candidates, confidence, and the quality
+  sub-metrics for the selected photo. The user reviews in loupe view with the panel open — native
+  workflow, zero new UI to learn.
+- Store the ranked alternates in metadata so the panel can display "or possibly: X, Y" — the user
+  needs the runner-up candidates visible to make a call.
+
+**5.4.4 Progress must be cancellable.** Use LrC's progress scope with a working cancel button.
+A multi-thousand-photo batch that can't be interrupted is unacceptable. On cancel, keep completed
+work (see the resume requirement in §5.3) and report how many were done.
+
+**5.4.5 Correction must take one action.** When the user disagrees with an ID, fixing it should
+be a single gesture, not a form. Preferred: the metadata panel lists the alternate candidates as
+selectable — picking one rewrites the keyword and logs the correction in the same step. Fall back
+to `Log Corrections` scanning for photos whose species keyword no longer matches the stored
+prediction. **VERIFY** what interactive controls a custom metadata panel actually supports in the
+current SDK; if it can't do clickable candidates, design the simplest dialog that does.
+
+**5.4.6 First-run experience.** On first launch, show a short setup panel: confirm model
+downloaded, confirm service starts, confirm dry-run is on, and offer a "test on 10 photos" button.
+Do not let the user's first action be a 5,000-photo batch against their real catalog.
+
+**5.4.7 Speed perception.** Write metadata incrementally as results arrive so the user sees stars
+and keywords appearing during the run, rather than staring at a bar and getting everything at the
+end. Order the queue so visible/selected photos process first.
+
+**5.4.8 Uninstall cleanly.** Provide a way to remove all Melampus keywords, custom field values,
+and smart collections. A tool that can't be backed out of is one people won't try.
+
 ## 6. Phase 3 — features worth having
 
 Ordered roughly by value-to-effort.
@@ -266,6 +338,8 @@ Single config file, editable outside Lightroom, with a dialog in-plugin for the 
 - occurrence API keys, cache TTL, offline mode
 - dry-run toggle (default on for first run)
 - taxa to attempt (allow disabling groups)
+- service autostart on/off, idle-shutdown timeout
+- auto-create smart collections on/off
 
 ## 8. Testing
 

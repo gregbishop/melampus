@@ -1,0 +1,18 @@
+# Environments and build artefacts
+.venv/
+__pycache__/
+*.egg-info/
+build/
+dist/
+
+# Photo corpora — large binary, not source
+fixtures/
+fixtures_full/
+
+# Result cache (regenerable, keyed on content hash)
+.melampus_cache/
+
+# Archived earlier attempt
+_old/
+
+.DS_Store
