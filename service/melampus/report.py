@@ -16,7 +16,31 @@ from .schema import ImageResult
 
 
 def _norm(name: str | None) -> str:
-    return (name or "").strip().lower()
+    """Normalise a taxon name for comparison.
+
+    Hyphenation of English bird names is genuinely inconsistent between authorities
+    ("Tricolored Heron" vs "Tri-colored Heron", "Night-Heron" vs "Night Heron"), so
+    comparing raw strings manufactures confusion pairs that are really the same
+    species. Hyphens are removed rather than turned into spaces so that
+    "tri-colored" and "tricolored" converge.
+    """
+    text = (name or "").strip().lower()
+    for token in ("(", ")", ".", ","):
+        text = text.replace(token, " ")
+    text = text.replace("-", "").replace("'", "")
+    return " ".join(text.split())
+
+
+def _matches(predicted_common: str, predicted_sci: str, ref_common: str, ref_sci: str) -> bool:
+    """A prediction is correct if either name agrees.
+
+    Scientific names are the more reliable signal: a model can return an unusual
+    common name while still having the taxon right. Requiring the common name alone
+    would score those as errors.
+    """
+    if ref_common and predicted_common and predicted_common == ref_common:
+        return True
+    return bool(ref_sci and predicted_sci and predicted_sci == ref_sci)
 
 
 def raw_table(results: list[ImageResult], max_candidates: int = 3) -> str:
@@ -85,8 +109,11 @@ def score(results: list[ImageResult], labels_path: Path) -> tuple[Scores, str]:
             s.unprocessed += 1
             continue
 
-        predicted_names = [_norm(c.common_name) for c in ident.ranked()]
-        abstained = ident.abstain or not predicted_names
+        ranked = ident.ranked()
+        predicted_names = [_norm(c.common_name) for c in ranked]
+        predicted_sci = [_norm(c.scientific_name) for c in ranked]
+        ref_sci = _norm(label.get("scientific_name"))
+        abstained = ident.abstain or not ranked
         if abstained:
             s.abstained += 1
 
@@ -106,13 +133,17 @@ def score(results: list[ImageResult], labels_path: Path) -> tuple[Scores, str]:
         s.per_species[truth][1] += 1
         s.per_taxon[label.get("taxon", "unknown")][1] += 1
 
-        if predicted_names and predicted_names[0] == truth:
+        hits = [
+            _matches(common, sci, truth, ref_sci)
+            for common, sci in zip(predicted_names, predicted_sci, strict=True)
+        ]
+        if hits and hits[0]:
             s.top1 += 1
             s.per_species[truth][0] += 1
             s.per_taxon[label.get("taxon", "unknown")][0] += 1
-        elif predicted_names:
+        elif ranked:
             s.confusions[(truth, predicted_names[0])] += 1
-        if truth in predicted_names[:3]:
+        if any(hits[:3]):
             s.top3 += 1
 
     return s, _render_scores(s)
