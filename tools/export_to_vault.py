@@ -98,10 +98,9 @@ def main(argv: list[str]) -> int:
         sightings[species].append((when, enc.index, enc.size, agreement, best))
         by_date[when].append((species, enc.size, agreement))
 
-    if not sightings:
-        print("no sightings to write", file=sys.stderr)
-        return 1
-
+    # Write the note even when nothing qualified. Bailing out would leave the
+    # previous export sitting in the vault looking current, which is worse than
+    # an empty list that says plainly that nothing was confidently identified.
     stamp = datetime.fromtimestamp(args.results.stat().st_mtime).date().isoformat()
     status = "human-confirmed" if args.reviewed else "PROVISIONAL — not yet human-reviewed"
 
@@ -138,9 +137,18 @@ def main(argv: list[str]) -> int:
         "One row per species. Sightings are counted per shooting encounter, not per",
         "frame, so a long burst of one bird counts once.",
         "",
-        "| species | first seen | last seen | sightings | frames | agreement |",
-        "| --- | --- | --- | ---: | ---: | ---: |",
     ]
+    if not sightings:
+        out += [
+            "Nothing was confidently identified in this run. Every encounter either",
+            "abstained or disagreed with itself across frames — see Provenance below.",
+            "",
+        ]
+    else:
+        out += [
+            "| species | first seen | last seen | sightings | frames | agreement |",
+            "| --- | --- | --- | ---: | ---: | ---: |",
+        ]
     for species in sorted(sightings, key=lambda s: (-len(sightings[s]), s)):
         entries = sightings[species]
         dates = sorted(e[0] for e in entries)
