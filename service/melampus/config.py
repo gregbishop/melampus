@@ -40,6 +40,31 @@ class ImageConfig(_Base):
     jpeg_quality: int = 92
 
 
+class OccurrenceConfig(_Base):
+    """Location and season re-ranking (CLAUDE.md §4.3)."""
+
+    enabled: bool = True
+    # GBIF needs no key and covers every taxon. eBird has far denser bird data but
+    # requires a free token from https://ebird.org/api/keygen — optional, additive.
+    ebird_token: str | None = None
+    # The Canon R3 has no GPS receiver and nothing in this catalog carries
+    # coordinates, so a default location is the only way §4.3 can run at all.
+    # Per-photo GPS, when present, always wins over this.
+    default_latitude: float | None = 28.65
+    default_longitude: float | None = -80.72
+    default_location_name: str = "Merritt Island National Wildlife Refuge, FL"
+    # 50 km comfortably covers a refuge and its surroundings without reaching into
+    # a different faunal region.
+    radius_km: float = 50.0
+    cache_path: Path = REPO_ROOT / ".melampus_cache" / "occurrence.json"
+    # Below this many regional records a species is present but scarce: demote
+    # gently and mark notable, rather than treating it as absent.
+    notable_threshold: int = 25
+    # Multipliers applied to an ordinal confidence. Not probabilities.
+    absent_penalty: float = 0.15
+    notable_penalty: float = 0.6
+
+
 class RunConfig(_Base):
     prompts_dir: Path = REPO_ROOT / "prompts"
     cache_path: Path = REPO_ROOT / ".melampus_cache" / "identifications.jsonl"
@@ -50,6 +75,7 @@ class RunConfig(_Base):
 class MelampusConfig(_Base):
     model: ModelConfig = Field(default_factory=ModelConfig)
     image: ImageConfig = Field(default_factory=ImageConfig)
+    occurrence: OccurrenceConfig = Field(default_factory=OccurrenceConfig)
     run: RunConfig = Field(default_factory=RunConfig)
 
 
