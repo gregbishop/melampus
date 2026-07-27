@@ -251,5 +251,32 @@ t.test('a second run over the same photos changes nothing', function()
 		'a re-run re-applied keywords it had already written')
 end)
 
+-- ── analysing photos that have never been seen ─────────────────────────────
+t.test('unanalysed photos trigger an offer to analyse them', function()
+	-- The failure seen in practice: selecting a folder the pipeline had never seen did
+	-- nothing at all and reported success.
+	runImport({}, { { 'never_seen_01.CR3' }, { 'never_seen_02.CR3' } }, defaultPrefs())
+	local offered = false
+	for _, d in ipairs(mock.state.dialogs) do
+		if d.body and string.find(d.body, 'never been analysed', 1, true) then
+			offered = true
+		end
+	end
+	t.isTrue(offered, 'silently did nothing instead of offering to analyse')
+end)
+
+t.test('declining the offer leaves the photos untouched', function()
+	writeResults(RESULTS, {})
+	mock.reset({ prefs = defaultPrefs(), confirmAnswer = 'cancel' })
+	mock.state.prefs.resultsPath = RESULTS
+	mock.addPhoto('untouched.CR3', {})
+	mock.install(PLUGIN)
+	package.loaded['MelampusJson'] = nil; package.loaded['MelampusRules'] = nil
+	package.loaded['MelampusLog'] = nil; package.loaded['MelampusAnalyze'] = nil
+	assert(loadfile(PLUGIN .. '/MelampusImport.lua'))()
+	t.equals(#mock.state.photos[1]:keywordPaths(), 0)
+	t.isNil(mock.state.photos[1]:getRawMetadata('rating'))
+end)
+
 os.remove(RESULTS)
 return t.summary()

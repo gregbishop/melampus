@@ -210,6 +210,7 @@ namespaces.LrFileUtils = {
 		if handle then handle:close(); return 'file' end
 		return false
 	end,
+	createAllDirectories = function(path) os.execute('mkdir -p ' .. path) return true end,
 	readFile = function(path)
 		local handle = io.open(path, 'r')
 		if not handle then return nil end
@@ -224,7 +225,10 @@ namespaces.LrFileUtils = {
 namespaces.LrPathUtils = {
 	child = function(dir, name) return dir .. '/' .. name end,
 	parent = function(path) return (string.gsub(path, '/[^/]+$', '')) end,
-	getStandardFilePath = function(which) return os.getenv('HOME') or '/tmp' end,
+	getStandardFilePath = function(which)
+		if which == 'temp' then return '/tmp' end
+		return os.getenv('HOME') or '/tmp'
+	end,
 }
 
 namespaces.LrPrefs = { prefsForPlugin = function() return M.state.prefs end }
@@ -242,6 +246,11 @@ namespaces.LrTasks = {
 	startAsyncTask = function(func) func() end,
 	yield = function() end,
 	sleep = function() end,
+	execute = function(cmd)
+		M.state.executed = M.state.executed or {}
+		M.state.executed[#M.state.executed + 1] = cmd
+		return M.state.executeCode or 0
+	end,
 }
 
 namespaces.LrLogger = function(name)

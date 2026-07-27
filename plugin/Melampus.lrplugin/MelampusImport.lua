@@ -22,6 +22,7 @@ local LrPrefs = import 'LrPrefs'
 local LrProgressScope = import 'LrProgressScope'
 local LrTasks = import 'LrTasks'
 
+local Analyze = require 'MelampusAnalyze'
 local Json = require 'MelampusJson'
 local Log = require 'MelampusLog'
 local Rules = require 'MelampusRules'
@@ -317,6 +318,82 @@ LrTasks.startAsyncTask(function()
 		end
 		Log.info(string.format('matched %d, unmatched %d, with changes %d',
 			matched, unmatched, #planned))
+
+		-- Photos with no identification are the whole point of the tool, not an
+		-- error to report. Offer to analyse them rather than shrugging.
+		if unmatched > 0 and not progress:isCanceled() then
+			local minutes = math.max(1, math.floor(unmatched * 7 / 60))
+			local ask = LrDialogs.confirm('Melampus',
+				string.format('%d of the %d selected photos have never been analysed.\n\n'
+					.. 'Melampus can analyse them now on this Mac. Nothing is uploaded '
+					.. 'anywhere.\n\nRoughly %d minute%s at about 7 seconds a photo. '
+					.. 'You can cancel part way and keep whatever finished.',
+					unmatched, #photos, minutes, minutes == 1 and '' or 's'),
+				'Analyse them', 'Skip')
+
+			if ask == 'ok' then
+				local repo = Analyze.repoRoot()
+				local workFolder = LrPathUtils.child(LrPathUtils.getStandardFilePath('temp'),
+					'melampus-previews')
+				local toAnalyse = {}
+				for _, photo in ipairs(photos) do
+					local name = photo:getFormattedMetadata('fileName') or ''
+					local stem = string.match(name, '^(.+)%.[^.]+$') or name
+					if not (byFile[name] or byFile[stem]) then
+						toAnalyse[#toAnalyse + 1] = photo
+					end
+				end
+
+				Log.info('exporting previews for ' .. #toAnalyse .. ' photos')
+				local exported = Analyze.exportPreviews(toAnalyse, workFolder, 1280, progress)
+
+				if exported == 0 then
+					LrDialogs.message('Melampus',
+						'Could not export previews for those photos.\n\nSee the log:\n'
+						.. Log.path(), 'critical')
+					return
+				end
+
+				local newResults = LrPathUtils.child(repo, 'plugin_results.json')
+				local ok, message = Analyze.run(repo, workFolder, newResults)
+				if not ok then
+					LrDialogs.message('Melampus', message, 'critical')
+					return
+				end
+
+				-- Reload and rebuild the plan from the freshly computed answers.
+				prefs.resultsPath = newResults
+				local reloaded = readResults(newResults)
+				if reloaded then
+					byFile = {}
+					for _, record in ipairs(reloaded) do
+						if type(record) == 'table' and record.file then
+							byFile[record.file] = record
+							local stem = string.match(record.file, '^(.+)%.[^.]+$')
+							if stem then byFile[stem] = record end
+						end
+					end
+					planned, matched, unmatched = {}, 0, 0
+					for _, photo in ipairs(photos) do
+						local name = photo:getFormattedMetadata('fileName') or ''
+						local stem = string.match(name, '^(.+)%.[^.]+$') or name
+						local record = byFile[name] or byFile[stem]
+						if record then
+							matched = matched + 1
+							local plan = Rules.planFor(normalise(record), photoState(photo), settings)
+							if not Rules.isEmpty(plan) then
+								planned[#planned + 1] = { photo = photo, plan = plan, name = name,
+									claim = describe(plan, normalise(record)) }
+							end
+						else
+							unmatched = unmatched + 1
+						end
+					end
+					Log.info(string.format('after analysis: matched %d, unmatched %d, changes %d',
+						matched, unmatched, #planned))
+				end
+			end
+		end
 
 		-- ── preview, and offer to apply straight from it ────────────────────
 		-- A preview you cannot act on is a dead end: you would have to go to
