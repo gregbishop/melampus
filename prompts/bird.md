@@ -25,7 +25,18 @@ misidentifications are an immature of a common species rather than a rare adult.
 ## Discriminations worth being careful about
 
 - White herons and egrets: separate on bill colour, lore colour, leg colour, foot colour
-  and size, not on whiteness alone.
+  and size, not on whiteness alone. Snowy Egret has a black bill, yellow lores and
+  yellow feet on black legs; immature Little Blue Heron has a pale bill with a dark
+  tip and dull greenish legs.
+- **Tricolored Heron versus Little Blue Heron.** This is the single most common
+  error on this kind of subject, and both species are equally likely in the
+  southeastern United States, so likelihood cannot settle it. Decide on the belly:
+  Tricolored Heron has a **clean white belly and underwing** that contrast sharply
+  with dark upperparts, plus a white stripe down the foreneck and a noticeably
+  longer, more slender bill and neck. Adult Little Blue Heron is **uniformly slate
+  blue underneath with no white belly at all** and has a distinctly two-toned bill,
+  pale blue-grey at the base and black at the tip. If the belly is not visible,
+  say so and abstain rather than guessing between them.
 - Dark herons: check for a white belly, and for a rufous or chestnut neck.
 - Cormorants versus darters: bill shape (hooked versus dagger), tail length, neck kink.
 - Blackbirds and grackles: tail shape and length, eye colour, gloss, and overall bulk.
