@@ -23,6 +23,7 @@ local LrProgressScope = import 'LrProgressScope'
 local LrTasks = import 'LrTasks'
 
 local Json = require 'MelampusJson'
+local Log = require 'MelampusLog'
 local Rules = require 'MelampusRules'
 
 local PLUGIN_ID = 'net.gregbishop.melampus'
@@ -145,11 +146,20 @@ LrTasks.startAsyncTask(function()
 			if prefs[key] ~= nil then settings[key] = prefs[key] end
 		end
 
+		Log.info('=== import started ===')
+		Log.info('results path: ' .. tostring(prefs.resultsPath))
+		Log.info('dryRun=' .. tostring(settings.dryRun)
+			.. ' writeKeywords=' .. tostring(settings.writeKeywords)
+			.. ' writeMetadata=' .. tostring(settings.writeMetadata)
+			.. ' force=' .. tostring(settings.force))
+
 		local records, err = readResults(prefs.resultsPath)
 		if not records then
+			Log.error('could not read results: ' .. tostring(err))
 			LrDialogs.message('Melampus', err, 'critical')
 			return
 		end
+		Log.info('records loaded: ' .. tostring(#records))
 
 		local byFile = {}
 		for _, record in ipairs(records) do
@@ -163,7 +173,9 @@ LrTasks.startAsyncTask(function()
 		end
 
 		local photos = catalog:getTargetPhotos()
+		Log.info('photos selected: ' .. tostring(#photos))
 		if #photos == 0 then
+			Log.warn('nothing selected')
 			LrDialogs.message('Melampus', 'Select some photos first.', 'info')
 			return
 		end
@@ -193,8 +205,13 @@ LrTasks.startAsyncTask(function()
 				end
 			else
 				unmatched = unmatched + 1
+				if unmatched <= 5 then
+					Log.warn('no result for: ' .. name .. '  (looked for "' .. stem .. '")')
+				end
 			end
 		end
+		Log.info(string.format('matched %d, unmatched %d, with changes %d',
+			matched, unmatched, #planned))
 
 		-- ── dry run stops here ──────────────────────────────────────────────
 		if not Rules.shouldApply(settings) then
@@ -211,6 +228,8 @@ LrTasks.startAsyncTask(function()
 			end
 			lines[#lines + 1] = '\nTurn off Dry Run in Melampus: Settings to apply.'
 			progress:done()
+			Log.info('dry run complete; nothing written')
+			lines[#lines + 1] = '\nLog: ' .. Log.path()
 			LrDialogs.message('Melampus — dry run', table.concat(lines, '\n'), 'info')
 			return
 		end
@@ -255,6 +274,7 @@ LrTasks.startAsyncTask(function()
 			end
 		end)
 
+		Log.info('photos updated: ' .. tostring(written))
 		progress:done()
 		local suffix = progress:isCanceled()
 			and '\n\nCancelled — completed work was kept.' or ''

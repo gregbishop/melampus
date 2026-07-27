@@ -6,6 +6,7 @@ local LrPrefs = import 'LrPrefs'
 local LrTasks = import 'LrTasks'
 local LrView = import 'LrView'
 
+local Log = require 'MelampusLog'
 local Rules = require 'MelampusRules'
 
 LrTasks.startAsyncTask(function()
@@ -92,6 +93,43 @@ LrTasks.startAsyncTask(function()
 			f:group_box {
 				title = 'Maintenance',
 				fill_horizontal = 1,
+				f:static_text { title = 'Log: ' .. Log.path(), width_in_chars = 50 },
+				f:row {
+					f:push_button {
+						title = 'Show log in Finder',
+						action = function()
+							import('LrShell').revealInShell(Log.path())
+						end,
+					},
+					f:push_button {
+						title = 'Check results file',
+						action = function()
+							local LrFileUtils = import 'LrFileUtils'
+							local path = prefs.resultsPath
+							if not path or path == '' then
+								LrDialogs.message('Melampus', 'No results file set.', 'warning')
+								return
+							end
+							if not LrFileUtils.exists(path) then
+								LrDialogs.message('Melampus', 'Not found:\n' .. path, 'critical')
+								return
+							end
+							local text = LrFileUtils.readFile(path)
+							local Json = require 'MelampusJson'
+							local data, err = Json.decode(text)
+							if not data then
+								LrDialogs.message('Melampus', 'Parse failed:\n' .. tostring(err), 'critical')
+								return
+							end
+							local names = {}
+							for i = 1, math.min(3, #data) do names[#names + 1] = data[i].file end
+							LrDialogs.message('Melampus',
+								string.format('OK — %d records.\n\nFirst filenames:\n  %s\n\n'
+									.. 'Your catalog photos must share these basenames.',
+									#data, table.concat(names, '\n  ')), 'info')
+						end,
+					},
+				},
 				f:push_button {
 					title = 'Restore safe defaults',
 					action = function()
