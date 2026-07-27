@@ -37,6 +37,11 @@ function Rules.defaultSettings()
 		-- What to write at all. Ratings and labels come from the quality
 		-- composite, which is Stage 2 work, so they stay off until it exists.
 		writeKeywords = true,
+		-- 'flat' writes just the species name. A hierarchy is harder to read in
+		-- the keyword panel, and taxon and confidence are bookkeeping that
+		-- already live in the metadata panel — they do not belong in a keyword
+		-- list you have to live with for years.
+		keywordStyle = 'flat',
 		writeMetadata = true,
 		writeRating = false,
 		writeLabel = false,
@@ -156,22 +161,32 @@ function Rules.planFor(result, photo, settings)
 	if settings.writeKeywords then
 		local proposed = {}
 		local root = Rules.KEYWORD_ROOT
+		local hierarchical = settings.keywordStyle == 'hierarchical'
 
-		if result.taxon and result.taxon ~= '' and result.taxon ~= 'none' then
-			proposed[#proposed + 1] = root .. ' > Taxon > ' .. titleCase(sanitise(result.taxon))
-		end
-
-		if passes then
-			proposed[#proposed + 1] = root .. ' > Species > ' .. species
-			proposed[#proposed + 1] = root .. ' > Confidence > '
-				.. Rules.confidenceBand(result.confidence, settings)
+		if hierarchical then
+			if result.taxon and result.taxon ~= '' and result.taxon ~= 'none' then
+				proposed[#proposed + 1] = root .. ' > Taxon > ' .. titleCase(sanitise(result.taxon))
+			end
+			if passes then
+				proposed[#proposed + 1] = root .. ' > Species > ' .. species
+				proposed[#proposed + 1] = root .. ' > Confidence > '
+					.. Rules.confidenceBand(result.confidence, settings)
+			else
+				proposed[#proposed + 1] = root .. ' > Review > Needs ID'
+			end
+			if result.rangeFlag then
+				proposed[#proposed + 1] = root .. ' > Notable > Out of range'
+			end
 		else
-			-- Everything that fails a gate lands in review rather than guessing.
-			proposed[#proposed + 1] = root .. ' > Review > Needs ID'
-		end
-
-		if result.rangeFlag then
-			proposed[#proposed + 1] = root .. ' > Notable > Out of range'
+			-- Flat: the species name, and nothing else unless it needs attention.
+			if passes then
+				proposed[#proposed + 1] = species
+			else
+				proposed[#proposed + 1] = 'Needs ID'
+			end
+			if result.rangeFlag then
+				proposed[#proposed + 1] = 'Out of Range'
+			end
 		end
 
 		for _, keyword in ipairs(proposed) do

@@ -95,7 +95,7 @@ t.test('an existing pick or reject flag is never touched by default', function()
 end)
 
 t.test('keywords already on the photo are not duplicated', function()
-	local existing = { 'Melampus > Species > Tricolored Heron' }
+	local existing = { 'Tricolored Heron' }
 	local plan = Rules.planFor(result(), photo({ keywords = existing }), settings())
 	for _, kw in ipairs(plan.keywords) do
 		t.isFalse(kw == existing[1], 'proposed a keyword the photo already carries')
@@ -116,41 +116,59 @@ t.test('auto-reject fires only when enabled and the photo is empty', function()
 end)
 
 -- ── the confidence gate ────────────────────────────────────────────────────
-t.test('a low-confidence result gets a review marker and no species keyword', function()
-	local plan = Rules.planFor(result({ confidence = 0.4 }), photo(), settings())
-	for _, kw in ipairs(plan.keywords) do
-		t.isFalse(string.find(kw, 'Species >', 1, true) ~= nil,
-			'wrote a species keyword below the confidence gate')
-	end
-	t.contains(plan.keywords, 'Melampus > Review > Needs ID')
+-- ── keyword shape ──────────────────────────────────────────────────────────
+-- Flat by default. A hierarchy is harder to read in the keyword panel, and
+-- confidence and taxon are bookkeeping that belongs in the metadata panel, not
+-- in a keyword list the photographer has to live with for years.
+t.test('a confident identification writes just the species name', function()
+	local plan = Rules.planFor(result(), photo(), settings())
+	t.contains(plan.keywords, 'Tricolored Heron')
+	t.equals(#plan.keywords, 1, 'wrote more than the species name: '
+		.. table.concat(plan.keywords, ', '))
 end)
 
-t.test('a high-confidence in-range result does get a species keyword', function()
+t.test('no confidence or taxon keywords are ever written', function()
 	local plan = Rules.planFor(result(), photo(), settings())
-	t.contains(plan.keywords, 'Melampus > Species > Tricolored Heron')
+	for _, kw in ipairs(plan.keywords) do
+		t.isFalse(kw == 'High' or kw == 'Bird' or string.find(kw, 'Confidence', 1, true) ~= nil,
+			'bookkeeping leaked into the keyword list: ' .. kw)
+	end
+end)
+
+t.test('a low-confidence result gets a review marker and no species', function()
+	local plan = Rules.planFor(result({ confidence = 0.4 }), photo(), settings())
+	t.contains(plan.keywords, 'Needs ID')
+	for _, kw in ipairs(plan.keywords) do
+		t.isFalse(kw == 'Tricolored Heron', 'named a species below the confidence gate')
+	end
 end)
 
 t.test('an unstable burst blocks the species keyword even at high confidence', function()
 	local plan = Rules.planFor(result({ burstAgreement = 0.4 }), photo(), settings())
 	for _, kw in ipairs(plan.keywords) do
-		t.isFalse(string.find(kw, 'Species >', 1, true) ~= nil,
+		t.isFalse(kw == 'Tricolored Heron',
 			'trusted a confident ID the model contradicted across the burst')
 	end
 end)
 
-t.test('a range-flagged result is routed to review, never auto-tagged', function()
+t.test('a range-flagged result is flagged and never auto-tagged', function()
 	local plan = Rules.planFor(result({ rangeFlag = true }), photo(), settings())
-	t.contains(plan.keywords, 'Melampus > Notable > Out of range')
+	t.contains(plan.keywords, 'Out of Range')
 	for _, kw in ipairs(plan.keywords) do
-		t.isFalse(string.find(kw, 'Species >', 1, true) ~= nil,
+		t.isFalse(kw == 'Tricolored Heron',
 			'auto-tagged a species that does not occur at this location')
 	end
 end)
 
 t.test('an abstention writes no species and says why', function()
 	local plan = Rules.planFor(result({ abstain = true, species = nil }), photo(), settings())
-	t.contains(plan.keywords, 'Melampus > Review > Needs ID')
+	t.contains(plan.keywords, 'Needs ID')
 	t.equals(plan.metadata.species, nil)
+end)
+
+t.test('hierarchical style remains available for those who want it', function()
+	local plan = Rules.planFor(result(), photo(), settings({ keywordStyle = 'hierarchical' }))
+	t.contains(plan.keywords, 'Melampus > Species > Tricolored Heron')
 end)
 
 -- ── idempotency ────────────────────────────────────────────────────────────
@@ -195,8 +213,8 @@ end)
 t.test('keyword text is sanitised', function()
 	local plan = Rules.planFor(result({ species = 'Heron > Weird | Name' }), photo(), settings())
 	for _, kw in ipairs(plan.keywords) do
-		local _, count = string.gsub(kw, '>', '')
-		t.isTrue(count <= 2, 'species name injected extra hierarchy separators: ' .. kw)
+		t.isFalse(string.find(kw, '>', 1, true) ~= nil,
+			'species name injected a hierarchy separator: ' .. kw)
 	end
 end)
 
