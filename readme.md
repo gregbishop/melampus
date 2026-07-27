@@ -18,7 +18,7 @@ no image ever leaves the machine.
 | **1** | Local VLM species identification | **Working.** 43 tests passing |
 | 2 | Quality scoring + location/season re-ranking | Not started |
 | 3 | HTTP service + frozen binary | Not started |
-| 4 | Lightroom Classic plugin | Not started |
+| 4 | Lightroom Classic plugin | **Review-only build working.** Untested in a live catalog |
 
 Stage 1 exists to answer one question before anything else gets built: *can a local
 VLM identify species well enough to be worth wiring into a catalog?* The current
@@ -196,11 +196,26 @@ Editing a prompt changes the cache fingerprint, so the next run genuinely re-run
 .venv/bin/python -m pytest -q
 ```
 
-43 tests, no model weights required — everything runs against a scripted backend, so
+63 tests, no model weights required — everything runs against a scripted backend, so
 parsing, validation, retry, caching, the downscale ladder and the no-leak guarantee are
-all verifiable in under a second.
+all verifiable in under a second. The plugin's Lua suites run from the same command,
+skipping cleanly if no Lua interpreter is installed.
 
 ---
+
+## Reviewing in Lightroom
+
+A review-only plugin lives in `plugin/Melampus.lrplugin`. It reads results from a
+JSON file and writes them into the catalog, so review happens in Lightroom's own
+grid and loupe. Dry run is on by default and nothing the user set is ever
+overwritten. Install steps and the SDK verification are in
+[docs/plugin.md](docs/plugin.md).
+
+```bash
+.venv/bin/python tools/make_plugin_results.py fixtures_full stage1_full_results.json \
+    plugin_results.json --occurrence
+# then: Lightroom -> File -> Plug-in Manager -> Add -> plugin/Melampus.lrplugin
+```
 
 ## Layout
 
@@ -213,6 +228,7 @@ service/melampus/     Python package. Library first; the CLI is a thin shell ove
   report.py           Raw table, scoring, calibration, name-quality checks
 prompts/              Editable per-taxon prompt templates
 tools/                Corpus utilities: clustering, dev split, review sheet, ingest
+plugin/               Lightroom Classic plugin, plus its dependency-free Lua tests
 docs/                 Architecture, evaluation methodology, config, troubleshooting
 fixtures/             Small development set
 fixtures_full/        Full validation corpus
@@ -223,4 +239,5 @@ fixtures_full/        Full validation corpus
 - [docs/architecture.md](docs/architecture.md) — how the pieces fit and why
 - [docs/evaluation.md](docs/evaluation.md) — what the accuracy numbers mean, and don't
 - [docs/config.md](docs/config.md) — every setting, with rationale
+- [docs/plugin.md](docs/plugin.md) — the Lightroom plugin: install, SDK findings, safety
 - [docs/troubleshooting.md](docs/troubleshooting.md) — known failure modes

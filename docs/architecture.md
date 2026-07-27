@@ -188,6 +188,23 @@ random sampling from a burst corpus returns near-duplicates of the same few subj
 
 ---
 
+## The Lightroom plugin
+
+Same split as the Python side, for the same reason. All write decisions live in
+`MelampusRules.lua`, a module that imports nothing from Lightroom, so CLAUDE.md §5.3's
+safety rules are testable in a second by a local Lua interpreter rather than discoverable
+only by damaging a real catalog. The Lightroom layer reads existing state into a plain
+table, calls `planFor`, and applies the returned plan.
+
+Two ordering constraints shape `MelampusImport.lua`. Everything async — file reading,
+JSON parsing, reading photo state — completes in a first pass before any write
+transaction opens, because file I/O yields and yielding inside `withWriteAccessDo` is
+what produces "yielding is not allowed". And writes are chunked at 100 photos per
+transaction so a cancel or crash keeps completed work.
+
+SDK verification results, including the one §5.4.5 requirement that turns out to be
+impossible, are recorded in [plugin.md](plugin.md).
+
 ## Reporting
 
 Three independent views, deliberately not blended into a single score:
