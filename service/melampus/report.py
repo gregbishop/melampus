@@ -238,3 +238,62 @@ def _render_scores(s: Scores) -> str:
     for (truth, predicted), count in s.confusions.most_common(25):
         lines.append(f"{count:>4}x  {truth[:30]:<30} -> {predicted[:30]}")
     return "\n".join(lines)
+
+
+def name_quality(results: list[ImageResult]) -> str:
+    """Flag suspect scientific names before anything is written to a catalog.
+
+    Two failure modes seen in practice, both of which would pollute a catalog and
+    both of which scoring alone will not catch:
+
+    * malformed binomials — not "Genus species", so almost certainly invented;
+    * one common name mapped to several different binomials across the corpus,
+      which means at least one is wrong even without consulting an authority.
+
+    This is a local consistency check, not taxonomic validation. Checking against
+    GBIF is Stage 2 work, once network access is on the table.
+    """
+    from collections import defaultdict
+
+    malformed: Counter = Counter()
+    by_common: dict[str, Counter] = defaultdict(Counter)
+    missing = 0
+    total = 0
+
+    for record in results:
+        ident = record.identification
+        if record.status != "ok" or ident is None:
+            continue
+        for cand in ident.candidates:
+            total += 1
+            sci = (cand.scientific_name or "").strip()
+            if not sci:
+                missing += 1
+                continue
+            parts = sci.split()
+            if len(parts) != 2 or not parts[0][:1].isupper() or not parts[1][:1].islower():
+                malformed[sci] += 1
+            by_common[_display(cand.common_name)][sci] += 1
+
+    inconsistent = {
+        common: counts for common, counts in by_common.items() if len(counts) > 1
+    }
+
+    lines = ["SCIENTIFIC NAME QUALITY (local consistency, not taxonomic validation)",
+             "=" * 72,
+             f"candidate names examined     : {total}",
+             f"missing scientific name      : {missing}",
+             f"malformed binomial           : {sum(malformed.values())}",
+             f"common names with >1 binomial: {len(inconsistent)}"]
+
+    if malformed:
+        lines += ["", "MALFORMED", "-" * 72]
+        lines += [f"{n:>4}x  {name[:60]}" for name, n in malformed.most_common(10)]
+
+    if inconsistent:
+        lines += ["", "ONE COMMON NAME, SEVERAL BINOMIALS (at least one is wrong)", "-" * 72]
+        for common, counts in sorted(inconsistent.items(), key=lambda kv: -sum(kv[1].values()))[:10]:
+            rendered = ", ".join(f"{s} x{n}" for s, n in counts.most_common())
+            lines.append(f"  {common[:28]:<28} -> {rendered[:80]}")
+
+    return "\n".join(lines)

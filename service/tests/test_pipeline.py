@@ -292,3 +292,73 @@ def test_results_predating_fingerprinting_are_still_honoured(tmp_path: Path, con
         record.run_fingerprint = ""
     assert cache.legacy_count() == 1
     assert cache.has_success(cache.results()[0].content_hash, "some-other-fingerprint")
+
+
+# --------------------------------------------------------------------------- #
+# adaptive downscale ladder (mlx-vlm prompt-token ceiling workaround)
+# --------------------------------------------------------------------------- #
+class _SizeSensitiveBackend(ScriptedBackend):
+    """Mimics the mlx-vlm 0.6.7 defect: empty generation above a size threshold.
+
+    The real runtime returns a single EOS token once the prompt (dominated by vision
+    tokens) passes ~2.1k. Reproducing that as a size cutoff lets the fallback ladder
+    be tested without weights.
+    """
+
+    def __init__(self, fails_above: int, responses: list[str]) -> None:
+        super().__init__(responses, name="size-sensitive")
+        self.fails_above = fails_above
+        self.seen_edges: list[int] = []
+
+    def complete(self, image_path: Path, prompt: str, max_tokens: int):
+        with Image.open(image_path) as img:
+            edge = max(img.size)
+        self.seen_edges.append(edge)
+        if edge > self.fails_above:
+            self.calls.append((image_path, prompt))
+            from melampus.backend import Completion
+
+            return Completion(text="", seconds=0.0)
+        return super().complete(image_path, prompt, max_tokens)
+
+
+def test_downscale_ladder_recovers_when_the_full_size_returns_nothing(photo: Path, config):
+    """An empty generation at 1280 must be retried smaller, not reported as failure."""
+    cfg = config.model_copy(
+        update={"image": config.image.model_copy(
+            update={"max_edge": 1280, "fallback_edges": [1024, 768]})}
+    )
+    backend = _SizeSensitiveBackend(fails_above=900, responses=[ROUTING_OK, ID_OK])
+    result = Identifier(backend, cfg).identify(photo)
+
+    assert result.status == "ok", "ladder did not recover from an empty generation"
+    assert result.image_max_edge == 768, f"recovered at {result.image_max_edge}, expected 768"
+    assert 1280 in backend.seen_edges, "never attempted the configured size first"
+    assert backend.seen_edges[0] == 1280, "did not try largest first"
+
+
+def test_ladder_records_the_size_that_worked(photo: Path, config):
+    """Silent degradation is worse than degradation you can see."""
+    cfg = config.model_copy(
+        update={"image": config.image.model_copy(
+            update={"max_edge": 1280, "fallback_edges": [1024]})}
+    )
+    backend = _SizeSensitiveBackend(fails_above=1100, responses=[ROUTING_OK, ID_OK])
+    result = Identifier(backend, cfg).identify(photo)
+
+    assert result.status == "ok"
+    assert result.image_max_edge == 1024
+
+
+def test_ladder_gives_up_rather_than_looping(photo: Path, config):
+    """When every size fails the image is unprocessed, not retried forever."""
+    cfg = config.model_copy(
+        update={"image": config.image.model_copy(
+            update={"max_edge": 1280, "fallback_edges": [1024, 768]})}
+    )
+    backend = _SizeSensitiveBackend(fails_above=1, responses=[])
+    result = Identifier(backend, cfg).identify(photo)
+
+    assert result.status == "unprocessed"
+    assert result.identification is None
+    assert set(backend.seen_edges) == {1280, 1024, 768}

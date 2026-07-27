@@ -10,7 +10,7 @@ from .backend import MLXBackend
 from .cache import ResultCache
 from .config import load_config
 from .identify import Identifier
-from .report import raw_table, score
+from .report import name_quality, raw_table, score
 from .runner import BatchStats, list_images, run_batch, stratify_by_prediction
 from .schema import ImageResult
 
@@ -97,6 +97,9 @@ def main(argv: list[str] | None = None) -> int:
     results = [r for r in cache.results() if r.file in wanted]
 
     print(raw_table(results))
+
+    print()
+    print(name_quality(results))
 
     if args.labels:
         print()
