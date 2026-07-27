@@ -151,16 +151,44 @@ local function keywordFromPath(catalog, path)
 	return parent
 end
 
-local function describe(plan)
-	local bits = {}
-	if plan.rating then bits[#bits + 1] = 'rating ' .. plan.rating end
-	if plan.label then bits[#bits + 1] = 'label ' .. plan.label end
-	if plan.pickStatus then bits[#bits + 1] = 'flag ' .. plan.pickStatus end
-	if #plan.keywords > 0 then bits[#bits + 1] = #plan.keywords .. ' keywords' end
-	local fields = 0
-	for _ in pairs(plan.metadata or {}) do fields = fields + 1 end
-	if fields > 0 then bits[#bits + 1] = fields .. ' fields' end
-	return table.concat(bits, ', ')
+--- What this plan will actually claim about the photo, in words.
+-- "3 keywords, 11 fields" tells you nothing about whether the answer is right.
+-- The species name and how sure it is are the only things worth previewing.
+local function describe(plan, source)
+	if plan.metadata and plan.metadata.species then
+		local line = plan.metadata.species
+		if plan.metadata.confidence then
+			line = line .. ' (' .. tostring(math.floor(tonumber(plan.metadata.confidence) * 100 + 0.5)) .. '%)'
+		end
+		if plan.metadata.rangeFlag == 'out-of-range' then
+			line = line .. '  [not found near here]'
+		end
+		return line
+	end
+	if source and source.abstain then return 'Needs ID — could not tell' end
+	if source and source.rangeFlag then return 'Needs ID — species not found near here' end
+	if source and source.species then
+		return 'Needs ID — not sure enough (' .. source.species .. '?)'
+	end
+	return 'Needs ID'
+end
+
+--- Group the plans by what they claim, so the preview reads as a summary.
+local function tally(planned)
+	local counts, order = {}, {}
+	for _, entry in ipairs(planned) do
+		local label = entry.claim
+		if counts[label] == nil then
+			counts[label] = 0
+			order[#order + 1] = label
+		end
+		counts[label] = counts[label] + 1
+	end
+	table.sort(order, function(a, b)
+		if counts[a] ~= counts[b] then return counts[a] > counts[b] end
+		return a < b
+	end)
+	return counts, order
 end
 
 LrTasks.startAsyncTask(function()
@@ -248,7 +276,11 @@ LrTasks.startAsyncTask(function()
 				matched = matched + 1
 				local plan = Rules.planFor(normalise(record), photoState(photo), settings)
 				if not Rules.isEmpty(plan) then
-					planned[#planned + 1] = { photo = photo, plan = plan, name = name }
+					local normalised = normalise(record)
+					planned[#planned + 1] = {
+						photo = photo, plan = plan, name = name,
+						claim = describe(plan, normalised),
+					}
 				end
 			else
 				unmatched = unmatched + 1
@@ -260,35 +292,61 @@ LrTasks.startAsyncTask(function()
 		Log.info(string.format('matched %d, unmatched %d, with changes %d',
 			matched, unmatched, #planned))
 
-		-- ── dry run stops here ──────────────────────────────────────────────
+		-- ── preview, and offer to apply straight from it ────────────────────
+		-- A preview you cannot act on is a dead end: you would have to go to
+		-- Settings, untick a box, and run again. So the preview itself asks.
 		if not Rules.shouldApply(settings) then
+			local counts, order = tally(planned)
 			local lines = {
-				'PREVIEW ONLY — none of your photos were changed.\n',
-				string.format('You selected %d photos.', #photos),
-				string.format('Melampus has identifications for %d of them.', matched),
+				string.format('%d of your %d selected photos have identifications.',
+					matched, #photos),
 			}
 			if unmatched > 0 then
 				lines[#lines + 1] = string.format(
-					'%d had no identification and were left alone.', unmatched)
+					'%d have none and will be left alone.', unmatched)
 			end
-			lines[#lines + 1] = string.format('\n%d photos would get new keywords:\n', #planned)
-			for i = 1, math.min(#planned, 15) do
-				lines[#lines + 1] = '  ' .. planned[i].name .. ': ' .. describe(planned[i].plan)
+			lines[#lines + 1] = ''
+
+			if #planned == 0 then
+				if matched > 0 then
+					lines[#lines + 1] = 'Nothing to change — these photos already have '
+						.. 'their Melampus keywords.'
+				else
+					lines[#lines + 1] = 'Nothing to change.'
+				end
+				progress:done()
+				Log.info('preview: nothing to change')
+				LrDialogs.message('Melampus', table.concat(lines, '\n'), 'info')
+				return
 			end
-			if #planned > 15 then
-				lines[#lines + 1] = string.format('  … and %d more.', #planned - 15)
+
+			lines[#lines + 1] = string.format('Melampus would tag %d photos:', #planned)
+			lines[#lines + 1] = ''
+			for _, label in ipairs(order) do
+				lines[#lines + 1] = string.format('   %3d x  %s', counts[label], label)
 			end
-			if #planned == 0 and matched > 0 then
-				lines[#lines + 1] = 'Nothing to change — these photos already have their '
-					.. 'Melampus keywords. That is what a second run should do.'
-			end
-			lines[#lines + 1] = '\nHappy with this? Go to Melampus: Settings… and untick '
-				.. '"Preview only", then run this again to apply it.'
+			lines[#lines + 1] = ''
+			lines[#lines + 1] = 'Species keywords are only added when it is confident '
+				.. 'and the species occurs near where you shot. Everything else '
+				.. 'becomes "Needs ID" for you to look at.'
+
 			progress:done()
-			Log.info('dry run complete; nothing written')
-			lines[#lines + 1] = '\nLog: ' .. Log.path()
-			LrDialogs.message('Melampus — dry run', table.concat(lines, '\n'), 'info')
-			return
+			Log.info('preview: ' .. #planned .. ' photos would change')
+
+			local choice = LrDialogs.confirm('Melampus — preview',
+				table.concat(lines, '\n'), 'Add these keywords', 'Not yet')
+			if choice ~= 'ok' then
+				Log.info('user declined to apply')
+				return
+			end
+			Log.info('user approved from preview; applying')
+
+			-- Re-open a scope for the writing phase, since the preview closed it.
+			progress = LrProgressScope({
+				title = 'Melampus: adding keywords',
+				functionContext = context,
+			})
+			progress:setCancelable(true)
 		end
 
 		-- ── phase 2: apply. Chunked, and nothing async inside the gate. ─────
