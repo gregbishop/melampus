@@ -16,19 +16,21 @@ from .schema import ImageResult
 
 
 def _norm(name: str | None) -> str:
-    """Normalise a taxon name for comparison.
+    """Comparison key for a taxon name.
 
-    Hyphenation of English bird names is genuinely inconsistent between authorities
-    ("Tricolored Heron" vs "Tri-colored Heron", "Night-Heron" vs "Night Heron"), so
-    comparing raw strings manufactures confusion pairs that are really the same
-    species. Hyphens are removed rather than turned into spaces so that
-    "tri-colored" and "tricolored" converge.
+    Hyphenation and spacing of English bird names is genuinely inconsistent between
+    authorities — "Tricolored Heron" / "Tri-colored Heron", "Night-Heron" /
+    "Night Heron" — so comparing raw strings manufactures confusion pairs that are
+    really one species. Every separator is dropped rather than normalised to a space,
+    because the variants differ in both directions. Use _display for anything a human
+    reads; this output is deliberately unreadable.
     """
-    text = (name or "").strip().lower()
-    for token in ("(", ")", ".", ","):
-        text = text.replace(token, " ")
-    text = text.replace("-", "").replace("'", "")
-    return " ".join(text.split())
+    return "".join(ch for ch in (name or "").lower() if ch.isalnum())
+
+
+def _display(name: str | None) -> str:
+    """Readable lowercase form, for the confusion report and per-species rows."""
+    return " ".join((name or "").strip().lower().split())
 
 
 def _matches(predicted_common: str, predicted_sci: str, ref_common: str, ref_sci: str) -> bool:
@@ -79,16 +81,34 @@ def raw_table(results: list[ImageResult], max_candidates: int = 3) -> str:
 
 @dataclass
 class Scores:
-    n_scored: int = 0
+    n_results: int = 0          # images that produced any result at all
+    n_labelled: int = 0         # reference rows matched to a result
+    n_scored: int = 0           # species-level rows eligible for accuracy
     top1: int = 0
     top3: int = 0
     abstained: int = 0
     unprocessed: int = 0
+    # Accuracy restricted to rows where the model actually committed to an answer.
+    # Reported separately because abstaining is desirable behaviour, not an error,
+    # and folding abstentions into one accuracy number hides which is happening.
+    n_committed: int = 0
+    top1_committed: int = 0
     per_species: dict[str, list[int]] = field(default_factory=lambda: defaultdict(lambda: [0, 0]))
     per_taxon: dict[str, list[int]] = field(default_factory=lambda: defaultdict(lambda: [0, 0]))
     confusions: Counter = field(default_factory=Counter)
     abstain_expected_met: int = 0
     abstain_expected_total: int = 0
+    # Top-1 confidence bucket -> [hits, total]. Feeds the §4.4 band thresholds:
+    # bands are only defensible if confidence tracks correctness at all.
+    calibration: dict[str, list[int]] = field(default_factory=lambda: defaultdict(lambda: [0, 0]))
+
+
+def _bucket(confidence: float) -> str:
+    edges = [(0.9, "0.90-1.00"), (0.8, "0.80-0.89"), (0.7, "0.70-0.79"), (0.5, "0.50-0.69")]
+    for low, label in edges:
+        if confidence >= low:
+            return label
+    return "<0.50"
 
 
 def score(results: list[ImageResult], labels_path: Path) -> tuple[Scores, str]:
@@ -97,12 +117,15 @@ def score(results: list[ImageResult], labels_path: Path) -> tuple[Scores, str]:
     by_file = {r.file: r for r in results}
 
     s = Scores()
+    s.n_results = len(results)
     for file, label in sorted(labels.items()):
         record = by_file.get(file)
         if record is None:
             continue
+        s.n_labelled += 1
         expected = label.get("expected_outcome", "identify")
         truth = _norm(label.get("common_name"))
+        truth_label = _display(label.get("common_name"))
         ident = record.identification
 
         if record.status != "ok" or ident is None:
@@ -130,7 +153,7 @@ def score(results: list[ImageResult], labels_path: Path) -> tuple[Scores, str]:
         if not truth:
             continue
         s.n_scored += 1
-        s.per_species[truth][1] += 1
+        s.per_species[truth_label][1] += 1
         s.per_taxon[label.get("taxon", "unknown")][1] += 1
 
         hits = [
@@ -139,12 +162,20 @@ def score(results: list[ImageResult], labels_path: Path) -> tuple[Scores, str]:
         ]
         if hits and hits[0]:
             s.top1 += 1
-            s.per_species[truth][0] += 1
+            s.per_species[truth_label][0] += 1
             s.per_taxon[label.get("taxon", "unknown")][0] += 1
         elif ranked:
-            s.confusions[(truth, predicted_names[0])] += 1
+            s.confusions[(truth_label, _display(ranked[0].common_name))] += 1
         if any(hits[:3]):
             s.top3 += 1
+
+        if not abstained and ranked:
+            s.n_committed += 1
+            bucket = _bucket(ranked[0].confidence)
+            s.calibration[bucket][1] += 1
+            if hits[0]:
+                s.top1_committed += 1
+                s.calibration[bucket][0] += 1
 
     return s, _render_scores(s)
 
@@ -161,12 +192,27 @@ def _render_scores(s: Scores) -> str:
     lines.append(f"macro-averaged top-1 (headline) : {macro:6.1%}   over {len(s.per_species)} species")
     lines.append(f"overall top-1                   : {overall:6.1%}   ({s.top1}/{s.n_scored})")
     lines.append(f"overall top-3                   : {top3:6.1%}   ({s.top3}/{s.n_scored})")
-    lines.append(f"abstained (any reason)          : {s.abstained}")
+    committed = s.top1_committed / s.n_committed if s.n_committed else 0.0
+    lines.append(
+        f"top-1 when NOT abstaining       : {committed:6.1%}   ({s.top1_committed}/{s.n_committed})"
+    )
+    rate = s.abstained / s.n_labelled if s.n_labelled else 0.0
+    lines.append(f"abstention rate                 : {rate:6.1%}   ({s.abstained}/{s.n_labelled})")
     lines.append(f"unprocessed / failed            : {s.unprocessed}")
     if s.abstain_expected_total:
         lines.append(
             f"correct on abstain/none cases   : {s.abstain_expected_met}/{s.abstain_expected_total}"
         )
+    lines.append(f"coverage                        : {s.n_labelled} labelled of {s.n_results} results")
+
+    lines.append("")
+    lines.append("CONFIDENCE CALIBRATION (top-1 confidence vs whether it was right)")
+    lines.append(f"{'bucket':<12} {'n':>5} {'correct':>9}")
+    lines.append("-" * 30)
+    for bucket in ("0.90-1.00", "0.80-0.89", "0.70-0.79", "0.50-0.69", "<0.50"):
+        hits, total = s.calibration.get(bucket, [0, 0])
+        if total:
+            lines.append(f"{bucket:<12} {total:>5} {hits / total:>9.1%}")
 
     lines.append("")
     lines.append("PER-SPECIES")
