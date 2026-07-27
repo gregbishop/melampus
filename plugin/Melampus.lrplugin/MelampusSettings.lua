@@ -140,36 +140,62 @@ LrTasks.startAsyncTask(function()
 					},
 				},
 				f:push_button {
-					title = 'Remove all Melampus keywords…',
+					title = 'Clean up Melampus keywords…',
 					action = function()
 						local LrApplication = import 'LrApplication'
 						local LrTasks = import 'LrTasks'
-						local choice = LrDialogs.confirm('Remove Melampus keywords',
-							'This deletes the Melampus keyword tree and every stray '
-							.. 'top-level keyword it created (Species, Taxon, Confidence, '
-							.. 'Review, Notable, Needs ID).\n\nYour own keywords are '
-							.. 'untouched. Photos keep everything else.',
-							'Remove them', 'Cancel')
-						if choice ~= 'ok' then return end
 						LrTasks.startAsyncTask(function()
 							local catalog = LrApplication.activeCatalog()
-							local strays = {
+
+							-- Only the structural keywords Melampus creates. Species
+							-- names are deliberately NOT touched: under the flat
+							-- scheme they are the correct output, and they may also
+							-- be keywords you added yourself.
+							local structural = {
 								['melampus'] = true, ['species'] = true, ['taxon'] = true,
-								['confidence'] = true, ['review'] = true,
-								['notable'] = true, ['needs id'] = true,
-								['out of range'] = true,
+								['confidence'] = true, ['review'] = true, ['notable'] = true,
+								['high'] = true, ['medium'] = true, ['low'] = true,
 							}
+
+							local doomed, lines = {}, {}
+							for _, keyword in ipairs(catalog:getKeywords() or {}) do
+								local name = keyword:getName()
+								if structural[string.lower(name)] then
+									local n = #(keyword:getPhotos() or {})
+									local kids = #(keyword:getChildren() or {})
+									doomed[#doomed + 1] = keyword
+									lines[#lines + 1] = string.format(
+										'   %s  (%d photos, %d sub-keywords)', name, n, kids)
+								end
+							end
+
+							if #doomed == 0 then
+								LrDialogs.message('Melampus',
+									'Nothing to clean up. No Melampus structural keywords found.',
+									'info')
+								return
+							end
+
+							-- Show exactly what goes, before anything goes.
+							local choice = LrDialogs.confirm('Clean up Melampus keywords',
+								'These keywords and everything nested under them will be '
+								.. 'deleted:\n\n' .. table.concat(lines, '\n')
+								.. '\n\nSpecies names are NOT touched — under the flat '
+								.. 'scheme those are the real keywords.\n\n'
+								.. 'Your photos keep every other keyword. This cannot be undone '
+								.. 'from here, though Lightroom\'s Undo will reverse it.',
+								'Delete these', 'Cancel')
+							if choice ~= 'ok' then return end
+
 							local removed = 0
-							catalog:withWriteAccessDo('Melampus: remove keywords', function()
-								for _, keyword in ipairs(catalog:getKeywords() or {}) do
-									if strays[string.lower(keyword:getName())] then
-										catalog:deleteKeyword(keyword)
-										removed = removed + 1
-									end
+							catalog:withWriteAccessDo('Melampus: clean up keywords', function()
+								for _, keyword in ipairs(doomed) do
+									catalog:deleteKeyword(keyword)
+									removed = removed + 1
 								end
 							end, { timeout = 60 })
 							LrDialogs.message('Melampus',
-								string.format('Removed %d top-level keyword trees.', removed), 'info')
+								string.format('Removed %d keyword trees.', removed), 'info')
 						end)
 					end,
 				},
