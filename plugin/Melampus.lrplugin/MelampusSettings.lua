@@ -68,7 +68,15 @@ LrTasks.startAsyncTask(function()
 				f:checkbox { title = 'Melampus panel details (confidence, alternates)', value = bind 'writeMetadata' },
 				f:checkbox { title = 'Star rating (needs quality scores — Stage 2)',
 					value = bind 'writeRating' },
-				f:checkbox { title = 'Colour label', value = bind 'writeLabel' },
+				f:checkbox { title = 'Colour label — green identified, yellow needs a look, red out of range',
+					value = bind 'writeLabel' },
+				f:static_text {
+					title = 'Red is the interesting pile: a species named that does not\n'
+						.. 'occur near Merritt Island. Either the model is wrong, or you\n'
+						.. 'photographed something genuinely unusual.',
+					height_in_lines = 3,
+					text_color = import('LrColor')(0.4, 0.4, 0.4),
+				},
 				f:checkbox { title = 'Pick flags', value = bind 'writeFlags' },
 				f:checkbox { title = 'Auto-reject poor frames (off by default)',
 					value = bind 'autoReject' },

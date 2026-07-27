@@ -171,6 +171,23 @@ t.test('hierarchical style remains available for those who want it', function()
 	t.contains(plan.keywords, 'Melampus > Species > Tricolored Heron')
 end)
 
+-- ── colour labels ──────────────────────────────────────────────────────────
+t.test('colour labels mean something specific', function()
+	local s = settings({ writeLabel = true })
+	t.equals(Rules.planFor(result(), photo(), s).label, 'green',
+		'a confident identification should be green')
+	t.equals(Rules.planFor(result({ confidence = 0.3 }), photo(), s).label, 'yellow',
+		'an unsure identification should be yellow')
+	t.equals(Rules.planFor(result({ rangeFlag = true }), photo(), s).label, 'red',
+		'an out-of-range species should be red, not lost among the unsure')
+end)
+
+t.test('an existing colour label is still never overwritten', function()
+	local plan = Rules.planFor(result({ rangeFlag = true }), photo({ colorNameForLabel = 'blue' }),
+		settings({ writeLabel = true }))
+	t.isNil(plan.label, 'clobbered a label the user had set')
+end)
+
 -- ── idempotency ────────────────────────────────────────────────────────────
 t.test('a second run over unchanged state proposes nothing', function()
 	local s = settings({ writeRating = true })

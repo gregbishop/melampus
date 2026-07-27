@@ -258,8 +258,18 @@ function Rules.planFor(result, photo, settings)
 		if photo.colorNameForLabel and photo.colorNameForLabel ~= ''
 			and not settings.overwriteLabel then
 			plan.skipped[#plan.skipped + 1] = 'label: already set'
-		elseif result.quality then
-			plan.label = passes and 'green' or 'yellow'
+		else
+			-- green  = confident identification, species keyword written
+			-- red    = species named that does not occur here; the notable pile,
+			--          holding both model errors and genuinely unusual records
+			-- yellow = needs a look, no species claimed
+			if result.rangeFlag then
+				plan.label = 'red'
+			elseif passes then
+				plan.label = 'green'
+			else
+				plan.label = 'yellow'
+			end
 		end
 	end
 
