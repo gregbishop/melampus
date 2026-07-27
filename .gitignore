@@ -9,6 +9,9 @@ dist/
 fixtures/
 fixtures_full/
 
+# Local secrets — API tokens. Never commit.
+melampus.local.toml
+
 # Result cache (regenerable, keyed on content hash)
 .melampus_cache/
 

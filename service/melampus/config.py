@@ -89,14 +89,33 @@ def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any
     return merged
 
 
+LOCAL_CONFIG = REPO_ROOT / "melampus.local.toml"
+
+
+def _secrets_from_environment() -> dict[str, Any]:
+    """Credentials come from the environment, never from tracked source.
+
+    Precedence, lowest to highest: packaged defaults, melampus.local.toml
+    (git-ignored), explicit --config file, environment variable, keyword override.
+    """
+    import os
+
+    token = os.environ.get("MELAMPUS_EBIRD_TOKEN")
+    return {"occurrence": {"ebird_token": token}} if token else {}
+
+
 def load_config(path: str | Path | None = None, **overrides: Any) -> MelampusConfig:
     data: dict[str, Any] = {}
+    if LOCAL_CONFIG.is_file():
+        with LOCAL_CONFIG.open("rb") as handle:
+            data = _deep_merge(data, tomllib.load(handle))
     if path is not None:
         file = Path(path).expanduser()
         if not file.is_file():
             raise FileNotFoundError(f"Config file not found: {file}")
         with file.open("rb") as handle:
-            data = tomllib.load(handle)
+            data = _deep_merge(data, tomllib.load(handle))
+    data = _deep_merge(data, _secrets_from_environment())
     if overrides:
         data = _deep_merge(data, overrides)
     return MelampusConfig.model_validate(data)
