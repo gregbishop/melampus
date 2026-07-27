@@ -375,6 +375,7 @@ LrTasks.startAsyncTask(function()
 
 		-- ── phase 2: apply. Chunked, and nothing async inside the gate. ─────
 		local written, chunkStart = 0, 1
+		local keywordsApplied, keywordsFailed, fieldsApplied = 0, 0, 0
 		while chunkStart <= #planned do
 			if progress:isCanceled() then break end
 			local chunkStop = math.min(chunkStart + CHUNK - 1, #planned)
@@ -388,15 +389,29 @@ LrTasks.startAsyncTask(function()
 					if plan.label ~= nil then photo:setRawMetadata('colorNameForLabel', plan.label) end
 					if plan.pickStatus ~= nil then photo:setRawMetadata('pickStatus', plan.pickStatus) end
 
+					local appliedHere = 0
 					for _, path in ipairs(plan.keywords) do
 						local keyword = keywordFromPath(catalog, path)
-						if keyword then photo:addKeyword(keyword) end
+						if keyword then
+							photo:addKeyword(keyword)
+							appliedHere = appliedHere + 1
+							keywordsApplied = keywordsApplied + 1
+						else
+							keywordsFailed = keywordsFailed + 1
+						end
 					end
 
 					for field, value in pairs(plan.metadata or {}) do
 						photo:setPropertyForPlugin(_PLUGIN, field, tostring(value))
+						fieldsApplied = fieldsApplied + 1
 					end
-					written = written + 1
+
+					-- Only count a photo as changed if something actually changed on
+					-- it. The previous counter incremented per photo processed, so a
+					-- run that silently wrote nothing still reported full success.
+					if appliedHere > 0 or next(plan.metadata or {}) ~= nil then
+						written = written + 1
+					end
 				end
 			end, { timeout = 60 })
 
@@ -413,15 +428,25 @@ LrTasks.startAsyncTask(function()
 			end
 		end)
 
-		Log.info('photos updated: ' .. tostring(written))
+		Log.info(string.format('photos changed: %d | keywords applied: %d, failed: %d | fields: %d',
+			written, keywordsApplied, keywordsFailed, fieldsApplied))
 		progress:done()
 		local suffix = progress:isCanceled()
 			and '\n\nCancelled — completed work was kept.' or ''
-		LrDialogs.message('Melampus — done',
-			string.format('Added keywords to %d of your %d selected photos.\n\n'
-				.. '%d had no identification and were left untouched.\n\n'
-				.. 'Next: run "Melampus: Set Up Review Collections" to get a '
-				.. 'Needs Review collection you can work through.%s',
-				written, #photos, unmatched, suffix), 'info')
+		local body = string.format(
+			'Changed %d photos.\n\n%d keywords added.\n%d panel fields written.\n',
+			written, keywordsApplied, fieldsApplied)
+		if keywordsFailed > 0 then
+			body = body .. string.format(
+				'\nWARNING: %d keywords could not be created. The keyword list may be '
+				.. 'incomplete. See the log:\n%s\n', keywordsFailed, Log.path())
+		end
+		if unmatched > 0 then
+			body = body .. string.format(
+				'\n%d selected photos had no identification and were left untouched.\n',
+				unmatched)
+		end
+		body = body .. '\nCheck the Keyword List panel for "Melampus".' .. suffix
+		LrDialogs.message('Melampus — done', body, 'info')
 	end)
 end)
