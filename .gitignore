@@ -19,3 +19,10 @@ melampus.local.toml
 _old/
 
 .DS_Store
+
+# Generated run artifacts — regenerable, and review.html embeds photo thumbnails
+review.html
+*_corrections.json
+fixtures_full_labels.json
+stage1_*.json
+stage1_*.log
