@@ -60,6 +60,11 @@ function Rules.defaultSettings()
 		-- Below this many frames a burst is too small for ranking to be
 		-- meaningful, so the absolute quality score is used instead.
 		minBurstForRanking = 4,
+		-- Working JPEG previews are deleted once analysis succeeds. They are
+		-- roughly 78 KB each, so a whole-library sweep would otherwise leave a
+		-- few hundred megabytes in a temp folder nothing ever cleans. They are
+		-- always kept when analysis fails, since then they are evidence.
+		keepPreviews = false,
 	}
 end
 

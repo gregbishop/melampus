@@ -59,6 +59,15 @@ LrTasks.startAsyncTask(function()
 				},
 				f:checkbox { title = 'Redo photos I have already done',
 					value = bind 'force' },
+				f:checkbox { title = 'Keep the working previews after analysing',
+					value = bind 'keepPreviews' },
+				f:static_text {
+					title = 'Previews are temporary JPEGs Melampus makes to look at your\n'
+						.. 'photos. They never enter your catalog and are deleted when\n'
+						.. 'analysis succeeds. About 78 KB each; keep them only to debug.',
+					height_in_lines = 3,
+					text_color = import('LrColor')(0.4, 0.4, 0.4),
+				},
 			},
 
 			f:group_box {

@@ -211,6 +211,27 @@ namespaces.LrFileUtils = {
 		return false
 	end,
 	createAllDirectories = function(path) os.execute('mkdir -p ' .. path) return true end,
+	files = function(folder)
+		local handle = io.popen('ls -1 ' .. folder .. ' 2>/dev/null')
+		local names = {}
+		if handle then
+			for line in handle:lines() do names[#names + 1] = folder .. '/' .. line end
+			handle:close()
+		end
+		local i = 0
+		return function() i = i + 1; return names[i] end
+	end,
+	fileAttributes = function(path)
+		local handle = io.open(path, 'rb')
+		if not handle then return {} end
+		local size = handle:seek('end'); handle:close()
+		return { fileSize = size }
+	end,
+	delete = function(path)
+		M.state.deleted = M.state.deleted or {}
+		M.state.deleted[#M.state.deleted + 1] = path
+		return true
+	end,
 	readFile = function(path)
 		local handle = io.open(path, 'r')
 		if not handle then return nil end

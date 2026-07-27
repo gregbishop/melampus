@@ -357,8 +357,18 @@ LrTasks.startAsyncTask(function()
 				local newResults = LrPathUtils.child(repo, 'plugin_results.json')
 				local ok, message = Analyze.run(repo, workFolder, newResults)
 				if not ok then
-					LrDialogs.message('Melampus', message, 'critical')
+					-- Keep the previews on failure; they are the evidence, and
+					-- re-exporting them would only waste the user's time again.
+					LrDialogs.message('Melampus', message .. '\n\nPreviews kept at:\n'
+						.. workFolder, 'critical')
 					return
+				end
+
+				if settings.keepPreviews ~= true then
+					local freed = Analyze.cleanUp(workFolder)
+					if freed > 1 then
+						Log.info(string.format('reclaimed %.0f MB of previews', freed))
+					end
 				end
 
 				-- Reload and rebuild the plan from the freshly computed answers.

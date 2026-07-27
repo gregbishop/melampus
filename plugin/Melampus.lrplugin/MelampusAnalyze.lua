@@ -94,6 +94,27 @@ function Analyze.exportPreviews(photos, folder, longEdge, progress)
 	return written
 end
 
+--- Total size of a folder of previews, in megabytes.
+function Analyze.folderSizeMB(folder)
+	local bytes = 0
+	for file in LrFileUtils.files(folder) do
+		local attrs = LrFileUtils.fileAttributes(file)
+		bytes = bytes + ((attrs and attrs.fileSize) or 0)
+	end
+	return bytes / 1048576
+end
+
+--- Remove the working previews. They are a means, not an artefact worth keeping:
+-- at roughly 78 KB each an unattended library sweep would leave a few hundred
+-- megabytes lying in a temp folder that nothing ever cleans.
+function Analyze.cleanUp(folder)
+	if not folder or not LrFileUtils.exists(folder) then return 0 end
+	local size = Analyze.folderSizeMB(folder)
+	local ok = LrFileUtils.delete(folder)
+	Log.info(string.format('removed preview folder (%.0f MB): %s', size, tostring(ok)))
+	return size
+end
+
 --- Shell-quote a path so spaces and quotes survive the trip.
 local function quote(text)
 	return "'" .. string.gsub(tostring(text), "'", "'\\''") .. "'"
