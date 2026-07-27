@@ -181,6 +181,12 @@ end
 --- What this plan will actually claim about the photo, in words.
 -- "3 keywords, 11 fields" tells you nothing about whether the answer is right.
 -- The species name and how sure it is are the only things worth previewing.
+--- Apply a list of {photo, plan} inside one write transaction.
+-- Shared by the batch path and the bulk path so incremental and one-shot
+-- application cannot drift apart.
+local applyPlans
+
+--- What this plan will actually claim about the photo, in words.
 local function describe(plan, source)
 	if plan.metadata and plan.metadata.species then
 		local line = plan.metadata.species
@@ -216,6 +222,27 @@ local function tally(planned)
 		return a < b
 	end)
 	return counts, order
+end
+
+applyPlans = function(catalog, entries)
+	local applied = 0
+	catalog:withWriteAccessDo('Melampus: apply identifications', function()
+		for _, entry in ipairs(entries) do
+			local photo, plan = entry.photo, entry.plan
+			if plan.rating ~= nil then photo:setRawMetadata('rating', plan.rating) end
+			if plan.label ~= nil then photo:setRawMetadata('colorNameForLabel', plan.label) end
+			if plan.pickStatus ~= nil then photo:setRawMetadata('pickStatus', plan.pickStatus) end
+			for _, path in ipairs(plan.keywords) do
+				local keyword = keywordFromPath(catalog, path)
+				if keyword then photo:addKeyword(keyword) end
+			end
+			for field, value in pairs(plan.metadata or {}) do
+				photo:setPropertyForPlugin(_PLUGIN, field, tostring(value))
+			end
+			applied = applied + 1
+		end
+	end, { timeout = 60 })
+	return applied
 end
 
 LrTasks.startAsyncTask(function()
@@ -333,8 +360,6 @@ LrTasks.startAsyncTask(function()
 
 			if ask == 'ok' then
 				local repo = Analyze.repoRoot()
-				local workFolder = LrPathUtils.child(LrPathUtils.getStandardFilePath('temp'),
-					'melampus-previews')
 				local toAnalyse = {}
 				for _, photo in ipairs(photos) do
 					local name = photo:getFormattedMetadata('fileName') or ''
@@ -344,63 +369,88 @@ LrTasks.startAsyncTask(function()
 					end
 				end
 
-				Log.info('exporting previews for ' .. #toAnalyse .. ' photos')
-				local exported = Analyze.exportPreviews(toAnalyse, workFolder, 1280, progress)
+				-- §5.4.7: work in batches and write after each one, so stars and
+				-- keywords appear as the run proceeds. A single pass over 700
+				-- photos would show nothing for an hour and look frozen, which is
+				-- indistinguishable from being frozen.
+				local BATCH = settings.analyzeBatchSize or 25
+				local doneCount, appliedTotal = 0, 0
 
-				if exported == 0 then
-					LrDialogs.message('Melampus',
-						'Could not export previews for those photos.\n\nSee the log:\n'
-						.. Log.path(), 'critical')
-					return
-				end
+				for first = 1, #toAnalyse, BATCH do
+					if progress:isCanceled() then break end
+					local last = math.min(first + BATCH - 1, #toAnalyse)
+					local batch = {}
+					for i = first, last do batch[#batch + 1] = toAnalyse[i] end
 
-				local newResults = LrPathUtils.child(repo, 'plugin_results.json')
-				local ok, message = Analyze.run(repo, workFolder, newResults)
-				if not ok then
-					-- Keep the previews on failure; they are the evidence, and
-					-- re-exporting them would only waste the user's time again.
-					LrDialogs.message('Melampus', message .. '\n\nPreviews kept at:\n'
-						.. workFolder, 'critical')
-					return
-				end
+					progress:setPortionComplete(doneCount, #toAnalyse)
+					local workFolder = LrPathUtils.child(
+						LrPathUtils.getStandardFilePath('temp'),
+						'melampus-previews-' .. tostring(first))
 
-				if settings.keepPreviews ~= true then
-					local freed = Analyze.cleanUp(workFolder)
-					if freed > 1 then
-						Log.info(string.format('reclaimed %.0f MB of previews', freed))
-					end
-				end
-
-				-- Reload and rebuild the plan from the freshly computed answers.
-				prefs.resultsPath = newResults
-				local reloaded = readResults(newResults)
-				if reloaded then
-					byFile = {}
-					for _, record in ipairs(reloaded) do
-						if type(record) == 'table' and record.file then
-							byFile[record.file] = record
-							local stem = string.match(record.file, '^(.+)%.[^.]+$')
-							if stem then byFile[stem] = record end
+					local exported = Analyze.exportPreviews(batch, workFolder, 1280, nil)
+					if exported == 0 then
+						Log.warn('no previews exported for batch starting at ' .. first)
+					else
+						local batchResults = LrPathUtils.child(workFolder, 'results.json')
+						local ok, message = Analyze.run(repo, workFolder, batchResults)
+						if not ok then
+							LrDialogs.message('Melampus', message
+								.. '\n\nPreviews kept at:\n' .. workFolder, 'critical')
+							return
 						end
-					end
-					planned, matched, unmatched = {}, 0, 0
-					for _, photo in ipairs(photos) do
-						local name = photo:getFormattedMetadata('fileName') or ''
-						local stem = string.match(name, '^(.+)%.[^.]+$') or name
-						local record = byFile[name] or byFile[stem]
-						if record then
-							matched = matched + 1
-							local plan = Rules.planFor(normalise(record), photoState(photo), settings)
-							if not Rules.isEmpty(plan) then
-								planned[#planned + 1] = { photo = photo, plan = plan, name = name,
-									claim = describe(plan, normalise(record)) }
+
+						local fresh = readResults(batchResults)
+						if fresh then
+							-- Apply this batch immediately so the grid updates.
+							local batchPlans = {}
+							for _, record in ipairs(fresh) do
+								if type(record) == 'table' and record.file then
+									local stem = string.match(record.file, '^(.+)%.[^.]+$')
+									for _, photo in ipairs(batch) do
+										local pname = photo:getFormattedMetadata('fileName') or ''
+										local pstem = string.match(pname, '^(.+)%.[^.]+$') or pname
+										if pstem == stem then
+											local plan = Rules.planFor(normalise(record),
+												photoState(photo), settings)
+											if not Rules.isEmpty(plan) then
+												batchPlans[#batchPlans + 1] = { photo = photo, plan = plan }
+											end
+										end
+									end
+								end
 							end
-						else
-							unmatched = unmatched + 1
+
+							if #batchPlans > 0 and Rules.shouldApply(settings) then
+								applyPlans(catalog, batchPlans)
+								appliedTotal = appliedTotal + #batchPlans
+							elseif #batchPlans > 0 then
+								for _, entry in ipairs(batchPlans) do
+									planned[#planned + 1] = { photo = entry.photo, plan = entry.plan,
+										name = entry.photo:getFormattedMetadata('fileName'),
+										claim = 'newly analysed' }
+								end
+							end
+						end
+
+						if settings.keepPreviews ~= true then
+							Analyze.cleanUp(workFolder)
 						end
 					end
-					Log.info(string.format('after analysis: matched %d, unmatched %d, changes %d',
-						matched, unmatched, #planned))
+
+					doneCount = doneCount + #batch
+					Log.info(string.format('analysed %d of %d, applied %d so far',
+						doneCount, #toAnalyse, appliedTotal))
+				end
+
+				if Rules.shouldApply(settings) then
+					progress:done()
+					LrDialogs.message('Melampus — done',
+						string.format('Analysed %d photos and updated %d of them.%s\n\n'
+							.. 'Stars and keywords appeared as each batch finished.',
+							doneCount, appliedTotal,
+							progress:isCanceled() and '\n\nCancelled — finished work was kept.' or ''),
+						'info')
+					return
 				end
 			end
 		end

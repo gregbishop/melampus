@@ -65,6 +65,11 @@ function Rules.defaultSettings()
 		-- few hundred megabytes in a temp folder nothing ever cleans. They are
 		-- always kept when analysis fails, since then they are evidence.
 		keepPreviews = false,
+		-- Photos analysed per batch. Each batch is written to the catalog before
+		-- the next starts, so stars and keywords appear during a long run rather
+		-- than all at the end. Smaller means more visible progress and slightly
+		-- more overhead; 25 is about three minutes between updates.
+		analyzeBatchSize = 25,
 	}
 end
 
