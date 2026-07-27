@@ -144,8 +144,32 @@ local function keywordFromPath(catalog, path)
 	for segment in string.gmatch(path, '[^>]+') do
 		local name = string.gsub(segment, '^%s*(.-)%s*$', '%1')
 		if name ~= '' then
-			-- returnExisting = true, so re-running never duplicates the tree.
-			parent = catalog:createKeyword(name, {}, false, parent, true)
+			-- Prefer an existing child of the current parent. createKeyword with
+			-- returnExisting can return nil when the name collides elsewhere in
+			-- the tree, and a nil parent silently dumps every remaining segment
+			-- at the root — which is how "Species" and "Taxon" ended up as
+			-- top-level keywords instead of under Melampus.
+			local found = nil
+			local siblings = parent and parent:getChildren() or catalog:getKeywords()
+			for _, candidate in ipairs(siblings or {}) do
+				if candidate:getName() == name then
+					found = candidate
+					break
+				end
+			end
+
+			if found == nil then
+				found = catalog:createKeyword(name, {}, false, parent, true)
+			end
+			if found == nil then
+				-- Still nothing: abandon this keyword rather than reparent the
+				-- rest of the path to the root and pollute the keyword list.
+				Log.warn('could not create or find keyword "' .. name
+					.. '" under ' .. (parent and parent:getName() or 'root')
+					.. '; skipping "' .. path .. '"')
+				return nil
+			end
+			parent = found
 		end
 	end
 	return parent

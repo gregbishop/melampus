@@ -140,6 +140,40 @@ LrTasks.startAsyncTask(function()
 					},
 				},
 				f:push_button {
+					title = 'Remove all Melampus keywords…',
+					action = function()
+						local LrApplication = import 'LrApplication'
+						local LrTasks = import 'LrTasks'
+						local choice = LrDialogs.confirm('Remove Melampus keywords',
+							'This deletes the Melampus keyword tree and every stray '
+							.. 'top-level keyword it created (Species, Taxon, Confidence, '
+							.. 'Review, Notable, Needs ID).\n\nYour own keywords are '
+							.. 'untouched. Photos keep everything else.',
+							'Remove them', 'Cancel')
+						if choice ~= 'ok' then return end
+						LrTasks.startAsyncTask(function()
+							local catalog = LrApplication.activeCatalog()
+							local strays = {
+								['melampus'] = true, ['species'] = true, ['taxon'] = true,
+								['confidence'] = true, ['review'] = true,
+								['notable'] = true, ['needs id'] = true,
+								['out of range'] = true,
+							}
+							local removed = 0
+							catalog:withWriteAccessDo('Melampus: remove keywords', function()
+								for _, keyword in ipairs(catalog:getKeywords() or {}) do
+									if strays[string.lower(keyword:getName())] then
+										catalog:deleteKeyword(keyword)
+										removed = removed + 1
+									end
+								end
+							end, { timeout = 60 })
+							LrDialogs.message('Melampus',
+								string.format('Removed %d top-level keyword trees.', removed), 'info')
+						end)
+					end,
+				},
+				f:push_button {
 					title = 'Restore safe defaults',
 					action = function()
 						for key, value in pairs(Rules.defaultSettings()) do prefs[key] = value end
