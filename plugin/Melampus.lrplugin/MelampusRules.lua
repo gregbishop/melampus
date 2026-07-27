@@ -57,6 +57,9 @@ function Rules.defaultSettings()
 		minConfidence = 0.90,
 		minBurstAgreement = 0.80,
 		rejectBelowQuality = 20,
+		-- Below this many frames a burst is too small for ranking to be
+		-- meaningful, so the absolute quality score is used instead.
+		minBurstForRanking = 4,
 	}
 end
 
@@ -108,6 +111,20 @@ function Rules.passesGate(result, settings)
 end
 
 function Rules.ratingFor(result, settings)
+	-- Prefer the frame's rank within its own burst. Absolute sharpness is not
+	-- comparable between a smooth white egret and a patterned heron, but "best
+	-- frame of this burst" is exactly the question culling asks. A lone frame
+	-- has no burst to rank against, so it falls back to the absolute score.
+	local rank = result.qualityRank
+	local frames = result.encounterFrames or 0
+	if rank ~= nil and frames >= (settings.minBurstForRanking or 4) then
+		if rank >= 0.90 then return 5 end
+		if rank >= 0.70 then return 4 end
+		if rank >= 0.40 then return 3 end
+		if rank >= 0.15 then return 2 end
+		return 1
+	end
+
 	local quality = result.quality
 	if quality == nil then return nil end
 	-- Breakpoints are deliberately strict at the top. Five stars should mean

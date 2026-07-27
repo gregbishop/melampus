@@ -116,9 +116,27 @@ def main(argv: list[str]) -> int:
                     flagged += 1
                 break
 
+        # Rank quality WITHIN the encounter. Absolute sharpness is not
+        # comparable across subjects — a smooth white egret has far less texture
+        # to resolve than a patterned heron at identical focus accuracy — and
+        # culling is a within-burst question anyway: which frame of these forty
+        # is the keeper. Ranking answers that; an absolute score does not.
+        member_quality = [(rec["file"], quality_scores.get(rec["file"]))
+                          for rec in members]
+        scored = sorted([m for m in member_quality if m[1] is not None],
+                        key=lambda m: m[1])
+        rank_of: dict[str, float] = {}
+        if scored:
+            for position, (name, _) in enumerate(scored):
+                # Percentile rank within the burst, 0.0 worst .. 1.0 best.
+                rank_of[name] = position / max(len(scored) - 1, 1)
+
         for rec in members:
             row = dict(rec)
             row["encounter"] = enc.index
+            if rec["file"] in rank_of:
+                row["quality_rank"] = round(rank_of[rec["file"]], 3)
+                row["encounter_frames"] = len(scored)
             if agreement is not None:
                 row["burst_agreement"] = round(agreement, 3)
             row["range_flag"] = range_flag

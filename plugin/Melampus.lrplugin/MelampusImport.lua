@@ -108,6 +108,8 @@ local function normalise(record)
 		rangeFlag = record.range_flag == true,
 		encounter = record.encounter,
 		quality = record.quality,
+		qualityRank = record.quality_rank,
+		encounterFrames = record.encounter_frames,
 		model = record.model,
 	}
 end

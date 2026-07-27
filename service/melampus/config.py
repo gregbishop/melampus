@@ -51,7 +51,12 @@ class QualityConfig(_Base):
     # HIGHER mean focus value than a sharp one (2.30 vs 2.08) because smooth
     # bokeh is quiet while uniform softness is noisy. Only the high percentiles
     # separate them.
-    region_percentile: float = 99.0
+    # p99.9, not p99. A smooth pale subject — a Snowy Egret — has very little
+    # texture to measure, so p99 lands on plumage rather than on the sharp bill
+    # and eye, and a genuinely excellent frame scored one star. p99.9 finds the
+    # sharpest structures that are actually present, and it still separates
+    # frames *within* a burst (38.4 vs 24.5) where max cannot (230 vs 220).
+    region_percentile: float = 99.9
 
     # Subject detection
     merge_dilate: int = 9
@@ -72,8 +77,9 @@ class QualityConfig(_Base):
     # Sampled across the real corpus (194 frames): raw subject p99 runs p10=13.5,
     # p50=30, p90=52, p99=63. Knees at 14 and 55 spread the corpus across the
     # range instead of pinning three quarters of it at 100.
-    knee_low: float = 14.0
-    knee_high: float = 55.0
+    # Sampled over the corpus at p99.9: p10=23.7, p50=47.4, p90=75.9.
+    knee_low: float = 22.0
+    knee_high: float = 78.0
     size_reference_frac: float = 0.08
     size_gain_strength: float = 0.25
     size_gain_max: float = 1.35
