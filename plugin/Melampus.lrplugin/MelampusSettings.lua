@@ -19,8 +19,14 @@ LrTasks.startAsyncTask(function()
 			bind_to_object = prefs,
 			spacing = f:control_spacing(),
 
+			f:static_text {
+				title = 'Melampus reads species identifications that were worked out on\n'
+					.. 'your Mac, and puts them onto your photos as keywords.',
+				height_in_lines = 2,
+			},
+
 			f:group_box {
-				title = 'Results file',
+				title = 'Step 1 — where the identifications are',
 				fill_horizontal = 1,
 				f:row {
 					f:edit_field { value = bind 'resultsPath', width_in_chars = 42,
@@ -40,23 +46,26 @@ LrTasks.startAsyncTask(function()
 			},
 
 			f:group_box {
-				title = 'Safety',
+				title = 'Step 2 — safety',
 				fill_horizontal = 1,
-				f:checkbox { title = 'Dry run — report changes without writing',
+				f:checkbox {
+					title = 'Preview only — show me what would change, change nothing',
 					value = bind 'dryRun' },
 				f:static_text {
-					title = 'Leave this on for the first run against any catalog.',
+					title = 'Keep this ticked until you have seen a preview you are happy with.\n'
+						.. 'Untick it when you want the changes actually applied.',
+					height_in_lines = 2,
 					text_color = import('LrColor')(0.4, 0.4, 0.4),
 				},
-				f:checkbox { title = 'Force — reprocess photos already done',
+				f:checkbox { title = 'Redo photos I have already done',
 					value = bind 'force' },
 			},
 
 			f:group_box {
-				title = 'What to write',
+				title = 'What to add to photos',
 				fill_horizontal = 1,
-				f:checkbox { title = 'Hierarchical keywords', value = bind 'writeKeywords' },
-				f:checkbox { title = 'Custom metadata fields', value = bind 'writeMetadata' },
+				f:checkbox { title = 'Keywords (species, taxon, review status)', value = bind 'writeKeywords' },
+				f:checkbox { title = 'Melampus panel details (confidence, alternates)', value = bind 'writeMetadata' },
 				f:checkbox { title = 'Star rating (needs quality scores — Stage 2)',
 					value = bind 'writeRating' },
 				f:checkbox { title = 'Colour label', value = bind 'writeLabel' },
@@ -66,7 +75,7 @@ LrTasks.startAsyncTask(function()
 			},
 
 			f:group_box {
-				title = 'Overwrite permission — off means write only where empty',
+				title = 'Never touch things I set myself (leave these unticked)',
 				fill_horizontal = 1,
 				f:checkbox { title = 'Overwrite existing ratings', value = bind 'overwriteRating' },
 				f:checkbox { title = 'Overwrite existing labels', value = bind 'overwriteLabel' },
@@ -74,7 +83,7 @@ LrTasks.startAsyncTask(function()
 			},
 
 			f:group_box {
-				title = 'Auto-tag gates',
+				title = 'How sure must it be before naming a species',
 				fill_horizontal = 1,
 				f:row {
 					f:static_text { title = 'Minimum confidence:' },
@@ -85,7 +94,7 @@ LrTasks.startAsyncTask(function()
 						min = 0, max = 1, precision = 2 },
 				},
 				f:static_text {
-					title = 'Below either gate a review keyword is written instead of a species.',
+					title = 'Not sure enough? It adds "Needs ID" instead of guessing a species.',
 					text_color = import('LrColor')(0.4, 0.4, 0.4),
 				},
 			},

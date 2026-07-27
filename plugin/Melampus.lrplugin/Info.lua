@@ -35,12 +35,12 @@ return {
 	-- Four items, no more. A cluttered plugin menu makes a tool feel unfinished.
 	LrLibraryMenuItems = {
 		{
-			title = 'Melampus: Import Identifications…',
+			title = 'Melampus: Identify Selected Photos…',
 			file = 'MelampusImport.lua',
 			enabledWhen = 'photosAvailable',
 		},
 		{
-			title = 'Melampus: Review Queue',
+			title = 'Melampus: Set Up Review Collections',
 			file = 'MelampusReviewQueue.lua',
 		},
 		{
@@ -48,7 +48,7 @@ return {
 			file = 'MelampusSettings.lua',
 		},
 		{
-			title = 'Melampus: Log Corrections',
+			title = 'Melampus: Save My Corrections…',
 			file = 'MelampusLogCorrections.lua',
 		},
 	},

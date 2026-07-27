@@ -31,7 +31,7 @@ local CHUNK = 100 -- photos per write transaction, so a crash loses little
 
 local function readResults(path)
 	if not path or path == '' then
-		return nil, 'No results file configured. Set one in Melampus: Settings.'
+		return nil, 'FIRST_RUN'
 	end
 	if not LrFileUtils.exists(path) then
 		return nil, 'Results file not found:\n' .. path
@@ -156,7 +156,23 @@ LrTasks.startAsyncTask(function()
 		local records, err = readResults(prefs.resultsPath)
 		if not records then
 			Log.error('could not read results: ' .. tostring(err))
-			LrDialogs.message('Melampus', err, 'critical')
+			if err == 'FIRST_RUN' then
+				-- §5.4.6: a first run should explain itself, not error.
+				LrDialogs.message('Welcome to Melampus',
+					'Melampus works out what species are in your photos, on your own Mac, '
+					.. 'and then adds them to your photos as keywords.\n\n'
+					.. 'It has not been told where those identifications are yet.\n\n'
+					.. 'What to do:\n'
+					.. '1.  Go to Library > Plug-in Extras > Melampus: Settings…\n'
+					.. '2.  Under Step 1, click Choose… and pick the file\n'
+					.. '     plugin_results.json in your melampus folder.\n'
+					.. '3.  Leave "Preview only" ticked.\n'
+					.. '4.  Come back here and run Identify Selected Photos again.\n\n'
+					.. 'Nothing will be changed on your photos until you untick '
+					.. '"Preview only" yourself.', 'info')
+			else
+				LrDialogs.message('Melampus', err, 'critical')
+			end
 			return
 		end
 		Log.info('records loaded: ' .. tostring(#records))
@@ -216,17 +232,27 @@ LrTasks.startAsyncTask(function()
 		-- ── dry run stops here ──────────────────────────────────────────────
 		if not Rules.shouldApply(settings) then
 			local lines = {
-				string.format('DRY RUN — nothing was written.\n'),
-				string.format('%d selected, %d matched, %d without results.', #photos, matched, unmatched),
-				string.format('%d photos would change.\n', #planned),
+				'PREVIEW ONLY — none of your photos were changed.\n',
+				string.format('You selected %d photos.', #photos),
+				string.format('Melampus has identifications for %d of them.', matched),
 			}
+			if unmatched > 0 then
+				lines[#lines + 1] = string.format(
+					'%d had no identification and were left alone.', unmatched)
+			end
+			lines[#lines + 1] = string.format('\n%d photos would get new keywords:\n', #planned)
 			for i = 1, math.min(#planned, 15) do
 				lines[#lines + 1] = '  ' .. planned[i].name .. ': ' .. describe(planned[i].plan)
 			end
 			if #planned > 15 then
 				lines[#lines + 1] = string.format('  … and %d more.', #planned - 15)
 			end
-			lines[#lines + 1] = '\nTurn off Dry Run in Melampus: Settings to apply.'
+			if #planned == 0 and matched > 0 then
+				lines[#lines + 1] = 'Nothing to change — these photos already have their '
+					.. 'Melampus keywords. That is what a second run should do.'
+			end
+			lines[#lines + 1] = '\nHappy with this? Go to Melampus: Settings… and untick '
+				.. '"Preview only", then run this again to apply it.'
 			progress:done()
 			Log.info('dry run complete; nothing written')
 			lines[#lines + 1] = '\nLog: ' .. Log.path()
@@ -278,8 +304,11 @@ LrTasks.startAsyncTask(function()
 		progress:done()
 		local suffix = progress:isCanceled()
 			and '\n\nCancelled — completed work was kept.' or ''
-		LrDialogs.message('Melampus',
-			string.format('%d photos updated of %d selected.\n%d had no results.%s',
+		LrDialogs.message('Melampus — done',
+			string.format('Added keywords to %d of your %d selected photos.\n\n'
+				.. '%d had no identification and were left untouched.\n\n'
+				.. 'Next: run "Melampus: Set Up Review Collections" to get a '
+				.. 'Needs Review collection you can work through.%s',
 				written, #photos, unmatched, suffix), 'info')
 	end)
 end)
