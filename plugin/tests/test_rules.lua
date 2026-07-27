@@ -171,6 +171,20 @@ t.test('hierarchical style remains available for those who want it', function()
 	t.contains(plan.keywords, 'Melampus > Species > Tricolored Heron')
 end)
 
+-- ── batch size ─────────────────────────────────────────────────────────────
+t.test('batch size is clamped to something sane', function()
+	t.equals(Rules.batchSize(settings()), 25, 'default should be 25')
+	t.equals(Rules.batchSize(settings({ analyzeBatchSize = 10 })), 10)
+	t.equals(Rules.batchSize(settings({ analyzeBatchSize = 0 })), 1,
+		'zero would stall the run')
+	t.equals(Rules.batchSize(settings({ analyzeBatchSize = -5 })), 1)
+	t.equals(Rules.batchSize(settings({ analyzeBatchSize = 99999 })), 500,
+		'an enormous batch defeats incremental updates entirely')
+	t.equals(Rules.batchSize(settings({ analyzeBatchSize = 'nonsense' })), 25,
+		'a junk pref should fall back, not crash')
+	t.equals(Rules.batchSize({}), 25)
+end)
+
 -- ── colour labels ──────────────────────────────────────────────────────────
 t.test('colour labels mean something specific', function()
 	local s = settings({ writeLabel = true })

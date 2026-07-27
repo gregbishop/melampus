@@ -59,6 +59,27 @@ LrTasks.startAsyncTask(function()
 				},
 				f:checkbox { title = 'Redo photos I have already done',
 					value = bind 'force' },
+				f:row {
+					f:static_text { title = 'Update the grid every' },
+					f:popup_menu {
+						value = bind 'analyzeBatchSize',
+						items = {
+							{ title = '10 photos  (updates often, slightly slower)', value = 10 },
+							{ title = '25 photos  (recommended)', value = 25 },
+							{ title = '50 photos', value = 50 },
+							{ title = '100 photos  (fewest interruptions)', value = 100 },
+						},
+					},
+				},
+				f:static_text {
+					title = 'Analysis runs in batches. Each batch is written to your catalog\n'
+						.. 'before the next starts, so stars and keywords appear as it goes\n'
+						.. 'instead of all at the end. At roughly 7 seconds a photo, 25 is\n'
+						.. 'about three minutes between updates. Cancelling keeps every\n'
+						.. 'batch that finished.',
+					height_in_lines = 5,
+					text_color = import('LrColor')(0.4, 0.4, 0.4),
+				},
 				f:checkbox { title = 'Keep the working previews after analysing',
 					value = bind 'keepPreviews' },
 				f:static_text {

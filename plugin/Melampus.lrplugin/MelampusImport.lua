@@ -373,7 +373,7 @@ LrTasks.startAsyncTask(function()
 				-- keywords appear as the run proceeds. A single pass over 700
 				-- photos would show nothing for an hour and look frozen, which is
 				-- indistinguishable from being frozen.
-				local BATCH = settings.analyzeBatchSize or 25
+				local BATCH = Rules.batchSize(settings)
 				local doneCount, appliedTotal = 0, 0
 
 				for first = 1, #toAnalyse, BATCH do

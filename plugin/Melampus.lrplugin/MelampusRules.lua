@@ -99,6 +99,17 @@ local function contains(list, needle)
 	return false
 end
 
+--- Batch size, clamped. Prefs are user-editable and persist across versions, so
+-- a stale or nonsensical value must not stall a run or spin it one photo at a
+-- time.
+function Rules.batchSize(settings)
+	local size = tonumber(settings and settings.analyzeBatchSize) or 25
+	size = math.floor(size)
+	if size < 1 then return 1 end
+	if size > 500 then return 500 end
+	return size
+end
+
 function Rules.confidenceBand(confidence, settings)
 	confidence = confidence or 0
 	if confidence >= (settings.minConfidence or 0.9) then return 'High' end
