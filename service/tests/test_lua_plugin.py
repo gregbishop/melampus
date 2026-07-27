@@ -35,6 +35,21 @@ def test_write_rules():
     assert "0 failed" in proc.stdout, proc.stdout
 
 
+def test_import_runs_against_a_mock_lightroom():
+    """Executes the real MelampusImport.lua end to end against a mock SDK.
+
+    Catches what unit tests could not: keywords failing to attach, ratings not
+    written, overwrite protection, dry run writing nothing, idempotency, and
+    file I/O inside a write gate.
+
+    It does NOT reproduce every real SDK behaviour — see docs/plugin.md for
+    what remains unverified.
+    """
+    proc = run_lua(TESTS / "test_import_integration.lua")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "0 failed" in proc.stdout, proc.stdout
+
+
 def test_json_decoder():
     proc = run_lua(TESTS / "test_json.lua")
     assert proc.returncode == 0, proc.stdout + proc.stderr
