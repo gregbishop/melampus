@@ -53,3 +53,18 @@ class PromptLibrary:
         """Taxon-specific prompt, falling back to the generic one."""
         name = taxon if self.path_for(taxon).is_file() else "generic"
         return self.render(name)
+
+    def fingerprint(self) -> str:
+        """Hash of every prompt file's contents.
+
+        Part of the cache key: editing a prompt must invalidate results produced by
+        the previous wording, otherwise a tuning pass silently re-serves stale
+        identifications and looks like it worked.
+        """
+        import hashlib
+
+        digest = hashlib.sha256()
+        for path in sorted(self.directory.glob("*.md")):
+            digest.update(path.name.encode("utf-8"))
+            digest.update(path.read_bytes())
+        return digest.hexdigest()[:16]

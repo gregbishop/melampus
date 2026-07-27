@@ -84,7 +84,7 @@ def run_batch(
             stats.errors += 1
             continue
 
-        if not force and cache.has_success(digest):
+        if not force and cache.has_success(digest, identifier.fingerprint):
             stats.skipped += 1
             continue
 

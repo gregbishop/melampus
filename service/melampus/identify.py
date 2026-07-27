@@ -86,6 +86,23 @@ class Identifier:
         self.backend = backend
         self.config = config
         self.prompts = prompts or PromptLibrary(config.run.prompts_dir)
+        self._fingerprint: str | None = None
+
+    @property
+    def fingerprint(self) -> str:
+        """Everything that can change an answer without the image changing."""
+        if self._fingerprint is None:
+            import hashlib
+
+            parts = "|".join([
+                self.backend.name,
+                self.prompts.fingerprint(),
+                str(self.config.image.max_edge),
+                str(self.config.model.max_tokens),
+                str(self.config.model.temperature),
+            ])
+            self._fingerprint = hashlib.sha256(parts.encode("utf-8")).hexdigest()[:16]
+        return self._fingerprint
 
     def _ask(self, image: Path, prompt: str, max_tokens: int, model_cls):
         """Call the model, validate, retry once with a corrective message."""
@@ -141,6 +158,7 @@ class Identifier:
                     image_max_edge=edge,
                 )
             result.image_max_edge = edge
+            result.run_fingerprint = self.fingerprint
             if result.status == "ok":
                 return result
             last = result

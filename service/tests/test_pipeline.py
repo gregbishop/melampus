@@ -230,3 +230,65 @@ def test_content_hash_is_stable(tmp_path: Path):
     path = tmp_path / "x.jpg"
     Image.new("RGB", (64, 64), (1, 2, 3)).save(path)
     assert content_hash(path) == content_hash(path)
+
+
+# --------------------------------------------------------------------------- #
+# cache invalidation on prompt / model change
+# --------------------------------------------------------------------------- #
+def test_editing_a_prompt_invalidates_cached_results(tmp_path: Path, config):
+    """A tuning pass must actually re-run, not silently re-serve old answers."""
+    import shutil
+
+    prompts = tmp_path / "prompts"
+    shutil.copytree(REPO / "prompts", prompts)
+    cfg = config.model_copy(update={"run": config.run.model_copy(update={"prompts_dir": prompts})})
+
+    folder = tmp_path / "imgs"
+    folder.mkdir()
+    Image.new("RGB", (400, 300), (10, 20, 30)).save(folder / "a.jpg")
+    paths = sorted(folder.glob("*.jpg"))
+    cache = ResultCache(cfg.run.cache_path)
+
+    first = run_batch(paths, Identifier(ScriptedBackend([ROUTING_OK, ID_OK]), cfg), cache,
+                      log=lambda _: None)
+    assert first.processed == 1
+
+    again = run_batch(paths, Identifier(ScriptedBackend([]), cfg), cache, log=lambda _: None)
+    assert again.skipped == 1, "unchanged prompts should still hit the cache"
+
+    (prompts / "bird.md").write_text("A different prompt entirely.\n$season_context\n")
+    after = run_batch(paths, Identifier(ScriptedBackend([ROUTING_OK, ID_OK]), cfg), cache,
+                      log=lambda _: None)
+    assert after.processed == 1, "prompt edit did not invalidate the cached result"
+    assert after.skipped == 0
+
+
+def test_changing_the_model_invalidates_cached_results(tmp_path: Path, config):
+    folder = tmp_path / "imgs"
+    folder.mkdir()
+    Image.new("RGB", (400, 300), (10, 20, 30)).save(folder / "a.jpg")
+    paths = sorted(folder.glob("*.jpg"))
+    cache = ResultCache(config.run.cache_path)
+
+    run_batch(paths, Identifier(ScriptedBackend([ROUTING_OK, ID_OK], name="model-a"), config),
+              cache, log=lambda _: None)
+    other = run_batch(paths, Identifier(ScriptedBackend([ROUTING_OK, ID_OK], name="model-b"), config),
+                      cache, log=lambda _: None)
+    assert other.processed == 1, "a different model reused another model's answer"
+
+
+def test_results_predating_fingerprinting_are_still_honoured(tmp_path: Path, config):
+    """Introducing the fingerprint must not discard hours of prior work."""
+    folder = tmp_path / "imgs"
+    folder.mkdir()
+    Image.new("RGB", (400, 300), (10, 20, 30)).save(folder / "a.jpg")
+    paths = sorted(folder.glob("*.jpg"))
+    cache = ResultCache(config.run.cache_path)
+    identifier = Identifier(ScriptedBackend([ROUTING_OK, ID_OK]), config)
+
+    run_batch(paths, identifier, cache, log=lambda _: None)
+    # Simulate a record written before fingerprints existed.
+    for record in cache.results():
+        record.run_fingerprint = ""
+    assert cache.legacy_count() == 1
+    assert cache.has_success(cache.results()[0].content_hash, "some-other-fingerprint")

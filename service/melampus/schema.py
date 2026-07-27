@@ -122,3 +122,6 @@ class ImageResult(BaseModel):
     seconds: float = 0.0
     model: str = ""
     image_max_edge: int = 0
+    # Identifies the model + prompt set + image settings that produced this result,
+    # so a prompt edit invalidates it instead of being silently re-served.
+    run_fingerprint: str = ""

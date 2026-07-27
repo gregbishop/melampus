@@ -41,9 +41,29 @@ class ResultCache:
     def get(self, content_hash: str) -> ImageResult | None:
         return self._by_hash.get(content_hash)
 
-    def has_success(self, content_hash: str) -> bool:
+    def has_success(self, content_hash: str, fingerprint: str | None = None) -> bool:
+        """True when this image already has a usable result.
+
+        The image contents alone are not a sufficient cache key: a different model,
+        prompt set or image size can change the answer without changing the file.
+        Passing `fingerprint` restricts hits to results produced under matching
+        settings, so editing a prompt genuinely re-runs instead of silently
+        re-serving the previous wording's answer.
+
+        Records written before fingerprinting existed carry an empty value and are
+        accepted, so introducing this does not discard prior work. Use `--force` to
+        reprocess those deliberately.
+        """
         record = self._by_hash.get(content_hash)
-        return record is not None and record.status == "ok"
+        if record is None or record.status != "ok":
+            return False
+        if fingerprint is None or not record.run_fingerprint:
+            return True
+        return record.run_fingerprint == fingerprint
+
+    def legacy_count(self) -> int:
+        """Successful results predating fingerprinting; they can never be invalidated."""
+        return sum(1 for r in self._by_hash.values() if r.status == "ok" and not r.run_fingerprint)
 
     def put(self, result: ImageResult) -> None:
         self._by_hash[result.content_hash] = result
