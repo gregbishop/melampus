@@ -25,4 +25,5 @@ review.html
 *_corrections.json
 fixtures_full_labels.json
 stage1_*.json
+plugin_results.json
 stage1_*.log

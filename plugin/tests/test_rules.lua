@@ -1,0 +1,203 @@
+--[[
+Tests for the write-decision rules.
+
+These encode CLAUDE.md §5.3's non-negotiables. They are written against a pure
+module with no Lightroom dependencies precisely so they can run here, in a second,
+rather than only being discoverable by damaging a real catalog:
+
+  * never overwrite an existing user rating, flag, label or keyword
+  * dry-run writes nothing
+  * a second run is a no-op
+  * auto-reject is off unless explicitly enabled
+
+`photo` in these tests is a plain table describing existing catalog state, and
+the rules return a plan describing intended changes. Nothing here touches a
+catalog; applying the plan is the thin Lightroom layer's job.
+--]]
+
+local t = require('harness')
+local Rules = require('MelampusRules')
+
+local function result(overrides)
+	local r = {
+		file = '0A1A2475.jpg',
+		status = 'ok',
+		species = 'Tricolored Heron',
+		scientificName = 'Egretta tricolor',
+		confidence = 0.95,
+		burstAgreement = 1.0,
+		rangeFlag = false,
+		taxon = 'bird',
+		alternates = 'Little Blue Heron',
+		abstain = false,
+		-- Ratings derive from the quality composite, never from ID confidence:
+		-- how sure the model is about a species says nothing about the photograph.
+		quality = 78,
+		model = 'qwen3-vl-30b',
+		encounter = 3,
+	}
+	for k, v in pairs(overrides or {}) do r[k] = v end
+	return r
+end
+
+local function photo(overrides)
+	local p = {
+		rating = nil, pickStatus = 0, colorNameForLabel = nil,
+		keywords = {}, melampus = {},
+	}
+	for k, v in pairs(overrides or {}) do p[k] = v end
+	return p
+end
+
+local function settings(overrides)
+	local s = Rules.defaultSettings()
+	for k, v in pairs(overrides or {}) do s[k] = v end
+	return s
+end
+
+-- ── the safety rules ───────────────────────────────────────────────────────
+t.test('defaults are safe', function()
+	local s = Rules.defaultSettings()
+	t.isTrue(s.dryRun, 'dry-run must default ON')
+	t.isFalse(s.autoReject, 'auto-reject must default OFF')
+	t.isFalse(s.overwriteRating, 'rating overwrite must default OFF')
+	t.isFalse(s.overwriteLabel, 'label overwrite must default OFF')
+	t.isFalse(s.overwriteKeywords, 'keyword overwrite must default OFF')
+end)
+
+t.test('an existing user rating is never overwritten by default', function()
+	local plan = Rules.planFor(result(), photo({ rating = 4 }), settings({ writeRating = true }))
+	t.isNil(plan.rating, 'clobbered a rating the user had already set')
+	t.contains(plan.skipped, 'rating: already set')
+end)
+
+t.test('a rating is written when the field is empty', function()
+	local plan = Rules.planFor(result(), photo(), settings({ writeRating = true }))
+	t.isNotNil(plan.rating, 'refused to write into an empty rating')
+end)
+
+t.test('overwriting a rating requires explicit opt-in', function()
+	local plan = Rules.planFor(result(), photo({ rating = 4 }),
+		settings({ writeRating = true, overwriteRating = true }))
+	t.isNotNil(plan.rating, 'explicit overwrite opt-in was ignored')
+end)
+
+t.test('an existing colour label is never overwritten by default', function()
+	local plan = Rules.planFor(result(), photo({ colorNameForLabel = 'red' }),
+		settings({ writeLabel = true }))
+	t.isNil(plan.label)
+	t.contains(plan.skipped, 'label: already set')
+end)
+
+t.test('an existing pick or reject flag is never touched by default', function()
+	local plan = Rules.planFor(result(), photo({ pickStatus = 1 }), settings({ writeFlags = true }))
+	t.isNil(plan.pickStatus, 'overwrote a flag the user had set')
+end)
+
+t.test('keywords already on the photo are not duplicated', function()
+	local existing = { 'Melampus > Species > Tricolored Heron' }
+	local plan = Rules.planFor(result(), photo({ keywords = existing }), settings())
+	for _, kw in ipairs(plan.keywords) do
+		t.isFalse(kw == existing[1], 'proposed a keyword the photo already carries')
+	end
+end)
+
+t.test('auto-reject never fires unless enabled', function()
+	local bad = result({ confidence = 0.05, burstAgreement = 0.2 })
+	local plan = Rules.planFor(bad, photo(), settings({ writeFlags = true }))
+	t.isFalse(plan.pickStatus == -1, 'rejected a photo with auto-reject off')
+end)
+
+t.test('auto-reject fires only when enabled and the photo is empty', function()
+	local bad = result({ confidence = 0.05, burstAgreement = 0.2, quality = 5 })
+	local plan = Rules.planFor(bad, photo(),
+		settings({ writeFlags = true, autoReject = true, rejectBelowQuality = 20 }))
+	t.equals(plan.pickStatus, -1)
+end)
+
+-- ── the confidence gate ────────────────────────────────────────────────────
+t.test('a low-confidence result gets a review marker and no species keyword', function()
+	local plan = Rules.planFor(result({ confidence = 0.4 }), photo(), settings())
+	for _, kw in ipairs(plan.keywords) do
+		t.isFalse(string.find(kw, 'Species >', 1, true) ~= nil,
+			'wrote a species keyword below the confidence gate')
+	end
+	t.contains(plan.keywords, 'Melampus > Review > Needs ID')
+end)
+
+t.test('a high-confidence in-range result does get a species keyword', function()
+	local plan = Rules.planFor(result(), photo(), settings())
+	t.contains(plan.keywords, 'Melampus > Species > Tricolored Heron')
+end)
+
+t.test('an unstable burst blocks the species keyword even at high confidence', function()
+	local plan = Rules.planFor(result({ burstAgreement = 0.4 }), photo(), settings())
+	for _, kw in ipairs(plan.keywords) do
+		t.isFalse(string.find(kw, 'Species >', 1, true) ~= nil,
+			'trusted a confident ID the model contradicted across the burst')
+	end
+end)
+
+t.test('a range-flagged result is routed to review, never auto-tagged', function()
+	local plan = Rules.planFor(result({ rangeFlag = true }), photo(), settings())
+	t.contains(plan.keywords, 'Melampus > Notable > Out of range')
+	for _, kw in ipairs(plan.keywords) do
+		t.isFalse(string.find(kw, 'Species >', 1, true) ~= nil,
+			'auto-tagged a species that does not occur at this location')
+	end
+end)
+
+t.test('an abstention writes no species and says why', function()
+	local plan = Rules.planFor(result({ abstain = true, species = nil }), photo(), settings())
+	t.contains(plan.keywords, 'Melampus > Review > Needs ID')
+	t.equals(plan.metadata.species, nil)
+end)
+
+-- ── idempotency ────────────────────────────────────────────────────────────
+t.test('a second run over unchanged state proposes nothing', function()
+	local s = settings({ writeRating = true })
+	local first = Rules.planFor(result(), photo(), s)
+
+	local after = photo({
+		rating = first.rating,
+		keywords = first.keywords,
+		melampus = first.metadata,
+	})
+	local second = Rules.planFor(result(), after, s)
+
+	t.isTrue(Rules.isEmpty(second), 'a re-run proposed changes it had already made')
+end)
+
+t.test('force makes a re-run write again', function()
+	local s = settings({ writeRating = true, force = true })
+	local first = Rules.planFor(result(), photo(), settings({ writeRating = true }))
+	local after = photo({ rating = first.rating, keywords = first.keywords, melampus = first.metadata })
+	t.isFalse(Rules.isEmpty(Rules.planFor(result(), after, s)), 'force did not re-apply')
+end)
+
+-- ── dry run ────────────────────────────────────────────────────────────────
+t.test('dry run marks the plan as not to be applied', function()
+	t.isFalse(Rules.shouldApply(settings({ dryRun = true })), 'dry run would have written')
+	t.isTrue(Rules.shouldApply(settings({ dryRun = false })))
+end)
+
+-- ── robustness against bad input ───────────────────────────────────────────
+t.test('a failed result produces no writes at all', function()
+	local plan = Rules.planFor({ file = 'x.jpg', status = 'unprocessed' }, photo(), settings())
+	t.isTrue(Rules.isEmpty(plan), 'wrote metadata for an unprocessed photo')
+end)
+
+t.test('missing fields do not raise', function()
+	local ok = pcall(Rules.planFor, { file = 'x.jpg', status = 'ok' }, photo(), settings())
+	t.isTrue(ok, 'a sparse record raised instead of degrading')
+end)
+
+t.test('keyword text is sanitised', function()
+	local plan = Rules.planFor(result({ species = 'Heron > Weird | Name' }), photo(), settings())
+	for _, kw in ipairs(plan.keywords) do
+		local _, count = string.gsub(kw, '>', '')
+		t.isTrue(count <= 2, 'species name injected extra hierarchy separators: ' .. kw)
+	end
+end)
+
+return t.summary()
