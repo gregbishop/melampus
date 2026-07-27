@@ -40,6 +40,77 @@ class ImageConfig(_Base):
     jpeg_quality: int = 92
 
 
+class QualityConfig(_Base):
+    """Technical quality scoring (CLAUDE.md §4.1). Every weight lives here."""
+
+    # Sharpness is scale dependent, so everything is measured at one working size.
+    working_long_edge: int = 1600
+    focus_window: int = 15
+    focus_percentile: float = 85.0
+    # p99, not the mean: measured on the corpus, a fully defocused frame has a
+    # HIGHER mean focus value than a sharp one (2.30 vs 2.08) because smooth
+    # bokeh is quiet while uniform softness is noisy. Only the high percentiles
+    # separate them.
+    region_percentile: float = 99.0
+
+    # Subject detection
+    merge_dilate: int = 9
+    min_blob_area_frac: float = 0.002
+    area_exponent: float = 0.35
+    centrality_strength: float = 0.30
+    box_pad_frac: float = 0.08
+    saliency_resize: int = 64
+    saliency_blur_sigma: float = 2.5
+
+    # Raw focus energy -> 0-100. Retune these first if real photographs cluster
+    # at one end of the range.
+    # Calibrated against real frames from the corpus. Subject p99 values run
+    # roughly 4 (fully defocused) to 48 (tack sharp), so these are the knees.
+    # Note that smooth pale subjects such as a Snowy Egret genuinely carry less
+    # high-frequency detail and will score lower than a patterned bird at the
+    # same focus accuracy.
+    knee_low: float = 4.0
+    knee_high: float = 40.0
+    size_reference_frac: float = 0.08
+    size_gain_strength: float = 0.25
+    size_gain_max: float = 1.35
+
+    # Motion vs defocus
+    anisotropy_floor: float = 0.15
+    anisotropy_ceiling: float = 0.55
+
+    # Catchlight / eye
+    search_percentile: float = 99.0
+    min_absolute_brightness: int = 200
+    min_area_frac_of_subject: float = 0.00005
+    max_area_frac_of_subject: float = 0.02
+    min_circularity: float = 0.55
+    min_ring_contrast: float = 45.0
+    ring_dilate: int = 5
+    patch_radius_mult: float = 6.0
+    min_eye_confidence: float = 0.45
+
+    # Exposure. Some clipping is always present on specular highlights and sky,
+    # so a penalty only accrues past the tolerance.
+    highlight_threshold: int = 254
+    shadow_threshold: int = 1
+    highlight_tolerance_pct: float = 0.5
+    shadow_tolerance_pct: float = 0.5
+    highlight_full_penalty_pct: float = 12.0
+    shadow_full_penalty_pct: float = 12.0
+
+    edge_margin_frac: float = 0.01
+
+    # Composite weights. Eye sharpness dominates because it is what a wildlife
+    # photographer actually culls on; motion is near-neutral because a
+    # directional wingbeat is often the point of the photograph.
+    weight_eye_sharpness: float = 0.40
+    weight_subject_sharpness: float = 0.35
+    weight_focus: float = 0.20
+    weight_exposure: float = 0.05
+    weight_motion: float = 0.00
+
+
 class OccurrenceConfig(_Base):
     """Location and season re-ranking (CLAUDE.md §4.3)."""
 
@@ -75,6 +146,7 @@ class RunConfig(_Base):
 class MelampusConfig(_Base):
     model: ModelConfig = Field(default_factory=ModelConfig)
     image: ImageConfig = Field(default_factory=ImageConfig)
+    quality: QualityConfig = Field(default_factory=QualityConfig)
     occurrence: OccurrenceConfig = Field(default_factory=OccurrenceConfig)
     run: RunConfig = Field(default_factory=RunConfig)
 
