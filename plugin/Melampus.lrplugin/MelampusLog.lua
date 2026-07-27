@@ -27,11 +27,15 @@ function Log.error(message)
 end
 
 --- Where the log file lives, for showing the user.
+-- Verified on macOS with Lightroom Classic 15.4: ~/Library/Logs/Adobe/Lightroom/
+-- LrClassicLogs/Melampus.log. An earlier guess of ~/Documents/LrClassicLogs was
+-- wrong and sent the user to a folder that did not exist.
 function Log.path()
 	local LrPathUtils = import 'LrPathUtils'
-	return LrPathUtils.child(
-		LrPathUtils.child(LrPathUtils.getStandardFilePath('documents'), 'LrClassicLogs'),
-		'Melampus.log')
+	local home = LrPathUtils.getStandardFilePath('home')
+	return LrPathUtils.child(LrPathUtils.child(LrPathUtils.child(
+		LrPathUtils.child(LrPathUtils.child(home, 'Library'), 'Logs'),
+		'Adobe'), 'Lightroom'), 'LrClassicLogs/Melampus.log')
 end
 
 return Log

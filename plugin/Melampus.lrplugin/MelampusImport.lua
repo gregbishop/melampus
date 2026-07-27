@@ -29,7 +29,34 @@ local Rules = require 'MelampusRules'
 local PLUGIN_ID = 'net.gregbishop.melampus'
 local CHUNK = 100 -- photos per write transaction, so a crash loses little
 
+--- Look for the results file in the obvious places before giving up.
+-- The plugin lives at <repo>/plugin/Melampus.lrplugin, so the file the Python
+-- side writes is normally two levels up. Finding it automatically removes the
+-- single configuration step that made the plugin look broken.
+local function discoverResults()
+	local candidates = {}
+	local pluginDir = _PLUGIN and _PLUGIN.path
+	if pluginDir then
+		local repo = LrPathUtils.parent(LrPathUtils.parent(pluginDir))
+		if repo then
+			candidates[#candidates + 1] = LrPathUtils.child(repo, 'plugin_results.json')
+			candidates[#candidates + 1] = LrPathUtils.child(repo, 'stage1_full_results.json')
+		end
+		candidates[#candidates + 1] = LrPathUtils.child(pluginDir, 'plugin_results.json')
+	end
+	for _, candidate in ipairs(candidates) do
+		if LrFileUtils.exists(candidate) then
+			Log.info('auto-discovered results at ' .. candidate)
+			return candidate
+		end
+	end
+	return nil
+end
+
 local function readResults(path)
+	if not path or path == '' then
+		path = discoverResults()
+	end
 	if not path or path == '' then
 		return nil, 'FIRST_RUN'
 	end
@@ -47,7 +74,7 @@ local function readResults(path)
 	if type(data) ~= 'table' then
 		return nil, 'Results file did not contain a list of records.'
 	end
-	return data
+	return data, nil, path
 end
 
 --- Flatten one Python-side record into the shape Rules expects.
@@ -153,7 +180,11 @@ LrTasks.startAsyncTask(function()
 			.. ' writeMetadata=' .. tostring(settings.writeMetadata)
 			.. ' force=' .. tostring(settings.force))
 
-		local records, err = readResults(prefs.resultsPath)
+		local records, err, resolvedPath = readResults(prefs.resultsPath)
+		if resolvedPath and resolvedPath ~= prefs.resultsPath then
+			-- Remember what we found so Settings shows it and the next run is direct.
+			prefs.resultsPath = resolvedPath
+		end
 		if not records then
 			Log.error('could not read results: ' .. tostring(err))
 			if err == 'FIRST_RUN' then
