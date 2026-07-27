@@ -39,6 +39,8 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--gap", type=float, default=10.0)
     ap.add_argument("--occurrence", action="store_true",
                     help="check candidates against GBIF (needs network)")
+    ap.add_argument("--quality", action="store_true",
+                    help="score technical quality so the plugin can set star ratings")
     args = ap.parse_args(argv[1:])
 
     records = {r["file"]: r for r in json.loads(args.results.read_text("utf-8"))}
@@ -58,6 +60,22 @@ def main(argv: list[str]) -> int:
         else:
             location = Location(occ.default_latitude, occ.default_longitude, occ.radius_km)
             client = GBIFClient(cache=OccurrenceCache(occ.cache_path))
+
+    quality_scores: dict[str, float] = {}
+    if args.quality:
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "service"))
+        from melampus.config import load_config as _load
+        from melampus.quality import analyze_quality
+
+        qcfg = _load()
+        frames = sorted(args.folder.glob("*.jpg"))
+        print(f"scoring quality for {len(frames)} frames ...", file=sys.stderr)
+        for index, frame in enumerate(frames, 1):
+            score = analyze_quality(frame, qcfg)
+            if score.error is None:
+                quality_scores[frame.name] = round(score.composite, 1)
+            if index % 250 == 0:
+                print(f"  {index}/{len(frames)}", file=sys.stderr)
 
     enriched: list[dict] = []
     flagged = 0
@@ -104,6 +122,8 @@ def main(argv: list[str]) -> int:
             if agreement is not None:
                 row["burst_agreement"] = round(agreement, 3)
             row["range_flag"] = range_flag
+            if rec["file"] in quality_scores:
+                row["quality"] = quality_scores[rec["file"]]
             enriched.append(row)
 
     if client is not None and client.cache is not None:
@@ -115,6 +135,10 @@ def main(argv: list[str]) -> int:
     print(f"  records          : {len(enriched)}")
     print(f"  with agreement   : {with_agreement}")
     print(f"  range-flagged    : {flagged} encounters")
+    if quality_scores:
+        vals = sorted(quality_scores.values())
+        print(f"  quality scored   : {len(quality_scores)} "
+              f"(median {vals[len(vals)//2]:.0f})")
     return 0
 
 

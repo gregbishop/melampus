@@ -43,7 +43,10 @@ function Rules.defaultSettings()
 		-- list you have to live with for years.
 		keywordStyle = 'flat',
 		writeMetadata = true,
-		writeRating = false,
+		-- Ratings now have a real source: the quality composite from §4.1.
+		-- They reflect how good the photograph is, never how sure the model is
+		-- about the species — those are different questions.
+		writeRating = true,
 		writeLabel = false,
 		writeFlags = false,
 
@@ -107,10 +110,13 @@ end
 function Rules.ratingFor(result, settings)
 	local quality = result.quality
 	if quality == nil then return nil end
-	if quality >= 85 then return 5 end
-	if quality >= 70 then return 4 end
-	if quality >= 50 then return 3 end
-	if quality >= 30 then return 2 end
+	-- Breakpoints are deliberately strict at the top. Five stars should mean
+	-- "the best frames of the shoot", not "most of them" — a rating everything
+	-- earns is useless for culling.
+	if quality >= 90 then return 5 end
+	if quality >= 75 then return 4 end
+	if quality >= 55 then return 3 end
+	if quality >= 35 then return 2 end
 	return 1
 end
 

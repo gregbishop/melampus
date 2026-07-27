@@ -69,8 +69,11 @@ class QualityConfig(_Base):
     # Note that smooth pale subjects such as a Snowy Egret genuinely carry less
     # high-frequency detail and will score lower than a patterned bird at the
     # same focus accuracy.
-    knee_low: float = 4.0
-    knee_high: float = 40.0
+    # Sampled across the real corpus (194 frames): raw subject p99 runs p10=13.5,
+    # p50=30, p90=52, p99=63. Knees at 14 and 55 spread the corpus across the
+    # range instead of pinning three quarters of it at 100.
+    knee_low: float = 14.0
+    knee_high: float = 55.0
     size_reference_frac: float = 0.08
     size_gain_strength: float = 0.25
     size_gain_max: float = 1.35
