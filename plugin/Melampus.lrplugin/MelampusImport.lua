@@ -102,6 +102,8 @@ local function normalise(record)
 		confidence = top and top.confidence or nil,
 		alternates = #alternates > 0 and table.concat(alternates, ', ') or nil,
 		taxon = type(ident) == 'table' and ident.taxon or nil,
+		behaviour = type(ident) == 'table' and ident.behavior or nil,
+		ageSex = type(ident) == 'table' and ident.age_sex or nil,
 		abstain = abstain,
 		-- These three are supplied by the encounter-aware exporter. Absent is
 		-- handled: Rules treats a missing agreement as "unknown", not "failed".

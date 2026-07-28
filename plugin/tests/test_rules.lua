@@ -171,6 +171,46 @@ t.test('hierarchical style remains available for those who want it', function()
 	t.contains(plan.keywords, 'Melampus > Species > Tricolored Heron')
 end)
 
+-- ── behaviour ──────────────────────────────────────────────────────────────
+t.test('behaviour becomes keywords', function()
+	local plan = Rules.planFor(result({ behaviour = { 'in-flight', 'feeding' } }),
+		photo(), settings())
+	t.contains(plan.keywords, 'In-Flight')
+	t.contains(plan.keywords, 'Feeding')
+end)
+
+t.test('behaviour is written even when the species is not', function()
+	-- A bird too blurred to name can still plainly be in flight.
+	local plan = Rules.planFor(result({ confidence = 0.2, behaviour = { 'in-flight' } }),
+		photo(), settings())
+	t.contains(plan.keywords, 'Needs ID')
+	t.contains(plan.keywords, 'In-Flight')
+end)
+
+t.test('age is off by default and skips non-observations', function()
+	local plan = Rules.planFor(result({ ageSex = 'adult male' }), photo(), settings())
+	for _, kw in ipairs(plan.keywords) do
+		t.isFalse(kw == 'Adult Male', 'wrote age with the setting off')
+	end
+	local on = Rules.planFor(result({ ageSex = 'adult male' }), photo(),
+		settings({ writeAgeSex = true }))
+	t.contains(on.keywords, 'Adult Male')
+
+	-- The model sometimes echoes the whole menu back rather than observing.
+	local echoed = Rules.planFor(
+		result({ ageSex = 'adult male | juvenile | breeding plumage | indeterminate' }),
+		photo(), settings({ writeAgeSex = true }))
+	for _, kw in ipairs(echoed.keywords) do
+		t.isFalse(string.find(kw, '|', 1, true) ~= nil, 'turned an echoed menu into a keyword')
+	end
+
+	local vague = Rules.planFor(result({ ageSex = 'indeterminate' }), photo(),
+		settings({ writeAgeSex = true }))
+	for _, kw in ipairs(vague.keywords) do
+		t.isFalse(kw == 'Indeterminate', '"indeterminate" is not worth a keyword')
+	end
+end)
+
 -- ── batch size ─────────────────────────────────────────────────────────────
 t.test('batch size is clamped to something sane', function()
 	t.equals(Rules.batchSize(settings()), 25, 'default should be 25')

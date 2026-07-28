@@ -42,6 +42,12 @@ function Rules.defaultSettings()
 		-- already live in the metadata panel — they do not belong in a keyword
 		-- list you have to live with for years.
 		keywordStyle = 'flat',
+		-- Behaviour is already extracted for every photo and was being thrown
+		-- away. "Find my in-flight shots" is a question a photographer actually
+		-- asks, and unlike a species name it does not risk a wrong identification
+		-- -- a bird either is wading or it is not.
+		writeBehaviour = true,
+		writeAgeSex = false,
 		writeMetadata = true,
 		-- Ratings now have a real source: the quality composite from §4.1.
 		-- They reflect how good the photograph is, never how sure the model is
@@ -230,6 +236,24 @@ function Rules.planFor(result, photo, settings)
 			end
 			if result.rangeFlag then
 				proposed[#proposed + 1] = 'Out of Range'
+			end
+		end
+
+		-- Behaviour and age are written regardless of the species gate. They do
+		-- not depend on getting the species right: a bird that cannot be named
+		-- can still plainly be in flight.
+		if settings.writeBehaviour and type(result.behaviour) == 'table' then
+			for _, behaviour in ipairs(result.behaviour) do
+				local clean = sanitise(behaviour)
+				if clean then proposed[#proposed + 1] = titleCase(clean) end
+			end
+		end
+		if settings.writeAgeSex then
+			local age = sanitise(result.ageSex)
+			-- The model sometimes echoes the whole menu of options back; that is
+			-- not an observation and must not become a keyword.
+			if age and age ~= 'indeterminate' and not string.find(age, '|', 1, true) then
+				proposed[#proposed + 1] = titleCase(age)
 			end
 		end
 
