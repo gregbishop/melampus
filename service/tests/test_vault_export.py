@@ -1,6 +1,6 @@
-"""Tests for the vault sightings export.
+"""Tests for the sightings-log export.
 
-This writes into a personal knowledge base that an assistant treats as fact, so
+This output is read later as settled fact rather than as model output, so
 its aggregation rules matter more than most. The two that must never regress:
 counting per encounter rather than per frame, and refusing to record encounters
 the model could not agree with itself about.

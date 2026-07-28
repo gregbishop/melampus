@@ -289,3 +289,13 @@ fixtures_full/        Full validation corpus
 - [docs/config.md](docs/config.md) — every setting, with rationale
 - [docs/plugin.md](docs/plugin.md) — the Lightroom plugin: install, SDK findings, safety
 - [docs/troubleshooting.md](docs/troubleshooting.md) — known failure modes
+
+---
+
+## License
+
+MIT — see [LICENSE](LICENSE).
+
+The photo corpus is **not** part of this repository and is not covered by that
+licence. `fixtures/` and `fixtures_full/` are git-ignored, and no image has ever been
+committed.

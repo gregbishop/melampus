@@ -57,12 +57,17 @@ def main(argv: list[str]) -> int:
     for e in picks:
         name = chosen[e.index].name
         shutil.copy2(args.full / name, args.dev / name)
+        # Deliberately no capture timestamp. The manifest is committed so the dev-set
+        # selection is auditable, and nothing reads it back — but a list of
+        # millisecond-precision capture times is a record of where the photographer
+        # was and when, which is not something a public repository should carry.
+        # Encounter index already orders these chronologically; frame count and
+        # duration carry the analytically useful part.
         records.append(
             {
                 "file": name,
                 "encounter": e.index,
                 "encounter_frames": e.size,
-                "encounter_start": e.start.isoformat() if e.start else None,
                 "encounter_duration_s": round(e.duration_s, 1),
             }
         )
@@ -76,10 +81,12 @@ def main(argv: list[str]) -> int:
     print(f"copied to {args.dev}/  : {len(records)} representatives")
     print(f"manifest             : {args.manifest}")
     print()
+    # Capture times are shown here, on your own machine, because they are useful
+    # while selecting. They are not written to the manifest — see above.
     print(f"{'file':<18} {'enc':>4} {'frames':>7}  start")
-    for r in records:
-        start = (r["encounter_start"] or "unknown")[:19].replace("T", " ")
-        print(f"{r['file']:<18} {r['encounter']:>4} {r['encounter_frames']:>7}  {start}")
+    for e in picks:
+        start = e.start.isoformat()[:19].replace("T", " ") if e.start else "unknown"
+        print(f"{chosen[e.index].name:<18} {e.index:>4} {e.size:>7}  {start}")
     return 0
 
 

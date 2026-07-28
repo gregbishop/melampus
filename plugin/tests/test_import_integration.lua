@@ -5,15 +5,21 @@ This is the test that was missing. Everything before it checked decision logic
 in isolation; this executes the actual file the plugin loads, with a real
 results JSON on disk, and asserts on what landed in the catalog.
 
-It is what would have caught the two failures seen in practice: keywords silently
+It is what would have caught the two failures seen in a real catalog: keywords
 failing to attach, and a counter reporting success for photos that got nothing.
 --]]
 
 local t = require('harness')
 local mock = require('lrmock')
 
-local PLUGIN = os.getenv('MELAMPUS_PLUGIN')
-	or '../Melampus.lrplugin'
+--- Locate the plugin relative to this file, so the suite runs from a clone at any
+--- path and from any working directory. MELAMPUS_PLUGIN overrides it.
+local function pluginPath()
+	local here = debug.getinfo(1, 'S').source:match('^@(.*)[/\\]') or '.'
+	return here .. '/../Melampus.lrplugin'
+end
+
+local PLUGIN = os.getenv('MELAMPUS_PLUGIN') or pluginPath()
 
 local function writeResults(path, records)
 	local parts = {}
@@ -253,7 +259,7 @@ end)
 
 -- ── analysing photos that have never been seen ─────────────────────────────
 t.test('unanalysed photos trigger an offer to analyse them', function()
-	-- The failure seen in practice: selecting a folder the pipeline had never seen did
+	-- A failure seen in practice: selecting a folder the pipeline had never seen did
 	-- nothing at all and reported success.
 	runImport({}, { { 'never_seen_01.CR3' }, { 'never_seen_02.CR3' } }, defaultPrefs())
 	local offered = false

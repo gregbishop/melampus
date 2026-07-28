@@ -1,16 +1,22 @@
 """Write a wildlife sightings log as a Markdown note.
 
 Melampus knows what was photographed; EXIF knows when. Together that is a life
-list and a per-outing log, which is the shape a personal assistant can actually
-use — "what did I see in June", "when did I first photograph an Anhinga".
+list and a per-outing log — "what did I see in June", "when did I first
+photograph an Anhinga". This is CLAUDE.md §6.2 (life-list detection) and §6.5
+(observation export) in their simplest useful form: one Markdown table, no
+service, no database.
+
+The output carries YAML frontmatter and a `[[melampus]]` backlink, so it drops
+straight into an Obsidian vault or any other Markdown knowledge base. Point it
+anywhere you like; the destination is just a file path.
 
 Aggregation is per ENCOUNTER, never per frame. A 216-frame burst of one heron is
 one sighting, not 216, and per-frame counts would make common subjects look
 overwhelming while rare ones vanish.
 
-Unreviewed identifications are marked as such. The whole project's governing rule
-is that a wrong label is worse than no label, and that applies with more force
-here: it is read later as settled fact.
+Unreviewed identifications are marked as such. The project's governing rule is
+that a wrong label is worse than no label, and it applies with extra force here,
+because a notes file is read later as settled fact rather than as model output.
 
     python tools/export_to_vault.py fixtures_full stage1_full_results.json \\
         ~/notes/wildlife-sightings.md
@@ -99,7 +105,7 @@ def main(argv: list[str]) -> int:
         by_date[when].append((species, enc.size, agreement))
 
     # Write the note even when nothing qualified. Bailing out would leave the
-    # previous export sitting in the vault looking current, which is worse than
+    # previous export sitting there looking current, which is worse than
     # an empty list that says plainly that nothing was confidently identified.
     stamp = datetime.fromtimestamp(args.results.stat().st_mtime).date().isoformat()
     status = "human-confirmed" if args.reviewed else "PROVISIONAL — not yet human-reviewed"
