@@ -30,6 +30,10 @@ function M.reset(options)
 		cancelled = false,
 		yieldInsideWrite = false,
 		inWriteGate = false,
+		-- fileName -> how many write operations to accept-and-discard. Simulates the
+		-- failure this project actually hit: a write that raises nothing and lands
+		-- nothing, so a counter next to the call reports success that never happened.
+		dropWrites = options.dropWrites or {},
 	}
 end
 
@@ -64,8 +68,17 @@ function Photo:getFormattedMetadata(key)
 	return self._formatted and self._formatted[key]
 end
 
+--- True when this write should be silently discarded, per state.dropWrites.
+function Photo:_swallow()
+	local remaining = M.state.dropWrites[self.fileName]
+	if remaining == nil or remaining <= 0 then return false end
+	M.state.dropWrites[self.fileName] = remaining - 1
+	return true
+end
+
 function Photo:setRawMetadata(key, value)
 	assert(M.state.inWriteGate, 'setRawMetadata outside a write gate')
+	if self:_swallow() then return end
 	self._raw[key] = value
 	self._writes[#self._writes + 1] = { key = key, value = value }
 end
@@ -73,6 +86,7 @@ end
 function Photo:addKeyword(keyword)
 	assert(M.state.inWriteGate, 'addKeyword outside a write gate')
 	assert(keyword ~= nil, 'addKeyword(nil)')
+	if self:_swallow() then return end
 	for _, existing in ipairs(self._keywords) do
 		if existing == keyword then return end
 	end

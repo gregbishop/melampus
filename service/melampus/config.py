@@ -145,6 +145,72 @@ class OccurrenceConfig(_Base):
     notable_penalty: float = 0.6
 
 
+class EscalationConfig(_Base):
+    """Optional second opinion from the Claude API on the hard tail (CLAUDE.md §6.6).
+
+    The local model is right about most frames and cheap about all of them. It is
+    wrong, or abstains, on a minority — and that minority is where a frontier model
+    earns its cost, precisely because the volume is small.
+
+    Two things make this safe to ship in a tool whose selling point is that it runs
+    locally. It is **off by default**, and it is the only path in the project that
+    sends a photograph off the machine, so it is opt-in twice over: a setting and a
+    key. And it obeys the same pixels-only rule as everything else — escalated frames
+    go through `images.staged_pixels` exactly as local ones do, so filenames, EXIF and
+    keywords do not travel either.
+    """
+
+    enabled: bool = False
+
+    # Which cloud to ask. The backend seam in backend.py is what makes this a
+    # one-line choice rather than a second pipeline: both providers get the same
+    # prompts, the same schema validation and the same corrective retry.
+    #   anthropic — the Claude API
+    #   openai    — the OpenAI API, or anything speaking its chat-completions shape
+    #               (set base_url for OpenRouter, LM Studio, vLLM, a proxy, …)
+    provider: str = "anthropic"
+    base_url: str | None = None
+
+    # None means "this provider's default" — see escalate.DEFAULT_MODELS. Vision
+    # model names change often, so treat the defaults as a starting point and
+    # override with --escalate-model rather than assuming they are current.
+    model: str | None = None
+    # Never set here in tracked source. Comes from MELAMPUS_ANTHROPIC_KEY /
+    # MELAMPUS_OPENAI_KEY, the provider's own variable, or the git-ignored
+    # melampus.local.toml.
+    api_key: str | None = None
+    # Anthropic-only; ignored by other providers.
+    effort: str = "high"
+    max_tokens: int = 1200
+
+    # Used only for the estimate printed before spending anything. Defaults are the
+    # Claude Opus 5 rate; change them when you change provider or model, or the
+    # warning will be confidently wrong.
+    input_usd_per_mtok: float = 5.0
+    output_usd_per_mtok: float = 25.0
+    # These are the frames the local model could not call, so resolution is the
+    # cheapest lever left. Claude reads up to 2576 px on the long edge; 2048 keeps
+    # most of that benefit without paying for the top of the image-token curve.
+    max_edge: int = 2048
+    timeout_seconds: float = 180.0
+
+    # Triggers. Confidence is an ordinal hint from the local model, not a
+    # probability — this threshold is a ranking cut, not a calibrated one.
+    confidence_below: float = 0.80
+    on_abstain: bool = True
+    on_range_flag: bool = True
+
+    # A hard ceiling on how many frames one run may bill for. The corpus has 836
+    # frames needing review; a mistyped flag should not turn into an unexpected
+    # invoice, so the cap is low enough to notice and must be raised deliberately.
+    max_images: int = 200
+
+    # Cloud answers live in their own file. Merging them into the local cache would
+    # give them a foreign run fingerprint, and the next local pass would decide they
+    # were stale and quietly overwrite work that was paid for.
+    cache_path: Path = REPO_ROOT / ".melampus_cache" / "escalations.jsonl"
+
+
 class RunConfig(_Base):
     # Which routing prompt to use. 'wildlife' asks what organism this is;
     # 'sport' asks what activity this is. Keeping them separate avoids the
@@ -163,6 +229,7 @@ class MelampusConfig(_Base):
     image: ImageConfig = Field(default_factory=ImageConfig)
     quality: QualityConfig = Field(default_factory=QualityConfig)
     occurrence: OccurrenceConfig = Field(default_factory=OccurrenceConfig)
+    escalation: EscalationConfig = Field(default_factory=EscalationConfig)
     run: RunConfig = Field(default_factory=RunConfig)
 
 
@@ -188,7 +255,13 @@ def _secrets_from_environment() -> dict[str, Any]:
     import os
 
     token = os.environ.get("MELAMPUS_EBIRD_TOKEN")
-    return {"occurrence": {"ebird_token": token}} if token else {}
+    secrets: dict[str, Any] = {}
+    if token:
+        secrets["occurrence"] = {"ebird_token": token}
+    # The Anthropic key is deliberately *not* merged in here. It is resolved at the
+    # point of use by escalate.resolve_api_key, so it never sits in a config object
+    # that something might serialise into a log, a report or a bug attachment.
+    return secrets
 
 
 def load_config(path: str | Path | None = None, **overrides: Any) -> MelampusConfig:

@@ -278,5 +278,91 @@ t.test('declining the offer leaves the photos untouched', function()
 	t.isNil(mock.state.photos[1]:getRawMetadata('rating'))
 end)
 
+-- ── writes that report success but do not land ─────────────────────────────
+-- The single worst failure this project has had: a run announcing 1301 photos
+-- updated while the catalog held keywords for about 37. A counter next to a write
+-- is not evidence the write happened, so applyPlans reads the catalog back.
+--
+-- `dropWrites` in the mock accepts a write and discards it silently, which is
+-- exactly what that looked like from the plugin's side.
+
+--- Run the import with a chosen number of writes swallowed for one photo.
+local function runWithDroppedWrites(fileName, drops, records, photos)
+	writeResults(RESULTS, records)
+	mock.reset({ prefs = defaultPrefs(), confirmAnswer = 'ok' })
+	mock.state.prefs.resultsPath = RESULTS
+	mock.state.dropWrites[fileName] = drops
+	for _, spec in ipairs(photos) do mock.addPhoto(spec[1], spec[2] or {}) end
+	mock.install(PLUGIN)
+	package.loaded['MelampusJson'] = nil; package.loaded['MelampusRules'] = nil
+	package.loaded['MelampusLog'] = nil; package.loaded['MelampusAnalyze'] = nil
+	assert(loadfile(PLUGIN .. '/MelampusImport.lua'))()
+end
+
+local function logMatching(needle)
+	for _, line in ipairs(mock.state.logLines) do
+		if string.find(line, needle, 1, true) then return line end
+	end
+	return nil
+end
+
+local function dialogMatching(needle)
+	for _, d in ipairs(mock.state.dialogs) do
+		if d.body and string.find(d.body, needle, 1, true) then return d.body end
+	end
+	return nil
+end
+
+t.test('a write that silently fails is retried and lands', function()
+	-- Two swallowed operations covers the rating and the first keyword of the
+	-- first pass; the retry then writes them for real.
+	runWithDroppedWrites('flaky.CR3', 2,
+		{ { file = 'flaky.jpg', candidates = { { 'Osprey', 'Pandion haliaetus', 0.97 } } } },
+		{ { 'flaky.CR3' } })
+
+	t.isTrue(logMatching('did not land; retrying') ~= nil,
+		'the failed write was never detected')
+	local paths = mock.state.photos[1]:keywordPaths()
+	t.isTrue(#paths > 0, 'the retry did not actually write the keyword')
+end)
+
+t.test('a write that fails twice is reported, not counted as success', function()
+	-- A very large drop count means every attempt is swallowed, including the retry.
+	runWithDroppedWrites('broken.CR3', 999,
+		{ { file = 'broken.jpg', candidates = { { 'Osprey', 'Pandion haliaetus', 0.97 } } } },
+		{ { 'broken.CR3' } })
+
+	t.equals(#mock.state.photos[1]:keywordPaths(), 0, 'the mock did not drop the writes')
+	t.isTrue(logMatching('failed twice') ~= nil, 'a permanent write failure went unreported')
+	t.isTrue(dialogMatching('Changed 0 photos') ~= nil,
+		'reported changing a photo whose writes never landed')
+end)
+
+t.test('a photo whose writes failed is not stamped as processed', function()
+	-- Otherwise the failure is permanent: the next run treats it as already done
+	-- and skips it forever.
+	runWithDroppedWrites('broken.CR3', 999,
+		{ { file = 'broken.jpg', candidates = { { 'Osprey', 'Pandion haliaetus', 0.97 } } } },
+		{ { 'broken.CR3' } })
+
+	t.isNil(mock.state.photos[1]:getPropertyForPlugin(nil, 'processedAt'),
+		'stamped a photo as processed when nothing was written to it')
+end)
+
+t.test('one failing photo does not stop the others', function()
+	runWithDroppedWrites('broken.CR3', 999, {
+		{ file = 'broken.jpg', candidates = { { 'Osprey', 'Pandion haliaetus', 0.97 } } },
+		{ file = 'fine.jpg', candidates = { { 'Snowy Egret', 'Egretta thula', 0.97 } } },
+	}, { { 'broken.CR3' }, { 'fine.CR3' } })
+
+	local byName = {}
+	for _, photo in ipairs(mock.state.photos) do byName[photo.fileName] = photo end
+	t.equals(#byName['broken.CR3']:keywordPaths(), 0)
+	t.isTrue(#byName['fine.CR3']:keywordPaths() > 0,
+		'a neighbouring failure took down a healthy write')
+	t.isTrue(dialogMatching('Changed 1 photos') ~= nil,
+		'the count did not exclude the photo that failed')
+end)
+
 os.remove(RESULTS)
 return t.summary()

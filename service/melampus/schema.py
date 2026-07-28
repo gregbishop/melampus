@@ -140,3 +140,12 @@ class ImageResult(BaseModel):
     # Identifies the model + prompt set + image settings that produced this result,
     # so a prompt edit invalidates it instead of being silently re-served.
     run_fingerprint: str = ""
+
+    # Cloud escalation provenance (CLAUDE.md §6.6). Set only on results produced by
+    # the optional Claude API pass. `local_identification` keeps what the local model
+    # said, which is what makes local-vs-cloud agreement measurable after the fact —
+    # the number that decides whether escalation is worth paying for at all.
+    escalated: bool = False
+    escalation_model: str = ""
+    escalation_reason: str = ""
+    local_identification: Identification | None = None

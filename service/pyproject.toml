@@ -15,6 +15,10 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
+# Optional: the cloud-escalation path (CLAUDE.md §6.6). The local pipeline never
+# imports this, so a local-only install stays local-only.
+cloud = ["anthropic>=0.60"]
+openai = ["openai>=1.60"]
 
 [project.scripts]
 melampus-id = "melampus.cli:main"

@@ -226,25 +226,128 @@ local function tally(planned)
 	return counts, order
 end
 
-applyPlans = function(catalog, entries)
-	local applied = 0
-	catalog:withWriteAccessDo('Melampus: apply identifications', function()
-		for _, entry in ipairs(entries) do
-			local photo, plan = entry.photo, entry.plan
-			if plan.rating ~= nil then photo:setRawMetadata('rating', plan.rating) end
-			if plan.label ~= nil then photo:setRawMetadata('colorNameForLabel', plan.label) end
-			if plan.pickStatus ~= nil then photo:setRawMetadata('pickStatus', plan.pickStatus) end
-			for _, path in ipairs(plan.keywords) do
-				local keyword = keywordFromPath(catalog, path)
-				if keyword then photo:addKeyword(keyword) end
-			end
-			for field, value in pairs(plan.metadata or {}) do
-				photo:setPropertyForPlugin(_PLUGIN, field, tostring(value))
-			end
-			applied = applied + 1
+--- Read the catalog back and confirm a plan actually landed.
+-- The worst failure this project has had was a run reporting 1301 photos updated
+-- while the catalog held keywords for about 37. A counter incremented next to a
+-- write is not evidence the write happened; reading it back is.
+local function verifyApplied(entries)
+	local verified, failed = 0, {}
+	for _, entry in ipairs(entries) do
+		local photo, plan = entry.photo, entry.plan
+		local ok = true
+
+		if plan.rating ~= nil and photo:getRawMetadata('rating') ~= plan.rating then
+			ok = false
 		end
-	end, { timeout = 60 })
-	return applied
+		if ok and #plan.keywords > 0 then
+			local present = {}
+			for _, kw in ipairs(photo:getRawMetadata('keywords') or {}) do
+				present[kw:getName()] = true
+			end
+			for _, path in ipairs(plan.keywords) do
+				local leaf = string.match(path, '([^>]+)$')
+				leaf = string.gsub(leaf or '', '^%s*(.-)%s*$', '%1')
+				if leaf ~= '' and not present[leaf] then ok = false end
+			end
+		end
+
+		if ok then
+			verified = verified + 1
+		else
+			failed[#failed + 1] = entry
+		end
+	end
+	return verified, failed
+end
+
+--- Total keywords across a set of plans, for honest reporting.
+local function keywordCount(entries)
+	local n = 0
+	for _, entry in ipairs(entries) do n = n + #entry.plan.keywords end
+	return n
+end
+
+--- Write one batch of plans, read the catalog back, and retry what did not land.
+--
+-- This is the only place in the plugin that writes identifications. There used to
+-- be a second, near-identical loop for the apply-from-results path, which meant
+-- the verification below protected only half the runs — and the half it did not
+-- protect was the one most people use.
+--
+-- Returns a stats table describing what the catalog *confirms*, not what was
+-- attempted. Callers must report `verified`; reporting the plan count is how a run
+-- once claimed 1301 updates against a catalog holding keywords for about 37.
+applyPlans = function(catalog, entries)
+	local stats = {
+		verified = 0, failed = 0,
+		keywords = 0, keywordsFailed = 0, fields = 0,
+		applied = {},
+	}
+	if #entries == 0 then return stats end
+
+	local function write(batch, full)
+		catalog:withWriteAccessDo('Melampus: apply identifications', function()
+			for _, entry in ipairs(batch) do
+				local photo, plan = entry.photo, entry.plan
+				if plan.rating ~= nil then photo:setRawMetadata('rating', plan.rating) end
+				if full then
+					if plan.label ~= nil then
+						photo:setRawMetadata('colorNameForLabel', plan.label)
+					end
+					if plan.pickStatus ~= nil then
+						photo:setRawMetadata('pickStatus', plan.pickStatus)
+					end
+				end
+				for _, path in ipairs(plan.keywords) do
+					local keyword = keywordFromPath(catalog, path)
+					if keyword then
+						photo:addKeyword(keyword)
+					elseif full then
+						-- Count creation failures once, on the first pass only.
+						stats.keywordsFailed = stats.keywordsFailed + 1
+					end
+				end
+				if full then
+					for field, value in pairs(plan.metadata or {}) do
+						photo:setPropertyForPlugin(_PLUGIN, field, tostring(value))
+						stats.fields = stats.fields + 1
+					end
+				end
+			end
+		end, { timeout = 60 })
+	end
+
+	write(entries, true)
+
+	-- Self-heal: read back, and retry anything that did not land. One repeat is
+	-- enough for transient contention; a second failure is a real problem and is
+	-- reported rather than swallowed.
+	local _, failed = verifyApplied(entries)
+	if #failed > 0 then
+		Log.warn(string.format('%d of %d writes did not land; retrying', #failed, #entries))
+		write(failed, false)
+		local _, stillFailed = verifyApplied(failed)
+		failed = stillFailed
+		if #failed > 0 then
+			Log.error(string.format('%d writes failed twice and were not applied', #failed))
+			for i = 1, math.min(#failed, 5) do
+				Log.error('  unwritten: '
+					.. tostring(failed[i].photo:getFormattedMetadata('fileName')))
+			end
+		end
+	end
+
+	local unwritten = {}
+	for _, entry in ipairs(failed) do unwritten[entry] = true end
+	for _, entry in ipairs(entries) do
+		if not unwritten[entry] then stats.applied[#stats.applied + 1] = entry end
+	end
+	stats.verified = #stats.applied
+	stats.failed = #failed
+	stats.keywords = keywordCount(entries) - keywordCount(failed)
+
+	Log.info(string.format('attempted %d, verified in catalog %d', #entries, stats.verified))
+	return stats
 end
 
 LrTasks.startAsyncTask(function()
@@ -423,8 +526,8 @@ LrTasks.startAsyncTask(function()
 							end
 
 							if #batchPlans > 0 and Rules.shouldApply(settings) then
-								applyPlans(catalog, batchPlans)
-								appliedTotal = appliedTotal + #batchPlans
+								-- Count what the catalog confirms, not what we intended.
+								appliedTotal = appliedTotal + applyPlans(catalog, batchPlans).verified
 							elseif #batchPlans > 0 then
 								for _, entry in ipairs(batchPlans) do
 									planned[#planned + 1] = { photo = entry.photo, plan = entry.plan,
@@ -517,55 +620,36 @@ LrTasks.startAsyncTask(function()
 		-- ── phase 2: apply. Chunked, and nothing async inside the gate. ─────
 		local written, chunkStart = 0, 1
 		local keywordsApplied, keywordsFailed, fieldsApplied = 0, 0, 0
+		local confirmed = {}
 		while chunkStart <= #planned do
 			if progress:isCanceled() then break end
 			local chunkStop = math.min(chunkStart + CHUNK - 1, #planned)
 
-			catalog:withWriteAccessDo('Melampus: apply identifications', function()
-				for i = chunkStart, chunkStop do
-					local entry = planned[i]
-					local photo, plan = entry.photo, entry.plan
+			local chunk = {}
+			for i = chunkStart, chunkStop do chunk[#chunk + 1] = planned[i] end
 
-					if plan.rating ~= nil then photo:setRawMetadata('rating', plan.rating) end
-					if plan.label ~= nil then photo:setRawMetadata('colorNameForLabel', plan.label) end
-					if plan.pickStatus ~= nil then photo:setRawMetadata('pickStatus', plan.pickStatus) end
-
-					local appliedHere = 0
-					for _, path in ipairs(plan.keywords) do
-						local keyword = keywordFromPath(catalog, path)
-						if keyword then
-							photo:addKeyword(keyword)
-							appliedHere = appliedHere + 1
-							keywordsApplied = keywordsApplied + 1
-						else
-							keywordsFailed = keywordsFailed + 1
-						end
-					end
-
-					for field, value in pairs(plan.metadata or {}) do
-						photo:setPropertyForPlugin(_PLUGIN, field, tostring(value))
-						fieldsApplied = fieldsApplied + 1
-					end
-
-					-- Only count a photo as changed if something actually changed on
-					-- it. The previous counter incremented per photo processed, so a
-					-- run that silently wrote nothing still reported full success.
-					if appliedHere > 0 or next(plan.metadata or {}) ~= nil then
-						written = written + 1
-					end
-				end
-			end, { timeout = 60 })
+			-- One shared implementation with the analyse path: write, read back,
+			-- retry once, then report only what the catalog confirms.
+			local stats = applyPlans(catalog, chunk)
+			written = written + stats.verified
+			keywordsApplied = keywordsApplied + stats.keywords
+			keywordsFailed = keywordsFailed + stats.keywordsFailed
+			fieldsApplied = fieldsApplied + stats.fields
+			for _, entry in ipairs(stats.applied) do confirmed[#confirmed + 1] = entry end
 
 			progress:setPortionComplete(#photos + chunkStop, #photos * 2)
 			chunkStart = chunkStop + 1
 		end
 
 		-- Timestamp separately: it is plugin-private, so it stays off the undo
-		-- stack rather than cluttering it with a bookkeeping entry.
+		-- stack rather than cluttering it with a bookkeeping entry. Only photos
+		-- whose writes were verified get stamped — marking a photo processed when
+		-- nothing landed would make the failure permanent, because the next run
+		-- would skip it as already done.
 		catalog:withPrivateWriteAccessDo(function()
 			local stamp = os.date('%Y-%m-%dT%H:%M:%S')
-			for i = 1, math.min(written, #planned) do
-				planned[i].photo:setPropertyForPlugin(_PLUGIN, 'processedAt', stamp)
+			for _, entry in ipairs(confirmed) do
+				entry.photo:setPropertyForPlugin(_PLUGIN, 'processedAt', stamp)
 			end
 		end)
 

@@ -114,6 +114,84 @@ rather than aborting the run.
 
 ---
 
+## `[escalation]` — optional cloud second opinion
+
+CLAUDE.md §6.6. The local model handles most of a catalog well and costs nothing to
+run. What it does not handle is the tail — frames where it abstains, splits between
+two similar species, or names something that does not occur within a thousand miles.
+That tail is a few hundred frames out of a few thousand, which is exactly the shape
+where a frontier model is worth paying for.
+
+**This is the only path in the project that sends a photograph off your machine.** It
+is off by default and additionally needs an API key, so it takes two deliberate acts
+to turn on. It obeys the same pixels-only rule as everything else: escalated frames go
+through `images.staged_pixels` exactly as local ones do, so no filename, EXIF or
+keyword travels with them.
+
+| Key | Default | Why |
+|---|---|---|
+| `enabled` | `false` | Off unless you ask. `--escalate` turns it on for one run. |
+| `provider` | `"anthropic"` | `anthropic` (Claude API) or `openai`. For any other OpenAI-compatible endpoint — OpenRouter, LM Studio, vLLM, a proxy — use `openai` with `base_url`. |
+| `base_url` | *(none)* | OpenAI-compatible endpoint override. Ignored by the Anthropic provider. |
+| `model` | *(provider default)* | `claude-opus-5` or `gpt-5`. **Vision model names move faster than this file does** — check the provider's current listing and override with `--escalate-model`. |
+| `api_key` | *(none)* | Never set this in tracked source. See below. |
+| `effort` | `"high"` | Anthropic only. These are the frames the local model could not resolve, so thinking depth is where the money should go. |
+| `max_tokens` | `1200` | Per reply. |
+| `max_edge` | `2048` | Long edge sent to the cloud. Higher than the local `1280`, because the 1280 ceiling exists to dodge an mlx-vlm token bug that does not apply here, and resolution is the cheapest lever left on a hard frame. |
+| `confidence_below` | `0.80` | Escalate when the local top candidate scores under this. Ordinal, not calibrated — a ranking cut, not a probability. |
+| `on_abstain` | `true` | Escalate frames the local model declined to call. |
+| `on_range_flag` | `true` | Escalate frames whose top candidate does not occur locally (§4.3). |
+| `max_images` | `200` | Hard ceiling per run. A mistyped flag should not become an unexpected invoice. When the cap bites, the most uncertain frames go first and the rest are counted and reported — never silently dropped. |
+| `input_usd_per_mtok` | `5.0` | Estimate only. Defaults are Claude Opus 5's rate. |
+| `output_usd_per_mtok` | `25.0` | **Change both when you change provider or model**, or the printed estimate will be confidently wrong. The CLI prints the rates alongside the dollars so the assumption is visible. |
+| `cache_path` | `<repo>/.melampus_cache/escalations.jsonl` | Cloud answers live in their own file. Merged into the local cache they would carry a foreign run fingerprint, and the next local pass would decide they were stale and quietly overwrite work you paid for. |
+
+### Keys
+
+Resolved at the point of use, in this order, and never merged into the config object
+that reports and logs are built from:
+
+1. `escalation.api_key` in `melampus.local.toml` (git-ignored)
+2. `MELAMPUS_ANTHROPIC_KEY` / `MELAMPUS_OPENAI_KEY`
+3. `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`
+
+Keys never cross providers: an Anthropic key will not silently authorise a request to
+OpenAI.
+
+### Usage
+
+```bash
+# See what it would send and roughly what it would cost. Needs no key, sends nothing.
+melampus-id fixtures --report-only --escalate-dry-run
+
+# Actually run it
+export MELAMPUS_ANTHROPIC_KEY=sk-ant-...
+melampus-id fixtures --escalate --escalate-max 50
+
+# Or against OpenAI, with the rates corrected so the estimate means something
+export MELAMPUS_OPENAI_KEY=sk-...
+melampus-id fixtures --escalate --escalate-provider openai --escalate-model gpt-5
+```
+
+Install the provider SDK first — neither is a dependency of the local pipeline, so a
+local-only install stays local-only:
+
+```bash
+uv pip install --python .venv/bin/python "./service[cloud]"   # anthropic
+uv pip install --python .venv/bin/python "./service[openai]"  # openai
+```
+
+### Provenance
+
+Each escalated result records `escalated`, `escalation_model`, `escalation_reason` and
+`local_identification` — what the local model had said. That last field is the point:
+it turns "is the cloud pass worth the money?" into a measurable local-vs-cloud
+agreement rate rather than an impression.
+
+A second escalation run over the same frames is a no-op; nothing is re-billed.
+
+---
+
 ## What never reaches the model
 
 Only pixels. Not filenames, keywords, subject tags, EXIF, XMP or IPTC. This is

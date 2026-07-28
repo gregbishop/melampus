@@ -15,10 +15,13 @@ no image ever leaves the machine.
 
 | Stage | Scope | State |
 |---|---|---|
-| **1** | Local VLM species identification | **Working.** 43 tests passing |
-| 2 | Quality scoring + location/season re-ranking | Not started |
-| 3 | HTTP service + frozen binary | Not started |
-| 4 | Lightroom Classic plugin | **Review-only build working.** Untested in a live catalog |
+| **1** | Local VLM species identification | **Working.** Run over a 1,743-frame corpus |
+| **2** | Quality scoring + location/season re-ranking | **Working.** Subject-localised sharpness and GBIF re-ranking both in the pipeline |
+| 3 | HTTP service + frozen binary | Not started. The CLI is the interface today |
+| **4** | Lightroom Classic plugin | **Working.** Analyses and writes to a real catalog |
+| — | Optional cloud escalation for the hard tail (§6.6) | **Working.** Off by default |
+
+171 tests: 115 Python, 56 Lua. None need model weights or a network.
 
 Stage 1 exists to answer one question before anything else gets built: *can a local
 VLM identify species well enough to be worth wiring into a catalog?* The current
@@ -179,6 +182,51 @@ Verified end to end: inference runs correctly with `HF_HUB_OFFLINE=1` and
 
 ---
 
+## Optional: a cloud second opinion on the hard tail
+
+Everything above runs locally and stays local. The one exception is opt-in, and it
+exists because the local model's failure mode is concentrated: it is right about most
+frames and uncertain about a few hundred. That tail is small enough to be worth a
+frontier model, and only the tail is sent.
+
+```bash
+# What would be sent, and roughly what it would cost. Needs no key. Sends nothing.
+melampus-id fixtures --report-only --escalate-dry-run
+#   would escalate 3 frame(s) to anthropic/claude-opus-5, est. $0.15 ...
+
+export MELAMPUS_ANTHROPIC_KEY=sk-ant-...
+melampus-id fixtures --escalate --escalate-max 50
+
+# Or OpenAI, or anything speaking its chat-completions shape
+melampus-id fixtures --escalate --escalate-provider openai --escalate-model gpt-5
+melampus-id fixtures --escalate --escalate-provider openai \
+  --escalate-base-url https://openrouter.ai/api/v1
+```
+
+Off by default, and additionally requires a key — two deliberate acts before a
+photograph leaves the machine. A frame is escalated when the local model abstained,
+scored its top candidate below `confidence_below`, failed outright, or named something
+that does not occur locally. Confident empty frames are never escalated. There is a
+hard per-run cap, and when it bites the most uncertain frames go first and the rest are
+reported rather than silently dropped.
+
+The same pixels-only guarantee applies: escalated frames go through the identical
+staging path, so no filename or EXIF travels with them. Cloud answers are written to
+their own cache file and never overwrite local ones, and each records what the local
+model had said — which is what makes "is this worth paying for?" a measurable
+agreement rate instead of an impression.
+
+Install the provider SDK you want; neither is a dependency of the local pipeline:
+
+```bash
+uv pip install --python .venv/bin/python "./service[cloud]"   # anthropic
+uv pip install --python .venv/bin/python "./service[openai]"  # openai
+```
+
+Full settings in [docs/config.md](docs/config.md#escalation--optional-cloud-second-opinion).
+
+---
+
 ## Prompts
 
 Editable Markdown in `prompts/` — one per taxon, plus `taxon_routing.md` and a
@@ -196,7 +244,7 @@ Editing a prompt changes the cache fingerprint, so the next run genuinely re-run
 .venv/bin/python -m pytest -q
 ```
 
-63 tests, no model weights required — everything runs against a scripted backend, so
+171 tests (115 Python, 56 Lua), no model weights required — everything runs against a scripted backend, so
 parsing, validation, retry, caching, the downscale ladder and the no-leak guarantee are
 all verifiable in under a second. The plugin's Lua suites run from the same command,
 skipping cleanly if no Lua interpreter is installed.
