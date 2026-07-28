@@ -70,6 +70,70 @@ def test_staged_image_is_renamed_and_stripped(photo: Path):
             assert "XML:com.adobe.xmp" not in img.info
 
 
+def _metadata_laden(path: Path) -> dict[str, bytes | str]:
+    """An image carrying every metadata channel a real camera file would.
+
+    The previous version of the stripping test used a freshly-constructed image
+    with no metadata at all, so it asserted the absence of something that was
+    never there. It would have passed unchanged if staging had been rewritten to
+    copy EXIF straight through. This builds the adversarial case instead.
+    """
+    exif = Image.Exif()
+    exif[0x010F] = "Canon"                       # Make
+    exif[0x0110] = "Canon EOS R3"                # Model
+    exif[0x013B] = "SECRET_PHOTOGRAPHER_NAME"    # Artist
+    exif[0x010E] = "SECRET_CAPTION_TEXT"         # ImageDescription
+    exif[0x0132] = "2026:06:14 05:23:37"         # DateTime
+    exif[0x8825] = {1: "N", 2: (28.0, 39.0, 0.0), 3: "W", 4: (80.0, 43.0, 0.0)}  # GPS IFD
+
+    markers: dict[str, bytes | str] = {
+        "exif": exif.tobytes(),
+        "xmp": b'<?xpacket?><x:xmpmeta xmlns:x="adobe:ns:meta/">'
+               b"<dc:subject>SECRET_KEYWORD</dc:subject></x:xmpmeta>",
+        "comment": b"SECRET_JFIF_COMMENT",
+        "icc_profile": b"\x00\x00\x02\x0cSECRET_ICC_PROFILE" + b"\x00" * 500,
+    }
+    Image.new("RGB", (1200, 800), (70, 100, 60)).save(path, format="JPEG", **markers)
+    return markers
+
+
+def test_staging_strips_every_metadata_channel(tmp_path: Path):
+    """The project's single most important rule, tested adversarially.
+
+    Only pixels may reach the model. This builds a file carrying EXIF (including
+    maker, model, artist, caption and a GPS IFD), an XMP packet with a keyword, a
+    JFIF comment and an ICC profile, then asserts none of it survives staging.
+    """
+    source = tmp_path / "SECRET_SPECIES_NAME.jpg"
+    _metadata_laden(source)
+
+    # Sanity: the fixture must actually carry the metadata, or the test is vacuous
+    # in exactly the way the old one was.
+    raw_before = source.read_bytes()
+    for secret in (b"SECRET_PHOTOGRAPHER_NAME", b"SECRET_CAPTION_TEXT",
+                   b"SECRET_KEYWORD", b"SECRET_JFIF_COMMENT", b"SECRET_ICC_PROFILE"):
+        assert secret in raw_before, f"fixture never carried {secret!r} — test would be vacuous"
+
+    with staged_pixels(source, max_edge=800) as staged:
+        raw_after = staged.read_bytes()
+
+        assert staged.name == NEUTRAL_NAME, "original filename reached the staged file"
+        for secret in (b"SECRET_PHOTOGRAPHER_NAME", b"SECRET_CAPTION_TEXT",
+                       b"SECRET_KEYWORD", b"SECRET_JFIF_COMMENT", b"SECRET_ICC_PROFILE"):
+            assert secret not in raw_after, f"{secret!r} survived staging"
+
+        # And nothing camera-identifying by name, in case a channel is added later.
+        for token in (b"Canon", b"EOS R3", b"2026:06:14"):
+            assert token not in raw_after, f"{token!r} survived staging"
+
+        with Image.open(staged) as img:
+            assert not img.getexif(), "EXIF survived staging"
+            assert "XML:com.adobe.xmp" not in img.info
+            assert "icc_profile" not in img.info
+            assert "comment" not in img.info
+            assert max(img.size) <= 800
+
+
 def test_backend_never_receives_original_filename(photo: Path, config):
     backend = ScriptedBackend([ROUTING_OK, ID_OK])
     Identifier(backend, config).identify(photo)

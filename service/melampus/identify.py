@@ -22,6 +22,11 @@ from .schema import Identification, ImageResult, Taxon, TaxonRouting
 
 _FENCE = re.compile(r"```(?:json)?\s*(.*?)```", re.S)
 
+#: Marker error meaning "a safety classifier declined this image". Distinguished
+#: from every other failure because it is permanent: re-running costs money and
+#: yields the same answer.
+REFUSED = "refused by the provider's safety classifier"
+
 CORRECTIVE = (
     "Your previous reply could not be parsed. Reply with a SINGLE valid JSON object "
     "and nothing else — no prose, no markdown fences, no trailing commentary. "
@@ -114,6 +119,11 @@ class Identifier:
         while attempt <= self.config.run.max_retries:
             completion = self.backend.complete(image, current, max_tokens)
             seconds += completion.seconds
+            # A refusal is a decision about the image, not a malformed reply.
+            # Retrying spends money to be told no a second time, so stop here and
+            # let the caller record it as permanent.
+            if completion.refused:
+                return None, attempt, seconds, REFUSED
             payload = extract_json(completion.text)
             if payload is None:
                 last_error = "no JSON object found in reply"
@@ -159,7 +169,8 @@ class Identifier:
                 )
             result.image_max_edge = edge
             result.run_fingerprint = self.fingerprint
-            if result.status == "ok":
+            if result.status == "ok" or result.refused:
+                # A refusal will not change at a smaller size, so stop retrying.
                 return result
             last = result
 
@@ -183,7 +194,7 @@ class Identifier:
             return ImageResult(
                 file=display_name, content_hash=content, status="unprocessed",
                 error=f"taxon routing failed: {err}", retries=retries,
-                seconds=total, model=self.backend.name,
+                seconds=total, model=self.backend.name, refused=err == REFUSED,
             )
 
         # No organism: Stage B would only invent one. Stop here.
@@ -211,6 +222,7 @@ class Identifier:
                 file=display_name, content_hash=content, status="unprocessed",
                 taxon_routing=routing, error=f"identification failed: {err}",
                 retries=retries, seconds=total, model=self.backend.name,
+                refused=err == REFUSED,
             )
 
         # A model that abstains but still lists candidates is contradicting itself;

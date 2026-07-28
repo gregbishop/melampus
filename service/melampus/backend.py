@@ -134,8 +134,24 @@ class AnthropicBackend(VLMBackend):
 
     @staticmethod
     def _is_beta_rejection(exc: Exception) -> bool:
+        """Only a genuine "this organisation cannot use the fallback beta".
+
+        This used to match any message containing "beta" or "unexpected keyword",
+        which is loose enough to catch failures having nothing to do with
+        fallbacks — and because the result is latched for the process, one
+        unrelated error silently disabled refusal recovery for the whole batch
+        while re-raising a misleading second error. Both halves were bad.
+        """
+        status = getattr(exc, "status_code", None)
+        if status is not None and status not in (400, 403, 404):
+            return False
         text = str(exc).lower()
-        return "fallback" in text or "beta" in text or "unexpected keyword" in text
+        if "fallback" in text:
+            return True
+        # An SDK too old to know the parameter names raises TypeError locally.
+        return isinstance(exc, TypeError) and (
+            "fallbacks" in text or "betas" in text
+        )
 
     def _send(self, blocks: list[dict], max_tokens: int):
         client = self._ensure_client()
@@ -234,8 +250,11 @@ class OpenAIBackend(VLMBackend):
         self._client = client
         # Reasoning models take max_completion_tokens; older ones only accept
         # max_tokens. Learn which once and remember, instead of failing on every
-        # frame or paying a rejected request per image.
+        # frame or paying a rejected request per image. Recorded against the model
+        # it was learned for: the latch is one-way, so without this a mid-process
+        # model switch would keep sending the wrong parameter with no recovery.
         self._token_param = "max_completion_tokens"
+        self._token_param_model = model
 
     def _ensure_client(self):
         if self._client is None:
@@ -256,6 +275,10 @@ class OpenAIBackend(VLMBackend):
 
     def _send(self, blocks: list[dict], max_tokens: int):
         client = self._ensure_client()
+        if self._token_param_model != self.model:
+            # Different model: what we learned no longer applies.
+            self._token_param = "max_completion_tokens"
+            self._token_param_model = self.model
         params = {"model": self.model, "messages": [{"role": "user", "content": blocks}]}
         try:
             return client.chat.completions.create(

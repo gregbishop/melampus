@@ -85,7 +85,8 @@ def resolve_api_key(config: EscalationConfig) -> str | None:
     the provider's own environment variables.
     """
     if config.api_key:
-        return config.api_key
+        # SecretStr keeps it out of reprs and tracebacks; unwrap only here.
+        return config.api_key.get_secret_value()
     for name in _KEY_VARIABLES.get((config.provider or "").strip().lower(), ()):
         value = os.environ.get(name)
         if value:
@@ -144,17 +145,23 @@ def should_escalate(
     if ident.abstain or not ident.candidates:
         return "local model abstained" if config.on_abstain else None
 
+    # Every reason that applies, not just the first. A frame that is both uncertain
+    # AND regionally impossible is the most interesting class there is, and
+    # returning early on confidence used to erase the range flag from its
+    # provenance entirely.
+    reasons: list[str] = []
+
     top = max(c.confidence for c in ident.candidates)
     if top < config.confidence_below:
-        return f"top confidence {top:.2f} below {config.confidence_below:.2f}"
+        reasons.append(f"top confidence {top:.2f} below {config.confidence_below:.2f}")
 
     # §4.3 already routes these to human review. A second opinion first is cheap
     # relative to the photographer's time, and it is the pile most likely to
     # contain either a real model error or a genuinely notable record.
     if range_flagged and config.on_range_flag:
-        return "top candidate flagged out of range"
+        reasons.append("top candidate flagged out of range")
 
-    return None
+    return "; ".join(reasons) if reasons else None
 
 
 def _priority(result: ImageResult, range_flagged: bool) -> float:
@@ -176,6 +183,7 @@ def select_for_escalation(
     config: EscalationConfig,
     range_flagged: frozenset[str] | set[str] = frozenset(),
 ) -> tuple[list[tuple[ImageResult, str]], list[tuple[ImageResult, str]]]:
+    # `range_flagged` holds CONTENT HASHES, not filenames.
     """Split candidates into what will be sent and what the cap excluded.
 
     Both halves are returned. A cap that silently drops work reads as "covered
@@ -184,7 +192,7 @@ def select_for_escalation(
     """
     scored: list[tuple[float, int, ImageResult, str]] = []
     for order, result in enumerate(results):
-        flagged = result.file in range_flagged
+        flagged = result.content_hash in range_flagged
         reason = should_escalate(result, config=config, range_flagged=flagged)
         if reason is not None:
             scored.append((_priority(result, flagged), order, result, reason))
@@ -226,6 +234,14 @@ def build_cloud_identifier(config: MelampusConfig, api_key: str | None = None):
     key = api_key or resolve_api_key(settings)
     model = resolve_model(settings)
 
+    # Import now, not on first request. The backends import their SDK lazily, so a
+    # missing dependency would otherwise surface once per frame, mid-run, after the
+    # selection has already been made.
+    if provider == "anthropic":
+        import anthropic  # noqa: F401
+    else:
+        import openai  # noqa: F401
+
     if provider == "anthropic":
         backend = AnthropicBackend(
             key, model, effort=settings.effort, timeout=settings.timeout_seconds,
@@ -238,6 +254,10 @@ def build_cloud_identifier(config: MelampusConfig, api_key: str | None = None):
     cloud_config.image.max_edge = settings.max_edge
     cloud_config.image.fallback_edges = []
     cloud_config.model.max_tokens = settings.max_tokens
+    # Stage A needs its own override. Leaving the local 200 here starves a
+    # thinking-on model before it emits any JSON, so every frame fails twice and
+    # is billed for both.
+    cloud_config.model.routing_max_tokens = settings.routing_max_tokens
     return Identifier(backend, cloud_config)
 
 
@@ -328,12 +348,24 @@ def escalate(
         result.escalation_reason = reason
         result.local_identification = record.identification
 
-        cloud_cache.put(result)  # checkpoint before anything else can fail
-        run.processed += 1
-
-        if result.status != "ok":
-            run.refused += 1
+        # Only permanent outcomes go in the cache. `identify()` returns rather than
+        # raises on failure, so caching every result would write a network blip, a
+        # bad key or a 529 into the "already paid for" file — and the next run would
+        # skip those frames forever. One outage would silently burn the whole tail,
+        # recoverable only by hand-editing JSONL. A refusal IS permanent, so it is
+        # cached: re-asking would spend money to be declined again.
+        permanent = result.status == "ok" or result.refused
+        if permanent:
+            cloud_cache.put(result)  # checkpoint before anything else can fail
+            run.processed += 1
         else:
+            run.errors += 1
+            run.notes.append(f"{record.file}: {result.error or result.status} (will retry)")
+            log(f"{record.file}: {result.error or result.status} — not cached, retry later")
+
+        if result.refused:
+            run.refused += 1
+        elif result.status == "ok":
             local_top = record.identification.top() if record.identification else None
             cloud_top = result.identification.top() if result.identification else None
             if cloud_top is not None and local_top is None:
@@ -348,6 +380,54 @@ def escalate(
 
     run.seconds = time.perf_counter() - started
     return run
+
+
+def compute_range_flags(
+    results: Iterable[ImageResult], config: MelampusConfig
+) -> frozenset[str]:
+    """Content hashes whose top candidate does not plausibly occur near the shoot.
+
+    Without this the `on_range_flag` trigger was unreachable: nothing computed the
+    flags, so `select_for_escalation` always saw an empty set and the documented
+    headline case — the pile holding both real model errors and genuinely notable
+    records — never fired.
+
+    Degrades to an empty set whenever §4.3 cannot run: occurrence lookups disabled,
+    no coordinates, or no network. That matches the rest of the module — a missing
+    signal must never be read as "everything is fine".
+    """
+    from .occurrence import GBIFClient, Location, OccurrenceCache, applies_to, rerank
+
+    settings = config.occurrence
+    if not settings.enabled:
+        return frozenset()
+    if settings.default_latitude is None or settings.default_longitude is None:
+        return frozenset()
+
+    where = Location(settings.default_latitude, settings.default_longitude, settings.radius_km)
+    client = GBIFClient(cache=OccurrenceCache(settings.cache_path))
+    flagged: set[str] = set()
+
+    for result in results:
+        ident = result.identification
+        if result.status != "ok" or ident is None or not ident.candidates:
+            continue
+        if not applies_to(ident.taxon.value if ident.taxon else None):
+            continue
+        # rerank sorts in place, so hand it a copy: escalation must not silently
+        # reorder the local result's candidate list as a side effect.
+        outcome = rerank(
+            list(ident.candidates), where, None, client,
+            taxon=ident.taxon.value if ident.taxon else None,
+            absent_penalty=settings.absent_penalty,
+            notable_threshold=settings.notable_threshold,
+            notable_penalty=settings.notable_penalty,
+        )
+        if outcome.applied and outcome.range_flag:
+            flagged.add(result.content_hash)
+
+    client.cache.flush()
+    return frozenset(flagged)
 
 
 def merged_results(local_cache: ResultCache, cloud_cache: ResultCache) -> list[ImageResult]:

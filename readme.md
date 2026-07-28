@@ -21,7 +21,7 @@ no image ever leaves the machine.
 | **4** | Lightroom Classic plugin | **Working.** Analyses and writes to a real catalog |
 | — | Optional cloud escalation for the hard tail (§6.6) | **Working.** Off by default |
 
-171 tests: 115 Python, 56 Lua. None need model weights or a network.
+182 tests: 126 Python, 56 Lua. None need model weights or a network.
 
 Stage 1 exists to answer one question before anything else gets built: *can a local
 VLM identify species well enough to be worth wiring into a catalog?* The current
@@ -174,8 +174,12 @@ cannot undo it:
 - **`prompts.render`** refuses any substitution key outside an explicit allowlist, so
   a filename or keyword cannot be interpolated into a prompt.
 
-Three tests treat this as load-bearing: `test_staged_image_is_renamed_and_stripped`,
-`test_backend_never_receives_original_filename`, `test_prompt_rejects_unapproved_context`.
+Three tests treat this as load-bearing:
+`test_staging_strips_every_metadata_channel` builds a file carrying EXIF (maker, model,
+artist, caption, GPS IFD), an XMP packet with a keyword, a JFIF comment and an ICC
+profile, asserts the fixture really carries them, then asserts none survive staging;
+`test_backend_never_receives_original_filename` and
+`test_prompt_rejects_unapproved_context` cover the other two routes in.
 
 Verified end to end: inference runs correctly with `HF_HUB_OFFLINE=1` and
 `TRANSFORMERS_OFFLINE=1`.
@@ -244,7 +248,7 @@ Editing a prompt changes the cache fingerprint, so the next run genuinely re-run
 .venv/bin/python -m pytest -q
 ```
 
-171 tests (115 Python, 56 Lua), no model weights required — everything runs against a scripted backend, so
+182 tests (126 Python, 56 Lua), no model weights required — everything runs against a scripted backend, so
 parsing, validation, retry, caching, the downscale ladder and the no-leak guarantee are
 all verifiable in under a second. The plugin's Lua suites run from the same command,
 skipping cleanly if no Lua interpreter is installed.

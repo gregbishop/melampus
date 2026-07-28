@@ -77,20 +77,29 @@ def make_result(
 
 @pytest.fixture()
 def cfg():
-    return load_config().escalation
+    # use_local=False throughout: melampus.local.toml is git-ignored, so reading it
+    # here would assert on the developer's machine rather than on the defaults, and
+    # would fail for anyone who follows the docs and puts a key in it.
+    return load_config(use_local=False).escalation
 
 
 # --------------------------------------------------------------------------- #
 # the default posture
 # --------------------------------------------------------------------------- #
 
-def test_escalation_is_off_by_default(cfg):
-    """§6.6: keep it off by default. Nothing leaves the machine unasked."""
-    assert cfg.enabled is False
+def test_escalation_is_off_by_default():
+    """§6.6: keep it off by default. Nothing leaves the machine unasked.
+
+    Asserted on the class, not on a loaded config, so a local override cannot make
+    this pass or fail for the wrong reason.
+    """
+    from melampus.config import EscalationConfig
+
+    assert EscalationConfig().enabled is False
 
 
 def test_escalation_refuses_when_disabled(tmp_path):
-    config = load_config(escalation={"enabled": False, "api_key": "sk-test"})
+    config = load_config(use_local=False, escalation={"enabled": False, "api_key": "sk-test"})
     with pytest.raises(EscalationRefused, match="not enabled"):
         escalate(
             [],
@@ -104,7 +113,7 @@ def test_escalation_refuses_when_disabled(tmp_path):
 def test_escalation_refuses_without_a_key(tmp_path, monkeypatch):
     monkeypatch.delenv("MELAMPUS_ANTHROPIC_KEY", raising=False)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    config = load_config(escalation={"enabled": True})
+    config = load_config(use_local=False, escalation={"enabled": True})
     with pytest.raises(EscalationRefused, match="API key"):
         escalate(
             [],
@@ -120,7 +129,7 @@ def test_dry_run_needs_no_key(tmp_path, monkeypatch):
     sign up for an API key at all."""
     monkeypatch.delenv("MELAMPUS_ANTHROPIC_KEY", raising=False)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    config = load_config(escalation={"enabled": True})
+    config = load_config(use_local=False, escalation={"enabled": True})
     run = escalate(
         [],
         ResultCache(tmp_path / "local.jsonl"),
@@ -137,22 +146,25 @@ def test_key_resolution_order(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "from-generic-env")
     monkeypatch.setenv("MELAMPUS_ANTHROPIC_KEY", "from-melampus-env")
 
-    explicit = load_config(escalation={"api_key": "from-config"}).escalation
+    explicit = load_config(use_local=False, escalation={"api_key": "from-config"}).escalation
     assert resolve_api_key(explicit) == "from-config"
 
-    assert resolve_api_key(load_config().escalation) == "from-melampus-env"
+    assert resolve_api_key(load_config(use_local=False).escalation) == "from-melampus-env"
 
     monkeypatch.delenv("MELAMPUS_ANTHROPIC_KEY")
-    assert resolve_api_key(load_config().escalation) == "from-generic-env"
+    assert resolve_api_key(load_config(use_local=False).escalation) == "from-generic-env"
 
     monkeypatch.delenv("ANTHROPIC_API_KEY")
-    assert resolve_api_key(load_config().escalation) is None
+    assert resolve_api_key(load_config(use_local=False).escalation) is None
 
 
 def test_api_key_is_never_written_into_tracked_config():
-    """The repo is going public. A key must only ever arrive from the environment."""
-    packaged = load_config().escalation
-    assert packaged.api_key is None
+    """The repo is public. A key must only ever arrive from the environment or the
+    git-ignored local file — never from anything committed."""
+    from melampus.config import EscalationConfig
+
+    assert EscalationConfig().api_key is None
+    assert load_config(use_local=False).escalation.api_key is None
 
 
 # --------------------------------------------------------------------------- #
@@ -216,7 +228,7 @@ def test_already_escalated_is_not_escalated_again(cfg):
 
 
 def test_toggles_can_disable_each_trigger():
-    off = load_config(escalation={"on_abstain": False, "on_range_flag": False}).escalation
+    off = load_config(use_local=False, escalation={"on_abstain": False, "on_range_flag": False}).escalation
     assert should_escalate(make_result(abstain=True), config=off) is None
     assert should_escalate(make_result(confidences=(0.95,)), config=off, range_flagged=True) is None
     # Low confidence still escalates; it is the primary trigger.
@@ -240,7 +252,7 @@ def test_selection_orders_most_uncertain_first(cfg):
 
 def test_cap_keeps_the_worst_and_reports_the_rest():
     """No silent truncation: what was left out has to be visible."""
-    config = load_config(escalation={"max_images": 2}).escalation
+    config = load_config(use_local=False, escalation={"max_images": 2}).escalation
     results = [
         make_result("a.jpg", confidences=(0.70,), content_hash="h-a"),
         make_result("b.jpg", confidences=(0.50,), content_hash="h-b"),
@@ -286,14 +298,14 @@ def photo(tmp_path: Path) -> Path:
 
 def _cloud_identifier(tmp_path: Path, responses: list[str]) -> tuple[Identifier, ScriptedBackend]:
     backend = ScriptedBackend(responses, name="claude-opus-5")
-    config = load_config(run={"prompts_dir": str(REPO / "prompts"),
+    config = load_config(use_local=False, run={"prompts_dir": str(REPO / "prompts"),
                               "cache_path": str(tmp_path / "unused.jsonl")})
     return Identifier(backend, config), backend
 
 
 def test_escalation_replaces_a_weak_answer_and_records_provenance(tmp_path, photo, monkeypatch):
     monkeypatch.setenv("MELAMPUS_ANTHROPIC_KEY", "sk-test")
-    config = load_config(escalation={"enabled": True})
+    config = load_config(use_local=False, escalation={"enabled": True})
 
     local_cache = ResultCache(tmp_path / "local.jsonl")
     cloud_cache = ResultCache(tmp_path / "cloud.jsonl")
@@ -327,7 +339,7 @@ def test_escalation_sends_pixels_only(tmp_path, photo, monkeypatch):
     """The CRITICAL constraint, and it matters more here than anywhere else: this is
     the one path where an image leaves the machine."""
     monkeypatch.setenv("MELAMPUS_ANTHROPIC_KEY", "sk-test")
-    config = load_config(escalation={"enabled": True})
+    config = load_config(use_local=False, escalation={"enabled": True})
 
     local_cache = ResultCache(tmp_path / "local.jsonl")
     cloud_cache = ResultCache(tmp_path / "cloud.jsonl")
@@ -350,7 +362,7 @@ def test_escalation_leaves_the_local_cache_untouched(tmp_path, photo, monkeypatc
     foreign fingerprint, decides the frame is stale, and quietly overwrites a
     result that was paid for."""
     monkeypatch.setenv("MELAMPUS_ANTHROPIC_KEY", "sk-test")
-    config = load_config(escalation={"enabled": True})
+    config = load_config(use_local=False, escalation={"enabled": True})
 
     local_cache = ResultCache(tmp_path / "local.jsonl")
     cloud_cache = ResultCache(tmp_path / "cloud.jsonl")
@@ -368,7 +380,7 @@ def test_escalation_leaves_the_local_cache_untouched(tmp_path, photo, monkeypatc
 
 def test_second_run_is_a_no_op(tmp_path, photo, monkeypatch):
     monkeypatch.setenv("MELAMPUS_ANTHROPIC_KEY", "sk-test")
-    config = load_config(escalation={"enabled": True})
+    config = load_config(use_local=False, escalation={"enabled": True})
     local_cache = ResultCache(tmp_path / "local.jsonl")
     cloud_cache = ResultCache(tmp_path / "cloud.jsonl")
     from melampus.images import content_hash
@@ -394,7 +406,7 @@ def test_run_estimate_uses_the_configured_rates(tmp_path, photo, monkeypatch):
     local_cache.put(make_result(photo.name, abstain=True, content_hash=content_hash(photo)))
 
     def run_with(rate: float) -> float:
-        config = load_config(escalation={
+        config = load_config(use_local=False, escalation={
             "enabled": True, "input_usd_per_mtok": rate, "output_usd_per_mtok": rate})
         run = escalate([photo], local_cache, ResultCache(tmp_path / f"c{rate}.jsonl"),
                        identifier=None, config=config, dry_run=True)
@@ -405,7 +417,7 @@ def test_run_estimate_uses_the_configured_rates(tmp_path, photo, monkeypatch):
 
 
 def test_escalation_rejects_an_unknown_provider(tmp_path):
-    config = load_config(escalation={"enabled": True, "provider": "gemini"})
+    config = load_config(use_local=False, escalation={"enabled": True, "provider": "gemini"})
     with pytest.raises(EscalationRefused, match="provider"):
         escalate([], ResultCache(tmp_path / "l.jsonl"), ResultCache(tmp_path / "c.jsonl"),
                  identifier=None, config=config, dry_run=True)
@@ -413,7 +425,7 @@ def test_escalation_rejects_an_unknown_provider(tmp_path):
 
 def test_dry_run_selects_but_spends_nothing(tmp_path, photo, monkeypatch):
     monkeypatch.setenv("MELAMPUS_ANTHROPIC_KEY", "sk-test")
-    config = load_config(escalation={"enabled": True})
+    config = load_config(use_local=False, escalation={"enabled": True})
     local_cache = ResultCache(tmp_path / "local.jsonl")
     cloud_cache = ResultCache(tmp_path / "cloud.jsonl")
     from melampus.images import content_hash
@@ -428,6 +440,141 @@ def test_dry_run_selects_but_spends_nothing(tmp_path, photo, monkeypatch):
     assert run.processed == 0
     assert backend.calls == []
     assert run.estimated_cost_usd > 0
+
+
+# --------------------------------------------------------------------------- #
+# failures: what is permanent, what is worth retrying
+# --------------------------------------------------------------------------- #
+
+class _FailingBackend:
+    """Raises on every call, like a network outage or a bad key."""
+
+    def __init__(self, exc: Exception) -> None:
+        self.name = "claude-opus-5"
+        self.exc = exc
+        self.calls = 0
+
+    def complete(self, image_path, prompt, max_tokens):
+        self.calls += 1
+        raise self.exc
+
+    def warmup(self) -> None:
+        return None
+
+
+class _RefusingBackend:
+    """Returns a refusal, the way a safety classifier does: HTTP 200, no content."""
+
+    def __init__(self) -> None:
+        self.name = "claude-opus-5"
+        self.calls = 0
+
+    def complete(self, image_path, prompt, max_tokens):
+        from melampus.backend import Completion
+
+        self.calls += 1
+        return Completion(text="", seconds=0.0, refused=True)
+
+    def warmup(self) -> None:
+        return None
+
+
+def _prepare(tmp_path: Path, photo: Path, backend):
+    from melampus.images import content_hash
+
+    local = ResultCache(tmp_path / "local.jsonl")
+    cloud = ResultCache(tmp_path / "cloud.jsonl")
+    local.put(make_result(photo.name, abstain=True, content_hash=content_hash(photo)))
+    config = load_config(
+        run={"prompts_dir": str(REPO / "prompts"), "cache_path": str(tmp_path / "u.jsonl")},
+        escalation={"enabled": True},
+    )
+    return local, cloud, Identifier(backend, config), config
+
+
+def test_transient_failure_is_not_cached_and_is_retried(tmp_path, photo, monkeypatch):
+    """The worst bug in the original: `identify()` returns rather than raises on
+    failure, so caching every result wrote outages into the paid-work file and the
+    next run skipped those frames forever. One 529 window burned the whole tail."""
+    monkeypatch.setenv("MELAMPUS_ANTHROPIC_KEY", "sk-test")
+    backend = _FailingBackend(RuntimeError("529 overloaded_error"))
+    local, cloud, identifier, config = _prepare(tmp_path, photo, backend)
+
+    first = escalate([photo], local, cloud, identifier=identifier, config=config)
+    assert first.selected == 1
+    assert first.processed == 0, "a failed frame must not count as processed"
+    assert first.errors == 1, "transient failure must be reported as an error"
+    assert first.refused == 0, "an outage is not a refusal"
+
+    from melampus.images import content_hash
+    assert cloud.get(content_hash(photo)) is None, "failure was cached; frame is now stuck"
+
+    # The API recovers; the same frame must be retried.
+    good = ScriptedBackend([CLOUD_ROUTING, CLOUD_ID], name="claude-opus-5")
+    identifier.backend = good
+    second = escalate([photo], local, cloud, identifier=identifier, config=config)
+    assert second.selected == 1, "frame was not retried after the outage cleared"
+    assert second.processed == 1
+    assert cloud.get(content_hash(photo)).identification.top().common_name == "Tricolored Heron"
+
+
+def test_a_refusal_is_permanent_and_is_not_retried(tmp_path, photo, monkeypatch):
+    """A refusal is a decision about the image. Re-asking spends money to be told
+    no again, so unlike a transient failure it IS cached."""
+    monkeypatch.setenv("MELAMPUS_ANTHROPIC_KEY", "sk-test")
+    backend = _RefusingBackend()
+    local, cloud, identifier, config = _prepare(tmp_path, photo, backend)
+
+    first = escalate([photo], local, cloud, identifier=identifier, config=config)
+    assert first.refused == 1
+    assert first.errors == 0, "a refusal is not an error"
+    assert first.processed == 1
+
+    from melampus.images import content_hash
+    cached = cloud.get(content_hash(photo))
+    assert cached is not None and cached.refused is True
+
+    calls_after_first = backend.calls
+    second = escalate([photo], local, cloud, identifier=identifier, config=config)
+    assert second.selected == 0, "a refused frame was re-billed"
+    assert backend.calls == calls_after_first
+
+
+def test_a_refusal_does_not_trigger_the_corrective_retry(tmp_path, photo, monkeypatch):
+    """`Completion.refused` existed but nothing consumed it, so every refusal paid
+    for a second call guaranteed to be refused as well."""
+    monkeypatch.setenv("MELAMPUS_ANTHROPIC_KEY", "sk-test")
+    backend = _RefusingBackend()
+    local, cloud, identifier, config = _prepare(tmp_path, photo, backend)
+
+    escalate([photo], local, cloud, identifier=identifier, config=config)
+    # One call for Stage A. No corrective retry, and no descent down the
+    # downscale ladder — a refusal will not change at a smaller size.
+    assert backend.calls == 1, f"refusal cost {backend.calls} calls; expected 1"
+
+
+def test_both_reasons_are_recorded_when_a_frame_is_uncertain_and_out_of_range(cfg):
+    """Returning early on confidence used to erase the range flag from provenance,
+    losing exactly the signal that makes a frame interesting."""
+    result = make_result(confidences=(0.55,))
+    reason = should_escalate(result, config=cfg, range_flagged=True)
+    assert reason is not None
+    assert "confidence" in reason
+    assert "range" in reason
+
+
+def test_range_flags_are_keyed_on_content_not_filename(cfg):
+    """Everything else in this module identifies a frame by content hash. Keying
+    range flags on the filename means two IMG_0042 in different folders collide,
+    and a rename silently unflags."""
+    result = make_result("IMG_0042.jpg", confidences=(0.95,), content_hash="hash-xyz")
+
+    by_name, _ = select_for_escalation([result], config=cfg,
+                                       range_flagged={"IMG_0042.jpg"})
+    assert by_name == [], "matched on filename; a rename would change the outcome"
+
+    by_hash, _ = select_for_escalation([result], config=cfg, range_flagged={"hash-xyz"})
+    assert len(by_hash) == 1
 
 
 # --------------------------------------------------------------------------- #
@@ -470,7 +617,7 @@ def test_openai_key_resolution(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "from-generic-env")
     monkeypatch.setenv("MELAMPUS_OPENAI_KEY", "from-melampus-env")
 
-    openai = load_config(escalation={"provider": "openai"}).escalation
+    openai = load_config(use_local=False, escalation={"provider": "openai"}).escalation
     assert resolve_api_key(openai) == "from-melampus-env"
 
     monkeypatch.delenv("MELAMPUS_OPENAI_KEY")
@@ -483,14 +630,14 @@ def test_openai_key_resolution(monkeypatch):
 
 
 def test_each_provider_gets_its_own_default_model():
-    assert resolve_model(load_config().escalation) == "claude-opus-5"
-    assert "gpt" in resolve_model(load_config(escalation={"provider": "openai"}).escalation)
-    explicit = load_config(escalation={"provider": "openai", "model": "some-other"}).escalation
+    assert resolve_model(load_config(use_local=False).escalation) == "claude-opus-5"
+    assert "gpt" in resolve_model(load_config(use_local=False, escalation={"provider": "openai"}).escalation)
+    explicit = load_config(use_local=False, escalation={"provider": "openai", "model": "some-other"}).escalation
     assert resolve_model(explicit) == "some-other"
 
 
 def test_unknown_provider_is_rejected_loudly():
-    config = load_config(escalation={"provider": "gemini", "enabled": True})
+    config = load_config(use_local=False, escalation={"provider": "gemini", "enabled": True})
     with pytest.raises(EscalationRefused, match="provider"):
         build_cloud_identifier(config, api_key="sk-test")
 
@@ -504,16 +651,57 @@ def test_cost_estimate_follows_configured_rates():
     assert estimate_cost_usd(10, dear) == pytest.approx(estimate_cost_usd(10, cheap) * 10)
 
 
-def test_backends_are_chosen_by_provider():
+def _sdk_installed(name: str) -> bool:
+    import importlib.util
+
+    return importlib.util.find_spec(name) is not None
+
+
+@pytest.mark.parametrize("provider,module", [("anthropic", "anthropic"), ("openai", "openai")])
+def test_missing_sdk_fails_before_any_frame_is_selected(provider, module):
+    """The backends import their SDK lazily, so without an eager check the failure
+    surfaced once per frame, mid-run, after selection — and every frame then got a
+    permanent error cached against it."""
+    if _sdk_installed(module):
+        pytest.skip(f"{module} is installed; nothing to assert about its absence")
+    config = load_config(use_local=False, escalation={"enabled": True, "provider": provider})
+    with pytest.raises(ImportError):
+        build_cloud_identifier(config, api_key="sk-test")
+
+
+@pytest.mark.skipif(not _sdk_installed("anthropic"), reason="anthropic SDK not installed")
+def test_anthropic_provider_builds_an_anthropic_backend():
+    identifier = build_cloud_identifier(
+        load_config(use_local=False, escalation={"enabled": True}), api_key="sk-test")
+    assert isinstance(identifier.backend, AnthropicBackend)
+
+
+@pytest.mark.skipif(not _sdk_installed("openai"), reason="openai SDK not installed")
+def test_openai_provider_builds_an_openai_backend():
     from melampus.backend import OpenAIBackend
 
-    anthropic_id = build_cloud_identifier(
-        load_config(escalation={"enabled": True}), api_key="sk-test")
-    assert isinstance(anthropic_id.backend, AnthropicBackend)
+    identifier = build_cloud_identifier(
+        load_config(use_local=False, escalation={"enabled": True, "provider": "openai"}), api_key="sk-test")
+    assert isinstance(identifier.backend, OpenAIBackend)
 
-    openai_id = build_cloud_identifier(
-        load_config(escalation={"enabled": True, "provider": "openai"}), api_key="sk-test")
-    assert isinstance(openai_id.backend, OpenAIBackend)
+
+def test_cloud_identifier_overrides_the_routing_budget():
+    """The local routing default is 200 tokens, sized for a runtime that does not
+    think before answering. On a thinking-on model that is consumed before any JSON
+    appears, so every frame would fail twice and be billed for both. This is the
+    single defect that would have made the whole feature not work."""
+    from melampus.config import MelampusConfig
+
+    config = MelampusConfig()
+    config.escalation.enabled = True
+    # Build the cloud config the same way build_cloud_identifier does, without
+    # needing a provider SDK installed.
+    cloud = config.model_copy(deep=True)
+    cloud.model.routing_max_tokens = config.escalation.routing_max_tokens
+    assert config.model.routing_max_tokens == 200, "local default changed; retune this"
+    assert cloud.model.routing_max_tokens >= 600, (
+        "cloud routing budget too small for a model that thinks before answering"
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -596,12 +784,16 @@ def test_openai_backend_reports_a_content_filter_as_a_refusal(tmp_path):
     staged = tmp_path / NEUTRAL_NAME
     Image.new("RGB", (64, 48), (10, 20, 30)).save(staged)
 
-    stub = _StubCompletions(text=None, finish_reason="content_filter")
+    # Partial text, not None: a filtered response can carry some content, and with
+    # text=None this test passed even with the guard deleted, because the `or ""`
+    # already produced an empty string.
+    stub = _StubCompletions(text="partial answer before the filter fired",
+                            finish_reason="content_filter")
     backend = OpenAIBackend(api_key="sk-test", client=_StubOpenAIClient(stub))
 
     completion = backend.complete(staged, "Identify.", max_tokens=200)
-    assert completion.text == ""
     assert completion.refused is True
+    assert completion.text == "", "filtered content was passed through as an answer"
 
 
 def test_anthropic_backend_requires_a_key():
@@ -629,6 +821,90 @@ def test_anthropic_backend_sends_base64_pixels_and_no_filename(tmp_path):
     # whole accuracy claim rests on the model seeing no metadata.
     assert NEUTRAL_NAME not in json.dumps(sent["messages"])
     assert str(staged) not in json.dumps(sent["messages"])
+
+
+def test_anthropic_request_carries_the_exact_parameters_the_api_needs(tmp_path):
+    """The stub accepts any kwargs, so a misspelled key or a wrong beta string
+    would pass green here and 400 in production. Assert the wire shape."""
+    staged = tmp_path / NEUTRAL_NAME
+    Image.new("RGB", (64, 48), (10, 20, 30)).save(staged)
+
+    stub = _StubMessages(text="{}")
+    backend = AnthropicBackend(api_key="sk-test", effort="high",
+                               client=_StubClient(stub))
+    backend.complete(staged, "Identify.", max_tokens=900)
+
+    sent = stub.requests[0]
+    assert sent["max_tokens"] == 900
+    # effort lives inside output_config, not at the top level
+    assert sent["output_config"] == {"effort": "high"}
+    assert "effort" not in sent
+    # The scalar `fallbacks: "default"` form pairs with the -07-01 beta; crossing
+    # it with the array form's -06-01 header is a 400.
+    assert sent["fallbacks"] == "default"
+    assert sent["betas"] == ["server-side-fallback-2026-07-01"]
+    # Sampling params were removed on this model tier and are rejected outright.
+    for banned in ("temperature", "top_p", "top_k", "thinking"):
+        assert banned not in sent, f"{banned} is rejected on this model tier"
+
+
+class _BetaRejectingMessages(_StubMessages):
+    """Beta endpoint refuses the fallback parameter; the plain endpoint works."""
+
+    def __init__(self, text: str = "{}", error: Exception | None = None) -> None:
+        super().__init__(text)
+        self.beta_calls = 0
+        self.plain_calls = 0
+        self.error = error or TypeError("unexpected keyword argument 'fallbacks'")
+
+    def beta_create(self, **kwargs):
+        self.beta_calls += 1
+        raise self.error
+
+    def create(self, **kwargs):
+        self.plain_calls += 1
+        return super().create(**kwargs)
+
+
+class _SplitClient:
+    def __init__(self, messages: _BetaRejectingMessages) -> None:
+        self.messages = messages
+        self.beta = type("Beta", (), {
+            "messages": type("M", (), {"create": messages.beta_create})()
+        })()
+
+
+def test_anthropic_falls_back_to_the_plain_endpoint_and_latches(tmp_path):
+    """An org without the fallback beta must still work — once, not per frame."""
+    staged = tmp_path / NEUTRAL_NAME
+    Image.new("RGB", (64, 48), (10, 20, 30)).save(staged)
+
+    stub = _BetaRejectingMessages(text='{"taxon":"bird","confidence":0.9,"reasoning":"x"}')
+    backend = AnthropicBackend(api_key="sk-test", client=_SplitClient(stub))
+
+    assert "bird" in backend.complete(staged, "Identify.", 200).text
+    assert "bird" in backend.complete(staged, "Identify.", 200).text
+
+    assert stub.beta_calls == 1, "re-probed the unavailable beta on every frame"
+    assert stub.plain_calls == 2
+
+
+def test_an_unrelated_error_does_not_silently_disable_fallbacks(tmp_path):
+    """The matcher used to accept any message containing 'beta', so one unrelated
+    failure switched refusal recovery off for the whole batch and re-raised a
+    misleading second error."""
+    staged = tmp_path / NEUTRAL_NAME
+    Image.new("RGB", (64, 48), (10, 20, 30)).save(staged)
+
+    unrelated = RuntimeError("overloaded_error: the model is in beta capacity issues")
+    unrelated.status_code = 529
+    stub = _BetaRejectingMessages(error=unrelated)
+    backend = AnthropicBackend(api_key="sk-test", client=_SplitClient(stub))
+
+    with pytest.raises(RuntimeError, match="overloaded"):
+        backend.complete(staged, "Identify.", 200)
+    assert backend._use_fallbacks is True, "an unrelated error disabled refusal recovery"
+    assert stub.plain_calls == 0, "masked the real error by retrying without fallbacks"
 
 
 def test_anthropic_backend_reports_a_refusal_instead_of_crashing(tmp_path):

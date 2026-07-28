@@ -23,11 +23,34 @@ def _humanise(seconds: float) -> str:
     return f"{seconds / 3600:.1f}h"
 
 
-def _run_escalation(paths, local_cache: ResultCache, config, *, dry_run: bool) -> int:
+def _confirm(count: int, cost: float) -> bool:
+    """Ask before spending. Returns False rather than guessing when not a terminal.
+
+    A non-interactive caller (cron, the Lightroom plugin, CI) has no way to answer,
+    and defaulting to "yes" there would make the confirmation decorative. Such
+    callers pass --escalate-yes deliberately.
+    """
+    if not sys.stdin.isatty():
+        print(
+            f"  {count} frame(s), est. ${cost:.2f}. Not a terminal, so nothing was "
+            "sent — pass --escalate-yes to run non-interactively.",
+            file=sys.stderr,
+        )
+        return False
+    try:
+        answer = input(f"  Send {count} frame(s) for about ${cost:.2f}? [y/N] ")
+    except (EOFError, KeyboardInterrupt):
+        return False
+    return answer.strip().lower() in {"y", "yes"}
+
+
+def _run_escalation(paths, local_cache: ResultCache, config, *,
+                    dry_run: bool, assume_yes: bool = False) -> int:
     """Second-opinion pass against the Claude API (CLAUDE.md §6.6)."""
     from .escalate import (
         EscalationRefused,
         build_cloud_identifier,
+        compute_range_flags,
         escalate,
         merged_results,
         resolve_model,
@@ -50,45 +73,81 @@ def _run_escalation(paths, local_cache: ResultCache, config, *, dry_run: bool) -
             print(str(exc), file=sys.stderr)
             return 3
 
+    # Range flags make the on_range_flag trigger reachable at all; previously
+    # nothing computed them, so that documented case never fired.
+    range_flagged = frozenset()
+    if config.escalation.on_range_flag:
+        try:
+            range_flagged = compute_range_flags(local_cache.results(), config)
+        except Exception as exc:  # noqa: BLE001 - a missing signal must not block the run
+            print(f"range flags unavailable ({exc}); continuing without them",
+                  file=sys.stderr)
+
     def progress(result: ImageResult, reason: str) -> None:
         top = result.identification.top() if result.identification else None
         answer = top.common_name if top else result.status
         print(f"  {result.file}: {reason} -> {answer}", file=sys.stderr)
 
     try:
-        run = escalate(
+        # Cost first, spend second. A "dry run" of the selection is free, so there
+        # is no excuse for the estimate to appear after the money is gone.
+        preview = escalate(
             paths, local_cache, cloud_cache,
-            identifier=identifier, config=config,
-            dry_run=dry_run, on_result=progress,
+            identifier=None, config=config,
+            range_flagged=range_flagged, dry_run=True,
         )
     except EscalationRefused as exc:
         print(str(exc), file=sys.stderr)
         return 3
 
     settings = config.escalation
-    verb = "would escalate" if dry_run else "escalated"
-    # State the rates in the same breath as the dollars. The rates are config and
-    # default to Claude Opus 5's, so an unadjusted estimate for another provider is
-    # confidently wrong — better to show the assumption than to hide it.
     print(
-        f"\n{verb} {run.selected} frame(s) to {settings.provider}/{resolve_model(settings)}, "
-        f"est. ${run.estimated_cost_usd:.2f} "
+        f"\nwould escalate {preview.selected} frame(s) to "
+        f"{settings.provider}/{resolve_model(settings)}, "
+        f"est. ${preview.estimated_cost_usd:.2f} "
         f"at ${settings.input_usd_per_mtok:g}/${settings.output_usd_per_mtok:g} per Mtok "
         f"(set escalation.input_usd_per_mtok / output_usd_per_mtok to match your provider)",
         file=sys.stderr,
     )
-    if not dry_run:
+    for note in preview.notes[:10]:
+        print(f"  note: {note}", file=sys.stderr)
+
+    if dry_run:
+        return 0
+    if preview.selected == 0:
+        print("  nothing to escalate", file=sys.stderr)
+        return 0
+    if not assume_yes and not _confirm(preview.selected, preview.estimated_cost_usd):
+        print("  cancelled; nothing was sent", file=sys.stderr)
+        return 0
+
+    try:
+        run = escalate(
+            paths, local_cache, cloud_cache,
+            identifier=identifier, config=config,
+            range_flagged=range_flagged, dry_run=False, on_result=progress,
+        )
+    except EscalationRefused as exc:
+        print(str(exc), file=sys.stderr)
+        return 3
+
+    print(
+        f"  processed {run.processed}  changed {run.changed}  "
+        f"resolved {run.resolved}  refused {run.refused}  errors {run.errors}  "
+        f"wall {_humanise(run.seconds)}",
+        file=sys.stderr,
+    )
+    if run.errors:
         print(
-            f"  processed {run.processed}  changed {run.changed}  "
-            f"resolved {run.resolved}  refused {run.refused}  errors {run.errors}  "
-            f"wall {_humanise(run.seconds)}",
+            f"  {run.errors} frame(s) failed transiently and were NOT cached — "
+            "re-run to retry them",
             file=sys.stderr,
         )
-        print(f"  cloud results: {config.escalation.cache_path}", file=sys.stderr)
+    print(f"  cloud results: {config.escalation.cache_path}", file=sys.stderr)
     for note in run.notes[:10]:
         print(f"  note: {note}", file=sys.stderr)
 
-    if not dry_run and run.processed:
+    if run.processed:
         # Report on the merged view, so the tables reflect what a consumer of the
         # results would actually see rather than only the local pass.
         merged = merged_results(local_cache, cloud_cache)
@@ -129,6 +188,8 @@ def main(argv: list[str] | None = None) -> int:
     cloud.add_argument("--escalate-model", default=None, help="override the cloud model")
     cloud.add_argument("--escalate-provider", choices=("anthropic", "openai"), default=None,
                        help="which cloud to ask (default: anthropic)")
+    cloud.add_argument("--escalate-yes", action="store_true",
+                       help="skip the cost confirmation (for non-interactive callers)")
     cloud.add_argument("--escalate-base-url", default=None,
                        help="OpenAI-compatible endpoint, for OpenRouter, LM Studio, a proxy, ...")
 
@@ -200,7 +261,9 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     if args.escalate or args.escalate_dry_run:
-        code = _run_escalation(paths, cache, config, dry_run=args.escalate_dry_run)
+        code = _run_escalation(paths, cache, config,
+                               dry_run=args.escalate_dry_run,
+                               assume_yes=args.escalate_yes)
         if code != 0:
             return code
 

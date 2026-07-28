@@ -136,12 +136,13 @@ keyword travels with them.
 | `model` | *(provider default)* | `claude-opus-5` or `gpt-5`. **Vision model names move faster than this file does** — check the provider's current listing and override with `--escalate-model`. |
 | `api_key` | *(none)* | Never set this in tracked source. See below. |
 | `effort` | `"high"` | Anthropic only. These are the frames the local model could not resolve, so thinking depth is where the money should go. |
-| `max_tokens` | `1200` | Per reply. |
+| `max_tokens` | `1200` | Per reply (Stage B). |
+| `routing_max_tokens` | `900` | Stage A budget. **Do not lower this to the local default of 200.** On a model where thinking is on by default, `max_tokens` caps thinking *and* output together, so 200 is consumed before any JSON appears and every frame fails twice while being billed. |
 | `max_edge` | `2048` | Long edge sent to the cloud. Higher than the local `1280`, because the 1280 ceiling exists to dodge an mlx-vlm token bug that does not apply here, and resolution is the cheapest lever left on a hard frame. |
 | `confidence_below` | `0.80` | Escalate when the local top candidate scores under this. Ordinal, not calibrated — a ranking cut, not a probability. |
 | `on_abstain` | `true` | Escalate frames the local model declined to call. |
 | `on_range_flag` | `true` | Escalate frames whose top candidate does not occur locally (§4.3). |
-| `max_images` | `200` | Hard ceiling per run. A mistyped flag should not become an unexpected invoice. When the cap bites, the most uncertain frames go first and the rest are counted and reported — never silently dropped. |
+| `max_images` | `200` | Hard ceiling per run, bounded 0–5000 by the schema. A mistyped flag should not become an unexpected invoice. When the cap bites, the most uncertain frames go first and the rest are counted and reported — never silently dropped. |
 | `input_usd_per_mtok` | `5.0` | Estimate only. Defaults are Claude Opus 5's rate. |
 | `output_usd_per_mtok` | `25.0` | **Change both when you change provider or model**, or the printed estimate will be confidently wrong. The CLI prints the rates alongside the dollars so the assumption is visible. |
 | `cache_path` | `<repo>/.melampus_cache/escalations.jsonl` | Cloud answers live in their own file. Merged into the local cache they would carry a foreign run fingerprint, and the next local pass would decide they were stale and quietly overwrite work you paid for. |
@@ -181,6 +182,29 @@ uv pip install --python .venv/bin/python "./service[cloud]"   # anthropic
 uv pip install --python .venv/bin/python "./service[openai]"  # openai
 ```
 
+### What gets cached, and what gets retried
+
+Only **permanent** outcomes are written to the escalation cache: a successful
+identification, or a refusal by the provider's safety classifier. A refusal is a
+decision about the image, so re-asking would spend money to be declined again.
+
+**Transient failures are deliberately not cached.** A network drop, a bad key, a
+529, or a missing SDK leaves the frame untouched, and the CLI says how many were
+affected so a re-run picks them up. This matters more than it sounds: `identify()`
+returns an error result rather than raising, so an earlier version cached those
+failures into the "already paid for" file and skipped them forever — one outage
+silently burned the whole tail, recoverable only by hand-editing JSONL.
+
+A refusal also stops the corrective retry and the downscale ladder, both of which
+would otherwise pay for repeat calls guaranteed to be refused again.
+
+### Cost confirmation
+
+A real run prints the selection and the estimate **before** sending anything, and
+asks for confirmation. Non-interactive callers get nothing sent unless they pass
+`--escalate-yes` — a confirmation that auto-answers itself when no one is watching
+is decorative.
+
 ### Provenance
 
 Each escalated result records `escalated`, `escalation_model`, `escalation_reason` and
@@ -206,7 +230,7 @@ structural rather than conventional, so a careless call site cannot undo it:
   both empty today). Attempting to interpolate a filename raises `PromptError`.
 
 Three tests cover this and should be treated as load-bearing:
-`test_staged_image_is_renamed_and_stripped`,
+`test_staging_strips_every_metadata_channel`,
 `test_backend_never_receives_original_filename`,
 `test_prompt_rejects_unapproved_context`.
 

@@ -6,7 +6,7 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -126,7 +126,11 @@ class OccurrenceConfig(_Base):
     enabled: bool = True
     # GBIF needs no key and covers every taxon. eBird has far denser bird data but
     # requires a free token from https://ebird.org/api/keygen — optional, additive.
-    ebird_token: str | None = None
+    # SecretStr: pydantic renders these as "**********" in repr, so a debug print,
+    # a validation error on a sibling field, or a bug-report attachment cannot
+    # leak the key. The docs promise the key never reaches a loggable object;
+    # this makes that structural rather than a convention.
+    ebird_token: SecretStr | None = None
     # The Canon R3 has no GPS receiver and nothing in this catalog carries
     # coordinates, so a default location is the only way §4.3 can run at all.
     # Per-photo GPS, when present, always wins over this.
@@ -178,10 +182,15 @@ class EscalationConfig(_Base):
     # Never set here in tracked source. Comes from MELAMPUS_ANTHROPIC_KEY /
     # MELAMPUS_OPENAI_KEY, the provider's own variable, or the git-ignored
     # melampus.local.toml.
-    api_key: str | None = None
+    api_key: SecretStr | None = None
     # Anthropic-only; ignored by other providers.
     effort: str = "high"
     max_tokens: int = 1200
+    # Stage A (taxon routing) budget. The local default is 200, which is sized for
+    # a runtime that does not think before answering. On a model where thinking is
+    # on by default, max_tokens caps thinking AND output together, so 200 is
+    # consumed before any JSON appears — every frame would fail, twice, billed.
+    routing_max_tokens: int = 900
 
     # Used only for the estimate printed before spending anything. Defaults are the
     # Claude Opus 5 rate; change them when you change provider or model, or the
@@ -203,7 +212,7 @@ class EscalationConfig(_Base):
     # A hard ceiling on how many frames one run may bill for. The corpus has 836
     # frames needing review; a mistyped flag should not turn into an unexpected
     # invoice, so the cap is low enough to notice and must be raised deliberately.
-    max_images: int = 200
+    max_images: int = Field(default=200, ge=0, le=5000)
 
     # Cloud answers live in their own file. Merging them into the local cache would
     # give them a foreign run fingerprint, and the next local pass would decide they
@@ -264,9 +273,18 @@ def _secrets_from_environment() -> dict[str, Any]:
     return secrets
 
 
-def load_config(path: str | Path | None = None, **overrides: Any) -> MelampusConfig:
+def load_config(
+    path: str | Path | None = None, *, use_local: bool = True, **overrides: Any
+) -> MelampusConfig:
+    """Build config from defaults, the local file, an explicit file, then overrides.
+
+    `use_local=False` skips melampus.local.toml. Tests need that: the file is
+    git-ignored, so a suite that asserts on defaults would otherwise be asserting
+    on whatever the developer happens to have configured — and would break for
+    anyone who follows the documentation and puts their API key there.
+    """
     data: dict[str, Any] = {}
-    if LOCAL_CONFIG.is_file():
+    if use_local and LOCAL_CONFIG.is_file():
         with LOCAL_CONFIG.open("rb") as handle:
             data = _deep_merge(data, tomllib.load(handle))
     if path is not None:

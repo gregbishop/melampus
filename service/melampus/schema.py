@@ -149,3 +149,8 @@ class ImageResult(BaseModel):
     escalation_model: str = ""
     escalation_reason: str = ""
     local_identification: Identification | None = None
+
+    # A safety classifier declined this image, as opposed to the call failing.
+    # The distinction decides whether retrying is worth money: a refusal is
+    # permanent for this image and prompt, a network error is not.
+    refused: bool = False
