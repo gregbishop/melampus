@@ -46,6 +46,25 @@ LrTasks.startAsyncTask(function()
 			},
 
 			f:group_box {
+				title = 'What kind of photos are these?',
+				fill_horizontal = 1,
+				f:popup_menu {
+					value = bind 'profile',
+					items = {
+						{ title = 'Wildlife — identify the species', value = 'wildlife' },
+						{ title = 'Sport — identify the activity and the action', value = 'sport' },
+					},
+				},
+				f:static_text {
+					title = 'Set this before analysing. Wildlife asks what organism is in\n'
+						.. 'the frame and checks it against range data. Sport asks what is\n'
+						.. 'happening — the movement, the equipment, the moment.',
+					height_in_lines = 3,
+					text_color = import('LrColor')(0.4, 0.4, 0.4),
+				},
+			},
+
+			f:group_box {
 				title = 'Step 2 — safety',
 				fill_horizontal = 1,
 				f:checkbox {

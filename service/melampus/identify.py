@@ -17,7 +17,7 @@ from pydantic import ValidationError
 from .backend import VLMBackend
 from .config import MelampusConfig
 from .images import staged_pixels
-from .prompts import ROUTING_PROMPT, PromptLibrary
+from .prompts import ROUTING_FOR_PROFILE, ROUTING_PROMPT, PromptLibrary
 from .schema import Identification, ImageResult, Taxon, TaxonRouting
 
 _FENCE = re.compile(r"```(?:json)?\s*(.*?)```", re.S)
@@ -172,7 +172,8 @@ class Identifier:
 
         routing, tries, secs, err = self._ask(
             staged,
-            self.prompts.render(ROUTING_PROMPT),
+            self.prompts.render(
+                ROUTING_FOR_PROFILE.get(self.config.run.profile, ROUTING_PROMPT)),
             self.config.model.routing_max_tokens,
             TaxonRouting,
         )

@@ -154,3 +154,25 @@ def test_cache_round_trips_to_disk(tmp_path: Path):
     cache.flush()
 
     assert OccurrenceCache(path).get(key) == 3060
+
+
+# --------------------------------------------------------------------------- #
+# non-organism subjects
+# --------------------------------------------------------------------------- #
+def test_occurrence_does_not_apply_to_sports():
+    """A GBIF lookup for 'CrossFit' returns zero and would flag it out of range."""
+    from melampus.occurrence import applies_to
+
+    for taxon in ("football", "fitness", "court_sport", "people", "none"):
+        assert not applies_to(taxon), f"{taxon} should be exempt from range checks"
+    for taxon in ("bird", "reptile", "plant", "insect"):
+        assert applies_to(taxon)
+
+
+def test_reranking_skips_non_organism_taxa():
+    cands = [c("American Football", "", 0.95)]
+    outcome = rerank(cands, FLORIDA, 6, FakeClient({}), taxon="football")
+
+    assert outcome.applied is False
+    assert "does not apply" in outcome.reason
+    assert outcome.range_flag is False, "a sport must never be flagged out of range"

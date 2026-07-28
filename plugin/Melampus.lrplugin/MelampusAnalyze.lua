@@ -122,7 +122,7 @@ end
 
 --- Run the identification pipeline over a folder of previews.
 -- Returns true plus the results path, or false plus a message.
-function Analyze.run(repo, previewFolder, resultsPath)
+function Analyze.run(repo, previewFolder, resultsPath, profile)
 	local python = LrPathUtils.child(LrPathUtils.child(repo, '.venv'), 'bin/python')
 	if not LrFileUtils.exists(python) then
 		return false, 'Could not find the Melampus Python environment at:\n' .. python
@@ -138,6 +138,7 @@ function Analyze.run(repo, previewFolder, resultsPath)
 	local command = table.concat({
 		'cd', quote(repo), '&&',
 		quote(melampus), quote(previewFolder),
+		'--profile', quote(profile or 'wildlife'),
 		'--json-out', quote(raw),
 		'>/dev/null 2>&1',
 	}, ' ')

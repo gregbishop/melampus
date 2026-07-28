@@ -100,7 +100,15 @@ def main(argv: list[str]) -> int:
         # One range lookup per encounter, not per frame: every frame in an
         # encounter is the same subject, and the cache would collapse them anyway.
         range_flag = False
-        if client is not None and location is not None and members:
+        first_ident = (members[0].get("identification") or {}) if members else {}
+        organism = True
+        try:
+            sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "service"))
+            from melampus.occurrence import applies_to
+            organism = applies_to(first_ident.get("taxon"))
+        except Exception:
+            organism = True
+        if client is not None and location is not None and members and organism:
             month = enc.start.month if enc.start else None
             for rec in members:
                 ident = rec.get("identification") or {}

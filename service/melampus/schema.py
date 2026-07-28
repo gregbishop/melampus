@@ -23,6 +23,16 @@ class Taxon(StrEnum):
     MAMMAL = "mammal"
     PLANT = "plant"
     FUNGUS = "fungus"
+    # Human-activity subjects. They share the Identification shape deliberately:
+    # candidates carry the sport, behavior carries the action, so gates, keywords,
+    # review and correction all work unchanged.
+    FOOTBALL = "football"
+    FITNESS = "fitness"
+    FIELD_SPORT = "field_sport"
+    COURT_SPORT = "court_sport"
+    RUNNING = "running"
+    TEAM_OTHER = "team_other"
+    PEOPLE = "people"
     NONE = "none"
 
 
@@ -48,6 +58,11 @@ class TaxonRouting(BaseModel):
                 "plants": "plant", "flower": "plant", "tree": "plant",
                 "fungi": "fungus", "mushroom": "fungus",
                 "spider": "arachnid", "fishes": "fish",
+                "american football": "football", "gridiron": "football",
+                "crossfit": "fitness", "gym": "fitness", "weightlifting": "fitness",
+                "soccer": "field_sport", "rugby": "field_sport",
+                "basketball": "court_sport", "volleyball": "court_sport",
+                "person": "people", "portrait": "people",
                 "frog": "amphibian", "toad": "amphibian",
                 "nothing": "none", "no organism": "none", "n/a": "none", "": "none",
             }

@@ -163,12 +163,26 @@ class GBIFClient:
         return count
 
 
+#: Taxa that are not organisms. Occurrence data says nothing about them, and a
+#: GBIF lookup for "CrossFit" would return zero and wrongly flag it out of range.
+NON_ORGANISM_TAXA = frozenset({
+    "football", "fitness", "field_sport", "court_sport",
+    "running", "team_other", "people", "none",
+})
+
+
+def applies_to(taxon: str | None) -> bool:
+    """Whether occurrence re-ranking is meaningful for this taxon at all."""
+    return (taxon or "").strip().lower() not in NON_ORGANISM_TAXA
+
+
 def rerank(
     candidates: list,
     location: Location | None,
     month: int | None,
     client: GBIFClient | None,
     *,
+    taxon: str | None = None,
     absent_penalty: float = 0.15,
     notable_threshold: int = 25,
     notable_penalty: float = 0.6,
@@ -185,6 +199,10 @@ def rerank(
     """
     if not candidates:
         return RerankOutcome(applied=False, reason="no candidates to re-rank")
+    if taxon is not None and not applies_to(taxon):
+        return RerankOutcome(
+            applied=False,
+            reason=f"occurrence data does not apply to '{taxon}'")
     if location is None:
         return RerankOutcome(applied=False, reason="no location available for this photo")
     if client is None:

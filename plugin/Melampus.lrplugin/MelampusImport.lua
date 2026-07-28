@@ -394,7 +394,7 @@ LrTasks.startAsyncTask(function()
 						Log.warn('no previews exported for batch starting at ' .. first)
 					else
 						local batchResults = LrPathUtils.child(workFolder, 'results.json')
-						local ok, message = Analyze.run(repo, workFolder, batchResults)
+						local ok, message = Analyze.run(repo, workFolder, batchResults, settings.profile)
 						if not ok then
 							LrDialogs.message('Melampus', message
 								.. '\n\nPreviews kept at:\n' .. workFolder, 'critical')

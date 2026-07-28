@@ -146,6 +146,12 @@ class OccurrenceConfig(_Base):
 
 
 class RunConfig(_Base):
+    # Which routing prompt to use. 'wildlife' asks what organism this is;
+    # 'sport' asks what activity this is. Keeping them separate avoids the
+    # obvious failure of a footballer being routed to 'mammal' and asked for a
+    # species, and keeps each prompt short enough to stay under the runtime's
+    # token ceiling.
+    profile: str = "wildlife"
     prompts_dir: Path = REPO_ROOT / "prompts"
     cache_path: Path = REPO_ROOT / ".melampus_cache" / "identifications.jsonl"
     # One corrective retry on schema-validation failure, per CLAUDE.md §4.2.

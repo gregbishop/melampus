@@ -14,6 +14,13 @@ from pathlib import Path
 from string import Template
 
 ROUTING_PROMPT = "taxon_routing"
+SPORT_ROUTING_PROMPT = "sport_routing"
+
+#: Which routing prompt each profile uses.
+ROUTING_FOR_PROFILE = {
+    "wildlife": ROUTING_PROMPT,
+    "sport": SPORT_ROUTING_PROMPT,
+}
 
 # Only these may ever be substituted into a prompt. Anything else raises.
 ALLOWED_CONTEXT_KEYS = frozenset({"season_context", "location_context"})

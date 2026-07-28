@@ -76,6 +76,10 @@ function Rules.defaultSettings()
 		-- than all at the end. Smaller means more visible progress and slightly
 		-- more overhead; 25 is about three minutes between updates.
 		analyzeBatchSize = 25,
+		-- What kind of shoot this is. Wildlife asks what organism is in the
+		-- frame; sport asks what activity is happening. Keeping them apart stops
+		-- a footballer being routed to 'mammal' and asked for a scientific name.
+		profile = 'wildlife',
 	}
 end
 

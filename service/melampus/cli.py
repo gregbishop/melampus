@@ -29,6 +29,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("folder", type=Path, help="folder of JPEGs")
     ap.add_argument("--config", type=Path, default=None)
     ap.add_argument("--model", default=None, help="override model repo")
+    ap.add_argument("--profile", choices=("wildlife", "sport"), default=None,
+                    help="what kind of shoot this is; picks the routing prompt")
     ap.add_argument("--cache", type=Path, default=None)
     ap.add_argument("--limit", type=int, default=None, help="process at most N images")
     ap.add_argument("--force", action="store_true", help="reprocess already-cached images")
@@ -43,6 +45,8 @@ def main(argv: list[str] | None = None) -> int:
     overrides: dict = {}
     if args.model:
         overrides.setdefault("model", {})["repo"] = args.model
+    if args.profile:
+        overrides.setdefault("run", {})["profile"] = args.profile
     if args.cache:
         overrides.setdefault("run", {})["cache_path"] = str(args.cache)
     config = load_config(args.config, **overrides)
