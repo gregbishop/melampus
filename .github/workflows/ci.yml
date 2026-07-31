@@ -1,0 +1,32 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# The token can read the repo and nothing else, even if a workflow step is
+# compromised.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    # mlx-vlm only ships Apple Silicon wheels, so CI must match the target
+    # platform anyway. macos-latest is arm64.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # lua enables the plugin tests (they self-skip without it); luac -p
+      # syntax-checks every plugin file inside the suite.
+      - name: Install uv and lua
+        run: brew install uv lua
+
+      - name: Run service and plugin tests
+        working-directory: service
+        run: uv run --with pytest pytest -q
