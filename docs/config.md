@@ -94,10 +94,124 @@ those is poor, shorten the prompts to free budget for pixels rather than raising
 
 ---
 
+## `[quality]`
+
+CLAUDE.md §4.1. Every weight and threshold in the quality scorer lives here — the
+composite is deliberately not opaque, and these are the knobs to turn when scores
+cluster at one end of the range on your corpus. The commentary in
+`service/melampus/config.py` records how each default was calibrated against real
+frames; this table is the summary.
+
+Measurement scale and focus:
+
+| Key | Default | Why |
+|---|---|---|
+| `working_long_edge` | `1600` | Sharpness is scale-dependent, so everything is measured at one working size. |
+| `focus_window` | `15` | Local window for the focus-energy map. |
+| `focus_percentile` | `85.0` | Percentile of the focus map used for the frame-level focus score. |
+| `region_percentile` | `99.9` | Subject sharpness reads p99.9, not the mean or p99: smooth bokeh is quiet while uniform softness is noisy, so only the extreme percentiles separate defocus from sharp — and p99.9 still finds the sharp bill and eye on a low-texture subject like a Snowy Egret where p99 lands on plumage. |
+
+Subject detection:
+
+| Key | Default | Why |
+|---|---|---|
+| `merge_dilate` | `9` | Dilation joining nearby salient blobs into one subject. |
+| `min_blob_area_frac` | `0.002` | Blobs below this fraction of the frame are noise, not subjects. |
+| `area_exponent` | `0.35` | How strongly blob area counts when picking the primary subject. |
+| `centrality_strength` | `0.30` | Central blobs win ties — wildlife framing favours the middle. |
+| `box_pad_frac` | `0.08` | Padding around the detected box so wingtips are not cropped out of the measurement. |
+| `saliency_resize` | `64` | Saliency runs at thumbnail size; detail is not needed to find the subject. |
+| `saliency_blur_sigma` | `2.5` | Smoothing before thresholding the saliency map. |
+
+Mapping raw focus energy to a 0–100 score — **retune these first** if your
+photographs cluster at one end of the range:
+
+| Key | Default | Why |
+|---|---|---|
+| `knee_low` | `22.0` | Below this raw p99.9 value the score is 0. Sampled across a 194-frame corpus (p10=23.7, p50=47.4, p90=75.9) so the range spreads rather than pinning most frames at 100. |
+| `knee_high` | `78.0` | At and above this the score is 100. |
+| `size_reference_frac` | `0.08` | Subject-size fraction treated as the reference for sharpness comparability. |
+| `size_gain_strength` | `0.25` | How much small subjects are compensated — a distant speck cannot score like a full-frame portrait without help. |
+| `size_gain_max` | `1.35` | Cap on that compensation. |
+
+Motion vs defocus (reported separately per §4.1 — a directional wingbeat is often
+the point of the photograph):
+
+| Key | Default | Why |
+|---|---|---|
+| `anisotropy_floor` | `0.15` | Below this the blur is treated as isotropic defocus. |
+| `anisotropy_ceiling` | `0.55` | Above this it is confidently directional motion. |
+
+Eye / catchlight detection (weighted heavily when found, per §4.1):
+
+| Key | Default | Why |
+|---|---|---|
+| `search_percentile` | `99.0` | Catchlights live in the brightest sliver of the subject. |
+| `min_absolute_brightness` | `200` | A catchlight is near-specular; dimmer bright spots are plumage. |
+| `min_area_frac_of_subject` | `0.00005` | Lower bound — smaller is sensor noise. |
+| `max_area_frac_of_subject` | `0.02` | Upper bound — larger is sky through wings, not an eye. |
+| `min_circularity` | `0.55` | Catchlights are round; reflections on water are not. |
+| `min_ring_contrast` | `45.0` | A real catchlight sits inside a dark iris ring. |
+| `ring_dilate` | `5` | Ring sampled just outside the candidate blob. |
+| `patch_radius_mult` | `6.0` | Sharpness is then measured on a patch this many blob-radii wide — the eye region, not just the highlight. |
+| `min_eye_confidence` | `0.45` | Below this the eye result is discarded and subject sharpness is used instead. |
+
+Exposure — raw numbers are always reported; a penalty only accrues past the
+tolerance, because some clipping is always present on specular highlights and sky:
+
+| Key | Default | Why |
+|---|---|---|
+| `highlight_threshold` | `254` | Pixel value counted as clipped white. |
+| `shadow_threshold` | `1` | Pixel value counted as clipped black. |
+| `highlight_tolerance_pct` | `0.5` | Clipping up to this percentage is free. |
+| `shadow_tolerance_pct` | `0.5` | Same for shadows. |
+| `highlight_full_penalty_pct` | `12.0` | Clipping at this level zeroes the exposure component. |
+| `shadow_full_penalty_pct` | `12.0` | Same for shadows. |
+
+Framing and the composite:
+
+| Key | Default | Why |
+|---|---|---|
+| `edge_margin_frac` | `0.01` | Subjects inside this margin of the frame edge are flagged as clipped by the boundary. |
+| `weight_eye_sharpness` | `0.40` | Dominates because eye sharpness is what a wildlife photographer actually culls on. |
+| `weight_subject_sharpness` | `0.35` | The fallback signal when no eye is found. |
+| `weight_focus` | `0.20` | Frame-level focus placement. |
+| `weight_exposure` | `0.05` | Diagnostics carry the detail; the composite only nudges. |
+| `weight_motion` | `0.00` | Near-neutral by design — directional blur is often desirable, so it informs the separate motion report, not the score. |
+
+---
+
+## `[occurrence]`
+
+CLAUDE.md §4.3: candidates are re-scored against real occurrence records for the
+photo's place and month, via the GBIF occurrence API (open, no key). **No candidate
+is ever dropped** — a top pick with zero regional records is multiplied down and
+`range_flag`ged for review, because it is either a model error or a genuinely
+notable record, and both deserve eyes. Present-but-scarce species are demoted more
+gently and marked notable. Re-ranking degrades gracefully: no GPS, no network, or a
+non-organism profile (sport, fitness) simply skips it, with the reason recorded in
+the result.
+
+| Key | Default | Why |
+|---|---|---|
+| `enabled` | `true` | The highest-value accuracy feature (§4.3); on unless you are offline. |
+| `ebird_token` | *(none)* | Reserved for the eBird species-list cross-check — accepted and kept out of logs (`SecretStr`), but **not queried yet**; GBIF is the only source today. Free token from ebird.org/api/keygen. Set it in `melampus.local.toml` or `MELAMPUS_EBIRD_TOKEN`, never in tracked source. |
+| `default_latitude` | *(none)* | Used only for photos with no GPS of their own — per-photo GPS always wins. Unset, GPS-less photos skip re-ranking entirely. There is no sane universal default, so set your home patch here (in `melampus.local.toml`) if your camera does not embed coordinates. |
+| `default_longitude` | *(none)* | Pairs with `default_latitude`; both must be set to take effect. |
+| `default_location_name` | *(none)* | Human-readable label for reports; not used in queries. |
+| `radius_km` | `50.0` | Comfortably covers a refuge and its surroundings without reaching into a different faunal region. |
+| `cache_path` | `<repo>/.melampus_cache/occurrence.json` | Lookups are cached keyed on species, rounded coordinates and month (§4.3 — most shots cluster in a handful of places, so hit rates are high). No TTL: occurrence data moves slowly; delete the file to refresh. |
+| `notable_threshold` | `25` | Below this many regional records a species is present but scarce: demote gently and mark notable rather than treating it as absent. |
+| `absent_penalty` | `0.15` | Multiplier on confidence for zero-record candidates. Ordinal, not a probability. |
+| `notable_penalty` | `0.6` | Multiplier for scarce candidates — the pile worth looking at. |
+
+---
+
 ## `[run]`
 
 | Key | Default | Why |
 |---|---|---|
+| `profile` | `"wildlife"` | Which routing prompt runs Stage A: `wildlife` asks what organism this is, `sport` what activity. Separate profiles keep a footballer from being routed to `mammal` and asked for a species, and keep each prompt under the runtime's token ceiling. |
 | `prompts_dir` | `<repo>/prompts` | Per-taxon prompt templates as editable files (CLAUDE.md §4.2). Point this elsewhere to A/B a prompt set without touching the installed package. |
 | `cache_path` | `<repo>/.melampus_cache/identifications.jsonl` | Append-only JSONL, fsynced after every image. |
 | `max_retries` | `1` | One corrective retry on schema-validation failure, exactly as §4.2 specifies. Then the image is marked `unprocessed` rather than having a guess written to it. More retries mostly burn time on images the model cannot parse anyway. |
@@ -138,6 +252,7 @@ keyword travels with them.
 | `effort` | `"high"` | Anthropic only. These are the frames the local model could not resolve, so thinking depth is where the money should go. |
 | `max_tokens` | `1200` | Per reply (Stage B). |
 | `routing_max_tokens` | `900` | Stage A budget. **Do not lower this to the local default of 200.** On a model where thinking is on by default, `max_tokens` caps thinking *and* output together, so 200 is consumed before any JSON appears and every frame fails twice while being billed. |
+| `timeout_seconds` | `180.0` | Per-request ceiling. High-effort thinking on a hard frame is slow; a hung connection should still fail before the run does. |
 | `max_edge` | `2048` | Long edge sent to the cloud. Higher than the local `1280`, because the 1280 ceiling exists to dodge an mlx-vlm token bug that does not apply here, and resolution is the cheapest lever left on a hard frame. |
 | `confidence_below` | `0.80` | Escalate when the local top candidate scores under this. Ordinal, not calibrated — a ranking cut, not a probability. |
 | `on_abstain` | `true` | Escalate frames the local model declined to call. |
@@ -248,9 +363,10 @@ Three tests cover this and should be treated as load-bearing:
 The following are specified in CLAUDE.md §7 but belong to later stages, and are listed
 here so the gap is explicit rather than silent:
 
-- Quality composite weights and per-sub-metric tuning (Stage 2)
 - Rating breakpoints, flag thresholds, colour-label mapping (Stage 2 / 4)
 - Confidence band thresholds for the High / Medium / Low policy in §4.4 (Stage 2)
-- Occurrence API keys, cache TTL, offline mode (Stage 2)
+- The eBird species-list cross-check — `occurrence.ebird_token` is accepted and
+  stored safely, but no code queries eBird yet; GBIF is the only occurrence source
+- Occurrence cache TTL (the cache currently persists until deleted)
 - Keyword root and hierarchy style, per-field overwrite permissions, dry-run toggle,
   service autostart and idle-shutdown, smart-collection creation (Stages 3 and 4)
