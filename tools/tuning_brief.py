@@ -75,6 +75,11 @@ def main(argv: list[str]) -> int:
         from melampus.occurrence import GBIFClient, Location, OccurrenceCache
 
         cfg = load_config().occurrence
+        if cfg.default_latitude is None or cfg.default_longitude is None:
+            print("--check-range needs occurrence.default_latitude/longitude in config;"
+                  " skipping range counts.")
+            args.check_range = False
+    if args.check_range:
         client = GBIFClient(cache=OccurrenceCache(cfg.cache_path))
         where = Location(cfg.default_latitude, cfg.default_longitude, cfg.radius_km)
         for (_, predicted) in confusions:

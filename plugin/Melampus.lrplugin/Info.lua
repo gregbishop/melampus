@@ -23,7 +23,7 @@ return {
 
 	LrToolkitIdentifier = 'net.gregbishop.melampus',
 	LrPluginName = 'Melampus',
-	LrPluginInfoUrl = 'https://github.com/',
+	LrPluginInfoUrl = 'https://github.com/gregbishop/melampus',
 
 	LrInitPlugin = 'MelampusInit.lua',
 

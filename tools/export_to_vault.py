@@ -34,9 +34,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from cluster_encounters import cluster  # noqa: E402
 
-DEFAULT_LOCATION = "Merritt Island National Wildlife Refuge, FL"
-
-
 def norm(name: str | None) -> str:
     return "".join(c for c in (name or "").lower() if c.isalnum())
 
@@ -56,7 +53,7 @@ def main(argv: list[str]) -> int:
     ap.add_argument("results", type=Path)
     ap.add_argument("out", type=Path)
     ap.add_argument("--gap", type=float, default=10.0)
-    ap.add_argument("--location", default=DEFAULT_LOCATION)
+    ap.add_argument("--location", default=None)
     ap.add_argument("--min-agreement", type=float, default=0.6,
                     help="drop encounters whose frames disagree more than this")
     ap.add_argument("--reviewed", action="store_true",
@@ -170,7 +167,7 @@ def main(argv: list[str]) -> int:
         seen = by_date[when]
         species_here = sorted({s for s, _, _ in seen})
         out += [
-            f"### {when} — {args.location}",
+            f"### {when} — {args.location}" if args.location else f"### {when}",
             "",
             f"{len(seen)} encounters, {len(species_here)} species, "
             f"{sum(f for _, f, _ in seen)} frames.",

@@ -31,7 +31,7 @@ from pathlib import Path
 
 GBIF_SEARCH = "https://api.gbif.org/v1/occurrence/search"
 EBIRD_SPPLIST = "https://api.ebird.org/v2/product/spplist/{region}"
-USER_AGENT = "melampus/0.1 (local wildlife photo triage; +https://github.com/)"
+USER_AGENT = "melampus/0.1 (local wildlife photo triage; +https://github.com/gregbishop/melampus)"
 
 
 @dataclass(frozen=True)

@@ -131,12 +131,13 @@ class OccurrenceConfig(_Base):
     # leak the key. The docs promise the key never reaches a loggable object;
     # this makes that structural rather than a convention.
     ebird_token: SecretStr | None = None
-    # The Canon R3 has no GPS receiver and nothing in this catalog carries
-    # coordinates, so a default location is the only way §4.3 can run at all.
-    # Per-photo GPS, when present, always wins over this.
-    default_latitude: float | None = 28.65
-    default_longitude: float | None = -80.72
-    default_location_name: str = "Merritt Island National Wildlife Refuge, FL"
+    # Bodies without a GPS receiver produce photos with no coordinates, so a
+    # default location is the only way §4.3 can run on them. There is no sane
+    # universal default — unset, occurrence re-ranking is skipped for photos
+    # without GPS. Per-photo GPS, when present, always wins over this.
+    default_latitude: float | None = None
+    default_longitude: float | None = None
+    default_location_name: str | None = None
     # 50 km comfortably covers a refuge and its surroundings without reaching into
     # a different faunal region.
     radius_km: float = 50.0
