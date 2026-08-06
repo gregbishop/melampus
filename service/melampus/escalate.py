@@ -24,7 +24,6 @@ Everything here exists to keep that from becoming a foot-gun:
 
 from __future__ import annotations
 
-import os
 import sys
 import time
 from collections.abc import Callable, Iterable, Sequence
@@ -34,6 +33,8 @@ from pathlib import Path
 from .cache import ResultCache
 from .config import EscalationConfig, MelampusConfig
 from .images import content_hash
+from .providers import DEFAULT_MODELS as PROVIDER_DEFAULT_MODELS
+from .providers import KEY_VARIABLES, resolve_provider_key
 from .schema import ImageResult, Taxon
 
 #: Rough token usage per image, for the estimate printed before spending anything.
@@ -46,20 +47,11 @@ from .schema import ImageResult, Taxon
 _INPUT_TOKENS_PER_IMAGE = 5_400
 _OUTPUT_TOKENS_PER_IMAGE = 900
 
-#: Where each provider's key is looked for, in order, when the config has none.
-#: Keys never cross providers: an Anthropic key must not silently authorise a
-#: request to OpenAI, or the "which cloud am I using" question has no answer.
-_KEY_VARIABLES = {
-    "anthropic": ("MELAMPUS_ANTHROPIC_KEY", "ANTHROPIC_API_KEY"),
-    "openai": ("MELAMPUS_OPENAI_KEY", "OPENAI_API_KEY"),
-}
-
-#: Starting points only. Vision model names move faster than this file does —
-#: check the provider's current listing and override with --escalate-model.
-DEFAULT_MODELS = {
-    "anthropic": "claude-opus-5",
-    "openai": "gpt-5",
-}
+# The provider registry (key variables, default models) is shared with the
+# primary-backend factory in providers.py — the same knowledge must not fork.
+# The old names are kept as aliases; tests and tooling refer to them.
+_KEY_VARIABLES = KEY_VARIABLES
+DEFAULT_MODELS = PROVIDER_DEFAULT_MODELS
 
 
 class EscalationRefused(RuntimeError):
@@ -84,14 +76,7 @@ def resolve_api_key(config: EscalationConfig) -> str | None:
     Order: explicit config (from the git-ignored local file or an override), then
     the provider's own environment variables.
     """
-    if config.api_key:
-        # SecretStr keeps it out of reprs and tracebacks; unwrap only here.
-        return config.api_key.get_secret_value()
-    for name in _KEY_VARIABLES.get((config.provider or "").strip().lower(), ()):
-        value = os.environ.get(name)
-        if value:
-            return value
-    return None
+    return resolve_provider_key(config.provider, config.api_key)
 
 
 def resolve_model(config: EscalationConfig) -> str:

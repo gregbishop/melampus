@@ -8,9 +8,16 @@ version = "0.1.0"
 description = "Local species identification and quality triage for wildlife photography"
 requires-python = ">=3.12,<3.13"
 dependencies = [
-    "mlx-vlm>=0.6.7",
+    # The local runtime exists only on Apple Silicon. Elsewhere (Windows, Linux,
+    # Intel Macs) the install succeeds without it and [model] backend selects a
+    # cloud provider instead — see readme.md § Windows.
+    "mlx-vlm>=0.6.7; sys_platform == 'darwin' and platform_machine == 'arm64'",
     "pydantic>=2.9",
     "pillow>=11",
+    # quality.py imports these directly; declared so non-mac installs get them
+    # rather than borrowing them transitively from mlx-vlm.
+    "numpy>=2",
+    "opencv-python-headless>=4.10",
 ]
 
 [project.optional-dependencies]

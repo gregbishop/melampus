@@ -32,7 +32,8 @@ the numbers do and don't support.
 
 ## Requirements
 
-- **Apple Silicon Mac.** MLX is arm64-only. Developed on an M4 Max / 128 GB.
+- **Apple Silicon Mac** for local inference. MLX is arm64-only. Developed on an
+  M4 Max / 128 GB. (Windows works too — with cloud inference; see § Windows.)
 - **Python 3.12** — not 3.13+. The `mlx-vlm` dependency stack publishes wheels for
   3.12; 3.13 runs ahead of parts of it.
 - ~20 GB of disk for the default model.
@@ -53,6 +54,43 @@ HF_HUB_DISABLE_XET=1 .venv/bin/hf download mlx-community/Qwen3-VL-30B-A3B-Instru
 
 `HF_HUB_DISABLE_XET=1` is not optional on some networks — see
 [docs/troubleshooting.md](docs/troubleshooting.md).
+
+## Windows (cloud inference)
+
+There is no local model runtime on Windows — MLX is Apple-Silicon-only — so on
+Windows the primary backend is a cloud provider instead: the same two backends
+the Mac uses for escalation, promoted to answering everything. Same prompts,
+same schema validation, same corrective retry; the only difference is who runs
+the model. Be aware of what that trades away: **every analysed frame leaves the
+machine and is billed**, where the Mac path sends nothing anywhere. The CLI
+prints a cost estimate and asks before spending (the plugin passes `--yes`,
+because it cannot ask — the estimate still lands in the log).
+
+Install (PowerShell, from the repo folder; `mlx-vlm` is skipped automatically
+on non-mac platforms):
+
+```powershell
+uv venv --python 3.12 .venv
+uv pip install --python .venv\Scripts\python.exe -e "./service[dev,cloud]"
+```
+
+Configure the backend and key in `melampus.local.toml` (git-ignored):
+
+```toml
+[model]
+backend = "anthropic"   # or "openai"; add base_url for any compatible endpoint
+```
+
+with `MELAMPUS_ANTHROPIC_KEY` (or `MELAMPUS_OPENAI_KEY`) set in your
+environment. Then everything works as on the Mac, plugin included:
+
+```powershell
+.venv\Scripts\melampus-id.exe fixtures\ --limit 3
+```
+
+One-off runs can skip the config file: `--backend anthropic`. The Lightroom
+plugin detects the platform itself — nothing to configure beyond the backend
+and key above.
 
 ### Available models
 

@@ -110,7 +110,7 @@ class AnthropicBackend(VLMBackend):
     ) -> None:
         if not api_key:
             raise ValueError(
-                "Cloud escalation needs an Anthropic API key. Set MELAMPUS_ANTHROPIC_KEY "
+                "The Anthropic backend needs an API key. Set MELAMPUS_ANTHROPIC_KEY "
                 "in your environment, or put it in melampus.local.toml (git-ignored). "
                 "Never commit it."
             )
@@ -238,7 +238,7 @@ class OpenAIBackend(VLMBackend):
     ) -> None:
         if not api_key:
             raise ValueError(
-                "Cloud escalation needs an OpenAI API key. Set MELAMPUS_OPENAI_KEY in "
+                "The OpenAI backend needs an API key. Set MELAMPUS_OPENAI_KEY in "
                 "your environment, or put it in melampus.local.toml (git-ignored). "
                 "Never commit it."
             )

@@ -115,32 +115,75 @@ function Analyze.cleanUp(folder)
 	return size
 end
 
+--[[
+Platform seams. Lightroom sets WIN_ENV / MAC_ENV globals; everything the shell
+sees differs between them, so the differences live here and nowhere else.
+On Windows the venv keeps executables in Scripts\ with .exe suffixes, commands
+run under cmd.exe (double-quote quoting, `cd /d` to survive a drive change),
+and the null device is NUL.
+--]]
+
 --- Shell-quote a path so spaces and quotes survive the trip.
 local function quote(text)
-	return "'" .. string.gsub(tostring(text), "'", "'\\''") .. "'"
+	text = tostring(text)
+	if WIN_ENV then
+		-- cmd.exe quoting. A Windows filename cannot contain a double quote,
+		-- so wrapping is sufficient.
+		return '"' .. text .. '"'
+	end
+	return "'" .. string.gsub(text, "'", "'\\''") .. "'"
+end
+
+--- Absolute path of a venv entry point, wherever this platform keeps it.
+local function venvTool(repo, tool)
+	local venv = LrPathUtils.child(repo, '.venv')
+	if WIN_ENV then
+		return LrPathUtils.child(LrPathUtils.child(venv, 'Scripts'), tool .. '.exe')
+	end
+	return LrPathUtils.child(LrPathUtils.child(venv, 'bin'), tool)
+end
+
+local NULL_DEVICE = WIN_ENV and 'NUL' or '/dev/null'
+-- Plain `cd` on Windows does not change drive; /d does both.
+local CHDIR = WIN_ENV and 'cd /d' or 'cd'
+
+--- The one-time setup instructions, phrased for the OS the user is actually on.
+local function setupHint()
+	if WIN_ENV then
+		return '\n\nRun this once in PowerShell, from the melampus folder:\n'
+			.. '  uv venv --python 3.12 .venv\n'
+			.. '  uv pip install --python .venv\\Scripts\\python.exe -e "./service[dev,cloud]"\n'
+			.. '\nWindows has no local model runtime: set [model] backend = "anthropic"\n'
+			.. 'or "openai" in melampus.local.toml, with the matching API key.'
+	end
+	return '\n\nRun this once in Terminal, from the melampus folder:\n'
+		.. '  uv venv --python 3.12 .venv\n'
+		.. '  uv pip install --python .venv/bin/python -e "./service[dev]"'
 end
 
 --- Run the identification pipeline over a folder of previews.
 -- Returns true plus the results path, or false plus a message.
 function Analyze.run(repo, previewFolder, resultsPath, profile)
-	local python = LrPathUtils.child(LrPathUtils.child(repo, '.venv'), 'bin/python')
+	local python = venvTool(repo, 'python')
 	if not LrFileUtils.exists(python) then
 		return false, 'Could not find the Melampus Python environment at:\n' .. python
-			.. '\n\nRun this once in Terminal, from the melampus folder:\n'
-			.. '  uv venv --python 3.12 .venv\n'
-			.. '  uv pip install --python .venv/bin/python -e "./service[dev]"'
+			.. setupHint()
 	end
 
-	local melampus = LrPathUtils.child(LrPathUtils.child(repo, '.venv'), 'bin/melampus-id')
+	local melampus = venvTool(repo, 'melampus-id')
 	local raw = LrPathUtils.child(previewFolder, '_raw_results.json')
 
 	-- Identification. Long-running, so it must not be inside any write gate.
+	-- --yes: this is a non-interactive caller, so the cloud-primary cost gate
+	-- cannot ask. Selecting the photos and configuring a cloud backend with a
+	-- key were the deliberate acts; the estimate still goes to the CLI log.
 	local command = table.concat({
-		'cd', quote(repo), '&&',
+		CHDIR, quote(repo), '&&',
 		quote(melampus), quote(previewFolder),
 		'--profile', quote(profile or 'wildlife'),
 		'--json-out', quote(raw),
-		'>/dev/null 2>&1',
+		'--yes',
+		'>' .. NULL_DEVICE .. ' 2>&1',
 	}, ' ')
 	Log.info('running: ' .. command)
 	local code = LrTasks.execute(command)
@@ -152,12 +195,12 @@ function Analyze.run(repo, previewFolder, resultsPath, profile)
 	-- Enrich with burst agreement, range flags and quality so the write gates
 	-- and star ratings have something to work with.
 	local enrich = table.concat({
-		'cd', quote(repo), '&&',
-		quote(LrPathUtils.child(LrPathUtils.child(repo, '.venv'), 'bin/python')),
+		CHDIR, quote(repo), '&&',
+		quote(python),
 		quote(LrPathUtils.child(LrPathUtils.child(repo, 'tools'), 'make_plugin_results.py')),
 		quote(previewFolder), quote(raw), quote(resultsPath),
 		'--occurrence', '--quality',
-		'>/dev/null 2>&1',
+		'>' .. NULL_DEVICE .. ' 2>&1',
 	}, ' ')
 	Log.info('running: ' .. enrich)
 	code = LrTasks.execute(enrich)

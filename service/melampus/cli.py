@@ -6,10 +6,17 @@ import argparse
 import sys
 from pathlib import Path
 
-from .backend import MLXBackend
 from .cache import ResultCache
 from .config import load_config
 from .identify import Identifier
+from .images import content_hash
+from .providers import (
+    BACKEND_CHOICES,
+    BackendUnavailable,
+    apply_cloud_primary_defaults,
+    build_primary_backend,
+    is_cloud_primary,
+)
 from .report import name_quality, raw_table, score
 from .runner import BatchStats, list_images, run_batch, stratify_by_prediction
 from .schema import ImageResult
@@ -23,17 +30,17 @@ def _humanise(seconds: float) -> str:
     return f"{seconds / 3600:.1f}h"
 
 
-def _confirm(count: int, cost: float) -> bool:
+def _confirm(count: int, cost: float, *, yes_flag: str = "--escalate-yes") -> bool:
     """Ask before spending. Returns False rather than guessing when not a terminal.
 
     A non-interactive caller (cron, the Lightroom plugin, CI) has no way to answer,
     and defaulting to "yes" there would make the confirmation decorative. Such
-    callers pass --escalate-yes deliberately.
+    callers pass the yes-flag deliberately.
     """
     if not sys.stdin.isatty():
         print(
             f"  {count} frame(s), est. ${cost:.2f}. Not a terminal, so nothing was "
-            "sent — pass --escalate-yes to run non-interactively.",
+            f"sent — pass {yes_flag} to run non-interactively.",
             file=sys.stderr,
         )
         return False
@@ -161,6 +168,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("folder", type=Path, help="folder of JPEGs")
     ap.add_argument("--config", type=Path, default=None)
     ap.add_argument("--model", default=None, help="override model repo")
+    ap.add_argument("--backend", choices=BACKEND_CHOICES, default=None,
+                    help="what answers: mlx locally (default), or a cloud provider "
+                         "for machines with no local runtime")
+    ap.add_argument("--yes", action="store_true",
+                    help="skip the cost confirmation when the primary backend is a "
+                         "cloud provider (for non-interactive callers)")
     ap.add_argument("--profile", choices=("wildlife", "sport"), default=None,
                     help="what kind of shoot this is; picks the routing prompt")
     ap.add_argument("--cache", type=Path, default=None)
@@ -198,6 +211,8 @@ def main(argv: list[str] | None = None) -> int:
     overrides: dict = {}
     if args.model:
         overrides.setdefault("model", {})["repo"] = args.model
+    if args.backend:
+        overrides.setdefault("model", {})["backend"] = args.backend
     if args.profile:
         overrides.setdefault("run", {})["profile"] = args.profile
     if args.cache:
@@ -229,10 +244,57 @@ def main(argv: list[str] | None = None) -> int:
         print(f"stratified selection: {len(paths)} images", file=sys.stderr)
 
     if not args.report_only:
-        backend = MLXBackend(config.model.repo, config.model.temperature)
-        print(f"loading {config.model.repo} ...", file=sys.stderr)
-        backend.warmup()
+        cloud_primary = is_cloud_primary(config)
+        if cloud_primary:
+            # Before the identifier exists: its cache fingerprint bakes in config
+            # values, so retuning afterwards would fingerprint the wrong settings.
+            for change in apply_cloud_primary_defaults(config):
+                print(f"  cloud default: {change}", file=sys.stderr)
+        try:
+            backend = build_primary_backend(config)
+        except ImportError:
+            extra = "openai" if config.model.backend == "openai" else "cloud"
+            print(
+                f"The {config.model.backend} SDK is not installed. Run:\n"
+                f'  uv pip install --python .venv/bin/python "./service[{extra}]"',
+                file=sys.stderr,
+            )
+            return 3
+        except (BackendUnavailable, ValueError) as exc:
+            print(str(exc), file=sys.stderr)
+            return 3
         identifier = Identifier(backend, config)
+
+        if cloud_primary:
+            # A cloud primary bills every frame, not just an escalated tail — so it
+            # gets the same courtesy the tail gets: cost first, spend second.
+            from .escalate import estimate_cost_usd
+
+            selected = paths[: args.limit if args.limit is not None else len(paths)]
+            pending = 0
+            for path in selected:
+                try:
+                    digest = content_hash(path)
+                except OSError:
+                    continue
+                if args.force or not cache.has_success(digest, identifier.fingerprint):
+                    pending += 1
+            rates = config.escalation  # per-Mtok prices live in [escalation]
+            cost = estimate_cost_usd(pending, rates)
+            print(
+                f"every frame goes to {config.model.backend}/{backend.name}: "
+                f"{pending} frame(s) to process, est. ${cost:.2f} "
+                f"at ${rates.input_usd_per_mtok:g}/${rates.output_usd_per_mtok:g} per Mtok "
+                "(set escalation.input_usd_per_mtok / output_usd_per_mtok to match "
+                "your provider)",
+                file=sys.stderr,
+            )
+            if pending and not args.yes and not _confirm(pending, cost, yes_flag="--yes"):
+                print("  cancelled; nothing was sent", file=sys.stderr)
+                return 0
+        else:
+            print(f"loading {config.model.repo} ...", file=sys.stderr)
+            backend.warmup()
 
         def progress(result: ImageResult, stats: BatchStats) -> None:
             done = stats.processed

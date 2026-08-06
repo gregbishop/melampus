@@ -16,8 +16,25 @@ class _Base(BaseModel):
 
 
 class ModelConfig(_Base):
-    # CLAUDE.md §3 wants the model to be a setting, never a hardcode.
+    # Which inference engine the *primary* pipeline talks to. CLAUDE.md §3 built
+    # the backend seam; this makes it a setting, which is what lets the same
+    # repo run on a machine with no local runtime at all (Windows).
+    #   mlx       — local, Apple Silicon only. The default; the local-first path.
+    #   anthropic — the Claude API. Every frame billed: see docs/config.md.
+    #   openai    — OpenAI, or anything chat-completions-compatible via base_url.
+    backend: str = "mlx"
+    # CLAUDE.md §3 wants the model to be a setting, never a hardcode. (mlx only.)
     repo: str = "mlx-community/Qwen3-VL-30B-A3B-Instruct-4bit"
+    # Cloud model name; None means the provider's default (providers.DEFAULT_MODELS).
+    name: str | None = None
+    # OpenAI-compatible endpoint override: OpenRouter, LM Studio, vLLM, a proxy, …
+    base_url: str | None = None
+    # Never set here in tracked source. Comes from MELAMPUS_ANTHROPIC_KEY /
+    # MELAMPUS_OPENAI_KEY, the provider's own variable, or melampus.local.toml.
+    api_key: SecretStr | None = None
+    # Anthropic-only; ignored elsewhere.
+    effort: str = "high"
+    timeout_seconds: float = 180.0
     max_tokens: int = 900
     # Identification wants determinism, not creativity.
     temperature: float = 0.0
