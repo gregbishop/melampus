@@ -15,9 +15,13 @@ dependencies = [
     "pydantic>=2.9",
     "pillow>=11",
     # quality.py imports these directly; declared so non-mac installs get them
-    # rather than borrowing them transitively from mlx-vlm.
+    # rather than borrowing them transitively from mlx-vlm. opencv is gated to
+    # the platforms where mlx-vlm is absent: mlx-vlm already requires the full
+    # opencv-python on Apple Silicon, and installing both distributions clobbers
+    # one wheel's files with the other's, leaving cv2 in an order-dependent
+    # broken state.
     "numpy>=2",
-    "opencv-python-headless>=4.10",
+    "opencv-python-headless>=4.10; sys_platform != 'darwin' or platform_machine != 'arm64'",
 ]
 
 [project.optional-dependencies]

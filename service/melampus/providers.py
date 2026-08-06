@@ -9,6 +9,7 @@ live here and both callers import them.
 
 from __future__ import annotations
 
+import platform
 import sys
 
 from pydantic import SecretStr
@@ -82,7 +83,10 @@ def build_primary_backend(config: MelampusConfig) -> VLMBackend:
     kind = (config.model.backend or "mlx").strip().lower()
 
     if kind == "mlx":
-        if sys.platform != "darwin":
+        # Both halves of the pyproject marker, or an Intel Mac passes the OS
+        # check and then dies on a raw ModuleNotFoundError at warmup instead of
+        # this message.
+        if sys.platform != "darwin" or platform.machine() != "arm64":
             raise BackendUnavailable(
                 "The local MLX backend only runs on Apple Silicon Macs. On this "
                 "machine set [model] backend = \"anthropic\" or \"openai\" in the "
@@ -146,4 +150,15 @@ def apply_cloud_primary_defaults(config: MelampusConfig) -> list[str]:
     if "routing_max_tokens" not in model.model_fields_set:
         model.routing_max_tokens = 900
         changed.append("model.routing_max_tokens -> 900 (200 starves a thinking model)")
+    if "cache_path" not in config.run.model_fields_set:
+        # The reason escalation has its own cache file (config.py, EscalationConfig
+        # .cache_path) applies with more force to a cloud primary: results carry
+        # this backend's fingerprint, so sharing the local file would let the next
+        # mlx pass silently overwrite answers that were paid for — and flipping
+        # back would re-bill every one of them.
+        config.run.cache_path = config.run.cache_path.with_name("identifications-cloud.jsonl")
+        changed.append(
+            "run.cache_path -> identifications-cloud.jsonl "
+            "(cloud answers must not overwrite local ones)"
+        )
     return changed

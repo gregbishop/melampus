@@ -62,16 +62,22 @@ Windows the primary backend is a cloud provider instead: the same two backends
 the Mac uses for escalation, promoted to answering everything. Same prompts,
 same schema validation, same corrective retry; the only difference is who runs
 the model. Be aware of what that trades away: **every analysed frame leaves the
-machine and is billed**, where the Mac path sends nothing anywhere. The CLI
-prints a cost estimate and asks before spending (the plugin passes `--yes`,
-because it cannot ask — the estimate still lands in the log).
+machine and is billed**, where the Mac path sends nothing anywhere. Three
+guards keep that predictable: the CLI prints a cost estimate and asks before
+spending (the plugin passes `--yes` because it cannot ask — its CLI output,
+estimate included, is written to `melampus-cli.log` in the OS temp directory);
+`model.max_images` (default 200) hard-caps any single run, `--yes` or not; and
+cloud results live in their own cache file so a later local pass cannot
+overwrite answers you paid for. Set `escalation.input_usd_per_mtok` /
+`output_usd_per_mtok` to your model's rates so the estimate means something.
 
 Install (PowerShell, from the repo folder; `mlx-vlm` is skipped automatically
-on non-mac platforms):
+on non-mac platforms; drop `cloud` or `openai` if you'll only ever use the
+other provider):
 
 ```powershell
 uv venv --python 3.12 .venv
-uv pip install --python .venv\Scripts\python.exe -e "./service[dev,cloud]"
+uv pip install --python .venv\Scripts\python.exe -e "./service[dev,cloud,openai]"
 ```
 
 Configure the backend and key in `melampus.local.toml` (git-ignored):

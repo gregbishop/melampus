@@ -35,6 +35,14 @@ class ModelConfig(_Base):
     # Anthropic-only; ignored elsewhere.
     effort: str = "high"
     timeout_seconds: float = 180.0
+    # Cloud primary only; the mlx backend ignores it. Same rationale as
+    # escalation.max_images: a cloud primary bills every frame, and a mistyped
+    # flag or an over-broad selection must not turn into an unexpected invoice
+    # — the ceiling is low enough to notice and must be raised deliberately.
+    # Unlike escalation there is no "most uncertain first" ordering to salvage a
+    # truncated run, so exceeding the cap refuses outright rather than billing
+    # an arbitrary subset.
+    max_images: int = Field(default=200, ge=0, le=5000)
     max_tokens: int = 900
     # Identification wants determinism, not creativity.
     temperature: float = 0.0

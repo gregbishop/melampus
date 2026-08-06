@@ -22,6 +22,11 @@ from .runner import BatchStats, list_images, run_batch, stratify_by_prediction
 from .schema import ImageResult
 
 
+def _venv_python() -> str:
+    """The venv interpreter path for install hints, phrased for this OS."""
+    return ".venv\\Scripts\\python.exe" if sys.platform == "win32" else ".venv/bin/python"
+
+
 def _humanise(seconds: float) -> str:
     if seconds < 90:
         return f"{seconds:.0f}s"
@@ -72,7 +77,7 @@ def _run_escalation(paths, local_cache: ResultCache, config, *,
             extra = "openai" if config.escalation.provider == "openai" else "cloud"
             print(
                 f"The {config.escalation.provider} SDK is not installed. Run:\n"
-                f'  uv pip install --python .venv/bin/python "./service[{extra}]"',
+                f'  uv pip install --python {_venv_python()} "./service[{extra}]"',
                 file=sys.stderr,
             )
             return 3
@@ -229,6 +234,14 @@ def main(argv: list[str] | None = None) -> int:
         overrides.setdefault("escalation", {})["base_url"] = args.escalate_base_url
     config = load_config(args.config, **overrides)
 
+    cloud_primary = is_cloud_primary(config)
+    if cloud_primary:
+        # Before anything else reads config: the cache opened below must be the
+        # cloud file (paid answers never share the local one), and the identifier's
+        # fingerprint bakes in the retuned values.
+        for change in apply_cloud_primary_defaults(config):
+            print(f"  cloud default: {change}", file=sys.stderr)
+
     if not args.folder.is_dir():
         print(f"not a folder: {args.folder}", file=sys.stderr)
         return 2
@@ -244,19 +257,13 @@ def main(argv: list[str] | None = None) -> int:
         print(f"stratified selection: {len(paths)} images", file=sys.stderr)
 
     if not args.report_only:
-        cloud_primary = is_cloud_primary(config)
-        if cloud_primary:
-            # Before the identifier exists: its cache fingerprint bakes in config
-            # values, so retuning afterwards would fingerprint the wrong settings.
-            for change in apply_cloud_primary_defaults(config):
-                print(f"  cloud default: {change}", file=sys.stderr)
         try:
             backend = build_primary_backend(config)
         except ImportError:
             extra = "openai" if config.model.backend == "openai" else "cloud"
             print(
                 f"The {config.model.backend} SDK is not installed. Run:\n"
-                f'  uv pip install --python .venv/bin/python "./service[{extra}]"',
+                f'  uv pip install --python {_venv_python()} "./service[{extra}]"',
                 file=sys.stderr,
             )
             return 3
@@ -289,6 +296,18 @@ def main(argv: list[str] | None = None) -> int:
                 "your provider)",
                 file=sys.stderr,
             )
+            # The hard ceiling holds even for a confirmed or --yes run: unlike
+            # escalation there is no most-uncertain-first ordering to make a
+            # truncated batch meaningful, so refusing outright beats billing an
+            # arbitrary subset. Raising it is a config edit, i.e. deliberate.
+            if pending > config.model.max_images:
+                print(
+                    f"  refused: {pending} frame(s) exceed model.max_images = "
+                    f"{config.model.max_images}. A cloud primary bills every frame — "
+                    "raise model.max_images in config, or narrow the run with --limit.",
+                    file=sys.stderr,
+                )
+                return 3
             if pending and not args.yes and not _confirm(pending, cost, yes_flag="--yes"):
                 print("  cancelled; nothing was sent", file=sys.stderr)
                 return 0

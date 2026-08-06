@@ -143,16 +143,27 @@ local function venvTool(repo, tool)
 	return LrPathUtils.child(LrPathUtils.child(venv, 'bin'), tool)
 end
 
-local NULL_DEVICE = WIN_ENV and 'NUL' or '/dev/null'
 -- Plain `cd` on Windows does not change drive; /d does both.
 local CHDIR = WIN_ENV and 'cd /d' or 'cd'
+
+--- Where the CLI's own output goes. Not the null device: the cloud-primary
+-- cost estimate (and any refusal, e.g. the model.max_images ceiling) prints to
+-- stderr, and a non-interactive caller that discards it has erased the only
+-- record of what a run was going to cost. Lives in the OS temp directory: the
+-- shell does not create directories for a redirect, and temp is the one
+-- location guaranteed to exist on both platforms (the plugin-log directory is
+-- not — Log.path() is a macOS layout). Outside previewFolder so cleanUp()
+-- does not take the evidence with it.
+local function cliLogPath()
+	return LrPathUtils.child(LrPathUtils.getStandardFilePath('temp'), 'melampus-cli.log')
+end
 
 --- The one-time setup instructions, phrased for the OS the user is actually on.
 local function setupHint()
 	if WIN_ENV then
 		return '\n\nRun this once in PowerShell, from the melampus folder:\n'
 			.. '  uv venv --python 3.12 .venv\n'
-			.. '  uv pip install --python .venv\\Scripts\\python.exe -e "./service[dev,cloud]"\n'
+			.. '  uv pip install --python .venv\\Scripts\\python.exe -e "./service[dev,cloud,openai]"\n'
 			.. '\nWindows has no local model runtime: set [model] backend = "anthropic"\n'
 			.. 'or "openai" in melampus.local.toml, with the matching API key.'
 	end
@@ -170,43 +181,54 @@ function Analyze.run(repo, previewFolder, resultsPath, profile)
 			.. setupHint()
 	end
 
+	local cliLog = cliLogPath()
+	if WIN_ENV and (tostring(repo) .. tostring(previewFolder) .. tostring(cliLog)):find('%%') then
+		-- cmd.exe expands %NAME% even inside double quotes, silently rewriting
+		-- the path before execution. Refusing loudly beats running against a
+		-- path the user never named.
+		return false, 'A path contains "%", which the Windows shell rewrites:\n'
+			.. repo .. '\n' .. previewFolder
+			.. '\n\nMove the melampus folder to a path without "%" characters.'
+	end
+
 	local melampus = venvTool(repo, 'melampus-id')
 	local raw = LrPathUtils.child(previewFolder, '_raw_results.json')
 
 	-- Identification. Long-running, so it must not be inside any write gate.
 	-- --yes: this is a non-interactive caller, so the cloud-primary cost gate
 	-- cannot ask. Selecting the photos and configuring a cloud backend with a
-	-- key were the deliberate acts; the estimate still goes to the CLI log.
+	-- key were the deliberate acts; the estimate is written to melampus-cli.log,
+	-- and the model.max_images ceiling still refuses an oversized run outright.
 	local command = table.concat({
 		CHDIR, quote(repo), '&&',
 		quote(melampus), quote(previewFolder),
 		'--profile', quote(profile or 'wildlife'),
 		'--json-out', quote(raw),
 		'--yes',
-		'>' .. NULL_DEVICE .. ' 2>&1',
+		'>' .. quote(cliLog) .. ' 2>&1',
 	}, ' ')
 	Log.info('running: ' .. command)
 	local code = LrTasks.execute(command)
 	if code ~= 0 then
 		return false, 'Identification failed (exit ' .. tostring(code)
-			.. ').\n\nSee the log:\n' .. Log.path()
+			.. ').\n\nSee the logs:\n' .. Log.path() .. '\n' .. cliLog
 	end
 
 	-- Enrich with burst agreement, range flags and quality so the write gates
-	-- and star ratings have something to work with.
+	-- and star ratings have something to work with. Appends to the same CLI log.
 	local enrich = table.concat({
 		CHDIR, quote(repo), '&&',
 		quote(python),
 		quote(LrPathUtils.child(LrPathUtils.child(repo, 'tools'), 'make_plugin_results.py')),
 		quote(previewFolder), quote(raw), quote(resultsPath),
 		'--occurrence', '--quality',
-		'>' .. NULL_DEVICE .. ' 2>&1',
+		'>>' .. quote(cliLog) .. ' 2>&1',
 	}, ' ')
 	Log.info('running: ' .. enrich)
 	code = LrTasks.execute(enrich)
 	if code ~= 0 then
 		return false, 'Post-processing failed (exit ' .. tostring(code)
-			.. ').\n\nSee the log:\n' .. Log.path()
+			.. ').\n\nSee the logs:\n' .. Log.path() .. '\n' .. cliLog
 	end
 
 	return true, resultsPath

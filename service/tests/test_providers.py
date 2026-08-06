@@ -8,6 +8,7 @@ retuned for a cloud primary without ever overriding an explicit setting.
 
 from __future__ import annotations
 
+import platform
 import sys
 import types
 
@@ -43,6 +44,10 @@ def stub_sdks(monkeypatch):
     monkeypatch.setitem(sys.modules, "openai", types.ModuleType("openai"))
 
 
+@pytest.mark.skipif(
+    sys.platform != "darwin" or platform.machine() != "arm64",
+    reason="the mlx default only constructs on Apple Silicon",
+)
 def test_default_backend_is_local_mlx():
     config = _cfg()
     assert config.model.backend == "mlx"
@@ -52,12 +57,22 @@ def test_default_backend_is_local_mlx():
     assert backend.repo == config.model.repo
 
 
-def test_mlx_is_refused_off_apple_silicon_with_directions(monkeypatch):
+def test_mlx_is_refused_on_windows_with_directions(monkeypatch):
     monkeypatch.setattr(providers.sys, "platform", "win32")
     with pytest.raises(providers.BackendUnavailable) as err:
         providers.build_primary_backend(_cfg())
     message = str(err.value)
     assert "anthropic" in message and "openai" in message and "--backend" in message
+
+
+def test_mlx_is_refused_on_intel_mac(monkeypatch):
+    """darwin alone is not enough — the pyproject marker also requires arm64,
+    so an Intel Mac must get the helpful refusal, not a ModuleNotFoundError
+    at warmup."""
+    monkeypatch.setattr(providers.sys, "platform", "darwin")
+    monkeypatch.setattr(providers.platform, "machine", lambda: "x86_64")
+    with pytest.raises(providers.BackendUnavailable):
+        providers.build_primary_backend(_cfg())
 
 
 def test_anthropic_primary_uses_provider_default_model(
@@ -115,18 +130,24 @@ def test_cloud_defaults_retuned_when_left_at_defaults():
     assert config.image.fallback_edges == []
     assert config.model.max_tokens == 1200
     assert config.model.routing_max_tokens == 900
-    assert len(changed) == 4
+    # Paid answers get their own file, or the next local pass would silently
+    # overwrite them (the exact foot-gun EscalationConfig.cache_path documents).
+    assert config.run.cache_path.name == "identifications-cloud.jsonl"
+    assert len(changed) == 5
 
 
-def test_cloud_defaults_never_override_explicit_settings():
+def test_cloud_defaults_never_override_explicit_settings(tmp_path):
+    my_cache = tmp_path / "my-results.jsonl"
     config = _cfg(
         model={"backend": "openai", "max_tokens": 700},
         image={"max_edge": 1500},
+        run={"cache_path": str(my_cache)},
     )
     providers.apply_cloud_primary_defaults(config)
     # Deliberate choices survive, even inconvenient ones.
     assert config.image.max_edge == 1500
     assert config.model.max_tokens == 700
+    assert config.run.cache_path == my_cache
     # Untouched siblings are still retuned.
     assert config.model.routing_max_tokens == 900
     assert config.image.fallback_edges == []
