@@ -102,6 +102,7 @@ class ModelConfig(_Base):
     api_key: SecretStr | None = None
     # Anthropic-only; ignored elsewhere.
     effort: str = "high"
+    # Per-request ceiling for a cloud primary and for ollama.
     timeout_seconds: float = 180.0
     # Cloud primary only; the mlx backend ignores it. Same rationale as
     # escalation.max_images: a cloud primary bills every frame, and a mistyped

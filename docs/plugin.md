@@ -80,8 +80,8 @@ line with the value blanked. The key is not an argument of the executable, but
 the shell line is the child's command line for the run's duration.
 
 When the preference is set, `MelampusAnalyze.lua` passes it to the executable
-as `--backend <engine>`, and the executable's own rules apply: `ollama` is
-refused as not built yet (card #406), `openai` and `claude` need their key
+as `--backend <engine>`, and the executable's own rules apply: `ollama` needs an
+Ollama server answering (card #406), `openai` and `claude` need their key
 (docs/config.md § `[model]`). When it is unset — the default, *Let Melampus
 choose* — the command carries no `--backend` and the executable decides:
 `[model] backend` in `melampus.local.toml`, else the first engine that can

@@ -33,7 +33,8 @@ the numbers do and don't support.
 ## Requirements
 
 - **Apple Silicon Mac** for local inference. MLX is arm64-only. Developed on an
-  M4 Max / 128 GB. (Windows works too — with cloud inference; see § Windows.)
+  M4 Max / 128 GB. (Windows and Linux work too — locally through Ollama, or
+  with cloud inference; see § Windows.)
 - **Python 3.12** — not 3.13+. The `mlx-vlm` dependency stack publishes wheels for
   3.12; 3.13 runs ahead of parts of it.
 - ~20 GB of disk for the default model.
@@ -59,19 +60,32 @@ HF_HUB_DISABLE_XET=1 .venv/bin/hf download mlx-community/Qwen3-VL-30B-A3B-Instru
 `HF_HUB_DISABLE_XET=1` is not optional on some networks — see
 [docs/troubleshooting.md](docs/troubleshooting.md).
 
-## Windows (cloud inference)
+## Windows (Ollama, or cloud inference)
 
-There is no local model runtime on Windows — MLX is Apple-Silicon-only — so on
-Windows the primary backend is a cloud provider instead: the same two backends
-the Mac uses for escalation, promoted to answering everything. Same prompts,
-same schema validation, same corrective retry; the only difference is who runs
-the model. Be aware of what that trades away: **every analysed frame leaves the
-machine and is billed**, where the Mac path sends nothing anywhere. Three
-guards keep that predictable: the CLI prints a cost estimate and asks before
-spending (the plugin passes `--yes` because it cannot ask — its CLI output,
-estimate included, is written to `melampus-cli.log` in the OS temp directory);
-`model.max_images` (default 200) hard-caps any single run, `--yes` or not; and
-cloud results live in their own cache file so a later local pass cannot
+There is no MLX on Windows — it is Apple-Silicon-only — so on Windows (and
+Linux, and a Mac that prefers it) the primary backend is one of two things.
+
+**Local, through Ollama.** Install Ollama from [ollama.com/download](https://ollama.com/download),
+pull a vision model (`ollama pull qwen3-vl:8b-instruct`, the default; see
+`ollama_model` in [docs/config.md](docs/config.md) § `[model]`), and the
+`ollama` engine talks to it at Ollama's default address, `http://127.0.0.1:11434`
+(`ollama_url` names another). Same prompts, same schema validation, same
+corrective retry as the Mac's MLX path, and like it nothing leaves the
+machine and nothing is billed. With no `--backend` and no `[model] backend`,
+a running Ollama is what the CLI picks on a machine without Apple Silicon.
+If Ollama is not running, the run stops before any image is read and says
+so, naming the address it tried and where to install Ollama.
+
+**Cloud.** The same two backends the Mac uses for escalation, promoted to
+answering everything. Same prompts, same schema validation, same corrective
+retry; the only difference is who runs the model. Be aware of what that
+trades away: **every analysed frame leaves the machine and is billed**,
+where the local paths send nothing anywhere. Three guards keep that
+predictable: the CLI prints a cost estimate and asks before spending (the
+plugin passes `--yes` because it cannot ask — its CLI output, estimate
+included, is written to `melampus-cli.log` in the OS temp directory);
+`model.max_images` (default 200) hard-caps any single run, `--yes` or not;
+and cloud results live in their own cache file so a later local pass cannot
 overwrite answers you paid for. Set `escalation.input_usd_per_mtok` /
 `output_usd_per_mtok` to your model's rates so the estimate means something.
 
@@ -85,21 +99,22 @@ uv venv --python 3.12 .venv
 $env:VIRTUAL_ENV = ".venv"; uv sync --project service --locked --extra dev --extra cloud --extra openai --active
 ```
 
-Configure the backend and key in `melampus.local.toml` (git-ignored):
+Configure the backend in `melampus.local.toml` (git-ignored):
 
 ```toml
 [model]
-backend = "claude"   # or "openai"; add base_url for any compatible endpoint
+backend = "ollama"   # local; ollama_model and ollama_url change the defaults
+# backend = "claude" # or "openai"; add base_url for any compatible endpoint
 ```
 
-with `MELAMPUS_ANTHROPIC_KEY` (or `MELAMPUS_OPENAI_KEY`) set in your
-environment. Then everything works as on the Mac, plugin included:
+with, for a cloud backend, `MELAMPUS_ANTHROPIC_KEY` (or `MELAMPUS_OPENAI_KEY`)
+set in your environment. Then everything works as on the Mac, plugin included:
 
 ```powershell
 .venv\Scripts\melampus-id.exe fixtures\ --limit 3
 ```
 
-One-off runs can skip the config file: `--backend claude`. With no `--backend`
+One-off runs can skip the config file: `--backend ollama`, `--backend claude`. With no `--backend`
 and no `[model] backend`, the CLI takes the first engine that can run on this
 machine, in the order mlx, ollama, openai, claude (docs/config.md § `[model]`);
 `--detect-engines` (`melampus-id --detect-engines`, no folder needed) prints
@@ -355,9 +370,11 @@ on Windows, `$XDG_DATA_HOME/Melampus/` elsewhere, with the caches in its
 ### Building on Windows
 
 The same script on Windows writes `dist\melampus.exe`, which carries everything
-but MLX: there is no local runtime there, so `--backend` (or `[model] backend`)
-selects a cloud provider, exactly as in § Windows above. Asked for `--backend
-mlx`, it says MLX needs Apple Silicon and names the backends that do work.
+but MLX: there is no MLX there, so `--backend` (or `[model] backend`) selects
+Ollama or a cloud provider, exactly as in § Windows above. Asked for `--backend
+mlx`, it says MLX needs Apple Silicon and names the backends that do work;
+asked for `--backend ollama` with no server answering, it says so and where
+to install Ollama.
 CI builds it on every pull request (the `build-windows` job in
 `.github/workflows/ci.yml`), smoke-tests it against the committed fixture frame
 in `service/tests/fixtures/`, and uploads it as the `melampus-windows` artifact.
