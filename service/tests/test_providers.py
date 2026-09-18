@@ -595,3 +595,36 @@ def test_cli_detection_never_overrides_a_chosen_engine(
     config = tmp_path / "settings.toml"
     config.write_text('[model]\nbackend = "claude"\n', encoding="utf-8")
     assert _chosen_engine(monkeypatch, [*argv, "--config", str(config)]) == "claude"
+
+
+# ---------------------------------------------------------------------------
+# Card #406: an Ollama backend behind the model seam.
+
+
+def test_ollama_model_and_address_are_settings_in_the_model_section():
+    """The model name and the server address are `[model]` settings, the way
+    `repo` names the mlx model and `name` the cloud one. The model default is
+    `qwen3-vl:8b-instruct` (ollama.com/library/qwen3-vl/tags: 6.1 GB, text and
+    image input, the Instruct build of the family the mlx default uses). The
+    address is unset by default, which means providers.OLLAMA_URL: the one
+    place Ollama's documented default is written (card #404)."""
+    config = _cfg()
+    assert config.model.ollama_model == "qwen3-vl:8b-instruct"
+    assert config.model.ollama_url is None
+    assert providers.DEFAULT_MODELS.get("ollama") is None, "one default, in config"
+
+    config = _cfg(model={"ollama_model": "qwen3-vl:30b-a3b-instruct",
+                         "ollama_url": "http://127.0.0.1:11435"})
+    assert config.model.ollama_model == "qwen3-vl:30b-a3b-instruct"
+    assert config.model.ollama_url == "http://127.0.0.1:11435"
+
+
+def test_ollama_address_setting_round_trips_through_a_config_file(tmp_path):
+    settings = tmp_path / "settings.toml"
+    settings.write_text(
+        '[model]\nbackend = "ollama"\nollama_url = "http://127.0.0.1:11435"\n',
+        encoding="utf-8",
+    )
+    config = load_config(settings, use_local=False)
+    assert config.model.backend == "ollama"
+    assert config.model.ollama_url == "http://127.0.0.1:11435"
