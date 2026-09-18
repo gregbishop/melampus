@@ -40,9 +40,9 @@ from conftest import PHOTO
 from melampus.backend import ScriptedBackend
 from melampus.config import load_config
 from melampus.identify import Identifier
+from melampus.providers import on_apple_silicon
 
 CONFTEST = Path(__file__).with_name("conftest.py")
-APPLE_SILICON = sys.platform == "darwin" and platform.machine() == "arm64"
 # What `.venv/bin/melampus-id` runs, spelled so it works from any interpreter
 # that has the package installed (CI has no root .venv).
 VENV_CLI = [sys.executable, "-m", "melampus.cli"]
@@ -376,7 +376,7 @@ def _look_for_weights(executable: Path, photos: Path, tmp_path: Path) -> str:
     return proc.stderr[-3000:]
 
 
-@pytest.mark.skipif(not APPLE_SILICON, reason="MLX exists only on Apple Silicon")
+@pytest.mark.skipif(not on_apple_silicon(), reason="MLX exists only on Apple Silicon")
 def test_executable_carries_the_service_and_mlx(built_executable: Path, photos: Path, tmp_path: Path):
     """Done-when 1 (#399). Asked for the mlx backend with the HuggingFace cache
     empty and offline, the executable must get as far as looking for weights —
@@ -389,7 +389,7 @@ def test_executable_carries_the_service_and_mlx(built_executable: Path, photos: 
     assert SYNTHETIC_MODEL in tail, f"did not look for the model the synthetic config file names:\n{tail}"
 
 
-@pytest.mark.skipif(not APPLE_SILICON, reason="MLX exists only on Apple Silicon")
+@pytest.mark.skipif(not on_apple_silicon(), reason="MLX exists only on Apple Silicon")
 def test_the_mlx_smoke_test_ignores_a_local_model_beside_the_executable(
     built_executable: Path, photos: Path, tmp_path: Path
 ):
@@ -408,7 +408,7 @@ def test_the_mlx_smoke_test_ignores_a_local_model_beside_the_executable(
     assert "LocalEntryNotFoundError" in tail, f"did not get as far as looking for weights:\n{tail}"
 
 
-@pytest.mark.skipif(APPLE_SILICON, reason="this machine can run MLX")
+@pytest.mark.skipif(on_apple_silicon(), reason="this machine can run MLX")
 def test_executable_refuses_mlx_off_apple_silicon_and_names_what_works(
     built_executable: Path, photos: Path, tmp_path: Path
 ):
