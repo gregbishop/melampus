@@ -23,6 +23,7 @@ REPO = Path(__file__).resolve().parents[2]
 CONFIG_DOC = REPO / "docs" / "config.md"
 AGENTS_MD = REPO / "AGENTS.md"
 PLUGIN_CHOICE = REPO / ".agents" / "on-purpose.json"
+BRIEF = REPO / "docs" / "brief.md"
 
 
 def test_every_config_field_is_documented():
@@ -76,7 +77,7 @@ def test_brief_names_the_test_command_ci_runs():
         if "pytest" in command
     ]
     assert ci_commands, "ci.yml runs no pytest step"
-    brief = (REPO / "docs" / "brief.md").read_text(encoding="utf-8")
+    brief = BRIEF.read_text(encoding="utf-8")
     missing = [c for c in ci_commands if c not in brief]
     assert not missing, f"docs/brief.md's stack contract does not name what CI runs: {missing}"
 
@@ -86,7 +87,7 @@ def test_agents_md_points_at_the_brief_without_restating_it():
     keeps the pointer; a second copy of the contract's values would drift."""
     agents = AGENTS_MD.read_text(encoding="utf-8")
     assert "`docs/brief.md`" in agents, "AGENTS.md must point at docs/brief.md"
-    brief = (REPO / "docs" / "brief.md").read_text(encoding="utf-8")
+    brief = BRIEF.read_text(encoding="utf-8")
     contract_values = [
         re.search(r"^- test: (`[^`]+`)", brief, re.MULTILINE),
         re.search(r"lockfile is (`[^`]+`)", brief),
