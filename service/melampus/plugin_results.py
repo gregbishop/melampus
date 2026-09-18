@@ -97,7 +97,8 @@ def _agreement(members: list[dict]) -> float | None:
     """Share of the encounter's voting frames that name the majority subject.
 
     An abstained frame casts no vote; an encounter where nothing voted has no
-    agreement (None), which the plugin treats as "do not write".
+    agreement (None), and the row carries no `burst_agreement` at all, which
+    MelampusRules.lua treats as absent, not as failure.
     """
     names: list[str] = []
     for rec in members:
