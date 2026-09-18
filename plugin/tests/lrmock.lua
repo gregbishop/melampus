@@ -71,6 +71,13 @@ function M.reset(options)
 		-- Plays the executable for LrTasks.execute: given the command, it
 		-- writes what the real one would and returns its exit code.
 		onExecute = options.onExecute,
+		-- Plays the user while a modal dialog is up: given the options, it
+		-- can set values the way typing would.
+		onModalDialog = options.onModalDialog,
+		-- What LrPasswords holds, by key string; the URLs the browser was
+		-- asked to open.
+		passwords = options.passwords or {},
+		openedUrls = {},
 		-- How many previews the plugin asked for in this run.
 		previewsRequested = 0,
 	}
@@ -267,8 +274,34 @@ namespaces.LrDialogs = {
 	presentModalDialog = function(options)
 		M.state.dialogs[#M.state.dialogs + 1] = {
 			title = options.title, contents = options.contents, modal = true }
+		if M.state.onModalDialog then M.state.onModalDialog(options) end
 		return 'ok'
 	end,
+}
+
+--- Stored and retrieved by key string; the real one keeps them in the OS
+-- keychain on macOS, which is exactly why a test must see them land here and
+-- nowhere else.
+namespaces.LrPasswords = {
+	store = function(key, password)
+		assert(key ~= nil and password ~= nil, 'keystring or password is nil.')
+		M.state.passwords[key] = password
+	end,
+	retrieve = function(key)
+		assert(key ~= nil, 'keystring is nil.')
+		return M.state.passwords[key]
+	end,
+}
+
+namespaces.LrHttp = {
+	openUrlInBrowser = function(url)
+		M.state.openedUrls[#M.state.openedUrls + 1] = url
+	end,
+}
+
+--- An observable property table is, for these tests, a plain table.
+namespaces.LrBinding = {
+	makePropertyTable = function() return {} end,
 }
 
 namespaces.LrFileUtils = {
@@ -404,7 +437,9 @@ namespaces.LrColor = function() return {} end
 namespaces.LrShell = { revealInShell = function() end }
 --- The view factory hands back each spec as given, tagged with the kind of
 -- view asked for (static_text, group_box, ...), so a dialog's text can be
--- read from the tree the plugin built.
+-- read from the tree the plugin built: children are the array part,
+-- attributes the rest. `bind` returns what it was given (a key, or a table
+-- with key, object and transform), so bindings are inspectable.
 namespaces.LrView = {
 	osFactory = function()
 		return setmetatable({}, { __index = function(_, kind)
@@ -415,7 +450,7 @@ namespaces.LrView = {
 			end
 		end })
 	end,
-	bind = function(key) return key end,
+	bind = function(spec) return spec end,
 }
 
 --- Install the SDK globals so plugin files can be dofile()'d directly.
