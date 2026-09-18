@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Callable, Iterable, TextIO
 
 from .config import MelampusConfig
-from .encounters import cluster
+from .encounters import Encounter, cluster
 from .occurrence import GBIFClient, Location, applies_to
 from .quality import QualityResult, analyze_quality
 from .report import taxon_key
@@ -78,6 +78,77 @@ def _top(rec: dict) -> dict | None:
     return cands[0] if cands else None
 
 
+def _score_quality(
+    frames: list[Path], config: MelampusConfig, score: Scorer,
+    on_progress: Callable[[int, int], None] | None,
+) -> dict[str, float]:
+    """Composite quality per frame name, rounded; frames that cannot be scored are absent."""
+    quality_scores: dict[str, float] = {}
+    for index, frame in enumerate(frames, 1):
+        result = score(frame, config)
+        if result.error is None:
+            quality_scores[frame.name] = round(result.composite, 1)
+        if on_progress is not None:
+            on_progress(index, len(frames))
+    return quality_scores
+
+
+def _agreement(members: list[dict]) -> float | None:
+    """Share of the encounter's voting frames that name the majority subject.
+
+    An abstained frame casts no vote; an encounter where nothing voted has no
+    agreement (None), which the plugin treats as "do not write".
+    """
+    names: list[str] = []
+    for rec in members:
+        ident = rec.get("identification") or {}
+        top = _top(rec)
+        if not ident.get("abstain") and top is not None:
+            names.append(taxon_key(top.get("common_name")))
+    if not names:
+        return None
+    return Counter(names).most_common(1)[0][1] / len(names)
+
+
+def _range_flag(client: GBIFClient, location: Location, enc: Encounter, members: list[dict]) -> bool:
+    """Whether GBIF says the encounter's subject does not occur here in this month.
+
+    One lookup per encounter, not per frame: every frame in an encounter is the
+    same subject, and the cache would collapse them anyway. A failed lookup
+    (None) is not absence.
+    """
+    first_ident = members[0].get("identification") or {}
+    if not applies_to(first_ident.get("taxon")):
+        return False
+    month = enc.start.month if enc.start else None
+    for rec in members:
+        top = _top(rec)
+        if top is None:
+            continue
+        sci = (top.get("scientific_name") or "").strip()
+        if not sci:
+            return False
+        count = client.count(sci, location, month)
+        return count is not None and count == 0
+    return False
+
+
+def _quality_ranks(members: list[dict], quality_scores: dict[str, float]) -> dict[str, float]:
+    """Percentile rank of each scored frame WITHIN the encounter, 0.0 worst .. 1.0 best.
+
+    Absolute sharpness is not comparable across subjects — a smooth white egret
+    has far less texture to resolve than a patterned heron at identical focus
+    accuracy — and culling is a within-burst question anyway: which frame of
+    these forty is the keeper. Ranking answers that; an absolute score does not.
+    """
+    scored = sorted(
+        [(rec["file"], quality_scores[rec["file"]]) for rec in members
+         if rec["file"] in quality_scores],
+        key=lambda m: m[1],
+    )
+    return {name: position / max(len(scored) - 1, 1) for position, (name, _) in enumerate(scored)}
+
+
 def enrich(
     frames: Iterable[Path],
     records: Iterable[dict],
@@ -101,73 +172,27 @@ def enrich(
 
     quality_scores: dict[str, float] = {}
     if score is not None:
-        members = [f for e in encounters for f in e.frames if f.name in by_file]
-        for index, frame in enumerate(members, 1):
-            result = score(frame, config)
-            if result.error is None:
-                quality_scores[frame.name] = round(result.composite, 1)
-            if on_progress is not None:
-                on_progress(index, len(members))
+        scorable = [f for e in encounters for f in e.frames if f.name in by_file]
+        quality_scores = _score_quality(scorable, config, score, on_progress)
 
     out = Enrichment(quality_scores=quality_scores)
 
     for enc in encounters:
-        names: list[str] = []
-        members = []
-        for frame in enc.frames:
-            rec = by_file.get(frame.name)
-            if rec is None:
-                continue
-            members.append(rec)
-            ident = rec.get("identification") or {}
-            top = _top(rec)
-            if not ident.get("abstain") and top is not None:
-                names.append(taxon_key(top.get("common_name")))
-
-        agreement = None
-        if names:
-            agreement = Counter(names).most_common(1)[0][1] / len(names)
-
-        # One range lookup per encounter, not per frame: every frame in an
-        # encounter is the same subject, and the cache would collapse them anyway.
-        range_flag = False
-        first_ident = (members[0].get("identification") or {}) if members else {}
-        if client is not None and members and applies_to(first_ident.get("taxon")):
-            month = enc.start.month if enc.start else None
-            for rec in members:
-                top = _top(rec)
-                if top is None:
-                    continue
-                sci = (top.get("scientific_name") or "").strip()
-                if not sci:
-                    break
-                count = client.count(sci, location, month)
-                if count is not None and count == 0:
-                    range_flag = True
-                    out.flagged_encounters += 1
-                break
-
-        # Rank quality WITHIN the encounter. Absolute sharpness is not
-        # comparable across subjects — a smooth white egret has far less texture
-        # to resolve than a patterned heron at identical focus accuracy — and
-        # culling is a within-burst question anyway: which frame of these forty
-        # is the keeper. Ranking answers that; an absolute score does not.
-        scored = sorted(
-            [(rec["file"], quality_scores[rec["file"]]) for rec in members
-             if rec["file"] in quality_scores],
-            key=lambda m: m[1],
-        )
-        rank_of: dict[str, float] = {}
-        for position, (name, _) in enumerate(scored):
-            # Percentile rank within the burst, 0.0 worst .. 1.0 best.
-            rank_of[name] = position / max(len(scored) - 1, 1)
+        members = [by_file[f.name] for f in enc.frames if f.name in by_file]
+        if not members:
+            continue
+        agreement = _agreement(members)
+        range_flag = client is not None and _range_flag(client, location, enc, members)
+        if range_flag:
+            out.flagged_encounters += 1
+        rank_of = _quality_ranks(members, quality_scores)
 
         for rec in members:
             row = dict(rec)
             row["encounter"] = enc.index
             if rec["file"] in rank_of:
                 row["quality_rank"] = round(rank_of[rec["file"]], 3)
-                row["encounter_frames"] = len(scored)
+                row["encounter_frames"] = len(rank_of)
             if agreement is not None:
                 row["burst_agreement"] = round(agreement, 3)
             row["range_flag"] = range_flag
