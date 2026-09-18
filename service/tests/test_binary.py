@@ -37,6 +37,7 @@ from pathlib import Path
 import pytest
 from conftest import PHOTO
 
+from melampus import config
 from melampus.backend import ScriptedBackend
 from melampus.config import load_config
 from melampus.identify import Identifier
@@ -88,8 +89,6 @@ def test_repo_root_is_the_bundle_when_frozen(monkeypatch: pytest.MonkeyPatch, tm
     not under service/ in a checkout; `_repo_root()` is that directory when
     frozen and the checkout otherwise. What is resolved against it is the
     business of the tests on load_config's defaults."""
-    from melampus import config
-
     monkeypatch.setattr(sys, "_MEIPASS", str(tmp_path), raising=False)
     assert config._repo_root() == tmp_path
     monkeypatch.delattr(sys, "_MEIPASS")
@@ -241,24 +240,79 @@ def test_frozen_prompts_come_from_the_bundle(monkeypatch: pytest.MonkeyPatch, tm
     assert load_config(use_local=False).run.prompts_dir == bundle / "prompts"
 
 
-def test_frozen_user_data_sits_beside_the_executable_not_in_the_bundle(
+def _per_user_data_dir(home: Path) -> Path:
+    """Where config._data_root() lands for the executable under this HOME, in a
+    bare environment (no LOCALAPPDATA, no XDG_DATA_HOME)."""
+    if sys.platform == "darwin":
+        return home / "Library" / "Application Support" / "Melampus"
+    if sys.platform == "win32":
+        return home / "AppData" / "Local" / "Melampus"
+    return home / ".local" / "share" / "Melampus"
+
+
+def test_frozen_config_and_caches_live_in_the_per_user_data_directory(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, repo: Path
+):
+    """Card #436, Done-when 3. The unpack directory is temporary: a config put
+    there is lost at the next launch and a cache written there is thrown away.
+    Inside the executable melampus.local.toml and the caches resolve under the
+    per-user data directory instead: ~/Library/Application Support/Melampus on
+    macOS, %LOCALAPPDATA%\\Melampus on Windows (falling back to the profile's
+    AppData\\Local when the variable is unset, as it is in a bare environment),
+    $XDG_DATA_HOME/Melampus or ~/.local/share/Melampus elsewhere. In a checkout
+    nothing moves: the repo root, as before."""
+    home = tmp_path / "home"
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.delenv("LOCALAPPDATA", raising=False)
+    monkeypatch.delenv("XDG_DATA_HOME", raising=False)
+
+    monkeypatch.setattr(sys, "_MEIPASS", str(tmp_path / "unpack"), raising=False)
+    monkeypatch.setattr(sys, "platform", "darwin")
+    assert config._data_root() == home / "Library" / "Application Support" / "Melampus"
+    monkeypatch.setattr(sys, "platform", "win32")
+    assert config._data_root() == home / "AppData" / "Local" / "Melampus"
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local"))
+    assert config._data_root() == tmp_path / "local" / "Melampus"
+    monkeypatch.setattr(sys, "platform", "linux")
+    assert config._data_root() == home / ".local" / "share" / "Melampus"
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
+    assert config._data_root() == tmp_path / "xdg" / "Melampus"
+    for platform_name in ("darwin", "win32", "linux"):
+        monkeypatch.setattr(sys, "platform", platform_name)
+        assert not config._data_root().is_relative_to(tmp_path / "unpack")
+        assert config._cache("x") == config._data_root() / "cache" / "x"
+
+    monkeypatch.delattr(sys, "_MEIPASS")
+    assert config._data_root() == repo
+    assert config._cache("x") == repo / ".melampus_cache" / "x"
+
+
+def test_frozen_user_data_lives_in_the_per_user_directory_not_in_the_bundle(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ):
-    """The unpack directory is deleted when the process exits, so a cache
-    written there is thrown away and a melampus.local.toml there is never read.
-    User data lives beside the executable, as it lives beside the code in a
-    checkout."""
+    """The frozen resolution above is what load_config's defaults use: the
+    unpack directory is deleted when the process exits, so a cache written
+    there is thrown away and a melampus.local.toml there is never read. Inside
+    the executable the caches and the local config resolve under this
+    platform's per-user data directory; prompts ship in the bundle and stay
+    there. Only user data moves."""
     tmp_path = tmp_path.resolve()
+    home = tmp_path / "home"
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.delenv("LOCALAPPDATA", raising=False)
+    monkeypatch.delenv("XDG_DATA_HOME", raising=False)
+    data = _per_user_data_dir(home)
+    data.mkdir(parents=True)
+    (data / "melampus.local.toml").write_text('[run]\nprofile = "sport"\n', encoding="utf-8")
     bundle, executable = tmp_path / "unpack", tmp_path / "dist" / "melampus"
-    executable.parent.mkdir()
-    (executable.parent / "melampus.local.toml").write_text('[run]\nprofile = "sport"\n', encoding="utf-8")
     _frozen(monkeypatch, bundle, executable)
-    config = load_config()
-    cache = executable.parent / ".melampus_cache"
-    assert config.run.cache_path == cache / "identifications.jsonl"
-    assert config.occurrence.cache_path == cache / "occurrence.json"
-    assert config.escalation.cache_path == cache / "escalations.jsonl"
-    assert config.run.profile == "sport", "melampus.local.toml beside the executable was not read"
+    settings = load_config()
+    cache = data / "cache"
+    assert settings.run.cache_path == cache / "identifications.jsonl"
+    assert settings.occurrence.cache_path == cache / "occurrence.json"
+    assert settings.escalation.cache_path == cache / "escalations.jsonl"
+    assert settings.run.prompts_dir == bundle / "prompts"
+    assert settings.run.profile == "sport", "melampus.local.toml under the per-user directory was not read"
 
 
 def test_build_plan_on_windows_names_the_exe_and_leaves_mlx_out(
@@ -307,21 +361,27 @@ def test_no_local_config_makes_the_config_file_the_whole_configuration(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, repo: Path, photos: Path
 ):
     """The CLI reads the checkout's melampus.local.toml and the executable
-    reads dist/'s, so a smoke test that compares the two would otherwise be
-    comparing a developer's settings with the defaults. `--config <file>
-    --no-local-config` makes that file the whole configuration: it is read,
-    and the melampus.local.toml beside the data is not. Run frozen, so the
-    data root is a dist/ of this test's own; prompts/ sits in the bundle as
-    the build lays it out."""
+    reads the per-user data directory's, so a smoke test that compares the two
+    would otherwise be comparing a developer's settings with the defaults.
+    `--config <file> --no-local-config` makes that file the whole
+    configuration: it is read, and the melampus.local.toml under the data root
+    is not. Run frozen with a fresh HOME, so the data root is a per-user
+    directory of this test's own; prompts/ sits in the bundle as the build
+    lays it out."""
     from melampus.cli import main
 
     tmp_path = tmp_path.resolve()
+    home = tmp_path / "home"
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.delenv("LOCALAPPDATA", raising=False)
+    monkeypatch.delenv("XDG_DATA_HOME", raising=False)
+    data = _per_user_data_dir(home)
+    data.mkdir(parents=True)
+    # Reaches the fingerprint if read; the synthetic file leaves it alone.
+    (data / "melampus.local.toml").write_text("[image]\nmax_edge = 640\n", encoding="utf-8")
     bundle, executable = tmp_path / "unpack", tmp_path / "dist" / "melampus"
     bundle.mkdir()
     (bundle / "prompts").symlink_to(repo / "prompts")
-    executable.parent.mkdir()
-    # Reaches the fingerprint if read; the synthetic file leaves it alone.
-    (executable.parent / "melampus.local.toml").write_text("[image]\nmax_edge = 640\n", encoding="utf-8")
     _frozen(monkeypatch, bundle, executable)
     out = tmp_path / "results.json"
     code = main([
@@ -332,7 +392,7 @@ def test_no_local_config_makes_the_config_file_the_whole_configuration(
     (result,) = json.loads(out.read_text(encoding="utf-8"))
     assert (result["run_fingerprint"], result["retries"]) == _fingerprint_and_retries(
         SYNTHETIC_CONFIG, photos
-    ), "the run did not read --config alone: melampus.local.toml beside the data was read too"
+    ), "the run did not read --config alone: melampus.local.toml under the data root was read too"
 
 
 # The model the mlx smoke tests look for: a synthetic repo, named in a
@@ -341,11 +401,14 @@ def test_no_local_config_makes_the_config_file_the_whole_configuration(
 SYNTHETIC_MODEL = "melampus-tests/synthetic-model"
 
 
-def _request_mlx(executable: Path, photos: Path, tmp_path: Path) -> subprocess.CompletedProcess[str]:
+def _request_mlx(
+    executable: Path, photos: Path, tmp_path: Path, env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
     """Ask the executable for the mlx backend, with the HuggingFace cache empty
     and offline, and a synthetic config file naming SYNTHETIC_MODEL as its
-    whole configuration."""
-    env = _no_python_environment(tmp_path)
+    whole configuration. `env` is the no-python environment to run in; by
+    default a fresh one."""
+    env = env or _no_python_environment(tmp_path)
     env |= {"HF_HUB_OFFLINE": "1", "HF_HOME": str(tmp_path / "hf")}
     return subprocess.run(
         [str(executable), str(photos), "--backend", "mlx",
@@ -355,10 +418,12 @@ def _request_mlx(executable: Path, photos: Path, tmp_path: Path) -> subprocess.C
     )
 
 
-def _look_for_weights(executable: Path, photos: Path, tmp_path: Path) -> str:
+def _look_for_weights(
+    executable: Path, photos: Path, tmp_path: Path, env: dict[str, str] | None = None
+) -> str:
     """Run `executable` with the mlx backend as _request_mlx does and return
     the end of its stderr. It must fail: there are no weights and no network."""
-    proc = _request_mlx(executable, photos, tmp_path)
+    proc = _request_mlx(executable, photos, tmp_path, env)
     assert proc.returncode != 0, "loaded a model with no weights and no network?"
     return proc.stderr[-3000:]
 
@@ -377,21 +442,23 @@ def test_executable_carries_the_service_and_mlx(built_executable: Path, photos: 
 
 
 @pytest.mark.skipif(not on_apple_silicon(), reason="MLX exists only on Apple Silicon")
-def test_the_mlx_smoke_test_ignores_a_local_model_beside_the_executable(
+def test_the_mlx_smoke_test_ignores_a_local_model_in_the_per_user_directory(
     built_executable: Path, photos: Path, tmp_path: Path
 ):
-    """A developer's dist/melampus.local.toml may point model.repo at a
-    directory of weights on disk, and mlx_vlm takes an existing directory as
-    it is: an empty, offline HuggingFace cache does not stop the executable
-    loading them. The lookup reads its synthetic file, not the one beside the
-    executable. The executable is copied into a dist/ of this test's own so
-    the checkout's dist/ is never written to."""
-    dist, weights = tmp_path / "dist", tmp_path / "weights"
-    dist.mkdir()
+    """A user's melampus.local.toml under the per-user data directory may
+    point model.repo at a directory of weights on disk, and mlx_vlm takes an
+    existing directory as it is: an empty, offline HuggingFace cache does not
+    stop the executable loading them. The lookup reads its synthetic file, not
+    the per-user one. The HOME is this test's own, so the developer's is never
+    read or written."""
+    weights = tmp_path / "weights"
     weights.mkdir()
-    (dist / "melampus.local.toml").write_text(f'[model]\nrepo = "{weights}"\n', encoding="utf-8")
-    tail = _look_for_weights(Path(shutil.copy(built_executable, dist)), photos, tmp_path)
-    assert str(weights) not in tail, f"read melampus.local.toml beside the executable:\n{tail}"
+    env = _no_python_environment(tmp_path)
+    data_dir = _per_user_data_dir(Path(env["HOME"]))
+    data_dir.mkdir(parents=True)
+    (data_dir / "melampus.local.toml").write_text(f'[model]\nrepo = "{weights}"\n', encoding="utf-8")
+    tail = _look_for_weights(built_executable, photos, tmp_path, env)
+    assert str(weights) not in tail, f"read melampus.local.toml under the per-user directory:\n{tail}"
     assert "LocalEntryNotFoundError" in tail, f"did not get as far as looking for weights:\n{tail}"
 
 

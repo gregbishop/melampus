@@ -317,7 +317,7 @@ def test_plugin_out_is_byte_identical_to_the_old_tool_on_the_corpus(
 
     # The old tool reads melampus.local.toml only; point it at the same config.
     from melampus import config as config_module
-    monkeypatch.setattr(config_module, "LOCAL_CONFIG", config)
+    monkeypatch.setattr(config_module, "_local_config", lambda: config)
     tool = _load_old_tool()
     assert tool.main([str(OLD_TOOL), str(folder), str(raw), str(old), "--occurrence", "--quality"]) == 0
 
