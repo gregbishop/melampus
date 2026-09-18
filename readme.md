@@ -371,10 +371,18 @@ overwritten. Install steps and the SDK verification are in
 [docs/plugin.md](docs/plugin.md).
 
 ```bash
-.venv/bin/python tools/make_plugin_results.py fixtures_full stage1_full_results.json \
-    plugin_results.json --occurrence
+# identification plus the fields the plugin gates on, in one run
+.venv/bin/melampus-id fixtures_full --json-out stage1_full_results.json \
+    --plugin-out plugin_results.json
 # then: Lightroom -> File -> Plug-in Manager -> Add -> plugin/Melampus.lrplugin
 ```
+
+`--plugin-out` writes the results enriched with burst agreement, the range flag,
+the encounter, and quality with its rank within the burst; the range check needs a
+default location in `melampus.local.toml` and is the only step that uses the
+network. It runs inside the shipped executable too. `tools/make_plugin_results.py`
+still exists for the plugin, as a thin caller of the same code, until the plugin is
+rewired to pass `--plugin-out` itself.
 
 ## Layout
 
@@ -385,6 +393,8 @@ service/melampus/     Python package. Library first; the CLI is a thin shell ove
   images.py           Pixel staging — and the metadata-leak enforcement point
   cache.py            Content-hash result cache, resumable, checkpointed
   report.py           Raw table, scoring, calibration, name-quality checks
+  encounters.py       Burst clustering by capture time
+  plugin_results.py   The enrichment the Lightroom plugin reads (--plugin-out)
 prompts/              Editable per-taxon prompt templates
 tools/                Corpus utilities: clustering, dev split, review sheet, ingest
 plugin/               Lightroom Classic plugin, plus its dependency-free Lua tests
