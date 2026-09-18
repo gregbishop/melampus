@@ -1,8 +1,10 @@
 --[[ Settings. Everything beyond the four menu items lives here (§5.4.2):
      the results file, the safety switches, the gates, and maintenance. ]]
+local LrBinding = import 'LrBinding'
 local LrDialogs = import 'LrDialogs'
 local LrFunctionContext = import 'LrFunctionContext'
 local LrHttp = import 'LrHttp'
+local LrPasswords = import 'LrPasswords'
 local LrPrefs = import 'LrPrefs'
 local LrTasks = import 'LrTasks'
 local LrView = import 'LrView'
@@ -47,6 +49,31 @@ LrTasks.startAsyncTask(function()
 					title = link,
 					text_color = import('LrColor')(0.1, 0.3, 0.8),
 					mouse_down = function() LrHttp.openUrlInBrowser(link) end,
+				}
+			end
+		end
+
+		-- A cloud engine's API key. It lives in LrPasswords (the OS keychain on
+		-- macOS), never in the preferences, so the fields bind to their own
+		-- table: read from the store as the dialog opens, written back when it
+		-- closes. Each field shows only while its engine is picked.
+		local keys, keysAtOpen = LrBinding.makePropertyTable(context), {}
+		for _, engine in ipairs(Rules.ENGINES) do
+			local variable = Rules.keyVariable(engine)
+			if variable then
+				keys[variable] = LrPasswords.retrieve(variable) or ''
+				keysAtOpen[variable] = keys[variable]
+				engineGroup[#engineGroup + 1] = f:row {
+					visible = bind {
+						key = 'engine', object = prefs,
+						transform = function(value) return value == engine end,
+					},
+					f:static_text { title = 'API key:' },
+					f:password_field {
+						bind_to_object = keys, value = bind(variable),
+						width_in_chars = 42, immediate = true,
+						tooltip = 'Kept in your keychain, not in a file',
+					},
 				}
 			end
 		end
@@ -315,5 +342,13 @@ LrTasks.startAsyncTask(function()
 			actionVerb = 'Done',
 			cancelVerb = '< exclude >',
 		}
+
+		-- The dialog has no Cancel, so what the fields hold is what the user
+		-- wants kept: a changed field is stored, an emptied one forgets the
+		-- key, an untouched one leaves the store alone.
+		for variable, before in pairs(keysAtOpen) do
+			local after = keys[variable] or ''
+			if after ~= before then LrPasswords.store(variable, after) end
+		end
 	end)
 end)

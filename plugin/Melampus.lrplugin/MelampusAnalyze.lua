@@ -19,6 +19,7 @@ Two ordering constraints, both from §5.3 and both load-bearing:
 
 local LrDialogs = import 'LrDialogs'
 local LrFileUtils = import 'LrFileUtils'
+local LrPasswords = import 'LrPasswords'
 local LrPathUtils = import 'LrPathUtils'
 local LrTasks = import 'LrTasks'
 
@@ -182,6 +183,16 @@ local function windowsPathRefusal(folder, previewFolder, resultsPath, cliLog)
 	return nil
 end
 
+--- A variable set in the child's environment, ahead of the command. LrTasks
+-- .execute takes one string and nothing else, so the shell sets it: `VAR=
+-- 'value' command` for sh, `set "VAR=value" && command` for cmd.exe. That
+-- string is the child's command line for the run's duration, which is why
+-- the caller logs the line with the value replaced, never this one.
+local function environmentPrefix(name, value)
+	if WIN_ENV then return 'set "' .. name .. '=' .. value .. '" && ' end
+	return name .. '=' .. quote(value) .. ' '
+end
+
 --- Where the CLI's own output goes. Not the null device: the cloud-primary
 -- cost estimate (and any refusal, e.g. the model.max_images ceiling) prints to
 -- stderr, and a non-interactive caller that discards it has erased the only
@@ -273,8 +284,21 @@ function Analyze.run(previewFolder, resultsPath, profile, engine)
 	parts[#parts + 1] = quote(resultsPath)
 	parts[#parts + 1] = '--yes'
 	parts[#parts + 1] = '>' .. quote(cliLog) .. ' 2>&1'
-	local command = shellLine(table.concat(parts, ' '))
-	Log.info('running: ' .. command)
+	local line = table.concat(parts, ' ')
+
+	-- A cloud engine's key (card #405): stored by the Settings dialog through
+	-- LrPasswords, handed to the executable in the variable it reads, and
+	-- only for the engine the user picked. It is never an argument and never
+	-- logged; the log carries the line with the key blanked.
+	local logged = line
+	local variable = Rules.keyVariable(engine)
+	local key = variable and LrPasswords.retrieve(variable)
+	if key and key ~= '' then
+		line = environmentPrefix(variable, key) .. line
+		logged = environmentPrefix(variable, '') .. logged
+	end
+	local command = shellLine(line)
+	Log.info('running: ' .. shellLine(logged))
 	local code = LrTasks.execute(command)
 	if code ~= 0 then
 		return false, 'Identification failed (exit ' .. tostring(code)

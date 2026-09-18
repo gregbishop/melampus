@@ -177,12 +177,15 @@ def _plugin_folder_holding(executable: Path, tmp_path: Path) -> Path:
 
 
 def _command_the_plugin_builds(
-    plugin_dir: Path, previews: Path, results: Path, tmp_path: Path, *, engine: str
+    plugin_dir: Path, previews: Path, results: Path, tmp_path: Path, *, engine: str,
+    stored_key: str = "",
 ) -> str:
     """The one shell command MelampusAnalyze.lua builds under the mock SDK for
     the platform Lightroom reports (a fake Windows Lightroom on a Windows
     host), with `_PLUGIN.path` at `plugin_dir` and the engine preference set
-    to `engine` ("" is the default: no preference).
+    to `engine` ("" is the default: no preference). `stored_key` is what
+    LrPasswords holds for `engine`'s key variable (card #405); "" means
+    nothing stored.
 
     The mock's temp directory: under TMPDIR on a fake macOS Lightroom, the
     Windows temp folder (TEMP, as Lightroom reports it) on a fake Windows
@@ -191,6 +194,11 @@ def _command_the_plugin_builds(
     script.write_text(
         "local mock = require('lrmock')\n"
         "mock.reset()\n"
+        "local Rules = dofile(os.getenv('MELAMPUS_RULES'))\n"
+        "local variable = Rules.keyVariable(os.getenv('MELAMPUS_ENGINE'))\n"
+        "if variable and os.getenv('MELAMPUS_STORED_KEY') ~= '' then\n"
+        "  mock.state.passwords[variable] = os.getenv('MELAMPUS_STORED_KEY')\n"
+        "end\n"
         "mock.install(os.getenv('MELAMPUS_PLUGIN_DIR'),"
         " { windows = os.getenv('MELAMPUS_WINDOWS') == '1' })\n"
         "local Analyze = dofile(os.getenv('MELAMPUS_ANALYZE'))\n"
@@ -203,10 +211,12 @@ def _command_the_plugin_builds(
     built = run_lua(script, env=os.environ | {
         "MELAMPUS_PLUGIN_DIR": str(plugin_dir),
         "MELAMPUS_ANALYZE": str(PLUGIN / "MelampusAnalyze.lua"),
+        "MELAMPUS_RULES": str(PLUGIN / "MelampusRules.lua"),
         "MELAMPUS_PREVIEWS": str(previews),
         "MELAMPUS_RESULTS": str(results),
         "MELAMPUS_ENGINE": engine,
         "MELAMPUS_WINDOWS": "1" if WINDOWS else "0",
+        "MELAMPUS_STORED_KEY": stored_key,
         "TMPDIR": str(tmp_path),
         "TEMP": str(tmp_path),
     })
@@ -251,6 +261,43 @@ def test_the_engine_preference_reaches_the_executable_through_the_command_the_pl
     tail = _cli_log_tail(tmp_path)
     assert "The Ollama engine is not built yet" in tail, tail
     assert "invalid choice" not in tail, f"the executable does not accept ollama:\n{tail}"
+
+
+@pytest.mark.parametrize("stored_key", ["", "stored-in-lrpasswords-not-a-real-key-9b2d"])
+def test_the_stored_key_reaches_the_executable_through_the_command_the_plugin_builds(
+    built_executable: Path, photos: Path, tmp_path: Path, stored_key: str
+):
+    """Card #405, Done-when 2 at the real boundary. With openai picked and a
+    key in LrPasswords, the command the plugin builds carries the key in the
+    executable's environment, not its arguments; run through sh against
+    dist/melampus with no key variable in the environment and no python on
+    the path, the executable gets past its key check. `model.max_images = 0`
+    in melampus.local.toml then refuses the run at the cost ceiling, exit 3,
+    so nothing is sent anywhere. Without a stored key the same command stops
+    one step earlier, on the executable's own "needs an API key"."""
+    plugin_dir = _plugin_folder_holding(built_executable, tmp_path)
+    env = per_user_config(tmp_path, "[model]\nmax_images = 0\n")
+    assert "MELAMPUS_OPENAI_KEY" not in env and "OPENAI_API_KEY" not in env
+
+    command = _command_the_plugin_builds(
+        plugin_dir, photos, photos / "results.json", tmp_path, engine="openai",
+        stored_key=stored_key)
+    assert f"--backend {as_the_shell_receives_it('openai')}" in command, command
+    arguments = command.split(as_the_shell_receives_it(plugin_dir / built_executable.name), 1)[1]
+    assert stored_key == "" or stored_key not in arguments, (
+        f"the key is an argument of the executable:\n{command}")
+
+    proc = run_as_lightroom_would(command, env=env, cwd=tmp_path,
+                                  capture_output=True, text=True, timeout=600)
+
+    tail = _cli_log_tail(tmp_path)
+    assert proc.returncode == 3, f"exit {proc.returncode}: {proc.stderr[-2000:]}\n{tail}"
+    if stored_key:
+        assert "needs an API key" not in tail, f"the key did not reach the executable:\n{tail}"
+        assert "exceed model.max_images" in tail, f"did not reach the cost ceiling:\n{tail}"
+        assert stored_key not in tail, f"the executable printed the key:\n{tail}"
+    else:
+        assert "needs an API key" in tail, tail
 
 
 def test_the_command_the_plugin_builds_runs_the_executable_beside_it(
