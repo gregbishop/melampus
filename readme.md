@@ -342,7 +342,7 @@ checkout, so a run's identifications survive the unpack directory being
 deleted at exit. `--cache` and `--config` override both, as they do for the CLI,
 and `--no-local-config` leaves the local file unread (docs/config.md).
 
-### Windows
+### Building on Windows
 
 The same script on Windows writes `dist\melampus.exe`, which carries everything
 but MLX: there is no local runtime there, so `--backend` (or `[model] backend`)
