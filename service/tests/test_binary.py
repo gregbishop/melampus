@@ -26,26 +26,25 @@ import types
 from pathlib import Path
 
 import pytest
+from PIL import Image
 
 from melampus.config import load_config
 
 CONFTEST = Path(__file__).with_name("conftest.py")
-
-# The frame test_quality.py leans on; any corpus JPEG would do.
-FIXTURE = Path("fixtures") / "0A1A2829.jpg"
+# Synthetic, like test_pipeline.py's: the scripted backend answers nothing
+# whatever the frame shows, and the corpus is gitignored, so a corpus frame
+# would only make these tests skip on the CI runner.
+PHOTO = "flat-green.jpg"
 # What `.venv/bin/melampus-id` runs, spelled so it works from any interpreter
 # that has the package installed (CI has no root .venv).
 VENV_CLI = [sys.executable, "-m", "melampus.cli"]
 
 
 @pytest.fixture()
-def photos(tmp_path: Path, repo: Path) -> Path:
-    fixture = repo / FIXTURE
-    if not fixture.is_file():
-        pytest.skip("corpus fixtures not present")
+def photos(tmp_path: Path) -> Path:
     folder = tmp_path / "photos"
     folder.mkdir()
-    shutil.copy(fixture, folder / fixture.name)
+    Image.new("RGB", (2400, 1600), (90, 120, 70)).save(folder / PHOTO, exif=b"")
     return folder
 
 
@@ -280,5 +279,5 @@ def test_executable_prints_the_same_json_as_the_cli_with_no_python_on_the_path(
         [str(built_executable)], photos, tmp_path / "binary",
         env=_no_python_environment(tmp_path),
     )
-    assert [r["file"] for r in expected] == [FIXTURE.name], "the CLI did not analyze the fixture"
+    assert [r["file"] for r in expected] == [PHOTO], "the CLI did not analyze the photo"
     assert actual == expected
