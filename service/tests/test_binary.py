@@ -24,6 +24,11 @@ Done-when 2: given the executable, when it runs with --plugin-out and
 Done-when 3: given the occurrence cache and config, when the executable runs,
 then they resolve under the per-user data directory, never the unpack directory.
 
+Card #434: the executable carries the cloud SDKs on every platform. Done-when 2:
+given the executable with no API key set, when `--backend anthropic` or
+`--backend openai` runs, then it reaches the key check and says the key is
+missing, not that the SDK is missing.
+
 Nothing here downloads a model: the MLX check stops at the point where the
 executable goes looking for weights.
 """
@@ -390,6 +395,35 @@ def test_executable_refuses_mlx_off_apple_silicon_and_names_what_works(
         assert works_here in tail, f"{works_here!r} is not named as working here:\n{tail}"
     for missing in ("ModuleNotFoundError", "ImportError"):
         assert missing not in tail, f"the refusal came from a missing module, not the CLI:\n{tail}"
+
+
+@pytest.mark.parametrize(
+    ("backend", "needs_a_key"),
+    [("anthropic", "The Anthropic backend needs an API key. Set MELAMPUS_ANTHROPIC_KEY"),
+     ("openai", "The OpenAI backend needs an API key. Set MELAMPUS_OPENAI_KEY")],
+)
+def test_executable_carries_the_cloud_sdks_and_asks_for_the_key(
+    built_executable: Path, photos: Path, tmp_path: Path, backend: str, needs_a_key: str
+):
+    """Card #434, Done-when 2 (and 3: the same test runs on every platform's
+    build). Given the executable with no API key set, when a cloud backend is
+    requested, then it gets as far as the key check and says the key is
+    missing: the SDK imported inside the bundle. An executable built without
+    the cloud and openai extras stops one step earlier, on the CLI's install
+    hint, which means nothing to a user who has no venv to install into. The
+    environment carries no key variable, so nothing is sent anywhere."""
+    env = _no_python_environment(tmp_path)
+    proc = subprocess.run(
+        [str(built_executable), str(photos), "--backend", backend,
+         "--cache", str(tmp_path / "cache.jsonl")],
+        env=env, capture_output=True, text=True, timeout=600,
+    )
+    tail = proc.stderr[-3000:]
+    assert proc.returncode == 3, f"exit {proc.returncode}:\n{tail}"
+    assert "SDK is not installed" not in tail, f"the executable does not carry the {backend} SDK:\n{tail}"
+    for missing in ("ModuleNotFoundError", "ImportError"):
+        assert missing not in tail, f"the executable does not carry the {backend} SDK:\n{tail}"
+    assert needs_a_key in tail, f"did not reach the key check:\n{tail}"
 
 
 def test_executable_prints_the_same_json_as_the_cli_with_no_python_on_the_path(
