@@ -296,12 +296,15 @@ export MELAMPUS_OPENAI_KEY=sk-...
 melampus-id fixtures --escalate --escalate-provider openai --escalate-model gpt-5
 ```
 
-Install the provider SDK first — neither is a dependency of the local pipeline, so a
-local-only install stays local-only:
+Install the provider SDK first, pinned from `service/uv.lock` like everything else:
+`cloud` is the anthropic SDK, `openai` the openai one; drop the extra you will not
+use. Neither is a dependency of the local pipeline, so a local-only install stays
+local-only. `uv sync` installs exactly the extras named, so keep `--extra dev` here,
+and re-running the README's `## Install` block (which names only `dev`) removes the
+SDKs again:
 
 ```bash
-uv pip install --python .venv/bin/python "./service[cloud]"   # anthropic
-uv pip install --python .venv/bin/python "./service[openai]"  # openai
+VIRTUAL_ENV=.venv uv sync --project service --locked --extra dev --extra cloud --extra openai --active
 ```
 
 ### What gets cached, and what gets retried
