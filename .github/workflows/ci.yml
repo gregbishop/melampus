@@ -45,8 +45,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Not astral-sh/setup-uv: this repository allows only GitHub-owned
+      # actions. The runner's own python installs uv, as brew does on macOS.
       - name: Install uv
-        uses: astral-sh/setup-uv@v6
+        run: pip install uv
 
       - name: Build the executable and run its smoke tests
         working-directory: service
