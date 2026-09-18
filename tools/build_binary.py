@@ -8,10 +8,10 @@ prompts, and the MLX runtime with its Metal library, all unpacked to a
 temporary directory at launch. Model weights are not bundled — they come from
 the HuggingFace cache, as before.
 
-Needs the `build` extra, installed from the lockfile like everything else:
-`VIRTUAL_ENV=.venv uv sync --project service --locked --extra dev --extra build --active`.
-Apple Silicon only, like the runtime it packages. The repo's test command
-runs this and then the smoke tests: `.venv/bin/python -m pytest -q --build-binary`.
+Needs the `build` extra, installed from the lockfile like everything else; the
+command is in readme.md § Building the executable. Apple Silicon only, like the
+runtime it packages. The repo's test command runs this and then the smoke
+tests: `.venv/bin/python -m pytest -q --build-binary`.
 """
 
 from __future__ import annotations
@@ -40,9 +40,8 @@ def main() -> int:
         import PyInstaller.__main__
     except ImportError:
         print(
-            "PyInstaller is not installed. Run:\n"
-            "  VIRTUAL_ENV=.venv uv sync --project service --locked "
-            "--extra dev --extra build --active",
+            "PyInstaller is not installed: install the build extra as "
+            "readme.md § Building the executable says",
             file=sys.stderr,
         )
         return 3
