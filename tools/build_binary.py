@@ -1,17 +1,19 @@
-"""Build one `melampus` executable that carries the service and MLX (card #399).
+"""Build one `melampus` executable that carries the service (cards #399, #400).
 
-    .venv/bin/python tools/build_binary.py
+    .venv/bin/python tools/build_binary.py            # macOS
+    .venv\\Scripts\\python.exe tools\\build_binary.py   # Windows
 
-Writes `dist/melampus` (git-ignored, alongside the `build/` scratch tree). It is
-a PyInstaller one-file bundle: the Python runtime, the service package, the
-prompts, and the MLX runtime with its Metal library, all unpacked to a
-temporary directory at launch. Model weights are not bundled — they come from
-the HuggingFace cache, as before.
+Writes `dist/melampus` (`dist/melampus.exe` on Windows; git-ignored, alongside
+the `build/` scratch tree). It is a PyInstaller one-file bundle: the Python
+runtime, the service package and the prompts, all unpacked to a temporary
+directory at launch. On Apple Silicon it also carries the MLX runtime with its
+Metal library; model weights are not bundled and come from the HuggingFace
+cache, as before. Everywhere else MLX does not exist, so the executable carries
+everything but MLX and `--backend` selects a cloud provider (or scripted).
 
 Needs the `build` extra, installed from the lockfile like everything else; the
-command is in readme.md § Building the executable. Apple Silicon only, like the
-runtime it packages. The repo's test command runs this and then the smoke
-tests: `.venv/bin/python -m pytest -q --build-binary`.
+command is in readme.md § Building the executable. The repo's test command
+runs this and then the smoke tests: `.venv/bin/python -m pytest -q --build-binary`.
 """
 
 from __future__ import annotations
@@ -27,15 +29,46 @@ NAME = "melampus"
 
 # Packages PyInstaller's static analysis cannot see the whole of: mlx loads its
 # native library and Metal shaders from files beside the module; mlx_vlm, mlx_lm
-# and transformers import model modules by name at run time.
+# and transformers import model modules by name at run time. All of them exist
+# only on Apple Silicon (the pyproject marker), and PyInstaller refuses to
+# collect a package it cannot find, so they are asked for only there.
 COLLECT_ALL = ("mlx",)
 COLLECT_SUBMODULES = ("mlx_vlm", "mlx_lm", "transformers")
 
 
+def carries_mlx() -> bool:
+    return sys.platform == "darwin" and platform.machine() == "arm64"
+
+
+def executable_path() -> Path:
+    """Where PyInstaller puts the one-file build for this platform."""
+    return DIST / (f"{NAME}.exe" if sys.platform == "win32" else NAME)
+
+
+def pyinstaller_arguments(entry: Path) -> list[str]:
+    # PyInstaller's --add-data separator is the platform's os.pathsep.
+    separator = ";" if sys.platform == "win32" else ":"
+    arguments = [
+        "--name", NAME,
+        "--onefile",
+        "--noconfirm",
+        "--clean",
+        "--distpath", str(DIST),
+        "--workpath", str(WORK),
+        "--specpath", str(WORK),
+        "--paths", str(REPO / "service"),
+        "--add-data", f"{REPO / 'prompts'}{separator}prompts",
+    ]
+    if carries_mlx():
+        for package in COLLECT_ALL:
+            arguments += ["--collect-all", package]
+        for package in COLLECT_SUBMODULES:
+            arguments += ["--collect-submodules", package]
+    arguments.append(str(entry))
+    return arguments
+
+
 def main() -> int:
-    if sys.platform != "darwin" or platform.machine() != "arm64":
-        print("the executable carries MLX, which only exists on Apple Silicon", file=sys.stderr)
-        return 2
     try:
         import PyInstaller.__main__
     except ImportError:
@@ -51,26 +84,9 @@ def main() -> int:
     entry = WORK / f"{NAME}_entry.py"
     entry.write_text("from melampus.cli import main\n\nraise SystemExit(main())\n", encoding="utf-8")
 
-    arguments = [
-        "--name", NAME,
-        "--onefile",
-        "--noconfirm",
-        "--clean",
-        "--distpath", str(DIST),
-        "--workpath", str(WORK),
-        "--specpath", str(WORK),
-        "--paths", str(REPO / "service"),
-        "--add-data", f"{REPO / 'prompts'}:prompts",
-    ]
-    for package in COLLECT_ALL:
-        arguments += ["--collect-all", package]
-    for package in COLLECT_SUBMODULES:
-        arguments += ["--collect-submodules", package]
-    arguments.append(str(entry))
+    PyInstaller.__main__.run(pyinstaller_arguments(entry))
 
-    PyInstaller.__main__.run(arguments)
-
-    built = DIST / NAME
+    built = executable_path()
     if not built.is_file():
         print(f"build finished but {built} does not exist", file=sys.stderr)
         return 1

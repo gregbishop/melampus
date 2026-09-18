@@ -1,9 +1,13 @@
 """Session-wide wiring for the shipped executable (card #399).
 
-`--build-binary` makes the repo's own test command build `dist/melampus` before
+`--build-binary` makes the repo's own test command build the executable before
 the binary smoke tests run, so the build is part of the test command without
 costing every unit-test run the minutes a PyInstaller build takes. Without the
 option the smoke tests use an existing build, or skip and say how to get one.
+
+The build script is the one source of truth for where the executable lands
+(`dist/melampus`, or `dist/melampus.exe` on Windows — card #400), so it is
+loaded here rather than having its answer restated.
 
 `photos` is the one-frame folder the scripted backend is run against, from
 the executable and from the CLI alike.
@@ -11,10 +15,12 @@ the executable and from the CLI alike.
 
 from __future__ import annotations
 
+import importlib.util
 import shutil
 import subprocess
 import sys
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 
@@ -24,12 +30,23 @@ pytest_plugins = ["pytester"]
 
 REPO = Path(__file__).resolve().parents[2]
 BUILD_SCRIPT = REPO / "tools" / "build_binary.py"
-EXECUTABLE = REPO / "dist" / "melampus"
 # The frame test_quality.py leans on, downscaled to 1200 px and stripped of
 # metadata so it can be committed: the corpus is gitignored and CI has none,
 # and the smoke test must analyze the same image on every platform (card #400).
 FIXTURE = Path(__file__).with_name("fixtures") / "0A1A2829.jpg"
 PHOTO = FIXTURE.name
+
+
+def _load_build_script() -> ModuleType:
+    """tools/ is not a package; import the script by path, without running it."""
+    spec = importlib.util.spec_from_file_location("build_binary", BUILD_SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+BUILD = _load_build_script()
+EXECUTABLE: Path = BUILD.executable_path()
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
@@ -48,6 +65,11 @@ def repo() -> Path:
     """The checkout root, for tests that reach outside service/ (fixtures/,
     tools/, the docs)."""
     return REPO
+
+
+@pytest.fixture(scope="session")
+def build_script() -> ModuleType:
+    return BUILD
 
 
 @pytest.fixture()
