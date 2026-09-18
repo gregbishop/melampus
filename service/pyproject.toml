@@ -30,6 +30,10 @@ dev = ["pytest>=8"]
 # imports this, so a local-only install stays local-only.
 cloud = ["anthropic>=0.60"]
 openai = ["openai>=1.60"]
+# Packaging the service and MLX into one executable (tools/build_binary.py).
+# Exact-pinned: the bundle's layout is the packager's, so a silent upgrade could
+# change what ships.
+build = ["pyinstaller==6.22.3"]
 
 [project.scripts]
 melampus-id = "melampus.cli:main"
