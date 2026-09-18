@@ -173,8 +173,8 @@ Known gap: there is no per-image **timeout**. Exceptions are handled; a hang is 
 
 ## Encounter-aware analysis
 
-Wildlife shooting produces bursts. `tools/cluster_encounters.py` groups frames by EXIF
-capture-time proximity, which recovers the shooting encounters and unlocks three things
+Wildlife shooting produces bursts. `encounters.py` groups frames by EXIF capture-time
+proximity (`tools/cluster_encounters.py` is the corpus report over it), which recovers the shooting encounters and unlocks three things
 that per-frame processing cannot do:
 
 1. **A tractable review unit.** One judgement per encounter labels every frame in it, so
