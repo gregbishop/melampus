@@ -3,11 +3,11 @@
 Each test here makes one promise a doc carries mechanical, so the doc cannot
 silently fall behind the code or the repo again (as happened when [occurrence] and
 [quality] shipped undocumented). The promises: docs/config.md names every
-implemented setting; AGENTS.md names the install command for the recorded plugins;
-no doc names a file by an uppercase name it does not have; docs/brief.md names the
-pytest command CI actually runs; AGENTS.md points at docs/brief.md without
-restating its values; and AGENTS.md points at the standard and names the tracker
-(card #410, Done-when 3).
+implemented setting; AGENTS.md, and not .gitignore, names the install command for
+the recorded plugins; no doc names a file by an uppercase name it does not have;
+docs/brief.md names the pytest command CI actually runs; AGENTS.md points at
+docs/brief.md without restating its values; and AGENTS.md points at the standard
+and names the tracker (card #410, Done-when 3).
 
 The checks are deliberately dumb — substring presence of the backticked name — so
 they never argue with prose style, only with absence.
@@ -24,6 +24,7 @@ CONFIG_DOC = REPO / "docs" / "config.md"
 AGENTS_MD = REPO / "AGENTS.md"
 PLUGIN_CHOICE = REPO / ".agents" / "on-purpose.json"
 BRIEF = REPO / "docs" / "brief.md"
+GITIGNORE = REPO / ".gitignore"
 
 
 def test_every_config_field_is_documented():
@@ -46,12 +47,19 @@ def test_every_config_field_is_documented():
 def test_agents_md_names_the_install_command_for_the_recorded_plugins():
     """The install outputs (.claude/settings.json, .agents/skills, .codex/agents)
     are machine-local and untracked; a fresh clone must be told how to regenerate
-    them, with the same plugins .agents/on-purpose.json records."""
+    them, with the same plugins .agents/on-purpose.json records. AGENTS.md is the
+    one place that says so: .gitignore, which lists those outputs, points there
+    rather than restating the command, so a plugin added later moves one file."""
     plugins = json.loads(PLUGIN_CHOICE.read_text(encoding="utf-8"))["plugins"]
     command = f"node ~/on-purpose/bin/install.mjs {' '.join(plugins)}"
     assert f"`{command}`" in AGENTS_MD.read_text(encoding="utf-8"), (
         f"AGENTS.md must tell a fresh clone to run `{command}` "
         "(the plugins recorded in .agents/on-purpose.json)"
+    )
+    gitignore = GITIGNORE.read_text(encoding="utf-8")
+    assert "install.mjs" not in gitignore, (
+        ".gitignore restates the install command that AGENTS.md is gated for; "
+        "say the installer regenerates the ignored outputs and point at AGENTS.md"
     )
 
 
