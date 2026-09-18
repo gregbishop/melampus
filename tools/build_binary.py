@@ -44,8 +44,6 @@ def executable_path() -> Path:
 
 
 def pyinstaller_arguments(entry: Path) -> list[str]:
-    # PyInstaller's --add-data separator is the platform's os.pathsep.
-    separator = ";" if sys.platform == "win32" else ":"
     arguments = [
         "--name", NAME,
         "--onefile",
@@ -55,7 +53,7 @@ def pyinstaller_arguments(entry: Path) -> list[str]:
         "--workpath", str(WORK),
         "--specpath", str(WORK),
         "--paths", str(REPO / "service"),
-        "--add-data", f"{REPO / 'prompts'}{separator}prompts",
+        "--add-data", f"{REPO / 'prompts'}:prompts",
     ]
     if on_apple_silicon():
         for package in COLLECT_ALL:
