@@ -323,8 +323,9 @@ runtime; model weights are not bundled and come from the HuggingFace cache as
 before. Apple Silicon only, like MLX.
 
 ```bash
-uv pip install --python .venv/bin/python -e "./service[build]"   # once: PyInstaller, pinned
-.venv/bin/python tools/build_binary.py                            # writes dist/melampus, ~200 MB
+# once: the pinned PyInstaller, from the same lockfile as everything else
+VIRTUAL_ENV=.venv uv sync --project service --locked --extra dev --extra build --active
+.venv/bin/python tools/build_binary.py    # writes dist/melampus, ~200 MB, about a minute
 ```
 
 The build is a PyInstaller one-file bundle, which unpacks itself to a temporary
