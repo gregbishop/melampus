@@ -84,7 +84,13 @@ def test_agents_md_points_at_the_brief_without_restating_it():
     keeps the pointer; a second copy of the contract's values would drift."""
     agents = AGENTS_MD.read_text(encoding="utf-8")
     assert "`docs/brief.md`" in agents, "AGENTS.md must point at docs/brief.md"
-    restated = [v for v in ("`.venv/bin/python -m pytest`", "`service/uv.lock`") if v in agents]
+    brief = (ROOT / "docs" / "brief.md").read_text(encoding="utf-8")
+    contract_values = [
+        re.search(r"^- test: (`[^`]+`)", brief, re.MULTILINE),
+        re.search(r"lockfile is (`[^`]+`)", brief),
+    ]
+    assert all(contract_values), "docs/brief.md no longer states its test command or lockfile"
+    restated = [m.group(1) for m in contract_values if m.group(1) in agents]
     assert not restated, f"AGENTS.md restates stack-contract values that live in docs/brief.md: {restated}"
 
 
