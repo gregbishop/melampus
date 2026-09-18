@@ -8,21 +8,31 @@ retuned for a cloud primary without ever overriding an explicit setting.
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import http.client
+import io
 import json
 import socket
 import sys
 import threading
 import time
 import types
+import urllib.error
 import urllib.request
 
 import pytest
 from conftest import PHOTO, QuietHandler, fake_platform, loopback_server, recording_handler
+from test_pipeline import ID_OK, ROUTING_OK
 
 from melampus import providers
-from melampus.backend import AnthropicBackend, MLXBackend, OpenAIBackend, ScriptedBackend
+from melampus.backend import (
+    AnthropicBackend,
+    MLXBackend,
+    OllamaBackend,
+    OpenAIBackend,
+    ScriptedBackend,
+)
 from melampus.config import load_config
 
 ALL_KEY_VARIABLES = [name for names in providers.KEY_VARIABLES.values() for name in names]
@@ -830,3 +840,134 @@ def test_ollama_address_setting_round_trips_through_a_config_file(tmp_path):
     config = load_config(settings, use_local=False)
     assert config.model.backend == "ollama"
     assert config.model.ollama_url == "http://127.0.0.1:11435"
+
+
+class _FakeUrlopen:
+    """Stands in for urllib.request.urlopen at the backend's HTTP edge: records
+    every request, then answers with `reply` or raises `error`."""
+
+    def __init__(self, reply: bytes = b"{}", error: Exception | None = None, status: int = 200):
+        self.reply, self.error, self.status = reply, error, status
+        self.requests: list[tuple[urllib.request.Request, float]] = []
+
+    def __call__(self, request, timeout):
+        self.requests.append((request, timeout))
+        if self.error is not None:
+            raise self.error
+        return io.BytesIO(self.reply)
+
+
+OLLAMA_REPLY = json.dumps({
+    "model": "qwen3-vl:8b-instruct",
+    "created_at": "2026-09-18T00:00:00Z",
+    "message": {"role": "assistant", "content": ID_OK},
+    "done_reason": "stop",
+    "done": True,
+    "total_duration": 1668506709,
+    "prompt_eval_count": 26,
+    "eval_count": 83,
+}).encode("utf-8")
+
+
+def _ollama_backend(client: _FakeUrlopen, **kwargs) -> OllamaBackend:
+    return OllamaBackend("qwen3-vl:8b-instruct", "http://127.0.0.1:11435", client=client, **kwargs)
+
+
+def test_ollama_backend_posts_the_chat_request_ollama_documents(tmp_path):
+    """Request building, against Ollama's docs/api.md § Generate a chat
+    completion: POST {url}/api/chat, JSON body with `model`, one user message
+    carrying the prompt as `content` and the image as a base64 string in
+    `images`, `stream` false so one object comes back, and `options` with
+    `num_predict` (docs/modelfile.mdx: the maximum number of tokens to
+    predict) and `temperature`. Only the staged file's bytes travel: no path,
+    no filename."""
+    image = tmp_path / "SECRET_SPECIES_NAME.jpg"
+    image.write_bytes(b"\xff\xd8not really a jpeg\xff\xd9")
+    client = _FakeUrlopen(OLLAMA_REPLY)
+    backend = _ollama_backend(client, temperature=0.0, timeout=42.0)
+
+    backend.complete(image, "what is in this image?", 900)
+
+    ((request, timeout),) = client.requests
+    assert request.full_url == "http://127.0.0.1:11435/api/chat"
+    assert request.get_method() == "POST"
+    assert request.get_header("Content-type") == "application/json"
+    assert timeout == 42.0
+    body = json.loads(request.data)
+    assert body == {
+        "model": "qwen3-vl:8b-instruct",
+        "messages": [{
+            "role": "user",
+            "content": "what is in this image?",
+            "images": [base64.b64encode(image.read_bytes()).decode("ascii")],
+        }],
+        "stream": False,
+        "options": {"num_predict": 900, "temperature": 0.0},
+    }
+    assert "SECRET_SPECIES_NAME" not in request.data.decode("utf-8")
+
+
+def test_ollama_backend_reads_the_reply_into_a_completion(tmp_path):
+    """Reply parsing: the text is `message.content`; the counts are
+    `prompt_eval_count` and `eval_count` (docs/api.md, the final response
+    object). The text is handed to the same JSON extraction and schema
+    validation every backend's text goes through (identify.py); nothing here
+    parses candidates."""
+    image = tmp_path / "image.jpg"
+    image.write_bytes(b"jpeg")
+    backend = _ollama_backend(_FakeUrlopen(OLLAMA_REPLY))
+
+    completion = backend.complete(image, "prompt", 900)
+
+    assert completion.text == ID_OK
+    assert completion.prompt_tokens == 26
+    assert completion.generated_tokens == 83
+    assert completion.refused is False
+    assert completion.seconds >= 0
+    assert backend.name == "qwen3-vl:8b-instruct"
+
+
+def test_ollama_backend_tolerates_a_reply_with_no_message(tmp_path):
+    image = tmp_path / "image.jpg"
+    image.write_bytes(b"jpeg")
+    backend = _ollama_backend(_FakeUrlopen(b'{"done": true}'))
+    assert backend.complete(image, "prompt", 10).text == ""
+
+
+@pytest.mark.parametrize(
+    ("error", "expected", "said"),
+    [
+        (urllib.error.URLError(ConnectionRefusedError(61, "Connection refused")),
+         ConnectionError, "no Ollama server answering at http://127.0.0.1:11435"),
+        (TimeoutError("timed out"), TimeoutError, "did not answer within 42s"),
+        (urllib.error.URLError(socket.timeout("timed out")), TimeoutError, "did not answer within 42s"),
+        (urllib.error.HTTPError("http://127.0.0.1:11435/api/chat", 404, "Not Found", {},
+                                io.BytesIO(b'{"error": "model \'qwen3-vl:8b-instruct\' not found"}')),
+         RuntimeError, "Ollama answered 404: model 'qwen3-vl:8b-instruct' not found"),
+        (urllib.error.HTTPError("http://127.0.0.1:11435/api/chat", 500, "Internal Server Error", {},
+                                io.BytesIO(b"not json")),
+         RuntimeError, "Ollama answered 500: not json"),
+    ],
+    ids=["connection-refused", "timeout", "timeout-wrapped", "404-model-missing", "500-plain"],
+)
+def test_ollama_backend_maps_each_failure_to_a_plain_error(tmp_path, error, expected, said):
+    """Error mapping: connection refused, a timeout (bare, or wrapped in
+    URLError as urllib does), a non-200 (with Ollama's own `error` field when
+    the body carries one), each raised as a plain message naming the address
+    or the status, never a traceback into urllib. identify() turns any of
+    them into an error result on that image and the batch continues."""
+    image = tmp_path / "image.jpg"
+    image.write_bytes(b"jpeg")
+    backend = _ollama_backend(_FakeUrlopen(error=error), timeout=42.0)
+    with pytest.raises(expected) as err:
+        backend.complete(image, "prompt", 10)
+    assert said in str(err.value), str(err.value)
+
+
+def test_ollama_backend_reports_a_malformed_reply(tmp_path):
+    image = tmp_path / "image.jpg"
+    image.write_bytes(b"jpeg")
+    backend = _ollama_backend(_FakeUrlopen(b"<html>proxy error</html>"))
+    with pytest.raises(RuntimeError) as err:
+        backend.complete(image, "prompt", 10)
+    assert "not JSON" in str(err.value)
