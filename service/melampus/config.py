@@ -73,7 +73,7 @@ class ModelConfig(_Base):
     # the backend seam; this makes it a setting, which is what lets the same
     # repo run on a machine with no local runtime at all (Windows).
     #   mlx       — local, Apple Silicon only. The default; the local-first path.
-    #   anthropic — the Claude API. Every frame billed: see docs/config.md.
+    #   claude    — the Claude API (Anthropic). Every frame billed: see docs/config.md.
     #   openai    — OpenAI, or anything chat-completions-compatible via base_url.
     backend: str = "mlx"
     # CLAUDE.md §3 wants the model to be a setting, never a hardcode. (mlx only.)
@@ -248,10 +248,10 @@ class EscalationConfig(_Base):
     # Which cloud to ask. The backend seam in backend.py is what makes this a
     # one-line choice rather than a second pipeline: both providers get the same
     # prompts, the same schema validation and the same corrective retry.
-    #   anthropic — the Claude API
+    #   claude    — the Claude API (Anthropic)
     #   openai    — the OpenAI API, or anything speaking its chat-completions shape
     #               (set base_url for OpenRouter, LM Studio, vLLM, a proxy, …)
-    provider: str = "anthropic"
+    provider: str = "claude"
     base_url: str | None = None
 
     # None means "this provider's default" — see escalate.DEFAULT_MODELS. Vision

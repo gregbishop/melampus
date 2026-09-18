@@ -222,12 +222,12 @@ def build_cloud_identifier(config: MelampusConfig, api_key: str | None = None):
     # Import now, not on first request. The backends import their SDK lazily, so a
     # missing dependency would otherwise surface once per frame, mid-run, after the
     # selection has already been made.
-    if provider == "anthropic":
+    if provider == "claude":
         import anthropic  # noqa: F401
     else:
         import openai  # noqa: F401
 
-    if provider == "anthropic":
+    if provider == "claude":
         backend = AnthropicBackend(
             key, model, effort=settings.effort, timeout=settings.timeout_seconds,
         )

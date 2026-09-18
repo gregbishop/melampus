@@ -280,7 +280,7 @@ def test_ci_builds_and_smoke_tests_the_executable():
     Card #434, Done-when 1 and 3: every job that builds also syncs the `cloud`
     and `openai` extras, on every platform alike. PyInstaller bundles what the
     build venv has, so a job that syncs only dev and build ships an executable
-    whose `--backend anthropic` prints an install hint that means nothing
+    whose `--backend claude` prints an install hint that means nothing
     inside a binary (the smoke test in test_binary.py proves the SDKs import;
     this gate keeps the extras in the command that builds)."""
     commands = _ci_pytest_commands()

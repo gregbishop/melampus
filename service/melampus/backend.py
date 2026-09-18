@@ -110,7 +110,7 @@ class AnthropicBackend(VLMBackend):
     ) -> None:
         if not api_key:
             raise ValueError(
-                "The Anthropic backend needs an API key. Set MELAMPUS_ANTHROPIC_KEY "
+                "The Claude backend needs an API key. Set MELAMPUS_ANTHROPIC_KEY "
                 "in your environment, or put it in melampus.local.toml (git-ignored). "
                 "Never commit it."
             )
