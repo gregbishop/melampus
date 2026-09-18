@@ -204,6 +204,22 @@ def test_ci_installs_from_the_lockfile_before_pytest():
     assert not not_locked, f"CI's pytest step does not install with uv sync --locked: {not_locked}"
 
 
+def test_ci_builds_and_smoke_tests_the_executable():
+    """Card #399, Done-when 3: given the repo's test command, when it runs,
+    then the build and the executable smoke test are part of it. The run that
+    gates merges is CI's, so its pytest step must pass --build-binary and
+    install the `build` extra PyInstaller comes from; with either missing, the
+    smoke tests in test_binary.py skip on every CI run and Done-when 1 and 2
+    are never checked where it counts."""
+    not_building = [
+        c for c in _ci_pytest_commands() if "--build-binary" not in c or "--extra build" not in c
+    ]
+    assert not not_building, (
+        "CI's pytest step must install `--extra build` and run `pytest --build-binary`: "
+        f"{not_building}"
+    )
+
+
 def test_brief_explains_ci_as_installing_from_the_lockfile():
     """The brief's paragraph on the two test commands explains what CI does with
     service/pyproject.toml. Since card #425 CI installs service/uv.lock with
