@@ -6,7 +6,7 @@ silently fall behind the code or the repo again (as happened when [occurrence] a
 implemented setting; AGENTS.md, and not .gitignore, names the install command for
 the recorded plugins; no doc names a file by an uppercase name it does not have;
 docs/brief.md names the pytest command CI actually runs and explains it as
-installing from the lockfile; the README's install block and CI both install
+installing from the lockfile; every doc block that installs the service, and CI, install
 from the lockfile (card #425, Done-when 3 and 2); AGENTS.md points at
 docs/brief.md without restating its values; and AGENTS.md points at the standard
 and names the tracker (card #410, Done-when 3).
@@ -28,6 +28,7 @@ PLUGIN_CHOICE = REPO / ".agents" / "on-purpose.json"
 BRIEF = REPO / "docs" / "brief.md"
 GITIGNORE = REPO / ".gitignore"
 README = REPO / "readme.md"
+DOCS = [README, AGENTS_MD, *sorted((REPO / "docs").glob("*.md"))]
 
 
 LOCKFILE_FLAGS = ("--locked", "--frozen")
@@ -81,7 +82,7 @@ def test_docs_name_only_the_lowercase_files():
     """The real files are readme.md and docs/config.md. A doc that still says
     README.md or docs/CONFIG.md, or claims another doc does, is stale."""
     stale = []
-    for doc in [README, AGENTS_MD, *sorted((REPO / "docs").glob("*.md"))]:
+    for doc in DOCS:
         for lineno, line in enumerate(doc.read_text(encoding="utf-8").splitlines(), 1):
             if "README.md" in line or "CONFIG.md" in line:
                 stale.append(f"{doc.relative_to(REPO)}:{lineno}: {line.strip()}")
@@ -110,19 +111,40 @@ def test_brief_names_the_test_command_ci_runs():
     assert not missing, f"docs/brief.md's stack contract does not name what CI runs: {missing}"
 
 
-def test_readme_install_block_installs_from_the_lockfile():
+def _fenced_commands(text: str) -> list[str]:
+    """Every non-blank, non-comment line inside a fenced code block of a doc."""
+    return [
+        line
+        for block in re.findall(r"^```\w*\n(.*?)^```", text, re.MULTILINE | re.DOTALL)
+        for line in block.splitlines()
+        if line and not line.startswith("#")
+    ]
+
+
+def test_install_blocks_install_from_the_lockfile():
     """Card #425, Done-when 3: given a fresh clone, when the README setup runs,
     then the resolved versions match the lockfile. Only `uv sync --locked` (or
-    `--frozen`) does that; `uv pip install` never reads uv.lock. Running the
-    install here would need the network, so the gate is on the command itself."""
+    `--frozen`) does that; `uv pip install` never reads uv.lock. The setup is
+    every fenced block that installs the service, not only `## Install`: the
+    Windows block and the provider-extras blocks (README and docs/config.md)
+    would otherwise re-resolve from pyproject's bounds, and because `uv sync`
+    is exact, an SDK added with `uv pip install` is removed the next time the
+    Install block runs. Running the installs here would need the network, so
+    the gate is on the commands themselves."""
     readme = README.read_text(encoding="utf-8")
-    block = re.search(r"^## Install\n.*?```bash\n(.*?)```", readme, re.MULTILINE | re.DOTALL)
-    assert block, "readme.md has no bash block under ## Install"
-    commands = [line for line in block.group(1).splitlines() if line and not line.startswith("#")]
-    locked = [c for c in commands if _installs_from_the_lockfile(c)]
-    assert locked and not any("uv pip install" in c for c in commands), (
-        "readme.md's ## Install block must install with `uv sync --locked` "
-        f"(or --frozen), not re-resolve with `uv pip install`: {commands}"
+    install = re.search(r"^## Install\n(.*?)^## ", readme, re.MULTILINE | re.DOTALL)
+    assert install and any(_installs_from_the_lockfile(c) for c in _fenced_commands(install.group(1))), (
+        "readme.md's ## Install section must install with `uv sync --locked`"
+    )
+    unlocked = [
+        f"{doc.relative_to(REPO)}: {command}"
+        for doc in DOCS
+        for command in _fenced_commands(doc.read_text(encoding="utf-8"))
+        if re.search(r"\buv (pip install|sync)\b", command) and not _installs_from_the_lockfile(command)
+    ]
+    assert not unlocked, (
+        "every doc block that installs the service must use `uv sync --locked` "
+        f"(or --frozen), not re-resolve with `uv pip install`: {unlocked}"
     )
 
 

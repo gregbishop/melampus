@@ -75,13 +75,14 @@ cloud results live in their own cache file so a later local pass cannot
 overwrite answers you paid for. Set `escalation.input_usd_per_mtok` /
 `output_usd_per_mtok` to your model's rates so the estimate means something.
 
-Install (PowerShell, from the repo folder; `mlx-vlm` is skipped automatically
-on non-mac platforms; drop `cloud` or `openai` if you'll only ever use the
-other provider):
+Install (PowerShell, from the repo folder; this installs exactly
+`service/uv.lock`, whose `mlx-vlm` entry is marked Apple-Silicon-only and so
+is skipped on Windows; drop `--extra cloud` or `--extra openai` if you'll only
+ever use the other provider):
 
 ```powershell
 uv venv --python 3.12 .venv
-uv pip install --python .venv\Scripts\python.exe -e "./service[dev,cloud,openai]"
+$env:VIRTUAL_ENV = ".venv"; uv sync --project service --locked --extra dev --extra cloud --extra openai --active
 ```
 
 Configure the backend and key in `melampus.local.toml` (git-ignored):
@@ -268,11 +269,14 @@ their own cache file and never overwrite local ones, and each records what the l
 model had said — which is what makes "is this worth paying for?" a measurable
 agreement rate instead of an impression.
 
-Install the provider SDK you want; neither is a dependency of the local pipeline:
+Install the provider SDK you want, pinned from `service/uv.lock` like everything
+else: `cloud` is the anthropic SDK, `openai` the openai one; drop the extra you
+will not use. Neither is a dependency of the local pipeline. `uv sync` installs
+exactly the extras named, so keep `--extra dev` here, and note that re-running
+the `## Install` block above (which names only `dev`) removes the SDKs again:
 
 ```bash
-uv pip install --python .venv/bin/python "./service[cloud]"   # anthropic
-uv pip install --python .venv/bin/python "./service[openai]"  # openai
+VIRTUAL_ENV=.venv uv sync --project service --locked --extra dev --extra cloud --extra openai --active
 ```
 
 Full settings in [docs/config.md](docs/config.md#escalation--optional-cloud-second-opinion).
