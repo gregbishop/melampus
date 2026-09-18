@@ -450,7 +450,10 @@ t.test('a missing executable names the plugin folder and the file it should hold
 	t.equals(#executed, 0, 'ran a command with no executable to run')
 	local message = dialogMatching(PLUGIN)
 	t.isNotNil(message, 'no dialog names the plugin folder ' .. PLUGIN)
-	t.isNotNil(string.find(message, 'melampus', 1, true), 'the dialog does not say what file is expected')
+	-- The plugin path already contains "melampus", so the file must be named
+	-- as the file: the phrase, followed by the folder that should hold it.
+	t.isNotNil(string.find(message, 'a file named melampus:\n' .. PLUGIN, 1, true),
+		'the dialog does not say what file is expected:\n' .. message)
 	assertNoSetupInstructions(message)
 end)
 
