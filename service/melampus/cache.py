@@ -75,6 +75,9 @@ class ResultCache:
     def results(self) -> list[ImageResult]:
         return list(self._by_hash.values())
 
+    def records(self) -> list[dict]:
+        """Every result as the dict --json-out writes; --plugin-out enriches the same."""
+        return [json.loads(r.model_dump_json()) for r in self.results()]
+
     def export_json(self, destination: Path) -> None:
-        payload = [json.loads(r.model_dump_json()) for r in self.results()]
-        Path(destination).write_text(json.dumps(payload, indent=1), encoding="utf-8")
+        Path(destination).write_text(json.dumps(self.records(), indent=1), encoding="utf-8")

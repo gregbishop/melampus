@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 from pathlib import Path
 
@@ -181,8 +180,7 @@ def _write_plugin_results(paths: list[Path], cache: ResultCache, config, destina
     lookup = range_lookup(config.occurrence)
     if lookup is None:
         print("no default location configured; skipping range checks", file=sys.stderr)
-    records = [json.loads(r.model_dump_json()) for r in cache.results()]
-    outcome = enrich(paths, records, config, lookup=lookup,
+    outcome = enrich(paths, cache.records(), config, lookup=lookup,
                      on_progress=progress_printer(sys.stderr))
     write_plugin_results(destination, outcome.rows)
     print(f"\nwrote {destination}\n{outcome.summary()}", file=sys.stderr)
