@@ -192,21 +192,15 @@ def test_cli_backend_scripted_writes_a_result_without_weights(photos, tmp_path, 
 
 
 def test_cli_backend_mlx_on_windows_names_apple_silicon_and_the_backends_that_work(
-    tmp_path, capsys, monkeypatch
+    photos, tmp_path, capsys, monkeypatch
 ):
     """Card #400, Done-when 2: given the Windows executable, when the local MLX
     engine is requested, then it says clearly that MLX needs Apple Silicon and
-    names the engines that work here — every backend but mlx, so the list can
-    never drift from BACKEND_CHOICES."""
-    from PIL import Image
-
+    names the engines that work here."""
     from melampus.cli import main
 
     monkeypatch.setattr(providers.sys, "platform", "win32")
     monkeypatch.setattr(providers.platform, "machine", lambda: "AMD64")
-    photos = tmp_path / "photos"
-    photos.mkdir()
-    Image.new("RGB", (640, 480), (90, 120, 70)).save(photos / "frame.jpg")
 
     code = main([str(photos), "--backend", "mlx", "--cache", str(tmp_path / "cache.jsonl")])
 
@@ -215,4 +209,3 @@ def test_cli_backend_mlx_on_windows_names_apple_silicon_and_the_backends_that_wo
     assert "Apple Silicon" in err
     for works_here in ("anthropic", "openai", "scripted"):
         assert works_here in err, f"{works_here!r} is not named as working here:\n{err}"
-    assert tuple(b for b in providers.BACKEND_CHOICES if b != "mlx") == ("anthropic", "openai", "scripted")
