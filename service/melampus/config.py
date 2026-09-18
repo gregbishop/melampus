@@ -72,9 +72,13 @@ class ModelConfig(_Base):
     # Which inference engine the *primary* pipeline talks to. CLAUDE.md §3 built
     # the backend seam; this makes it a setting, which is what lets the same
     # repo run on a machine with no local runtime at all (Windows).
-    #   mlx       — local, Apple Silicon only. The default; the local-first path.
+    #   mlx       — local, Apple Silicon only. The local-first path.
+    #   ollama    — local; named, not built yet (card #406).
     #   claude    — the Claude API (Anthropic). Every frame billed: see docs/config.md.
     #   openai    — OpenAI, or anything chat-completions-compatible via base_url.
+    # Left unset, the CLI replaces this value with the first engine detection
+    # says can run here (providers.default_engine, card #404); `model_fields_set`
+    # is how it tells "unset" from "set to mlx".
     backend: str = "mlx"
     # CLAUDE.md §3 wants the model to be a setting, never a hardcode. (mlx only.)
     repo: str = "mlx-community/Qwen3-VL-30B-A3B-Instruct-4bit"
