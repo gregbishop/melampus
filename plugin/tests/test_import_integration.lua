@@ -382,8 +382,9 @@ end)
 
 --- Run the import with photos the results file has never seen, accept the
 --- offer to analyse, and hand back the commands the shell was given.
-local function runAnalysis(existing)
-	runImport({}, { { 'fresh_01.CR3' }, { 'fresh_02.CR3' } }, defaultPrefs(),
+-- `prefs` overrides individual preferences on top of the defaults.
+local function runAnalysis(existing, prefs)
+	runImport({}, { { 'fresh_01.CR3' }, { 'fresh_02.CR3' } }, defaultPrefs(prefs),
 		{ existing = existing })
 	return mock.state.executed or {}
 end
@@ -407,16 +408,38 @@ local function loadAnalyzeOnWindows(executablePresent)
 	return loadUnderMock('MelampusAnalyze', { existing = existing }, WIN_PLUGIN, { windows = true })
 end
 
+--- The engine's place on the command line: `--backend <engine>` after the
+--- profile when one is set, quoted as `quote` quotes it, nothing when not
+--- (the CLI decides).
+local function engineOption(engine, quote)
+	if engine == nil or engine == '' then return '' end
+	return ' --backend ' .. quote(engine)
+end
+
 --- The one line the import runs on macOS: the executable beside the plugin
 --- over the first batch of previews in the mock's temp directory, the
 --- enriched results next to the previews, the CLI's own output kept in temp,
 --- every path single-quoted for sh. The whole line, so nothing of a Python
 --- checkout (python, .venv, tools/, cd) can be in it, wherever the clone is.
-local function macCommand()
+--- `engine` is the engine preference, on the line as --backend when set.
+local function macCommand(engine)
 	local temp = mock.state.tempDir
 	local previews = temp .. '/melampus-previews-1'
-	return string.format("'%s' '%s' --profile 'wildlife' --plugin-out '%s/results.json' --yes >'%s/melampus-cli.log' 2>&1",
-		MAC_EXECUTABLE, previews, previews, temp)
+	return string.format("'%s' '%s' --profile 'wildlife'%s --plugin-out '%s/results.json' --yes >'%s/melampus-cli.log' 2>&1",
+		MAC_EXECUTABLE, previews, engineOption(engine, function(w) return "'" .. w .. "'" end),
+		previews, temp)
+end
+
+--- The same line for a fake Windows Lightroom, as cmd.exe needs it: every
+--- path double-quoted (single quotes mean nothing to cmd.exe), and the whole
+--- line wrapped in a pair of its own: cmd.exe /c strips the first and last
+--- quote of a line that starts with one and holds more than two, so the ones
+--- around each path survive.
+local function windowsCommand(engine)
+	return string.format(
+		'""%s" "%s" --profile "wildlife"%s --plugin-out "%s\\results.json" --yes >"%s\\melampus-cli.log" 2>&1"',
+		WIN_EXECUTABLE, WIN_PREVIEWS, engineOption(engine, function(w) return '"' .. w .. '"' end),
+		WIN_PREVIEWS, WIN_TEMP)
 end
 
 --- What Analyze.run says when the executable is not beside the plugin: the
@@ -464,13 +487,7 @@ t.test('on Windows the command names melampus.exe with cmd.exe quoting', functio
 	local Analyze = loadAnalyzeOnWindows(true)
 	local ok, message = Analyze.run(WIN_PREVIEWS, WIN_PREVIEWS .. '\\results.json', 'wildlife')
 	t.isTrue(ok, 'run failed: ' .. tostring(message))
-	-- Every path double-quoted (single quotes mean nothing to cmd.exe), and
-	-- the whole line wrapped in a pair of its own: cmd.exe /c strips the
-	-- first and last quote of a line that starts with one and holds more
-	-- than two, so the ones around each path survive.
-	t.equals(mock.state.executed[1], string.format(
-		'""%s" "%s" --profile "wildlife" --plugin-out "%s\\results.json" --yes >"%s\\melampus-cli.log" 2>&1"',
-		WIN_EXECUTABLE, WIN_PREVIEWS, WIN_PREVIEWS, WIN_TEMP),
+	t.equals(mock.state.executed[1], windowsCommand(),
 		'not the one command for melampus.exe beside the plugin, as cmd.exe needs it')
 end)
 
@@ -501,6 +518,45 @@ t.test('the "%" refusal names the path that has it, and the fix for that path', 
 	t.isNotNil(string.find(message, results, 1, true),
 		'the message does not name the results path:\n' .. message)
 	t.isNil(mock.state.executed, 'ran a command through a path with "%"')
+end)
+
+-- ── the engine preference reaches the command line (card #403) ─────────────
+-- Done-when 1: given a preference named engine with one of mlx, ollama,
+-- openai, claude, when the plugin builds the CLI command, then the CLI
+-- receives it. Done-when 2: given no preference, the plugin passes no
+-- --backend and the CLI's default applies.
+local ENGINES = { 'mlx', 'ollama', 'openai', 'claude' }
+
+t.test('each engine preference reaches the command line as --backend', function()
+	for _, engine in ipairs(ENGINES) do
+		local executed = runAnalysis({ [MAC_EXECUTABLE] = true }, { engine = engine })
+		t.equals(#executed, 1, engine .. ': expected one command')
+		t.equals(executed[1], macCommand(engine), engine .. ' did not reach the command line as --backend')
+	end
+end)
+
+t.test('no engine preference means no --backend on the command line', function()
+	local executed = runAnalysis({ [MAC_EXECUTABLE] = true })
+	t.equals(#executed, 1, 'expected one command')
+	t.equals(executed[1], macCommand(), 'the plugin chose an engine the user never set')
+end)
+
+t.test('an unknown engine preference is refused before anything runs', function()
+	local executed = runAnalysis({ [MAC_EXECUTABLE] = true }, { engine = 'anthropic' })
+	t.equals(#executed, 0, 'ran a command with an engine the CLI would reject')
+	local message = dialogMatching('anthropic')
+	t.isNotNil(message, 'no dialog names the engine that was set')
+	for _, engine in ipairs(ENGINES) do
+		t.isNotNil(string.find(message, engine, 1, true), 'the dialog does not name ' .. engine)
+	end
+end)
+
+t.test('on Windows the engine is double-quoted for cmd.exe', function()
+	local Analyze = loadAnalyzeOnWindows(true)
+	local ok, message = Analyze.run(WIN_PREVIEWS, WIN_PREVIEWS .. '\\results.json', 'wildlife', 'claude')
+	t.isTrue(ok, 'run failed: ' .. tostring(message))
+	t.equals(mock.state.executed[1], windowsCommand('claude'),
+		'the engine is not double-quoted for cmd.exe')
 end)
 
 t.test('a missing executable names the plugin folder and the file it should hold', function()
