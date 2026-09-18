@@ -13,6 +13,10 @@ local Analyze = require 'MelampusAnalyze'
 local Log = require 'MelampusLog'
 local Rules = require 'MelampusRules'
 
+-- Lightroom's Lua 5.1 has unpack; the local interpreter the tests use has
+-- table.unpack.
+local unpack = unpack or table.unpack
+
 local function lineCount(text)
 	local _, newlines = string.gsub(text, '\n', '')
 	return newlines + 1
@@ -32,20 +36,18 @@ LrTasks.startAsyncTask(function()
 
 		-- The picker, the reasons for whatever is greyed, and a link for each
 		-- greyed engine whose reason names where to get it.
-		local engineGroup = f:group_box {
-			title = 'Where identification runs',
-			fill_horizontal = 1,
+		local engineViews = {
 			f:popup_menu { value = bind 'engine', items = engineItems },
 		}
 		if engineNote ~= '' then
-			engineGroup[#engineGroup + 1] = f:static_text {
+			engineViews[#engineViews + 1] = f:static_text {
 				title = engineNote, height_in_lines = lineCount(engineNote), text_color = grey,
 			}
 		end
 		for _, item in ipairs(engineItems) do
 			if not item.enabled and item.link then
 				local link = item.link
-				engineGroup[#engineGroup + 1] = f:static_text {
+				engineViews[#engineViews + 1] = f:static_text {
 					title = link,
 					text_color = import('LrColor')(0.1, 0.3, 0.8),
 					mouse_down = function() LrHttp.openUrlInBrowser(link) end,
@@ -63,7 +65,7 @@ LrTasks.startAsyncTask(function()
 			if variable then
 				keys[variable] = LrPasswords.retrieve(variable) or ''
 				keysAtOpen[variable] = keys[variable]
-				engineGroup[#engineGroup + 1] = f:row {
+				engineViews[#engineViews + 1] = f:row {
 					visible = bind {
 						key = 'engine', object = prefs,
 						transform = function(value) return value == engine end,
@@ -109,7 +111,11 @@ LrTasks.startAsyncTask(function()
 				},
 			},
 
-			engineGroup,
+			f:group_box {
+				title = 'Where identification runs',
+				fill_horizontal = 1,
+				unpack(engineViews),
+			},
 
 			f:group_box {
 				title = 'What kind of photos are these?',
