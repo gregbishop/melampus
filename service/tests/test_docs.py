@@ -1,12 +1,16 @@
-"""Docs drift gate.
+"""Docs drift gates.
 
-docs/config.md promises every implemented setting, with rationale. This test makes
-that promise mechanical: a config field that does not appear in the doc fails CI, so
-the doc cannot silently fall behind the code again (as happened when [occurrence]
-and [quality] shipped undocumented).
+Each test here makes one promise a doc carries mechanical, so the doc cannot
+silently fall behind the code or the repo again (as happened when [occurrence] and
+[quality] shipped undocumented). The promises: docs/config.md names every
+implemented setting; AGENTS.md names the install command for the recorded plugins;
+no doc names a file by an uppercase name it does not have; docs/brief.md names the
+pytest command CI actually runs; AGENTS.md points at docs/brief.md without
+restating its values; and AGENTS.md points at the standard and names the tracker
+(card #410, Done-when 3).
 
-The check is deliberately dumb — substring presence of the backticked key name — so
-it never argues with prose style, only with absence.
+The checks are deliberately dumb — substring presence of the backticked name — so
+they never argue with prose style, only with absence.
 """
 
 import json
