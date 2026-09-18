@@ -100,8 +100,9 @@ environment. Then everything works as on the Mac, plugin included:
 ```
 
 One-off runs can skip the config file: `--backend claude`. The Lightroom
-plugin detects the platform itself — nothing to configure beyond the backend
-and key above.
+plugin detects the platform itself; its `engine` preference (docs/plugin.md
+§ The engine) passes the same name as `--backend`, and left unset it defers to
+the backend and key above.
 
 ### Available models
 
