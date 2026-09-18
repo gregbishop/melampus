@@ -56,6 +56,8 @@ so the HTTP layer can accept per-request settings without touching the analysis 
 | `cache.py` | Append-only JSONL result cache, fsynced per image |
 | `runner.py` | Batch execution, resume, per-file failure isolation |
 | `report.py` | Raw table, scoring, calibration, name-quality checks |
+| `encounters.py` | Burst clustering by capture time, from the XMP packet, never the pixels |
+| `plugin_results.py` | The enrichment the Lightroom plugin gates on: burst agreement, range flag, encounter, quality and its rank within the burst (`melampus-id --plugin-out`) |
 
 ---
 
@@ -174,8 +176,8 @@ Known gap: there is no per-image **timeout**. Exceptions are handled; a hang is 
 ## Encounter-aware analysis
 
 Wildlife shooting produces bursts. `encounters.py` groups frames by EXIF capture-time
-proximity (`tools/cluster_encounters.py` is the corpus report over it), which recovers the shooting encounters and unlocks three things
-that per-frame processing cannot do:
+proximity (`tools/cluster_encounters.py` is the corpus report over it), which recovers
+the shooting encounters and unlocks three things that per-frame processing cannot do:
 
 1. **A tractable review unit.** One judgement per encounter labels every frame in it, so
    43 human decisions cover 1,743 photographs.
@@ -185,6 +187,16 @@ that per-frame processing cannot do:
 
 The development set was sampled *across* encounters rather than at random, because
 random sampling from a burst corpus returns near-duplicates of the same few subjects.
+
+The plugin's write gates reason per encounter too. `plugin_results.py` adds
+`burst_agreement` (the share of a burst's frames that agree with its majority call),
+`range_flag` (one GBIF lookup per encounter, in the month it was shot, against the
+configured default location), `encounter`, and `quality` with `quality_rank` and
+`encounter_frames` — quality is ranked *within* the burst, because absolute sharpness
+is not comparable across subjects and culling is a within-burst question anyway.
+`melampus-id --plugin-out` writes it in the same run as the identification, so the
+shipped executable needs no second Python step; `tools/make_plugin_results.py` is a
+thin caller of the same module for the Lightroom plugin until card #401 rewires it.
 
 ---
 
