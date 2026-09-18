@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import platform
 import sys
+import urllib.request
 from dataclasses import dataclass
 
 from pydantic import SecretStr
@@ -57,6 +58,10 @@ BACKEND_CHOICES = ("mlx", OLLAMA, "openai", "claude", SCRIPTED)
 #: config value.
 OLLAMA_URL = "http://127.0.0.1:11434"
 
+#: How long the probe waits for the local server. Loopback answers in
+#: milliseconds or not at all; a second is a firewall's silence, not Ollama's.
+OLLAMA_PROBE_SECONDS = 1.0
+
 #: Where to get Ollama when nothing answers at OLLAMA_URL.
 OLLAMA_INSTALL = "https://ollama.com/download"
 
@@ -87,8 +92,17 @@ def _refusal(reason: str, *, works_here: tuple[str, ...]) -> BackendUnavailable:
 
 
 def ollama_answers() -> bool:
-    """Whether an Ollama server answers at OLLAMA_URL. Never raises."""
-    return False
+    """Whether an Ollama server answers at OLLAMA_URL: GET /api/version
+    (Ollama's docs/api.md § Version) within OLLAMA_PROBE_SECONDS, status 200.
+    Connection refused, a timeout, a non-200: unavailable. Never raises; a
+    probe reports."""
+    try:
+        with urllib.request.urlopen(
+            f"{OLLAMA_URL}/api/version", timeout=OLLAMA_PROBE_SECONDS
+        ) as response:
+            return response.status == 200
+    except Exception:  # noqa: BLE001 - every failure means the same thing: not here
+        return False
 
 
 @dataclass(frozen=True, slots=True)
