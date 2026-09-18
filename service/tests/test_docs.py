@@ -5,7 +5,8 @@ silently fall behind the code or the repo again (as happened when [occurrence] a
 [quality] shipped undocumented). The promises: docs/config.md names every
 implemented setting; AGENTS.md, and not .gitignore, names the install command for
 the recorded plugins; no doc names a file by an uppercase name it does not have;
-docs/brief.md names the pytest command CI actually runs; AGENTS.md points at
+docs/brief.md names the pytest command CI actually runs; CI installs from the
+lockfile before it runs pytest (card #425, Done-when 2); AGENTS.md points at
 docs/brief.md without restating its values; and AGENTS.md points at the standard
 and names the tracker (card #410, Done-when 3).
 
@@ -25,6 +26,12 @@ AGENTS_MD = REPO / "AGENTS.md"
 PLUGIN_CHOICE = REPO / ".agents" / "on-purpose.json"
 BRIEF = REPO / "docs" / "brief.md"
 GITIGNORE = REPO / ".gitignore"
+
+
+def _installs_from_the_lockfile(command: str) -> bool:
+    """`uv sync --locked` (or `--frozen`) installs exactly uv.lock; anything else
+    re-resolves from pyproject.toml's bounds."""
+    return bool(re.search(r"\buv sync\b[^&|;]*--(locked|frozen)\b", command))
 
 
 def test_every_config_field_is_documented():
@@ -74,20 +81,34 @@ def test_docs_name_only_the_lowercase_files():
     assert not stale, f"docs name uppercase files that do not exist: {stale}"
 
 
+def _ci_pytest_commands() -> list[str]:
+    """The `run:` line of every ci.yml step that invokes pytest."""
+    workflow = (REPO / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    commands = [
+        command
+        for command in re.findall(r"^\s*run:\s*(.+?)\s*$", workflow, re.MULTILINE)
+        if "pytest" in command
+    ]
+    assert commands, "ci.yml runs no pytest step"
+    return commands
+
+
 def test_brief_names_the_test_command_ci_runs():
     """Rule 11: the repo's own commands are the truth. CI gates merges with its
     own pytest invocation, so the stack contract must name that command too,
     not only the local one."""
-    workflow = (REPO / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
-    ci_commands = [
-        f"`{command}`"
-        for command in re.findall(r"^\s*run:\s*(.+?)\s*$", workflow, re.MULTILINE)
-        if "pytest" in command
-    ]
-    assert ci_commands, "ci.yml runs no pytest step"
+    ci_commands = [f"`{command}`" for command in _ci_pytest_commands()]
     brief = BRIEF.read_text(encoding="utf-8")
     missing = [c for c in ci_commands if c not in brief]
     assert not missing, f"docs/brief.md's stack contract does not name what CI runs: {missing}"
+
+
+def test_ci_installs_from_the_lockfile_before_pytest():
+    """Card #425, Done-when 2: given CI, when it installs, then it installs from
+    the lockfile and fails if the lockfile and pyproject disagree. That is
+    `uv sync --locked` (or `--frozen`); `uv pip install` re-resolves instead."""
+    not_locked = [c for c in _ci_pytest_commands() if not _installs_from_the_lockfile(c)]
+    assert not not_locked, f"CI's pytest step does not install with uv sync --locked/--frozen: {not_locked}"
 
 
 def test_agents_md_points_at_the_brief_without_restating_it():
