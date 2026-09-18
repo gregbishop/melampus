@@ -86,3 +86,20 @@ def test_agents_md_points_at_the_brief_without_restating_it():
     assert "`docs/brief.md`" in agents, "AGENTS.md must point at docs/brief.md"
     restated = [v for v in ("`.venv/bin/python -m pytest`", "`service/uv.lock`") if v in agents]
     assert not restated, f"AGENTS.md restates stack-contract values that live in docs/brief.md: {restated}"
+
+
+def test_agents_md_points_at_the_standard_and_names_the_tracker():
+    """Card #410, Done-when 3: given AGENTS.md, when read, then it points at the
+    standard and names this board as the tracker. The standard is its two files
+    in the on-purpose checkout; the tracker is a `tracker:` line naming the board."""
+    agents = AGENTS_MD.read_text(encoding="utf-8")
+    standard = [
+        f"`plugins/standard/standards/{name}.md`" for name in ("ticket", "tdd")
+    ]
+    missing = [s for s in standard if s not in agents]
+    assert not missing, f"AGENTS.md does not point at the standard: {missing}"
+    tracker = re.findall(r"^tracker: (.+)$", agents, re.MULTILINE)
+    assert tracker, "AGENTS.md has no `tracker: ` line"
+    assert "board=Melampus" in tracker[0], (
+        f"AGENTS.md's tracker line does not name this board: {tracker[0]!r}"
+    )
