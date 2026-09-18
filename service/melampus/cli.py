@@ -232,8 +232,8 @@ def main(argv: list[str] | None = None) -> int:
     cloud.add_argument("--escalate-max", type=int, default=None,
                        help="ceiling on how many frames one run may bill for")
     cloud.add_argument("--escalate-model", default=None, help="override the cloud model")
-    cloud.add_argument("--escalate-provider", choices=("anthropic", "openai"), default=None,
-                       help="which cloud to ask (default: anthropic)")
+    cloud.add_argument("--escalate-provider", choices=("claude", "openai"), default=None,
+                       help="which cloud to ask (default: claude)")
     cloud.add_argument("--escalate-yes", action="store_true",
                        help="skip the cost confirmation (for non-interactive callers)")
     cloud.add_argument("--escalate-base-url", default=None,

@@ -20,15 +20,18 @@ from .config import MelampusConfig
 #: Where each provider's key is looked for, in order, when the config has none.
 #: Keys never cross providers: an Anthropic key must not silently authorise a
 #: request to OpenAI, or the "which cloud am I using" question has no answer.
+#: The providers carry the engine names the user chooses between (card #403):
+#: `claude` is the Anthropic backend everywhere a user names it; the key
+#: variables keep the vendor's name.
 KEY_VARIABLES = {
-    "anthropic": ("MELAMPUS_ANTHROPIC_KEY", "ANTHROPIC_API_KEY"),
+    "claude": ("MELAMPUS_ANTHROPIC_KEY", "ANTHROPIC_API_KEY"),
     "openai": ("MELAMPUS_OPENAI_KEY", "OPENAI_API_KEY"),
 }
 
 #: Starting points only. Vision model names move faster than this file does —
 #: check the provider's current listing and override in config when they age.
 DEFAULT_MODELS = {
-    "anthropic": "claude-opus-5",
+    "claude": "claude-opus-5",
     "openai": "gpt-5",
 }
 
@@ -120,7 +123,7 @@ def build_primary_backend(config: MelampusConfig) -> VLMBackend:
 
     # Import now, not on first request: a missing SDK should fail once, up front,
     # with an install hint — not once per frame mid-run.
-    if provider == "anthropic":
+    if provider == "claude":
         import anthropic  # noqa: F401
     else:
         import openai  # noqa: F401
@@ -131,7 +134,7 @@ def build_primary_backend(config: MelampusConfig) -> VLMBackend:
 
     from .backend import AnthropicBackend, OpenAIBackend
 
-    if provider == "anthropic":
+    if provider == "claude":
         return AnthropicBackend(
             key, model, effort=settings.effort, timeout=settings.timeout_seconds
         )

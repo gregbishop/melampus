@@ -40,7 +40,7 @@ jobs:
       # build is the slow step, a few minutes on the runner. --extra cloud and
       # --extra openai put the anthropic and openai SDKs in the build venv, so
       # the executable carries them (card #434): PyInstaller bundles what the
-      # venv has, and without them --backend anthropic prints an install hint
+      # venv has, and without them --backend claude prints an install hint
       # that means nothing inside a binary.
       - name: Run service and plugin tests, building the executable first
         working-directory: service
