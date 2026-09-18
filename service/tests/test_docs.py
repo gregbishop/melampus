@@ -430,3 +430,24 @@ def test_docs_name_engine_detection_where_the_default_and_the_refusal_are_descri
     assert "`--detect-engines`" in backend_row, "docs/config.md's backend row does not name --detect-engines"
     assert "turns that into" not in backend_row, "docs/config.md still says detection is yet to come"
     assert "`--detect-engines`" in readme, "readme.md does not name --detect-engines"
+
+
+def test_docs_describe_the_engine_picker_and_where_the_key_lives():
+    """Card #405: the engine has a control in Settings now. docs/plugin.md's
+    engine section must describe the picker (what greys an engine, where the
+    key goes: LrPasswords, never a file) instead of promising the dialog is
+    yet to come, and readme.md's Lightroom section must show the dialog: the
+    screenshot's reference, docs/settings-dialog.png, which the owner takes."""
+    plugin_doc = (REPO / "docs" / "plugin.md").read_text(encoding="utf-8")
+    engine = re.search(r"^## The engine\n(.*?)^---", plugin_doc, re.MULTILINE | re.DOTALL)
+    assert engine, "docs/plugin.md has no ## The engine section"
+    prose = " ".join(engine.group(1).split())
+    assert "until then the preference is unset" not in prose, (
+        "docs/plugin.md still says the engine has no control in Settings")
+    for named in ("`--detect-engines`", "LrPasswords", "settings-dialog.png"):
+        assert named in prose, f"docs/plugin.md's engine section does not name {named}"
+    readme = README.read_text(encoding="utf-8")
+    section = re.search(r"^## Reviewing in Lightroom\n(.*?)^## ", readme, re.MULTILINE | re.DOTALL)
+    assert section, "readme.md has no ## Reviewing in Lightroom section"
+    assert "docs/settings-dialog.png" in section.group(1), (
+        "readme.md's Lightroom section does not show the settings dialog")

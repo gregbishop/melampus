@@ -388,7 +388,14 @@ plugin folder with the executable already inside it. Unpack it (double-click,
 or `unzip Melampus-macOS.zip`), keep the `Melampus.lrplugin` folder somewhere
 it can stay, then in Lightroom: **File → Plug-in Manager → Add** and select
 that folder. It should report *Installed and running*; **Library → Plug-in
-Extras → Melampus: Settings…** opens the settings. The release workflow
+Extras → Melampus: Settings…** opens the settings, where **Where
+identification runs** picks the engine (mlx, ollama, openai, claude; the
+ones this machine cannot run are greyed with the reason) and takes the API
+key for a cloud engine, kept in your keychain:
+
+![The Melampus settings dialog, with the engine picker](docs/settings-dialog.png)
+
+The release workflow
 (`.github/workflows/release.yml`) builds both zips with the same commands CI
 runs, through `tools/package_plugin.py`, on every pushed `v*` tag. The
 executable is not yet signed or notarized (card #438).
