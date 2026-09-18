@@ -415,7 +415,8 @@ def test_executable_refuses_mlx_off_apple_silicon_and_names_what_works(
 def test_executable_prints_the_same_json_as_the_cli_with_no_python_on_the_path(
     built_executable: Path, photos: Path, tmp_path: Path
 ):
-    """Done-when 2. Same folder, same fake backend, same JSON — from the
+    """Done-when 2 (#399) and Done-when 1 (#400), on whichever platform built
+    the executable. Same folder, same fake backend, same JSON — from the
     executable alone, in an environment where no python exists.
 
     Both read one synthetic config file, not the checkout's and dist/'s
