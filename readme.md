@@ -307,7 +307,7 @@ skipping cleanly if no Lua interpreter is installed.
 
 The executable's smoke tests (`service/tests/test_binary.py`) run against
 `dist/melampus` when it exists and skip when it does not. To build it first and
-run everything, which takes about a minute:
+run everything, which takes about a minute (CI always does this):
 
 ```bash
 .venv/bin/python -m pytest -q --build-binary
