@@ -215,12 +215,21 @@ def test_ci_builds_and_smoke_tests_the_executable():
     gates merges is CI's, so its pytest step must pass --build-binary and
     install the `build` extra PyInstaller comes from; with either missing, the
     smoke tests in test_binary.py skip on every CI run and Done-when 1 and 2
-    are never checked where it counts."""
+    are never checked where it counts.
+
+    Card #434, Done-when 1 and 3: every job that builds also syncs the `cloud`
+    and `openai` extras, on every platform alike. PyInstaller bundles what the
+    build venv has, so a job that syncs only dev and build ships an executable
+    whose `--backend anthropic` prints an install hint that means nothing
+    inside a binary (the smoke test in test_binary.py proves the SDKs import;
+    this gate keeps the extras in the command that builds)."""
+    extras = ("--extra build", "--extra cloud", "--extra openai")
     not_building = [
-        c for c in _ci_pytest_commands() if "--build-binary" not in c or "--extra build" not in c
+        c for c in _ci_pytest_commands()
+        if "--build-binary" not in c or any(extra not in c for extra in extras)
     ]
     assert not not_building, (
-        "CI's pytest step must install `--extra build` and run `pytest --build-binary`: "
+        f"CI's pytest step must install {' '.join(extras)} and run `pytest --build-binary`: "
         f"{not_building}"
     )
 
