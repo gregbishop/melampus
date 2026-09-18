@@ -47,25 +47,37 @@ end
 
 local RESULTS = os.tmpname() .. '.json'
 
+--- Drop the plugin's modules so the next load runs them fresh under the mock.
+local function unloadPlugin()
+	for _, name in ipairs({ 'MelampusJson', 'MelampusRules', 'MelampusLog', 'MelampusAnalyze' }) do
+		package.loaded[name] = nil
+	end
+end
+
 --- Run the real import file end to end and hand back the resulting state.
-local function runImport(records, photos, prefs)
+-- `photos` is a list of { fileName, rawMetadata, pluginProperties }; `options`
+-- goes through to mock.reset (confirmAnswer, existing, dropWrites), with the
+-- offer accepted unless it says otherwise. Raises if the import does.
+local function runImport(records, photos, prefs, options)
+	options = options or {}
+	options.prefs = prefs or {}
+	options.confirmAnswer = options.confirmAnswer or 'ok'
 	writeResults(RESULTS, records)
-	mock.reset({ prefs = prefs or {}, confirmAnswer = 'ok' })
+	mock.reset(options)
 	mock.state.prefs.resultsPath = RESULTS
 	for _, spec in ipairs(photos) do
-		mock.addPhoto(spec[1], spec[2] or {})
+		local photo = mock.addPhoto(spec[1], spec[2] or {})
+		for k, v in pairs(spec[3] or {}) do photo._plugin[k] = v end
 	end
 	mock.install(PLUGIN)
-	package.loaded['MelampusJson'] = nil
-	package.loaded['MelampusRules'] = nil
-	package.loaded['MelampusLog'] = nil
-	local chunk = assert(loadfile(PLUGIN .. '/MelampusImport.lua'))
-	local ok, err = pcall(chunk)
-	return ok, err
+	unloadPlugin()
+	local ok, err = pcall(assert(loadfile(PLUGIN .. '/MelampusImport.lua')))
+	if not ok then error('import raised: ' .. tostring(err), 2) end
+	return true
 end
 
 local function defaultPrefs(extra)
-	package.loaded['MelampusRules'] = nil
+	unloadPlugin()
 	local Rules = dofile(PLUGIN .. '/MelampusRules.lua')
 	local prefs = Rules.defaultSettings()
 	prefs.dryRun = false
@@ -197,17 +209,9 @@ end)
 
 -- ── dry run ────────────────────────────────────────────────────────────────
 t.test('preview mode writes nothing when declined', function()
-	mock.reset()
-	local prefs = defaultPrefs({ dryRun = true })
-	writeResults(RESULTS, { { file = 'd1.jpg',
-		candidates = { { 'Snowy Egret', 'Egretta thula', 0.95 } } } })
-	mock.reset({ prefs = prefs, confirmAnswer = 'cancel' })
-	mock.state.prefs.resultsPath = RESULTS
-	mock.addPhoto('d1.CR3', {})
-	mock.install(PLUGIN)
-	package.loaded['MelampusJson'] = nil; package.loaded['MelampusRules'] = nil
-	package.loaded['MelampusLog'] = nil
-	assert(loadfile(PLUGIN .. '/MelampusImport.lua'))()
+	runImport(
+		{ { file = 'd1.jpg', candidates = { { 'Snowy Egret', 'Egretta thula', 0.95 } } } },
+		{ { 'd1.CR3' } }, defaultPrefs({ dryRun = true }), { confirmAnswer = 'cancel' })
 	t.equals(#mock.state.photos[1]:keywordPaths(), 0, 'preview wrote despite being declined')
 	t.equals(#mock.state.writeTransactions, 0, 'preview opened a write transaction')
 end)
@@ -245,14 +249,7 @@ t.test('a second run over the same photos changes nothing', function()
 
 	-- Re-run against a photo already carrying the previous result.
 	local previous = mock.state.photos[1]._plugin
-	mock.reset({ prefs = defaultPrefs(), confirmAnswer = 'ok' })
-	mock.state.prefs.resultsPath = RESULTS
-	local photo = mock.addPhoto('i1.CR3', {})
-	for k, v in pairs(previous) do photo._plugin[k] = v end
-	mock.install(PLUGIN)
-	package.loaded['MelampusJson'] = nil; package.loaded['MelampusRules'] = nil
-	package.loaded['MelampusLog'] = nil
-	assert(loadfile(PLUGIN .. '/MelampusImport.lua'))()
+	runImport(records, { { 'i1.CR3', {}, previous } }, defaultPrefs())
 	t.equals(#mock.state.photos[1]:keywordPaths(), 0,
 		'a re-run re-applied keywords it had already written')
 end)
@@ -272,14 +269,7 @@ t.test('unanalysed photos trigger an offer to analyse them', function()
 end)
 
 t.test('declining the offer leaves the photos untouched', function()
-	writeResults(RESULTS, {})
-	mock.reset({ prefs = defaultPrefs(), confirmAnswer = 'cancel' })
-	mock.state.prefs.resultsPath = RESULTS
-	mock.addPhoto('untouched.CR3', {})
-	mock.install(PLUGIN)
-	package.loaded['MelampusJson'] = nil; package.loaded['MelampusRules'] = nil
-	package.loaded['MelampusLog'] = nil; package.loaded['MelampusAnalyze'] = nil
-	assert(loadfile(PLUGIN .. '/MelampusImport.lua'))()
+	runImport({}, { { 'untouched.CR3' } }, defaultPrefs(), { confirmAnswer = 'cancel' })
 	t.equals(#mock.state.photos[1]:keywordPaths(), 0)
 	t.isNil(mock.state.photos[1]:getRawMetadata('rating'))
 end)
@@ -294,15 +284,7 @@ end)
 
 --- Run the import with a chosen number of writes swallowed for one photo.
 local function runWithDroppedWrites(fileName, drops, records, photos)
-	writeResults(RESULTS, records)
-	mock.reset({ prefs = defaultPrefs(), confirmAnswer = 'ok' })
-	mock.state.prefs.resultsPath = RESULTS
-	mock.state.dropWrites[fileName] = drops
-	for _, spec in ipairs(photos) do mock.addPhoto(spec[1], spec[2] or {}) end
-	mock.install(PLUGIN)
-	package.loaded['MelampusJson'] = nil; package.loaded['MelampusRules'] = nil
-	package.loaded['MelampusLog'] = nil; package.loaded['MelampusAnalyze'] = nil
-	assert(loadfile(PLUGIN .. '/MelampusImport.lua'))()
+	runImport(records, photos, defaultPrefs(), { dropWrites = { [fileName] = drops } })
 end
 
 local function logMatching(needle)
@@ -378,22 +360,14 @@ end)
 --- Run the import with photos the results file has never seen, accept the
 --- offer to analyse, and hand back the commands the shell was given.
 local function runAnalysis(existing)
-	writeResults(RESULTS, {})
-	mock.reset({ prefs = defaultPrefs(), confirmAnswer = 'ok', existing = existing })
-	mock.state.prefs.resultsPath = RESULTS
-	mock.addPhoto('fresh_01.CR3', {})
-	mock.addPhoto('fresh_02.CR3', {})
-	mock.install(PLUGIN)
-	package.loaded['MelampusJson'] = nil; package.loaded['MelampusRules'] = nil
-	package.loaded['MelampusLog'] = nil; package.loaded['MelampusAnalyze'] = nil
-	local ok, err = pcall(assert(loadfile(PLUGIN .. '/MelampusImport.lua')))
-	t.isTrue(ok, 'import raised: ' .. tostring(err))
+	runImport({}, { { 'fresh_01.CR3' }, { 'fresh_02.CR3' } }, defaultPrefs(),
+		{ existing = existing })
 	return mock.state.executed or {}
 end
 
 --- Load MelampusAnalyze.lua under the installed mock, fresh.
 local function loadAnalyze()
-	package.loaded['MelampusLog'] = nil; package.loaded['MelampusAnalyze'] = nil
+	unloadPlugin()
 	return dofile(PLUGIN .. '/MelampusAnalyze.lua')
 end
 
