@@ -15,14 +15,14 @@ home-directory path.
 import subprocess
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]
+REPO = Path(__file__).resolve().parents[2]
 # POSIX ERE, for git grep.
 HOME_PATH = "/(Users|home)/[^/[:space:]`'\"]+/"
 
 
 def _git(*args: str) -> str:
     return subprocess.run(
-        ["git", "-C", str(ROOT), *args], check=True, capture_output=True, text=True
+        ["git", "-C", str(REPO), *args], check=True, capture_output=True, text=True
     ).stdout
 
 
@@ -39,8 +39,8 @@ def _tracked_symlinks():
 def test_no_tracked_symlink_leaves_the_repository():
     outside = []
     for path, target in _tracked_symlinks():
-        resolved = ((ROOT / path).parent / target).resolve()
-        if not resolved.is_relative_to(ROOT):
+        resolved = ((REPO / path).parent / target).resolve()
+        if not resolved.is_relative_to(REPO):
             outside.append(f"{path} -> {target}")
     assert not outside, (
         "tracked symlinks point outside the repository (machine-local install "
@@ -50,7 +50,7 @@ def test_no_tracked_symlink_leaves_the_repository():
 
 def test_no_tracked_file_names_a_home_directory_path():
     hits = subprocess.run(
-        ["git", "-C", str(ROOT), "grep", "-I", "-n", "-E", HOME_PATH],
+        ["git", "-C", str(REPO), "grep", "-I", "-n", "-E", HOME_PATH],
         capture_output=True,
         text=True,
     )
