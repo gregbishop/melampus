@@ -1,0 +1,101 @@
+name: release
+
+# Card #402: a pushed v* tag builds the executable on each platform with the
+# same commands ci.yml uses, packages the plugin folder with the executable
+# inside it (tools/package_plugin.py, the one place that knows the layout), and
+# publishes a GitHub release with Melampus-macOS.zip and Melampus-Windows.zip
+# attached. A user unpacks one and adds Melampus.lrplugin in Plug-in Manager.
+# Code signing and notarization are card #438.
+on:
+  push:
+    tags: ['v*']
+
+# The build jobs read the repo; only the job that creates the release writes,
+# and only to contents (the release and its assets).
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Install uv and lua
+        run: brew install uv lua
+
+      # Exactly ci.yml's test step: what ships is what was tested.
+      - name: Run service and plugin tests, building the executable first
+        working-directory: service
+        run: uv sync --locked --extra dev --extra build --extra cloud --extra openai && uv run pytest -q --build-binary
+
+      - name: Package Melampus-macOS.zip
+        working-directory: service
+        run: uv run python ../tools/package_plugin.py
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: Melampus-macOS
+          path: dist/Melampus-macOS.zip
+          if-no-files-found: error
+
+  build-windows:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Install uv
+        run: pip install uv
+
+      # Exactly ci.yml's Lua step: Lua 5.1, Lightroom's own, so the plugin
+      # tests run here as they do there, not skip.
+      - name: Install lua
+        shell: bash
+        run: |
+          choco install lua --version=5.1.5.52 -y --no-progress --install-arguments='/DIR=C:\Lua'
+          echo 'C:\Lua' >> "$GITHUB_PATH"
+          /c/Lua/lua.exe -v
+
+      # Exactly ci.yml's build-windows step.
+      - name: Build the executable and run its smoke tests and the plugin tests
+        working-directory: service
+        shell: bash
+        run: uv sync --locked --extra dev --extra build --extra cloud --extra openai && uv run pytest -v -rs tests/test_binary.py tests/test_lua_plugin.py --build-binary
+
+      - name: Package Melampus-Windows.zip
+        working-directory: service
+        shell: bash
+        run: uv run python ../tools/package_plugin.py
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: Melampus-Windows
+          path: dist/Melampus-Windows.zip
+          if-no-files-found: error
+
+  release:
+    needs: [build-macos, build-windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: Melampus-*
+          path: release
+          merge-multiple: true
+
+      # gh is on the runner; the token is the workflow's own, scoped above.
+      - name: Create the release with both zips attached
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" --generate-notes
+          release/Melampus-macOS.zip release/Melampus-Windows.zip
