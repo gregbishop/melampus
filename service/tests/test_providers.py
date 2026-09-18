@@ -8,9 +8,13 @@ retuned for a cloud primary without ever overriding an explicit setting.
 
 from __future__ import annotations
 
+import contextlib
 import json
+import socket
 import sys
+import threading
 import types
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
 from conftest import PHOTO
@@ -449,3 +453,75 @@ def test_the_refusal_names_what_detection_says_is_available(monkeypatch):
     with pytest.raises(providers.BackendUnavailable) as err:
         providers.build_primary_backend(_cfg())
     assert "ollama, openai, claude, scripted" in str(err.value)
+
+
+@contextlib.contextmanager
+def _fake_ollama(monkeypatch, *, status: int = 200, delay: float = 0.0):
+    """A server speaking Ollama's version endpoint on 127.0.0.1 at an
+    ephemeral port, with detection pointed at it. `status` is what
+    GET /api/version answers; `delay` holds the answer that long."""
+    release = threading.Event()
+
+    class Version(BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802 - http.server's name
+            assert self.path == "/api/version", self.path
+            if delay:
+                release.wait(delay)
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"version": "0.0.0-fake"}')
+
+        def log_message(self, *_):
+            return None
+
+    server = HTTPServer(("127.0.0.1", 0), Version)
+    thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
+    thread.start()
+    monkeypatch.setattr(providers, "OLLAMA_URL", f"http://127.0.0.1:{server.server_port}")
+    try:
+        yield server
+    finally:
+        release.set()
+        server.shutdown()
+        server.server_close()
+
+
+def test_ollama_probe_finds_a_server_answering_on_localhost(monkeypatch):
+    """Done-when 2 and 4, at the real boundary: an HTTP server on loopback
+    standing in for Ollama, GET /api/version (Ollama's docs/api.md § Version)
+    answering 200, and the probe says it is there. No network beyond 127.0.0.1."""
+    with _fake_ollama(monkeypatch):
+        assert providers.ollama_answers()
+        assert _verdict("ollama").available
+
+
+def test_ollama_probe_reports_a_closed_port_without_raising(monkeypatch):
+    """Nothing listening: connection refused is "not installed or not
+    running", never a traceback."""
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        closed_port = probe.getsockname()[1]
+    monkeypatch.setattr(providers, "OLLAMA_URL", f"http://127.0.0.1:{closed_port}")
+    assert providers.ollama_answers() is False
+    verdict = _verdict("ollama")
+    assert not verdict.available
+    assert f"127.0.0.1:{closed_port}" in verdict.reason
+
+
+def test_ollama_probe_treats_a_non_200_as_unavailable(monkeypatch):
+    with _fake_ollama(monkeypatch, status=503):
+        assert providers.ollama_answers() is False
+
+
+def test_ollama_probe_gives_up_after_its_timeout(monkeypatch):
+    """A server that accepts and never answers must not stall detection: the
+    probe waits OLLAMA_PROBE_SECONDS (one second in production) and reports
+    unavailable."""
+    monkeypatch.setattr(providers, "OLLAMA_PROBE_SECONDS", 0.2)
+    with _fake_ollama(monkeypatch, delay=5.0):
+        assert providers.ollama_answers() is False
+
+
+def test_ollama_probe_timeout_is_one_second():
+    assert providers.OLLAMA_PROBE_SECONDS == 1.0
