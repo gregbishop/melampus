@@ -184,6 +184,108 @@ t.test('when ollama is available there is no link', function()
 	t.equals(#titlesMatching(contents, OLLAMA_DOWNLOAD), 0)
 end)
 
+-- ── the API key ────────────────────────────────────────────────────────────
+--- The password fields, keyed by the variable each is bound to.
+local function keyFields(contents)
+	local fields = {}
+	for _, entry in ipairs(viewsOfKind(contents, 'password_field')) do
+		fields[bindingKey(entry.view.value)] = entry
+	end
+	return fields
+end
+
+--- Whether a view (or the row holding it) is visible with `engine` picked,
+--- through its visible binding's transform.
+local function visibleFor(entry, engine)
+	local binding = entry.view.visible or (entry.parent and entry.parent.visible)
+	t.isNotNil(binding, 'the key field has no visible binding')
+	t.equals(bindingKey(binding), 'engine', 'the key field is not shown by the engine')
+	t.equals(type(binding.transform), 'function', 'the visible binding has no transform')
+	return binding.transform(engine, mock.state.prefs)
+end
+
+t.test('a password field takes the key for openai and for claude, shown only when that engine is picked', function()
+	local contents = openSettings({ detection = detection() })
+	local fields = keyFields(contents)
+	t.isNotNil(fields.MELAMPUS_OPENAI_KEY, 'no password field for the OpenAI key')
+	t.isNotNil(fields.MELAMPUS_ANTHROPIC_KEY, 'no password field for the Claude key')
+	local count = 0
+	for _ in pairs(fields) do count = count + 1 end
+	t.equals(count, 2, 'expected exactly two password fields')
+	for _, engine in ipairs({ '', 'mlx', 'ollama', 'claude' }) do
+		t.isFalse(visibleFor(fields.MELAMPUS_OPENAI_KEY, engine), 'the OpenAI key field shows for ' .. engine)
+	end
+	t.isTrue(visibleFor(fields.MELAMPUS_OPENAI_KEY, 'openai'))
+	for _, engine in ipairs({ '', 'mlx', 'ollama', 'openai' }) do
+		t.isFalse(visibleFor(fields.MELAMPUS_ANTHROPIC_KEY, engine), 'the Claude key field shows for ' .. engine)
+	end
+	t.isTrue(visibleFor(fields.MELAMPUS_ANTHROPIC_KEY, 'claude'))
+end)
+
+t.test('the password fields are not bound to the preferences', function()
+	local contents = openSettings({ detection = detection() })
+	for variable, entry in pairs(keyFields(contents)) do
+		t.isNotNil(entry.view.bind_to_object, variable .. ' inherits the dialog\'s binding target, the preferences')
+		t.isFalse(entry.view.bind_to_object == mock.state.prefs, variable .. ' is bound to the preferences')
+	end
+end)
+
+--- Every file under the plugin folder, read whole.
+local function pluginFiles()
+	local files = {}
+	local listing = io.popen('ls -1 "' .. PLUGIN .. '"')
+	for name in listing:lines() do
+		local handle = io.open(PLUGIN .. '/' .. name, 'rb')
+		if handle then
+			files[name] = handle:read('*a')
+			handle:close()
+		end
+	end
+	listing:close()
+	return files
+end
+
+local TYPED = 'typed-into-the-dialog-not-a-real-key-7f3a'
+
+t.test('a typed key is stored through LrPasswords and lands nowhere else', function()
+	openSettings({
+		detection = detection(),
+		prefs = { engine = 'openai' },
+		onDialog = function(options)
+			local fields = keyFields(options.contents)
+			fields.MELAMPUS_OPENAI_KEY.view.bind_to_object.MELAMPUS_OPENAI_KEY = TYPED
+		end,
+	})
+	t.equals(mock.state.passwords.MELAMPUS_OPENAI_KEY, TYPED, 'the key was not stored through LrPasswords')
+	t.isNil(mock.state.passwords.MELAMPUS_ANTHROPIC_KEY, 'a key was stored for the other engine')
+	for key, value in pairs(mock.state.prefs) do
+		t.isFalse(value == TYPED, 'the key is in the preferences under ' .. tostring(key))
+		t.isFalse(type(value) == 'string' and string.find(value, TYPED, 1, true) ~= nil,
+			'the key is in the preferences under ' .. tostring(key))
+	end
+	for name, text in pairs(pluginFiles()) do
+		t.isNil(string.find(text, TYPED, 1, true), 'the key was written into the plugin folder: ' .. name)
+	end
+	for _, line in ipairs(mock.state.logLines) do
+		t.isNil(string.find(line, TYPED, 1, true), 'the key was logged: ' .. line)
+	end
+end)
+
+t.test('a stored key is shown back in its field, and an emptied one is forgotten', function()
+	local contents = openSettings({
+		detection = detection(),
+		passwords = { MELAMPUS_ANTHROPIC_KEY = TYPED },
+		onDialog = function(options)
+			local fields = keyFields(options.contents)
+			t.equals(fields.MELAMPUS_ANTHROPIC_KEY.view.bind_to_object.MELAMPUS_ANTHROPIC_KEY, TYPED,
+				'the stored key is not in the field')
+			fields.MELAMPUS_ANTHROPIC_KEY.view.bind_to_object.MELAMPUS_ANTHROPIC_KEY = ''
+		end,
+	})
+	t.isNotNil(contents)
+	t.equals(mock.state.passwords.MELAMPUS_ANTHROPIC_KEY, '', 'clearing the field did not clear the store')
+end)
+
 -- ── no executable ──────────────────────────────────────────────────────────
 t.test('with no executable beside the plugin the dialog still opens, nothing greyed, and says why', function()
 	local contents = openSettings({ detection = nil })

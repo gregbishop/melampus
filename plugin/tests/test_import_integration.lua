@@ -422,23 +422,29 @@ end
 --- every path single-quoted for sh. The whole line, so nothing of a Python
 --- checkout (python, .venv, tools/, cd) can be in it, wherever the clone is.
 --- `engine` is the engine preference, on the line as --backend when set.
-local function macCommand(engine)
+--- `variable` and `key` are the cloud engine's key variable and the key
+--- LrPasswords holds for it: set ahead of the executable in its environment
+--- (`VAR='key' command`, as sh sets one) when given, nothing when not.
+local function macCommand(engine, variable, key)
 	local temp = mock.state.tempDir
 	local previews = temp .. '/melampus-previews-1'
-	return string.format("'%s' '%s' --profile 'wildlife'%s --plugin-out '%s/results.json' --yes >'%s/melampus-cli.log' 2>&1",
-		MAC_EXECUTABLE, previews, engineOption(engine, function(w) return "'" .. w .. "'" end),
+	local environment = variable and (variable .. "='" .. key .. "' ") or ''
+	return string.format("%s'%s' '%s' --profile 'wildlife'%s --plugin-out '%s/results.json' --yes >'%s/melampus-cli.log' 2>&1",
+		environment, MAC_EXECUTABLE, previews, engineOption(engine, function(w) return "'" .. w .. "'" end),
 		previews, temp)
 end
 
 --- The same line for a fake Windows Lightroom, as cmd.exe needs it: every
---- path double-quoted (single quotes mean nothing to cmd.exe), and the whole
---- line wrapped in a pair of its own: cmd.exe /c strips the first and last
---- quote of a line that starts with one and holds more than two, so the ones
---- around each path survive.
-local function windowsCommand(engine)
+--- path double-quoted (single quotes mean nothing to cmd.exe), the key set
+--- with `set "VAR=key" &&` ahead of the executable when given, and the whole
+--- line wrapped in a pair of quotes of its own: cmd.exe /c strips the first
+--- and last quote of a line that starts with one and holds more than two, so
+--- the ones around each path survive.
+local function windowsCommand(engine, variable, key)
+	local environment = variable and ('set "' .. variable .. '=' .. key .. '" && ') or ''
 	return string.format(
-		'""%s" "%s" --profile "wildlife"%s --plugin-out "%s\\results.json" --yes >"%s\\melampus-cli.log" 2>&1"',
-		WIN_EXECUTABLE, WIN_PREVIEWS, engineOption(engine, function(w) return '"' .. w .. '"' end),
+		'"%s"%s" "%s" --profile "wildlife"%s --plugin-out "%s\\results.json" --yes >"%s\\melampus-cli.log" 2>&1"',
+		environment, WIN_EXECUTABLE, WIN_PREVIEWS, engineOption(engine, function(w) return '"' .. w .. '"' end),
 		WIN_PREVIEWS, WIN_TEMP)
 end
 
@@ -639,6 +645,69 @@ t.test('the Settings dialog is worded for both platforms and the executable flow
 	-- With no first step, nothing is numbered as a step.
 	for _, s in ipairs(strings) do
 		t.isNil(string.match(s, '^Step %d'), 'numbered as a step when there is no first step: ' .. s)
+	end
+end)
+
+-- ── the picked cloud engine's key reaches the executable (card #405) ──────
+-- The key lives in LrPasswords. When the picked engine needs one, the
+-- command carries it in the executable's environment, in the variable the
+-- executable reads (MELAMPUS_OPENAI_KEY, MELAMPUS_ANTHROPIC_KEY), never as
+-- an argument, never in the log, and never for an engine that needs none.
+local KEY = 'stored-in-lrpasswords-not-a-real-key-4c1e'
+
+--- Run the import for `engine` with the given LrPasswords contents, on macOS,
+--- and hand back the one command the shell was given.
+local function commandWithKeys(engine, passwords)
+	runImport({}, { { 'fresh_01.CR3' }, { 'fresh_02.CR3' } }, defaultPrefs({ engine = engine }),
+		{ existing = { [MAC_EXECUTABLE] = true }, passwords = passwords })
+	local executed = mock.state.executed or {}
+	t.equals(#executed, 1, 'expected one command')
+	return executed[1]
+end
+
+t.test('the stored key for the picked cloud engine goes to the executable in its environment', function()
+	-- The whole line: the variable set once, ahead of the executable, never
+	-- as an argument, and not the other engine's variable.
+	local command = commandWithKeys('openai', { MELAMPUS_OPENAI_KEY = KEY })
+	t.equals(command, macCommand('openai', 'MELAMPUS_OPENAI_KEY', KEY),
+		'not the command with the OpenAI key set in the environment')
+
+	command = commandWithKeys('claude', { MELAMPUS_ANTHROPIC_KEY = KEY, MELAMPUS_OPENAI_KEY = 'other' })
+	t.equals(command, macCommand('claude', 'MELAMPUS_ANTHROPIC_KEY', KEY),
+		'not the command with the Claude key alone set in the environment')
+end)
+
+t.test('the key is never logged', function()
+	commandWithKeys('openai', { MELAMPUS_OPENAI_KEY = KEY })
+	t.isTrue(#mock.state.logLines > 0, 'the run was not logged at all')
+	for _, line in ipairs(mock.state.logLines) do
+		t.isNil(string.find(line, KEY, 1, true), 'the key was logged: ' .. line)
+	end
+end)
+
+t.test('a local engine, or no engine, carries no key even when keys are stored', function()
+	local stored = { MELAMPUS_OPENAI_KEY = KEY, MELAMPUS_ANTHROPIC_KEY = KEY }
+	for _, engine in ipairs({ 'mlx', 'ollama', '' }) do
+		local command = commandWithKeys(engine, stored)
+		t.equals(command, macCommand(engine), engine .. ': a key travels with a run that needs none')
+	end
+end)
+
+t.test('a cloud engine with no stored key runs without one, so the executable says what is missing', function()
+	local command = commandWithKeys('openai', {})
+	t.equals(command, macCommand('openai'), 'an empty key was set')
+end)
+
+t.test('on Windows the key is set for cmd.exe before the executable, once', function()
+	local Analyze = loadUnderMock('MelampusAnalyze',
+		{ existing = { [WIN_EXECUTABLE] = true }, passwords = { MELAMPUS_ANTHROPIC_KEY = KEY } },
+		WIN_PLUGIN, { windows = true })
+	local ok, message = Analyze.run(WIN_PREVIEWS, WIN_PREVIEWS .. '\\results.json', 'wildlife', 'claude')
+	t.isTrue(ok, 'run failed: ' .. tostring(message))
+	t.equals(mock.state.executed[1], windowsCommand('claude', 'MELAMPUS_ANTHROPIC_KEY', KEY),
+		'not the command with the Claude key set for cmd.exe ahead of the executable')
+	for _, line in ipairs(mock.state.logLines) do
+		t.isNil(string.find(line, KEY, 1, true), 'the key was logged: ' .. line)
 	end
 end)
 
