@@ -26,11 +26,17 @@ local Log = require 'MelampusLog'
 
 local Analyze = {}
 
---- Where the repository lives, inferred from the plugin's own location.
-function Analyze.repoRoot()
+--- The executable ships inside the plugin folder, so the plugin never looks for
+-- a Python environment. `melampus` on macOS, `melampus.exe` on Windows.
+function Analyze.executableName()
+	return WIN_ENV and 'melampus.exe' or 'melampus'
+end
+
+--- Absolute path of the executable beside this plugin, or nil outside Lightroom.
+function Analyze.executablePath()
 	local pluginDir = _PLUGIN and _PLUGIN.path
 	if not pluginDir then return nil end
-	return LrPathUtils.parent(LrPathUtils.parent(pluginDir))
+	return LrPathUtils.child(pluginDir, Analyze.executableName())
 end
 
 --- Write JPEG previews for the given photos into `folder`.
@@ -118,9 +124,8 @@ end
 --[[
 Platform seams. Lightroom sets WIN_ENV / MAC_ENV globals; everything the shell
 sees differs between them, so the differences live here and nowhere else.
-On Windows the venv keeps executables in Scripts\ with .exe suffixes, commands
-run under cmd.exe (double-quote quoting, `cd /d` to survive a drive change),
-and the null device is NUL.
+LrTasks.execute runs the line through cmd.exe on Windows (double-quote quoting)
+and sh on macOS (single-quote quoting).
 --]]
 
 --- Shell-quote a path so spaces and quotes survive the trip.
@@ -134,17 +139,14 @@ local function quote(text)
 	return "'" .. string.gsub(text, "'", "'\\''") .. "'"
 end
 
---- Absolute path of a venv entry point, wherever this platform keeps it.
-local function venvTool(repo, tool)
-	local venv = LrPathUtils.child(repo, '.venv')
-	if WIN_ENV then
-		return LrPathUtils.child(LrPathUtils.child(venv, 'Scripts'), tool .. '.exe')
-	end
-	return LrPathUtils.child(LrPathUtils.child(venv, 'bin'), tool)
+--- The whole line, as the platform's shell needs to receive it.
+-- cmd.exe /c, given a line that starts with a quote and holds more than two,
+-- strips the first and the last one (see `cmd /?`); wrapped in a pair of its
+-- own, the line loses only those and the quotes around each path survive.
+local function shellLine(command)
+	if WIN_ENV then return '"' .. command .. '"' end
+	return command
 end
-
--- Plain `cd` on Windows does not change drive; /d does both.
-local CHDIR = WIN_ENV and 'cd /d' or 'cd'
 
 --- Where the CLI's own output goes. Not the null device: the cloud-primary
 -- cost estimate (and any refusal, e.g. the model.max_images ceiling) prints to
@@ -158,76 +160,48 @@ local function cliLogPath()
 	return LrPathUtils.child(LrPathUtils.getStandardFilePath('temp'), 'melampus-cli.log')
 end
 
---- The one-time setup instructions, phrased for the OS the user is actually on.
-local function setupHint()
-	if WIN_ENV then
-		return '\n\nRun this once in PowerShell, from the melampus folder:\n'
-			.. '  uv venv --python 3.12 .venv\n'
-			.. '  uv pip install --python .venv\\Scripts\\python.exe -e "./service[dev,cloud,openai]"\n'
-			.. '\nWindows has no local model runtime: set [model] backend = "anthropic"\n'
-			.. 'or "openai" in melampus.local.toml, with the matching API key.'
-	end
-	return '\n\nRun this once in Terminal, from the melampus folder:\n'
-		.. '  uv venv --python 3.12 .venv\n'
-		.. '  uv pip install --python .venv/bin/python -e "./service[dev]"'
-end
-
---- Run the identification pipeline over a folder of previews.
+--- Run the identification pipeline over a folder of previews, writing the
+-- enriched results (quality and its rank, burst agreement, range flag,
+-- encounter) to `resultsPath` in the same run.
 -- Returns true plus the results path, or false plus a message.
-function Analyze.run(repo, previewFolder, resultsPath, profile)
-	local python = venvTool(repo, 'python')
-	if not LrFileUtils.exists(python) then
-		return false, 'Could not find the Melampus Python environment at:\n' .. python
-			.. setupHint()
+function Analyze.run(previewFolder, resultsPath, profile)
+	local pluginDir = _PLUGIN and _PLUGIN.path
+	local executable = Analyze.executablePath()
+	if not executable or not LrFileUtils.exists(executable) then
+		return false, 'Melampus could not find its analysis program.\n\n'
+			.. 'The plugin folder should contain a file named '
+			.. Analyze.executableName() .. ':\n' .. tostring(pluginDir)
+			.. '\n\nCopy it there from the Melampus download and try again.'
 	end
 
 	local cliLog = cliLogPath()
-	if WIN_ENV and (tostring(repo) .. tostring(previewFolder) .. tostring(cliLog)):find('%%') then
+	if WIN_ENV and (tostring(pluginDir) .. tostring(previewFolder) .. tostring(resultsPath)
+			.. tostring(cliLog)):find('%%') then
 		-- cmd.exe expands %NAME% even inside double quotes, silently rewriting
 		-- the path before execution. Refusing loudly beats running against a
 		-- path the user never named.
 		return false, 'A path contains "%", which the Windows shell rewrites:\n'
-			.. repo .. '\n' .. previewFolder
-			.. '\n\nMove the melampus folder to a path without "%" characters.'
+			.. pluginDir .. '\n' .. previewFolder
+			.. '\n\nMove the plugin to a path without "%" characters.'
 	end
 
-	local melampus = venvTool(repo, 'melampus-id')
-	local raw = LrPathUtils.child(previewFolder, '_raw_results.json')
-
-	-- Identification. Long-running, so it must not be inside any write gate.
+	-- Identification and enrichment, one process. Long-running, so it must not
+	-- be inside any write gate.
 	-- --yes: this is a non-interactive caller, so the cloud-primary cost gate
 	-- cannot ask. Selecting the photos and configuring a cloud backend with a
 	-- key were the deliberate acts; the estimate is written to melampus-cli.log,
 	-- and the model.max_images ceiling still refuses an oversized run outright.
-	local command = table.concat({
-		CHDIR, quote(repo), '&&',
-		quote(melampus), quote(previewFolder),
+	local command = shellLine(table.concat({
+		quote(executable), quote(previewFolder),
 		'--profile', quote(profile or 'wildlife'),
-		'--json-out', quote(raw),
+		'--plugin-out', quote(resultsPath),
 		'--yes',
 		'>' .. quote(cliLog) .. ' 2>&1',
-	}, ' ')
+	}, ' '))
 	Log.info('running: ' .. command)
 	local code = LrTasks.execute(command)
 	if code ~= 0 then
 		return false, 'Identification failed (exit ' .. tostring(code)
-			.. ').\n\nSee the logs:\n' .. Log.path() .. '\n' .. cliLog
-	end
-
-	-- Enrich with burst agreement, range flags and quality so the write gates
-	-- and star ratings have something to work with. Appends to the same CLI log.
-	local enrich = table.concat({
-		CHDIR, quote(repo), '&&',
-		quote(python),
-		quote(LrPathUtils.child(LrPathUtils.child(repo, 'tools'), 'make_plugin_results.py')),
-		quote(previewFolder), quote(raw), quote(resultsPath),
-		'--occurrence', '--quality',
-		'>>' .. quote(cliLog) .. ' 2>&1',
-	}, ' ')
-	Log.info('running: ' .. enrich)
-	code = LrTasks.execute(enrich)
-	if code ~= 0 then
-		return false, 'Post-processing failed (exit ' .. tostring(code)
 			.. ').\n\nSee the logs:\n' .. Log.path() .. '\n' .. cliLog
 	end
 
