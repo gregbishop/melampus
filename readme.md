@@ -305,6 +305,36 @@ parsing, validation, retry, caching, the downscale ladder and the no-leak guaran
 all verifiable in under a second. The plugin's Lua suites run from the same command,
 skipping cleanly if no Lua interpreter is installed.
 
+The executable's smoke tests (`service/tests/test_binary.py`) run against
+`dist/melampus` when it exists and skip when it does not. To build it first and
+run everything, which takes about a minute:
+
+```bash
+.venv/bin/python -m pytest -q --build-binary
+```
+
+---
+
+## Building the executable
+
+The service ships to users as one file, `dist/melampus`, so they install neither
+Python nor uv. It carries the Python runtime, the service, the prompts and the MLX
+runtime; model weights are not bundled and come from the HuggingFace cache as
+before. Apple Silicon only, like MLX.
+
+```bash
+uv pip install --python .venv/bin/python -e "./service[build]"   # once: PyInstaller, pinned
+.venv/bin/python tools/build_binary.py                            # writes dist/melampus, ~200 MB
+```
+
+The build is a PyInstaller one-file bundle, which unpacks itself to a temporary
+directory at every launch (a few seconds). `dist/` and `build/` are git-ignored.
+Try it without any Python on the path — the scripted backend needs no weights:
+
+```bash
+env -i PATH=/nonexistent HOME="$HOME" dist/melampus fixtures/ --backend scripted --limit 1
+```
+
 ---
 
 ## Reviewing in Lightroom

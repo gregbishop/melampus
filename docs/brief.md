@@ -20,8 +20,11 @@ every session.
 ## stack contract
 
 - stack: python
-- build: none
-- test: `.venv/bin/python -m pytest` — from the repo root, locally
+- build: `.venv/bin/python tools/build_binary.py` — from the repo root, on Apple
+  Silicon; writes `dist/melampus`, the one-file executable (needs the `build`
+  extra, see readme.md § Building the executable)
+- test: `.venv/bin/python -m pytest` — from the repo root, locally; add
+  `--build-binary` to build the executable first and smoke-test it
 - test in CI: `uv sync --locked --extra dev && uv run pytest -q` — from `service/`, in
   `.github/workflows/ci.yml`; this is the run that gates merges
 - lint: none adopted
