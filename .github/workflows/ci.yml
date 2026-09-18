@@ -52,10 +52,13 @@ jobs:
       - name: Install uv
         run: pip install uv==0.12.17
 
+      # -v -rs: the job log is where the owner reads the proof, so it names
+      # every test that ran against dist/melampus.exe and why the one that
+      # needs MLX skipped, rather than a row of dots.
       - name: Build the executable and run its smoke tests
         working-directory: service
         shell: bash
-        run: uv sync --locked --extra dev --extra build && uv run pytest -q tests/test_binary.py --build-binary
+        run: uv sync --locked --extra dev --extra build && uv run pytest -v -rs tests/test_binary.py --build-binary
 
       - name: Upload melampus.exe
         uses: actions/upload-artifact@v4
