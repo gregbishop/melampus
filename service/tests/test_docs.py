@@ -9,6 +9,7 @@ The check is deliberately dumb — substring presence of the backticked key name
 it never argues with prose style, only with absence.
 """
 
+import json
 from pathlib import Path
 
 from melampus.config import MelampusConfig
@@ -30,4 +31,21 @@ def test_every_config_field_is_documented():
     assert not missing, (
         "settings implemented in config.py but absent from docs/config.md "
         f"(document them, including a Why): {missing}"
+    )
+
+
+ROOT = CONFIG_DOC.parents[1]
+AGENTS_MD = ROOT / "AGENTS.md"
+PLUGIN_CHOICE = ROOT / ".agents" / "on-purpose.json"
+
+
+def test_agents_md_names_the_install_command_for_the_recorded_plugins():
+    """The install outputs (.claude/settings.json, .agents/skills, .codex/agents)
+    are machine-local and untracked; a fresh clone must be told how to regenerate
+    them, with the same plugins .agents/on-purpose.json records."""
+    plugins = json.loads(PLUGIN_CHOICE.read_text(encoding="utf-8"))["plugins"]
+    command = f"node ~/on-purpose/bin/install.mjs {' '.join(plugins)}"
+    assert f"`{command}`" in AGENTS_MD.read_text(encoding="utf-8"), (
+        f"AGENTS.md must tell a fresh clone to run `{command}` "
+        "(the plugins recorded in .agents/on-purpose.json)"
     )
