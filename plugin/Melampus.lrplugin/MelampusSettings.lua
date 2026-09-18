@@ -2,18 +2,54 @@
      the results file, the safety switches, the gates, and maintenance. ]]
 local LrDialogs = import 'LrDialogs'
 local LrFunctionContext = import 'LrFunctionContext'
+local LrHttp = import 'LrHttp'
 local LrPrefs = import 'LrPrefs'
 local LrTasks = import 'LrTasks'
 local LrView = import 'LrView'
 
+local Analyze = require 'MelampusAnalyze'
 local Log = require 'MelampusLog'
 local Rules = require 'MelampusRules'
+
+local function lineCount(text)
+	local _, newlines = string.gsub(text, '\n', '')
+	return newlines + 1
+end
 
 LrTasks.startAsyncTask(function()
 	LrFunctionContext.callWithContext('melampusSettings', function(context)
 		local prefs = LrPrefs.prefsForPlugin()
 		local f = LrView.osFactory()
 		local bind = LrView.bind
+		local grey = import('LrColor')(0.4, 0.4, 0.4)
+
+		-- Which engines can run here is the executable's verdict (card #404),
+		-- asked once, now, as the dialog opens. Without the executable nothing
+		-- is greyed and the note says what is missing.
+		local engineItems, engineNote = Rules.engineItems(Analyze.detectEngines())
+
+		-- The picker, the reasons for whatever is greyed, and a link for each
+		-- greyed engine whose reason names where to get it.
+		local engineGroup = f:group_box {
+			title = 'Where identification runs',
+			fill_horizontal = 1,
+			f:popup_menu { value = bind 'engine', items = engineItems },
+		}
+		if engineNote ~= '' then
+			engineGroup[#engineGroup + 1] = f:static_text {
+				title = engineNote, height_in_lines = lineCount(engineNote), text_color = grey,
+			}
+		end
+		for _, item in ipairs(engineItems) do
+			if not item.enabled and item.link then
+				local link = item.link
+				engineGroup[#engineGroup + 1] = f:static_text {
+					title = link,
+					text_color = import('LrColor')(0.1, 0.3, 0.8),
+					mouse_down = function() LrHttp.openUrlInBrowser(link) end,
+				}
+			end
+		end
 
 		local contents = f:column {
 			bind_to_object = prefs,
@@ -45,6 +81,8 @@ LrTasks.startAsyncTask(function()
 					},
 				},
 			},
+
+			engineGroup,
 
 			f:group_box {
 				title = 'What kind of photos are these?',

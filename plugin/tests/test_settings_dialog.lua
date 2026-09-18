@@ -1,0 +1,201 @@
+--[[
+Runs the real MelampusSettings.lua against the mock Lightroom SDK (card #405).
+
+The engine picker shows what `melampus --detect-engines` says: the four
+engines in the owner's order, the ones that cannot run here greyed with their
+reason, a link to install Ollama when it is missing, and a password field for
+the API key of the picked cloud engine, stored through LrPasswords and never
+in the preferences, a file, or the log.
+--]]
+
+local t = require('harness')
+local mock = require('lrmock')
+
+local function pluginPath()
+	local here = debug.getinfo(1, 'S').source:match('^@(.*)[/\\]') or '.'
+	return here .. '/../Melampus.lrplugin'
+end
+
+local PLUGIN = os.getenv('MELAMPUS_PLUGIN') or pluginPath()
+local EXECUTABLE = PLUGIN .. '/melampus'
+local ENGINES = { 'mlx', 'ollama', 'openai', 'claude' }
+local OLLAMA_DOWNLOAD = 'https://ollama.com/download'
+
+local function verdict(engine, available, reason)
+	return string.format('{"engine": %q, "available": %s, "reason": %q}', engine, tostring(available), reason)
+end
+
+--- The executable's --detect-engines answer on a Mac with no Ollama running.
+local function detection(overrides)
+	local reasons = {
+		mlx = { true, 'runs locally on this Apple Silicon Mac' },
+		ollama = { false, 'no Ollama server at http://127.0.0.1:11434; install it from ' .. OLLAMA_DOWNLOAD },
+		openai = { true, 'API key required: set MELAMPUS_OPENAI_KEY (or OPENAI_API_KEY)' },
+		claude = { true, 'API key required: set MELAMPUS_ANTHROPIC_KEY (or ANTHROPIC_API_KEY)' },
+	}
+	for engine, value in pairs(overrides or {}) do reasons[engine] = value end
+	local parts = {}
+	for _, engine in ipairs(ENGINES) do
+		parts[#parts + 1] = verdict(engine, reasons[engine][1], reasons[engine][2])
+	end
+	return '[' .. table.concat(parts, ', ') .. ']'
+end
+
+local function defaultPrefs(extra)
+	package.loaded['MelampusRules'] = nil
+	local prefs = dofile(PLUGIN .. '/MelampusRules.lua').defaultSettings()
+	for k, v in pairs(extra or {}) do prefs[k] = v end
+	return prefs
+end
+
+--- Open the real Settings dialog under the mock. `options.detection` is what
+--- the executable prints for --detect-engines (nil: no executable beside the
+--- plugin); `options.onDialog` plays the user while the dialog is up.
+local function openSettings(options)
+	options = options or {}
+	mock.reset({
+		prefs = defaultPrefs(options.prefs),
+		existing = options.detection and { [EXECUTABLE] = true } or {},
+		passwords = options.passwords,
+		onExecute = function(command)
+			local target = string.match(command, ">'([^']+)'")
+			if target and options.detection then
+				local handle = assert(io.open(target, 'w'))
+				handle:write(options.detection)
+				handle:close()
+			end
+			return 0
+		end,
+		onModalDialog = options.onDialog,
+	})
+	mock.install(PLUGIN)
+	for _, name in ipairs({ 'MelampusJson', 'MelampusRules', 'MelampusLog', 'MelampusAnalyze' }) do
+		package.loaded[name] = nil
+	end
+	local ok, err = pcall(assert(loadfile(PLUGIN .. '/MelampusSettings.lua')))
+	t.isTrue(ok, 'the settings file raised: ' .. tostring(err))
+	local modal = {}
+	for _, dialog in ipairs(mock.state.dialogs) do
+		if dialog.modal then modal[#modal + 1] = dialog end
+	end
+	t.equals(#modal, 1, 'expected exactly one dialog')
+	return modal[1].contents
+end
+
+--- Every view of one kind in the tree, in order, each with its parent.
+local function viewsOfKind(root, kind)
+	local found = {}
+	local function walk(node, parent)
+		if type(node) ~= 'table' then return end
+		if node.kind == kind then found[#found + 1] = { view = node, parent = parent } end
+		for _, child in ipairs(node) do walk(child, node) end
+	end
+	walk(root, nil)
+	return found
+end
+
+local function bindingKey(binding)
+	if type(binding) == 'table' then return binding.key end
+	return binding
+end
+
+--- The one popup_menu bound to prefs.engine.
+local function enginePicker(contents)
+	for _, entry in ipairs(viewsOfKind(contents, 'popup_menu')) do
+		if bindingKey(entry.view.value) == 'engine' then return entry.view end
+	end
+	return nil
+end
+
+local function titlesMatching(contents, needle)
+	local out = {}
+	for _, entry in ipairs(viewsOfKind(contents, 'static_text')) do
+		local title = entry.view.title
+		if type(title) == 'string' and string.find(title, needle, 1, true) then out[#out + 1] = entry.view end
+	end
+	return out
+end
+
+-- ── the picker ─────────────────────────────────────────────────────────────
+t.test('the settings dialog opens with a picker bound to prefs.engine listing the four engines in order', function()
+	local contents = openSettings({ detection = detection() })
+	local picker = enginePicker(contents)
+	t.isNotNil(picker, 'no popup_menu bound to engine')
+	local values = {}
+	for _, item in ipairs(picker.items) do values[#values + 1] = item.value end
+	t.equals(values[1], '', 'the first item leaves the choice to Melampus, the unset preference')
+	for i, engine in ipairs(ENGINES) do
+		t.equals(values[i + 1], engine, 'item ' .. (i + 1) .. ' of the picker')
+	end
+	t.equals(#values, 5)
+end)
+
+t.test('detection runs once, when the dialog opens', function()
+	openSettings({ detection = detection() })
+	local detections = 0
+	for _, command in ipairs(mock.state.executed or {}) do
+		if string.find(command, '--detect-engines', 1, true) then detections = detections + 1 end
+	end
+	t.equals(detections, 1, 'the executable should be asked exactly once')
+	t.equals(#mock.state.executed, 1, 'nothing but detection should run')
+end)
+
+t.test('engines that cannot run here are greyed and their reasons shown', function()
+	local contents = openSettings({ detection = detection({ mlx = { false, 'needs Apple Silicon' } }) })
+	local enabled = {}
+	for _, item in ipairs(enginePicker(contents).items) do enabled[item.value] = item.enabled end
+	t.isFalse(enabled.mlx, 'mlx should be greyed')
+	t.isFalse(enabled.ollama, 'ollama should be greyed')
+	t.isTrue(enabled.openai, 'openai should be available')
+	t.isTrue(enabled.claude, 'claude should be available')
+	t.isTrue(enabled[''], 'letting Melampus choose is always available')
+	t.isTrue(#titlesMatching(contents, 'needs Apple Silicon') > 0, 'the mlx reason is not shown')
+	t.isTrue(#titlesMatching(contents, 'no Ollama server') > 0, 'the ollama reason is not shown')
+	t.equals(#titlesMatching(contents, 'API key required'), 0, 'an available engine needs no reason')
+end)
+
+t.test('with every engine available nothing is greyed', function()
+	local contents = openSettings({ detection = detection({ ollama = { true, 'Ollama is answering at http://127.0.0.1:11434' } }) })
+	for _, item in ipairs(enginePicker(contents).items) do
+		t.isTrue(item.enabled, item.value .. ' was greyed')
+	end
+	t.equals(#titlesMatching(contents, 'Ollama'), 0, 'a reason was shown for an available engine')
+end)
+
+-- ── the Ollama link ────────────────────────────────────────────────────────
+t.test('when ollama is unavailable a link opens the Ollama download page', function()
+	local contents = openSettings({ detection = detection() })
+	local links = titlesMatching(contents, OLLAMA_DOWNLOAD)
+	local clickable = {}
+	for _, view in ipairs(links) do
+		if type(view.mouse_down) == 'function' then clickable[#clickable + 1] = view end
+	end
+	t.equals(#clickable, 1, 'expected exactly one clickable link to ' .. OLLAMA_DOWNLOAD)
+	clickable[1].mouse_down()
+	t.equals(#mock.state.openedUrls, 1, 'the click did not open the browser')
+	t.equals(mock.state.openedUrls[1], OLLAMA_DOWNLOAD)
+end)
+
+t.test('when ollama is available there is no link', function()
+	local contents = openSettings({ detection = detection({ ollama = { true, 'Ollama is answering at http://127.0.0.1:11434' } }) })
+	for _, entry in ipairs(viewsOfKind(contents, 'static_text')) do
+		t.isNil(entry.view.mouse_down, 'a clickable link is shown with nothing to install: ' .. tostring(entry.view.title))
+	end
+	t.equals(#titlesMatching(contents, OLLAMA_DOWNLOAD), 0)
+end)
+
+-- ── no executable ──────────────────────────────────────────────────────────
+t.test('with no executable beside the plugin the dialog still opens, nothing greyed, and says why', function()
+	local contents = openSettings({ detection = nil })
+	t.isNil(mock.state.executed, 'ran a command with no executable to run')
+	local picker = enginePicker(contents)
+	t.isNotNil(picker, 'no picker')
+	t.equals(#picker.items, 5)
+	for _, item in ipairs(picker.items) do
+		t.isTrue(item.enabled, item.value .. ' was greyed with no detection to grey it')
+	end
+	t.isTrue(#titlesMatching(contents, PLUGIN) > 0, 'the missing-executable message does not name the plugin folder')
+	t.isTrue(#titlesMatching(contents, 'melampus') > 0, 'the missing-executable message does not name the file')
+end)
+
+return t.summary()
