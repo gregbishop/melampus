@@ -43,6 +43,8 @@ the numbers do and don't support.
 ```bash
 uv venv --python 3.12 .venv
 uv pip install --python .venv/bin/python -e "./service[dev]"
+# the pinned dependency set is service/uv.lock; CI installs from it with
+# `uv sync --locked`, which fails rather than re-resolve if it drifts from pyproject
 ```
 
 Model weights are **not bundled**. They download on first use into the standard
