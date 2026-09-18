@@ -26,6 +26,7 @@ CONFIG_DOC = REPO / "docs" / "config.md"
 AGENTS_MD = REPO / "AGENTS.md"
 PLUGIN_CHOICE = REPO / ".agents" / "on-purpose.json"
 BRIEF = REPO / "docs" / "brief.md"
+CI_WORKFLOW = REPO / ".github" / "workflows" / "ci.yml"
 GITIGNORE = REPO / ".gitignore"
 README = REPO / "readme.md"
 DOCS = [README, AGENTS_MD, *sorted((REPO / "docs").glob("*.md"))]
@@ -91,7 +92,7 @@ def test_docs_name_only_the_lowercase_files():
 
 def _ci_pytest_commands() -> list[str]:
     """The `run:` line of every ci.yml step that invokes pytest."""
-    workflow = (REPO / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    workflow = CI_WORKFLOW.read_text(encoding="utf-8")
     commands = [
         command
         for command in re.findall(r"^\s*run:\s*(.+?)\s*$", workflow, re.MULTILINE)
@@ -252,7 +253,7 @@ def test_ci_builds_and_smoke_tests_the_windows_executable():
     names every test it ran and its outcome (-v) and the reason for each skip
     (-rs), so the log says which tests ran against dist/melampus.exe rather
     than a count of dots."""
-    workflow = (REPO / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    workflow = CI_WORKFLOW.read_text(encoding="utf-8")
     jobs = re.split(r"^  (?=\w[\w-]*:\s*$)", workflow.split("\njobs:\n", 1)[1], flags=re.MULTILINE)
     windows = [job for job in jobs if re.search(r"runs-on: windows-", job)]
     assert windows, "ci.yml has no job on a Windows runner"
@@ -277,7 +278,7 @@ def test_ci_pins_every_pip_install_to_an_exact_version():
     executable that is uploaded as an artifact, so `pip install <name>` with no
     `==` runs whatever PyPI serves that day. Every pip install in ci.yml names
     an exact version."""
-    workflow = (REPO / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    workflow = CI_WORKFLOW.read_text(encoding="utf-8")
     pip_installs = re.findall(r"^\s*run:.*\bpip install\b(.*?)\s*$", workflow, re.MULTILINE)
     assert pip_installs, "ci.yml has no pip install step"
     unpinned = [
