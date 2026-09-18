@@ -42,10 +42,12 @@ the numbers do and don't support.
 
 ```bash
 uv venv --python 3.12 .venv
-uv pip install --python .venv/bin/python -e "./service[dev]"
-# the pinned dependency set is service/uv.lock; CI installs from it with
-# `uv sync --locked`, which fails rather than re-resolve if it drifts from pyproject
+VIRTUAL_ENV=.venv uv sync --project service --locked --extra dev --active
 ```
+
+That installs exactly `service/uv.lock`, the pinned dependency set CI installs
+from too; `--locked` fails rather than re-resolve if the lock has drifted from
+`service/pyproject.toml`.
 
 Model weights are **not bundled**. They download on first use into the standard
 HuggingFace cache, or fetch them ahead of time:
