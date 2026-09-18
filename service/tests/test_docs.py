@@ -298,6 +298,19 @@ def test_docs_name_the_build_and_its_smoke_test():
         if command not in readme
     ]
     assert not missing, f"readme.md does not name: {missing}"
+    # Card #434: the executable carries the cloud SDKs, and PyInstaller bundles
+    # what the build venv has, so every `uv sync` in the build section (the macOS
+    # block and the Windows one) names the build, cloud and openai extras.
+    section = re.search(r"^## Building the executable\n(.*?)^## ", readme, re.MULTILINE | re.DOTALL)
+    assert section, "readme.md has no ## Building the executable section"
+    syncs = [c for c in _fenced_commands(section.group(1)) if re.search(r"\buv sync\b", c)]
+    assert syncs, "readme.md's build section has no uv sync command"
+    extras = ("--extra build", "--extra cloud", "--extra openai")
+    without = [c for c in syncs if any(extra not in c for extra in extras)]
+    assert not without, (
+        f"readme.md's build section must sync {' '.join(extras)}, or the executable "
+        f"it builds lacks the SDKs: {without}"
+    )
 
 
 def _windows_job() -> str:
