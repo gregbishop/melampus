@@ -16,15 +16,20 @@ executable goes looking for weights.
 
 from __future__ import annotations
 
+import importlib.util
 import json
+import platform
 import shutil
 import subprocess
 import sys
+import types
 from pathlib import Path
 
 import pytest
 
 from melampus.config import load_config
+
+CONFTEST = Path(__file__).with_name("conftest.py")
 
 # The frame test_quality.py leans on; any corpus JPEG would do.
 FIXTURE = Path("fixtures") / "0A1A2829.jpg"
@@ -76,6 +81,132 @@ def test_repo_root_is_the_bundle_when_frozen(monkeypatch: pytest.MonkeyPatch, tm
     assert config._repo_root() == tmp_path
     monkeypatch.delattr(sys, "_MEIPASS")
     assert config._repo_root() == repo
+
+
+def _build_script(repo: Path) -> types.ModuleType:
+    """tools/build_binary.py imported as a module: tools/ is not a package."""
+    spec = importlib.util.spec_from_file_location("build_binary", repo / "tools" / "build_binary.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _fake_pyinstaller(monkeypatch: pytest.MonkeyPatch, run) -> None:
+    """A PyInstaller whose `__main__.run` is `run`, whether or not the real one
+    is installed."""
+    package = types.ModuleType("PyInstaller")
+    package.__main__ = types.ModuleType("PyInstaller.__main__")
+    package.__main__.run = run
+    monkeypatch.setitem(sys.modules, "PyInstaller", package)
+    monkeypatch.setitem(sys.modules, "PyInstaller.__main__", package.__main__)
+
+
+@pytest.fixture()
+def build(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, repo: Path) -> types.ModuleType:
+    """The build script, writing under tmp_path instead of the checkout's
+    dist/ and build/, on a machine that counts as Apple Silicon."""
+    script = _build_script(repo)
+    monkeypatch.setattr(script, "DIST", tmp_path / "dist")
+    monkeypatch.setattr(script, "WORK", tmp_path / "build" / "pyinstaller")
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(platform, "machine", lambda: "arm64")
+    return script
+
+
+def test_build_refuses_anything_but_apple_silicon(build, monkeypatch: pytest.MonkeyPatch, capsys):
+    monkeypatch.setattr(platform, "machine", lambda: "x86_64")
+    assert build.main() == 2
+    assert "Apple Silicon" in capsys.readouterr().err
+
+
+def test_build_says_pyinstaller_is_missing(build, monkeypatch: pytest.MonkeyPatch, capsys):
+    monkeypatch.setitem(sys.modules, "PyInstaller", None)
+    assert build.main() == 3
+    assert "PyInstaller is not installed" in capsys.readouterr().err
+
+
+def test_build_bundles_the_service_the_prompts_and_the_mlx_runtime(
+    build, monkeypatch: pytest.MonkeyPatch, repo: Path
+):
+    """Done-when 1's ingredients, as the arguments handed to PyInstaller: one
+    file, the service on the path, prompts/ at the bundle's top level, all of
+    mlx (its native library and Metal shaders sit beside the module) and every
+    submodule of the packages that import model code by name at run time."""
+    calls: list[list[str]] = []
+
+    def run(arguments: list[str]) -> None:
+        calls.append(arguments)
+        build.DIST.mkdir()
+        (build.DIST / build.NAME).write_text("the executable", encoding="utf-8")
+
+    _fake_pyinstaller(monkeypatch, run)
+    assert build.main() == 0
+    (arguments,) = calls
+    pairs = set(zip(arguments, arguments[1:]))
+    assert "--onefile" in arguments
+    assert ("--paths", str(repo / "service")) in pairs
+    assert ("--add-data", f"{repo / 'prompts'}:prompts") in pairs
+    assert ("--collect-all", "mlx") in pairs
+    for package in ("mlx_vlm", "mlx_lm", "transformers"):
+        assert ("--collect-submodules", package) in pairs
+    entry = Path(arguments[-1])
+    assert "from melampus.cli import main" in entry.read_text(encoding="utf-8")
+    assert entry.is_relative_to(build.WORK)
+
+
+def test_build_fails_when_pyinstaller_writes_nothing(build, monkeypatch: pytest.MonkeyPatch, capsys):
+    _fake_pyinstaller(monkeypatch, lambda arguments: None)
+    assert build.main() == 1
+    assert "does not exist" in capsys.readouterr().err
+
+
+FAKE_BUILD_SCRIPT = """\
+import sys
+from pathlib import Path
+
+dist = Path(__file__).resolve().parents[1] / "dist"
+dist.mkdir(exist_ok=True)
+(dist / "melampus").write_text("built by tools/build_binary.py", encoding="utf-8")
+raise SystemExit(int(sys.argv[1]) if len(sys.argv) > 1 else 0)
+"""
+
+SMOKE_TEST = """\
+def test_smoke(built_executable):
+    assert built_executable.read_text(encoding="utf-8") == "built by tools/build_binary.py"
+"""
+
+
+def _checkout(pytester: pytest.Pytester, build_script: str = FAKE_BUILD_SCRIPT) -> None:
+    """A checkout laid out like this one, tools/build_binary.py and
+    service/tests/conftest.py, where the build is a script that writes
+    dist/melampus and one smoke test that uses it."""
+    tools, tests = pytester.mkdir("tools"), pytester.mkdir("service").joinpath("tests")
+    tests.mkdir()
+    (tools / "build_binary.py").write_text(build_script, encoding="utf-8")
+    shutil.copy(CONFTEST, tests / "conftest.py")
+    (tests / "test_smoke.py").write_text(SMOKE_TEST, encoding="utf-8")
+
+
+def test_the_test_command_builds_the_executable_before_the_smoke_tests(pytester: pytest.Pytester):
+    """Done-when 3: given the repo's test command, when it runs, then the
+    build and the executable smoke test are part of it. With --build-binary
+    the fixture runs tools/build_binary.py and the smoke test gets its output."""
+    _checkout(pytester)
+    pytester.runpytest("service/tests", "--build-binary").assert_outcomes(passed=1)
+
+
+def test_a_failed_build_fails_the_test_command(pytester: pytest.Pytester):
+    _checkout(pytester, build_script=FAKE_BUILD_SCRIPT.replace("else 0", "else 1"))
+    result = pytester.runpytest("service/tests", "--build-binary")
+    result.assert_outcomes(errors=1)
+    result.stdout.fnmatch_lines(["*CalledProcessError*build_binary.py*"])
+
+
+def test_without_a_build_the_smoke_tests_skip_and_say_how_to_get_one(pytester: pytest.Pytester):
+    _checkout(pytester)
+    result = pytester.runpytest("service/tests", "-rs")
+    result.assert_outcomes(skipped=1)
+    result.stdout.fnmatch_lines(["*no executable at dist/melampus; build one with*--build-binary*"])
 
 
 def _frozen(monkeypatch: pytest.MonkeyPatch, bundle: Path, executable: Path) -> None:

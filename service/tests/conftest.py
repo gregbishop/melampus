@@ -14,6 +14,10 @@ from pathlib import Path
 
 import pytest
 
+# pytester runs a pytest inside pytest: how test_binary.py proves what this
+# file's option and fixture do without a real build.
+pytest_plugins = ["pytester"]
+
 REPO = Path(__file__).resolve().parents[2]
 BUILD_SCRIPT = REPO / "tools" / "build_binary.py"
 EXECUTABLE = REPO / "dist" / "melampus"
