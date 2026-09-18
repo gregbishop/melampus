@@ -63,19 +63,43 @@ basename: `0A1A2475.jpg` finds `0A1A2475.CR3`. Verified 300/300 on this corpus.
 
 ## The engine
 
-Where inference runs is the user's choice (card #403), and the choice has a
-home before it has a dialog: a preference named `engine`, one of `mlx`,
-`ollama`, `openai`, `claude`, in the plugin's preferences beside `profile`.
-When it is set, `MelampusAnalyze.lua` passes it to the executable as
-`--backend <engine>`, and the executable's own rules apply: `ollama` is refused
-as not built yet (card #406), `openai` and `claude` need their key
-(docs/config.md § `[model]`). When it is unset — the default — the command
-carries no `--backend` and the executable decides: `[model] backend` in
-`melampus.local.toml`, else `mlx`; card #404's detection makes that the first
-engine that can run on this machine. A value that is not one of the four is
-refused before anything runs, with the four named, so a stale preference never
-reaches the shell. Card #405 adds the control in Settings; until then the
-preference is unset.
+Where inference runs is the user's choice (card #403): a preference named
+`engine`, one of `mlx`, `ollama`, `openai`, `claude`, in the plugin's
+preferences beside `profile`, and since card #405 a picker in Settings under
+**Where identification runs** (readme.md § Reviewing in Lightroom shows it,
+`docs/settings-dialog.png`).
+
+When the dialog opens it runs the executable beside the plugin once with
+`--detect-engines` (card #404) and shows what it said: the four engines in
+that order after *Let Melampus choose*, the ones that cannot run here greyed
+with their reason under the picker, and when the reason names a web address
+(Ollama's download page), a line that opens it in the browser.
+`Rules.engineItems` turns the executable's JSON into those items, so the
+dialog holds no engine knowledge of its own and the rules tests cover it
+without Lightroom. Without the executable nothing is greyed and the note is
+the missing-executable message; the dialog never fails to open.
+
+`openai` and `claude` need an API key. Picking one shows a password field for
+it. The key is kept through the SDK's `LrPasswords` (`store` / `retrieve` by
+key string; the OS keychain on macOS), under the name of the variable the
+executable reads, `MELAMPUS_OPENAI_KEY` or `MELAMPUS_ANTHROPIC_KEY`. It is
+never in the preferences, never in `melampus.local.toml` or any other file,
+and never logged. When a run starts, `MelampusAnalyze.lua` sets that variable
+in the executable's environment for the picked engine only: `LrTasks.execute`
+takes one shell line and nothing else, so the line begins `VAR='key'` (sh) or
+`set "VAR=key" &&` (cmd.exe) ahead of the executable, and the log carries the
+line with the value blanked. The key is not an argument of the executable, but
+the shell line is the child's command line for the run's duration.
+
+When the preference is set, `MelampusAnalyze.lua` passes it to the executable
+as `--backend <engine>`, and the executable's own rules apply: `ollama` is
+refused as not built yet (card #406), `openai` and `claude` need their key
+(docs/config.md § `[model]`). When it is unset — the default, *Let Melampus
+choose* — the command carries no `--backend` and the executable decides:
+`[model] backend` in `melampus.local.toml`, else the first engine that can
+run on this machine. A value that is not one of the four is refused before
+anything runs, with the four named, so a stale preference never reaches the
+shell.
 
 ---
 
@@ -138,10 +162,15 @@ truncated results file should produce a clear dialog, not a stack trace.
 The Lua tests are driven from pytest so one command covers both languages, and
 skip cleanly when no interpreter is present:
 
-- **31 rules tests** — never-overwrite for ratings, labels and flags; dry-run;
+- **37 rules tests** — never-overwrite for ratings, labels and flags; dry-run;
   idempotency; force; auto-reject staying off; the confidence and burst-agreement
   gates; range-flag routing; abstention; keyword sanitisation; graceful handling
-  of sparse records; the engine preference, every value and the default.
+  of sparse records; the engine preference, every value and the default; the
+  engine picker's items from detection, greyed states, reasons and links.
+- **The settings dialog against the mock SDK** — the real `MelampusSettings.lua`
+  executed: the picker's items and bindings, the greyed states from a fake
+  detection, the Ollama link, the key field visible only for a cloud engine,
+  the key landing in `LrPasswords` and nowhere else, the missing executable.
 - **8 JSON tests** plus a parse of 1,093 real records.
 - **`luac -p` over every plugin file**, which has already caught a real bug.
 
