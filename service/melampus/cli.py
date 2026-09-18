@@ -176,30 +176,16 @@ def _write_plugin_results(paths: list[Path], cache: ResultCache, config, destina
     network; without one they are skipped and the log says so.
     """
     from .occurrence import range_lookup
-    from .plugin_results import enrich, write_plugin_results
+    from .plugin_results import enrich, progress_printer, write_plugin_results
 
     lookup = range_lookup(config.occurrence)
     if lookup is None:
         print("no default location configured; skipping range checks", file=sys.stderr)
-
-    def progress(done: int, total: int) -> None:
-        if done == 1:
-            print(f"scoring quality for {total} frames ...", file=sys.stderr)
-        if done % 250 == 0:
-            print(f"  {done}/{total}", file=sys.stderr)
-
     records = [json.loads(r.model_dump_json()) for r in cache.results()]
-    outcome = enrich(paths, records, config, lookup=lookup, on_progress=progress)
+    outcome = enrich(paths, records, config, lookup=lookup,
+                     on_progress=progress_printer(sys.stderr))
     write_plugin_results(destination, outcome.rows)
-    print(f"\nwrote {destination}", file=sys.stderr)
-    print(f"  records          : {len(outcome.rows)}", file=sys.stderr)
-    print(f"  with agreement   : {sum(1 for r in outcome.rows if 'burst_agreement' in r)}",
-          file=sys.stderr)
-    print(f"  range-flagged    : {outcome.flagged_encounters} encounters", file=sys.stderr)
-    if outcome.quality_scores:
-        vals = sorted(outcome.quality_scores.values())
-        print(f"  quality scored   : {len(vals)} (median {vals[len(vals) // 2]:.0f})",
-              file=sys.stderr)
+    print(f"\nwrote {destination}\n{outcome.summary()}", file=sys.stderr)
 
 
 def main(argv: list[str] | None = None) -> int:
