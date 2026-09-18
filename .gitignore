@@ -28,11 +28,16 @@ stage1_*.json
 plugin_results.json
 stage1_*.log
 
-# on-purpose install outputs are machine-local: the links and the marketplace path
-# point into the on-purpose checkout by absolute path. .agents/on-purpose.json
-# records the plugin choice; the installer regenerates the rest.
+# The local layer: what is true of this machine and not another, never committed.
+# on-purpose's install outputs (the marketplace path in .claude/settings.json and
+# the links in .agents/skills and .codex/agents) point into the on-purpose checkout
+# by absolute path; .agents/on-purpose.json records the plugin choice and
+# `node ~/on-purpose/bin/install.mjs standard python` regenerates them.
+# .agents/on-purpose.local.md holds this repo's private specifics (the installer
+# seeds it from each plugin's template; the contents are yours), and
+# .claude/settings.local.json is Claude Code's own per-user overrides.
 .claude/settings.json
-.claude/settings.local.json
 .agents/skills/
 .codex/agents/
 .agents/on-purpose.local.md
+.claude/settings.local.json
