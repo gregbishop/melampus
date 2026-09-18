@@ -34,6 +34,9 @@ function M.reset(options)
 		-- failure this project actually hit: a write that raises nothing and lands
 		-- nothing, so a counter next to the call reports success that never happened.
 		dropWrites = options.dropWrites or {},
+		-- Paths LrFileUtils.exists reports as present without touching the
+		-- disk: the executable beside the plugin, on either platform.
+		existing = options.existing or {},
 	}
 end
 
@@ -94,6 +97,14 @@ function Photo:addKeyword(keyword)
 end
 
 function Photo:getPropertyForPlugin(_, field) return self._plugin[field] end
+
+--- The real call is asynchronous and the plugin must retain the returned object;
+-- the mock answers at once with bytes that are not a JPEG, which is enough for
+-- the export loop to write a file and count it.
+function Photo:requestJpegThumbnail(width, height, callback)
+	callback('mock-preview-bytes', nil)
+	return {}
+end
 
 function Photo:setPropertyForPlugin(_, field, value)
 	assert(M.state.inWriteGate, 'setPropertyForPlugin outside a write gate')
@@ -220,6 +231,7 @@ namespaces.LrDialogs = {
 
 namespaces.LrFileUtils = {
 	exists = function(path)
+		if M.state.existing[path] then return 'file' end
 		local handle = io.open(path, 'r')
 		if handle then handle:close(); return 'file' end
 		return false
@@ -257,11 +269,15 @@ namespaces.LrFileUtils = {
 	end,
 }
 
+-- Lightroom joins paths with the platform's separator; WIN_ENV picks it.
 namespaces.LrPathUtils = {
-	child = function(dir, name) return dir .. '/' .. name end,
-	parent = function(path) return (string.gsub(path, '/[^/]+$', '')) end,
+	child = function(dir, name) return dir .. (WIN_ENV and '\\' or '/') .. name end,
+	parent = function(path) return (string.gsub(path, '[/\\][^/\\]+$', '')) end,
 	getStandardFilePath = function(which)
-		if which == 'temp' then return '/tmp' end
+		if which == 'temp' then
+			if WIN_ENV then return 'C:\\Users\\photographer\\AppData\\Local\\Temp' end
+			return os.getenv('TMPDIR') or '/tmp'
+		end
 		return os.getenv('HOME') or '/tmp'
 	end,
 }
@@ -311,13 +327,18 @@ namespaces.LrView = {
 }
 
 --- Install the SDK globals so plugin files can be dofile()'d directly.
-function M.install(pluginPath)
+-- `options.windows` fakes a Windows Lightroom: WIN_ENV set, MAC_ENV unset,
+-- backslash paths. The default is macOS.
+function M.install(pluginPath, options)
+	options = options or {}
 	_G.import = function(name)
 		local ns = namespaces[name]
 		if ns == nil then error('mock: unknown Lightroom namespace ' .. tostring(name), 2) end
 		return ns
 	end
 	_G._PLUGIN = { path = pluginPath, id = 'net.gregbishop.melampus' }
+	_G.WIN_ENV = options.windows and true or nil
+	_G.MAC_ENV = (not options.windows) and true or nil
 	_G.LOC = function(text) return text end
 end
 

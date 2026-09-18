@@ -464,7 +464,6 @@ LrTasks.startAsyncTask(function()
 				'Analyse them', 'Skip')
 
 			if ask == 'ok' then
-				local repo = Analyze.repoRoot()
 				local toAnalyse = {}
 				for _, photo in ipairs(photos) do
 					local name = photo:getFormattedMetadata('fileName') or ''
@@ -497,7 +496,7 @@ LrTasks.startAsyncTask(function()
 						Log.warn('no previews exported for batch starting at ' .. first)
 					else
 						local batchResults = LrPathUtils.child(workFolder, 'results.json')
-						local ok, message = Analyze.run(repo, workFolder, batchResults, settings.profile)
+						local ok, message = Analyze.run(workFolder, batchResults, settings.profile)
 						if not ok then
 							LrDialogs.message('Melampus', message
 								.. '\n\nPreviews kept at:\n' .. workFolder, 'critical')
