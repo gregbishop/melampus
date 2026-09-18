@@ -408,24 +408,14 @@ def test_executable_writes_the_enriched_results_and_reads_config_from_the_per_us
     directory of a fresh HOME, which is the proof that config resolves there and
     not in the temporary unpack directory. No default location is configured, so
     the range check is skipped and nothing touches the network."""
-    from melampus.cache import ResultCache
-    from melampus.images import content_hash
     from melampus.plugin_results import PLUGIN_FIELDS
-    from melampus.schema import ImageResult
+    from test_plugin_results import HERON, seed
 
     env = _no_python_environment(tmp_path)
     data_dir = _per_user_data_dir(Path(env["HOME"]))
     data_dir.mkdir(parents=True)
     seeded = tmp_path / "seeded.jsonl"
-    ResultCache(seeded).put(ImageResult.model_validate({
-        "file": PHOTO, "content_hash": content_hash(photos / PHOTO),
-        "status": "ok", "model": "seeded",
-        "identification": {
-            "taxon": "bird", "abstain": False,
-            "candidates": [{"common_name": "Tricolored Heron",
-                            "scientific_name": "Egretta tricolor", "confidence": 0.8}],
-        },
-    }))
+    seed(seeded, [photos / PHOTO], {PHOTO: HERON})
     (data_dir / "melampus.local.toml").write_text(
         f"[run]\ncache_path = '{seeded.as_posix()}'\n", encoding="utf-8")
     out = tmp_path / "plugin_results.json"
