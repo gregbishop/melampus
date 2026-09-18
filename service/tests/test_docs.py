@@ -77,3 +77,12 @@ def test_brief_names_the_test_command_ci_runs():
     brief = (ROOT / "docs" / "brief.md").read_text(encoding="utf-8")
     missing = [c for c in ci_commands if c not in brief]
     assert not missing, f"docs/brief.md's stack contract does not name what CI runs: {missing}"
+
+
+def test_agents_md_points_at_the_brief_without_restating_it():
+    """docs/brief.md is the source of truth for build, test and run. AGENTS.md
+    keeps the pointer; a second copy of the contract's values would drift."""
+    agents = AGENTS_MD.read_text(encoding="utf-8")
+    assert "`docs/brief.md`" in agents, "AGENTS.md must point at docs/brief.md"
+    restated = [v for v in ("`.venv/bin/python -m pytest`", "`service/uv.lock`") if v in agents]
+    assert not restated, f"AGENTS.md restates stack-contract values that live in docs/brief.md: {restated}"
