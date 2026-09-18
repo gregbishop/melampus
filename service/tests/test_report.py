@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from melampus.report import _bucket, _matches, _norm, score
+from melampus.report import _bucket, _matches, score, taxon_key
 from melampus.schema import Candidate, Identification, ImageResult, Taxon
 
 
@@ -29,7 +29,7 @@ from melampus.schema import Candidate, Identification, ImageResult, Taxon
     ],
 )
 def test_hyphenation_and_spacing_variants_converge(left: str, right: str):
-    assert _norm(left) == _norm(right)
+    assert taxon_key(left) == taxon_key(right)
 
 
 @pytest.mark.parametrize(
@@ -41,29 +41,29 @@ def test_hyphenation_and_spacing_variants_converge(left: str, right: str):
     ],
 )
 def test_genuinely_different_species_stay_distinct(left: str, right: str):
-    assert _norm(left) != _norm(right)
+    assert taxon_key(left) != taxon_key(right)
 
 
 def test_scientific_name_rescues_an_unusual_common_name():
     """The taxon is right even when the vernacular name is phrased oddly."""
     assert _matches(
-        _norm("Tri-colored Heron"), _norm("Egretta tricolor"),
-        _norm("Tricolored Heron"), _norm("Egretta tricolor"),
+        taxon_key("Tri-colored Heron"), taxon_key("Egretta tricolor"),
+        taxon_key("Tricolored Heron"), taxon_key("Egretta tricolor"),
     )
     assert _matches(
-        _norm("Louisiana Heron"), _norm("Egretta tricolor"),
-        _norm("Tricolored Heron"), _norm("Egretta tricolor"),
+        taxon_key("Louisiana Heron"), taxon_key("Egretta tricolor"),
+        taxon_key("Tricolored Heron"), taxon_key("Egretta tricolor"),
     )
 
 
 def test_matching_scientific_name_is_not_enough_when_absent():
-    assert not _matches(_norm("Little Blue Heron"), "", _norm("Tricolored Heron"), "")
+    assert not _matches(taxon_key("Little Blue Heron"), "", taxon_key("Tricolored Heron"), "")
 
 
 def test_wrong_species_does_not_match_on_either_name():
     assert not _matches(
-        _norm("Little Blue Heron"), _norm("Egretta caerulea"),
-        _norm("Tricolored Heron"), _norm("Egretta tricolor"),
+        taxon_key("Little Blue Heron"), taxon_key("Egretta caerulea"),
+        taxon_key("Tricolored Heron"), taxon_key("Egretta tricolor"),
     )
 
 
