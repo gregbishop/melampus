@@ -100,6 +100,18 @@ def test_import_runs_against_a_mock_lightroom():
     run_lua_suite(TESTS / "test_import_integration.lua")
 
 
+def test_settings_dialog_against_a_mock_lightroom():
+    """Card #405: executes the real MelampusSettings.lua against the mock SDK.
+    The engine picker lists the four engines in order with the ones detection
+    says cannot run here greyed and their reasons shown; the Ollama link is
+    there exactly when ollama is unavailable; the API key field shows only for
+    the picked cloud engine and stores through LrPasswords, never the
+    preferences, a file, or the log; a missing executable greys nothing."""
+    proc = run_lua(TESTS / "test_settings_dialog.lua")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "0 failed" in proc.stdout, proc.stdout
+
+
 def test_json_decoder():
     run_lua_suite(TESTS / "test_json.lua")
 
