@@ -10,17 +10,28 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 
+# The checkout root: two levels up from this file. Both roots below are it
+# unless the program is running frozen.
+_CHECKOUT = Path(__file__).resolve().parents[2]
+
+
+def _bundle() -> Path | None:
+    """PyInstaller's unpack directory when running inside the executable
+    (tools/build_binary.py); None in a checkout. The bootloader sets
+    sys._MEIPASS before the package runs."""
+    bundle = getattr(sys, "_MEIPASS", None)
+    return Path(bundle) if bundle else None
+
+
 def _repo_root() -> Path:
     """Where prompts/ sits relative to the code: what ships with the program.
 
-    In a checkout that is two levels up from this file. Inside the executable
-    (tools/build_binary.py) the package is unpacked into PyInstaller's temporary
-    directory, which the build lays out the same way: prompts/ at its top level.
-    Nothing the user owns belongs here: the directory is deleted when the
-    process exits. That is `_data_root()`.
+    In a checkout, the checkout root. Inside the executable, the unpack
+    directory, which the build lays out the same way: prompts/ at its top
+    level. Nothing the user owns belongs here: the directory is deleted when
+    the process exits. That is `_data_root()`.
     """
-    bundle = getattr(sys, "_MEIPASS", None)
-    return Path(bundle) if bundle else Path(__file__).resolve().parents[2]
+    return _bundle() or _CHECKOUT
 
 
 def _data_root() -> Path:
@@ -32,9 +43,7 @@ def _data_root() -> Path:
     local config there is never read. Beside the executable mirrors the
     checkout layout and needs no per-platform decision.
     """
-    if getattr(sys, "_MEIPASS", None):
-        return Path(sys.executable).resolve().parent
-    return Path(__file__).resolve().parents[2]
+    return Path(sys.executable).resolve().parent if _bundle() else _CHECKOUT
 
 
 def _cache(name: str) -> Path:
