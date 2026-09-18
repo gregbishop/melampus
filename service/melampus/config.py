@@ -73,7 +73,7 @@ class ModelConfig(_Base):
     # the backend seam; this makes it a setting, which is what lets the same
     # repo run on a machine with no local runtime at all (Windows).
     #   mlx       — local, Apple Silicon only. The local-first path.
-    #   ollama    — local; named, not built yet (card #406).
+    #   ollama    — local, wherever Ollama runs (Windows, Linux, a Mac that prefers it).
     #   claude    — the Claude API (Anthropic). Every frame billed: see docs/config.md.
     #   openai    — OpenAI, or anything chat-completions-compatible via base_url.
     # Left unset, the CLI replaces this value with the first engine detection
@@ -84,6 +84,17 @@ class ModelConfig(_Base):
     repo: str = "mlx-community/Qwen3-VL-30B-A3B-Instruct-4bit"
     # Cloud model name; None means the provider's default (providers.DEFAULT_MODELS).
     name: str | None = None
+    # The Ollama model (ollama only): a tag from ollama.com/library that takes
+    # image input. qwen3-vl:8b-instruct is the Instruct build, 6.1 GB, of the
+    # family the mlx default uses (ollama.com/library/qwen3-vl/tags); the
+    # library's `qwen3-vl` tag itself is the thinking build, which would spend
+    # the token budget thinking before any JSON appears.
+    ollama_model: str = "qwen3-vl:8b-instruct"
+    # Where the Ollama server listens (ollama only). None means Ollama's
+    # documented default, http://127.0.0.1:11434, written once as
+    # providers.OLLAMA_URL: the address detection probes (card #404) and the
+    # backend talks to are the same one.
+    ollama_url: str | None = None
     # OpenAI-compatible endpoint override: OpenRouter, LM Studio, vLLM, a proxy, …
     base_url: str | None = None
     # Never set here in tracked source. Comes from MELAMPUS_ANTHROPIC_KEY /
