@@ -42,7 +42,7 @@ Two things here differ from every other python repo, both deliberately:
   only in skips: locally 2 skip (`test_escalation.py`, the anthropic and
   openai SDKs are not installed); in CI 13 skip (those two, plus the 11
   corpus-backed tests in `test_quality.py`, because `fixtures/` is gitignored
-  and absent on the runner). 147 tests collect as of 2026-09-18.
+  and absent on the runner).
 
 ## the split, and why
 
