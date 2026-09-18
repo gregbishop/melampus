@@ -30,8 +30,9 @@ given the executable with no API key set, when `--backend claude` or
 missing, not that the SDK is missing.
 
 Card #403 names the engines mlx, ollama, openai, claude. The executable must
-accept every one of them; `--backend ollama` is refused as not built yet
-(card #406) with the backends that do work here, exit 3.
+accept every one of them; `--backend ollama` with no server answering at the
+configured address is refused as not running (card #406), naming the address
+and the install, with the backends that do work here, exit 3.
 
 Card #404: `--detect-engines` from the executable prints, as JSON, which of
 the four can run on this machine and why or why not. On a runner nothing
@@ -552,17 +553,27 @@ def test_executable_carries_the_cloud_sdks_and_asks_for_the_key(
     assert needs_a_key in tail, f"did not reach the key check:\n{tail}"
 
 
-def test_executable_accepts_ollama_and_refuses_it_as_not_built_yet(
+def test_executable_refuses_ollama_when_no_server_answers(
     built_executable: Path, photos: Path, tmp_path: Path
 ):
-    """Card #403, Done-when 1 in the frozen build: `ollama` is one of the four
-    names, so the executable's parser accepts it; its backend is card #406's,
-    so the run is refused in plain words, naming what works here, exit 3."""
-    proc = _request_backend(built_executable, photos, tmp_path, "ollama")
+    """Card #406, Done-when 2 in the frozen build: with no Ollama server at
+    the address (a closed port on loopback, so a developer's running Ollama
+    cannot answer), `--backend ollama` exits 3 on the not-running message,
+    naming the address tried and where to install Ollama, and the backends
+    that do work here."""
+    import socket
+
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    settings = tmp_path / "settings.toml"
+    settings.write_text(f'[model]\nollama_url = "http://127.0.0.1:{port}"\n', encoding="utf-8")
+    proc = _request_backend(built_executable, photos, tmp_path, "ollama", "--config", str(settings))
     tail = proc.stderr[-3000:]
     assert proc.returncode == 3, f"exit {proc.returncode}:\n{tail}"
     assert "invalid choice" not in tail, f"the executable does not accept ollama:\n{tail}"
-    assert "The Ollama engine is not built yet" in tail, tail
+    assert f"No Ollama server is answering at http://127.0.0.1:{port}" in tail, tail
+    assert "https://ollama.com/download" in tail, tail
     for works_here in ("claude", "openai", "scripted"):
         assert works_here in tail, f"{works_here!r} is not named as working here:\n{tail}"
 

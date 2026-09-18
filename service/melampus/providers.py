@@ -42,10 +42,9 @@ DEFAULT_MODELS = {
 #: answers nothing useful; it is here to prove the pipeline around it runs.
 SCRIPTED = "scripted"
 
-#: Named so the CLI accepts it (card #403: the user's choice of engine needs a
-#: home before it needs a dialog); its backend is card #406's. Until that
-#: lands, asking for it is refused below, the way mlx is refused off Apple
-#: Silicon.
+#: The local Ollama server (card #403 named it, card #406 built it): the local
+#: engine on Windows and Linux, and on Macs that prefer it. Refused below, the
+#: way mlx is refused off Apple Silicon, when no server answers.
 OLLAMA = "ollama"
 
 #: The engines the user chooses between, in the owner's order, then the fake.
@@ -54,8 +53,9 @@ OLLAMA = "ollama"
 BACKEND_CHOICES = ("mlx", OLLAMA, "openai", "claude", SCRIPTED)
 
 #: Where the local Ollama server listens. Ollama's docs/faq.mdx: "Ollama binds
-#: 127.0.0.1 port 11434 by default." One constant, so card #406 can make it a
-#: config value.
+#: 127.0.0.1 port 11434 by default." One constant: the default of the
+#: `[model] ollama_url` setting (card #406), which is unset until a user
+#: names another address, so the probe and the backend share it.
 OLLAMA_URL = "http://127.0.0.1:11434"
 
 #: How long the probe waits for the local server. Loopback answers in
@@ -91,14 +91,20 @@ def _refusal(reason: str, *, works_here: tuple[str, ...]) -> BackendUnavailable:
     )
 
 
-def ollama_answers() -> bool:
-    """Whether an Ollama server answers at OLLAMA_URL: GET /api/version
-    (Ollama's docs/api.md § Version) within OLLAMA_PROBE_SECONDS, status 200.
-    Connection refused, a timeout, a non-200: unavailable. Never raises; a
-    probe reports."""
+def ollama_url(configured: str | None = None) -> str:
+    """The address Ollama is looked for at: `[model] ollama_url` when set,
+    else OLLAMA_URL. Trailing slash dropped so the endpoints append cleanly."""
+    return (configured or OLLAMA_URL).rstrip("/")
+
+
+def ollama_answers(url: str | None = None) -> bool:
+    """Whether an Ollama server answers at `url` (default OLLAMA_URL):
+    GET /api/version (Ollama's docs/api.md § Version) within
+    OLLAMA_PROBE_SECONDS, status 200. Connection refused, a timeout, a
+    non-200: unavailable. Never raises; a probe reports."""
     try:
         with urllib.request.urlopen(
-            f"{OLLAMA_URL}/api/version", timeout=OLLAMA_PROBE_SECONDS
+            f"{ollama_url(url)}/api/version", timeout=OLLAMA_PROBE_SECONDS
         ) as response:
             return response.status == 200
     except Exception:  # noqa: BLE001 - every failure means the same thing: not here
@@ -121,13 +127,15 @@ def _key_required(engine: str) -> str:
     return f"API key required: set {specific} (or {generic})"
 
 
-def detect_engines() -> list[EngineVerdict]:
+def detect_engines(ollama_at: str | None = None) -> list[EngineVerdict]:
     """One verdict per engine, in the owner's order (BACKEND_CHOICES without the
     test fake). This is the one place that knows whether an engine can run
     here: the refusals' "what works" list and the CLI's default both come from
-    it, so they cannot disagree with what the dialog (card #405) shows."""
+    it, so they cannot disagree with what the dialog (card #405) shows.
+    `ollama_at` is the configured address, if any (`[model] ollama_url`)."""
     apple_silicon = on_apple_silicon()
-    ollama = ollama_answers()
+    url = ollama_url(ollama_at)
+    ollama = ollama_answers(url)
     return [
         EngineVerdict(
             "mlx", apple_silicon,
@@ -135,24 +143,24 @@ def detect_engines() -> list[EngineVerdict]:
         ),
         EngineVerdict(
             OLLAMA, ollama,
-            f"Ollama is answering at {OLLAMA_URL}" if ollama
-            else f"no Ollama server at {OLLAMA_URL}; install it from {OLLAMA_INSTALL}",
+            f"Ollama is answering at {url}" if ollama
+            else f"no Ollama server at {url}; install it from {OLLAMA_INSTALL}",
         ),
         EngineVerdict("openai", True, _key_required("openai")),
         EngineVerdict("claude", True, _key_required("claude")),
     ]
 
 
-def _works_here() -> tuple[str, ...]:
+def _works_here(ollama_at: str | None = None) -> tuple[str, ...]:
     """The backends this machine can run, as detection says, plus the fake."""
-    return (*(v.engine for v in detect_engines() if v.available), SCRIPTED)
+    return (*(v.engine for v in detect_engines(ollama_at) if v.available), SCRIPTED)
 
 
-def default_engine() -> str:
+def default_engine(ollama_at: str | None = None) -> str:
     """What runs when nothing names an engine: the first detection says is
     available, in the owner's order. Were none available, mlx, whose refusal
     already says what to do."""
-    return next((v.engine for v in detect_engines() if v.available), "mlx")
+    return next((v.engine for v in detect_engines(ollama_at) if v.available), "mlx")
 
 
 def normalise_provider(provider: str | None) -> str:
@@ -196,20 +204,35 @@ def build_primary_backend(config: MelampusConfig) -> VLMBackend:
     and the corrective retry are identical wherever the answer comes from.
     """
     kind = (config.model.backend or "mlx").strip().lower()
+    settings = config.model
 
     if kind == "mlx":
         if not on_apple_silicon():
             raise _refusal(
                 "The local MLX backend only runs on Apple Silicon Macs.",
-                works_here=_works_here(),
+                works_here=_works_here(settings.ollama_url),
             )
         from .backend import MLXBackend
 
-        return MLXBackend(config.model.repo, config.model.temperature)
+        return MLXBackend(settings.repo, settings.temperature)
 
     if kind == OLLAMA:
-        raise _refusal(
-            "The Ollama engine is not built yet (card #406).", works_here=_works_here()
+        # The probe detection uses, run here, before any image is read: a
+        # server that is not there fails once, up front, with the fix, rather
+        # than once per frame mid-run.
+        url = ollama_url(settings.ollama_url)
+        if not ollama_answers(url):
+            raise _refusal(
+                f"No Ollama server is answering at {url}. Start Ollama, or install "
+                f"it from {OLLAMA_INSTALL}; a server on another address is named by "
+                "[model] ollama_url.",
+                works_here=_works_here(settings.ollama_url),
+            )
+        from .backend import OllamaBackend
+
+        return OllamaBackend(
+            settings.ollama_model, url,
+            temperature=settings.temperature, timeout=settings.timeout_seconds,
         )
 
     if kind == SCRIPTED:
@@ -226,7 +249,6 @@ def build_primary_backend(config: MelampusConfig) -> VLMBackend:
     else:
         import openai  # noqa: F401
 
-    settings = config.model
     key = resolve_provider_key(provider, settings.api_key)
     model = settings.name or DEFAULT_MODELS[provider]
 
