@@ -7,7 +7,8 @@ option the smoke tests use an existing build, or skip and say how to get one.
 
 The build script is the one source of truth for where the executable lands
 (`dist/melampus`, or `dist/melampus.exe` on Windows — card #400), so it is
-loaded here rather than having its answer restated.
+loaded here rather than having its answer restated. The packaging script
+(card #402) is loaded the same way for the tests on the release zip.
 
 `photos` is the one-frame folder the scripted backend is run against, from
 the executable and from the CLI alike.
@@ -29,7 +30,9 @@ import pytest
 pytest_plugins = ["pytester"]
 
 REPO = Path(__file__).resolve().parents[2]
-BUILD_SCRIPT = REPO / "tools" / "build_binary.py"
+TOOLS = REPO / "tools"
+BUILD_SCRIPT = TOOLS / "build_binary.py"
+PACKAGE_SCRIPT = TOOLS / "package_plugin.py"
 # The frame test_quality.py leans on, downscaled to 1200 px and stripped of
 # metadata so it can be committed: the corpus is gitignored and CI has none,
 # and the smoke test must analyze the same image on every platform (card #400).
@@ -37,15 +40,15 @@ FIXTURE = Path(__file__).with_name("fixtures") / "0A1A2829.jpg"
 PHOTO = FIXTURE.name
 
 
-def _load_build_script() -> ModuleType:
+def _load_tool(script: Path) -> ModuleType:
     """tools/ is not a package; import the script by path, without running it."""
-    spec = importlib.util.spec_from_file_location("build_binary", BUILD_SCRIPT)
+    spec = importlib.util.spec_from_file_location(script.stem, script)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
 
 
-BUILD = _load_build_script()
+BUILD = _load_tool(BUILD_SCRIPT)
 EXECUTABLE: Path = BUILD.executable_path()
 
 
@@ -70,6 +73,13 @@ def repo() -> Path:
 @pytest.fixture(scope="session")
 def build_script() -> ModuleType:
     return BUILD
+
+
+@pytest.fixture(scope="session")
+def package_script() -> ModuleType:
+    """tools/package_plugin.py (card #402): the one place that knows the
+    release zip's layout."""
+    return _load_tool(PACKAGE_SCRIPT)
 
 
 @pytest.fixture()
