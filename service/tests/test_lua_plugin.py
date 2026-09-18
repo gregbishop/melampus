@@ -7,11 +7,15 @@ Lightroom itself runs Lua 5.1, so this catches logic errors, not dialect ones.
 
 from __future__ import annotations
 
+import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
+
+from test_binary import FIXTURE, _no_python_environment, _per_user_data_dir
 
 REPO = Path(__file__).resolve().parents[2]
 PLUGIN = REPO / "plugin" / "Melampus.lrplugin"
@@ -20,11 +24,11 @@ TESTS = REPO / "plugin" / "tests"
 pytestmark = pytest.mark.skipif(shutil.which("lua") is None, reason="lua not installed")
 
 
-def run_lua(script: Path) -> subprocess.CompletedProcess:
+def run_lua(script: Path, env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
     return subprocess.run(
         ["lua", "-e", f'package.path="{TESTS}/?.lua;{PLUGIN}/?.lua;"..package.path',
          str(script)],
-        capture_output=True, text=True, cwd=TESTS,
+        capture_output=True, text=True, cwd=TESTS, env=env,
     )
 
 
@@ -64,3 +68,69 @@ def test_every_plugin_file_compiles():
     assert files, "no plugin Lua files found"
     proc = subprocess.run(["luac", "-p", *files], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr
+
+
+def test_the_command_the_plugin_builds_runs_the_executable_beside_it(
+    built_executable: Path, tmp_path: Path
+):
+    """Card #401, Done-when 1 at the real boundary. The plugin's Analyze module,
+    run under the mock SDK with `_PLUGIN.path` pointing at a plugin folder that
+    holds the executable, builds one shell command; that exact command is then
+    run through sh, as Lightroom's LrTasks.execute runs it on macOS, against
+    dist/melampus with no python on the path. The scripted backend is selected
+    the way a user selects any backend for the plugin: `[model] backend` in
+    melampus.local.toml under the per-user data directory. The enriched results
+    the plugin reads must land where the command said."""
+    from melampus.plugin_results import PLUGIN_FIELDS
+
+    plugin_dir = tmp_path / "Melampus.lrplugin"
+    plugin_dir.mkdir()
+    (plugin_dir / built_executable.name).symlink_to(built_executable)
+    previews = tmp_path / "previews"
+    previews.mkdir()
+    shutil.copy(FIXTURE, previews / FIXTURE.name)
+    results = previews / "results.json"
+    env = _no_python_environment(tmp_path)
+    data_dir = _per_user_data_dir(Path(env["HOME"]))
+    data_dir.mkdir(parents=True)
+    (data_dir / "melampus.local.toml").write_text(
+        "[model]\nbackend = 'scripted'\n", encoding="utf-8")
+
+    script = tmp_path / "command.lua"
+    script.write_text(
+        "local mock = require('lrmock')\n"
+        "mock.reset()\n"
+        "mock.install(os.getenv('MELAMPUS_PLUGIN_DIR'))\n"
+        "local Analyze = dofile(os.getenv('MELAMPUS_ANALYZE'))\n"
+        "local ok, message = Analyze.run(os.getenv('MELAMPUS_PREVIEWS'),"
+        " os.getenv('MELAMPUS_RESULTS'), 'wildlife')\n"
+        "assert(ok, message)\n"
+        "io.write(mock.state.executed[1])\n",
+        encoding="utf-8",
+    )
+    built = run_lua(script, env=os.environ | {
+        "MELAMPUS_PLUGIN_DIR": str(plugin_dir),
+        "MELAMPUS_ANALYZE": str(PLUGIN / "MelampusAnalyze.lua"),
+        "MELAMPUS_PREVIEWS": str(previews),
+        "MELAMPUS_RESULTS": str(results),
+        "TMPDIR": str(tmp_path),
+    })
+    assert built.returncode == 0, built.stdout + built.stderr
+    command = built.stdout
+    assert str(plugin_dir / built_executable.name) in command, command
+
+    proc = subprocess.run(command, shell=True, env=env, cwd=tmp_path,
+                          capture_output=True, text=True, timeout=600)
+
+    log = tmp_path / "melampus-cli.log"
+    assert proc.returncode == 0, (
+        f"exit {proc.returncode}: {proc.stderr[-2000:]}\n"
+        f"{log.read_text(encoding='utf-8')[-3000:] if log.is_file() else 'no CLI log'}")
+    rows = json.loads(results.read_text(encoding="utf-8"))
+    assert [r["file"] for r in rows] == [FIXTURE.name]
+    # The scripted fake answers nothing, so the row has no identification and
+    # therefore no burst_agreement (that is agreement between calls); every
+    # other enrichment field is scored from the pixels and the capture times.
+    expected = set(PLUGIN_FIELDS) - {"burst_agreement"}
+    assert expected <= set(rows[0]), f"missing {expected - set(rows[0])}"
+    assert 0 < rows[0]["quality"] <= 100, "quality was not scored on the pixels"
