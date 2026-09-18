@@ -18,9 +18,10 @@ runs this and then the smoke tests: `.venv/bin/python -m pytest -q --build-binar
 
 from __future__ import annotations
 
-import platform
 import sys
 from pathlib import Path
+
+from melampus.providers import on_apple_silicon
 
 REPO = Path(__file__).resolve().parents[1]
 DIST = REPO / "dist"
@@ -30,14 +31,11 @@ NAME = "melampus"
 # Packages PyInstaller's static analysis cannot see the whole of: mlx loads its
 # native library and Metal shaders from files beside the module; mlx_vlm, mlx_lm
 # and transformers import model modules by name at run time. All of them exist
-# only on Apple Silicon (the pyproject marker), and PyInstaller refuses to
-# collect a package it cannot find, so they are asked for only there.
+# only on Apple Silicon (the pyproject marker, `on_apple_silicon`), and
+# PyInstaller refuses to collect a package it cannot find, so they are asked
+# for only there.
 COLLECT_ALL = ("mlx",)
 COLLECT_SUBMODULES = ("mlx_vlm", "mlx_lm", "transformers")
-
-
-def carries_mlx() -> bool:
-    return sys.platform == "darwin" and platform.machine() == "arm64"
 
 
 def executable_path() -> Path:
@@ -59,7 +57,7 @@ def pyinstaller_arguments(entry: Path) -> list[str]:
         "--paths", str(REPO / "service"),
         "--add-data", f"{REPO / 'prompts'}{separator}prompts",
     ]
-    if carries_mlx():
+    if on_apple_silicon():
         for package in COLLECT_ALL:
             arguments += ["--collect-all", package]
         for package in COLLECT_SUBMODULES:
