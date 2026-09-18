@@ -24,21 +24,21 @@ from pathlib import Path
 
 import pytest
 
-REPO = Path(__file__).resolve().parents[2]
 # The frame test_quality.py leans on; any corpus JPEG would do.
-FIXTURE = REPO / "fixtures" / "0A1A2829.jpg"
+FIXTURE = Path("fixtures") / "0A1A2829.jpg"
 # What `.venv/bin/melampus-id` runs, spelled so it works from any interpreter
 # that has the package installed (CI has no root .venv).
 VENV_CLI = [sys.executable, "-m", "melampus.cli"]
 
 
 @pytest.fixture()
-def photos(tmp_path: Path) -> Path:
-    if not FIXTURE.is_file():
+def photos(tmp_path: Path, repo: Path) -> Path:
+    fixture = repo / FIXTURE
+    if not fixture.is_file():
         pytest.skip("corpus fixtures not present")
     folder = tmp_path / "photos"
     folder.mkdir()
-    shutil.copy(FIXTURE, folder / FIXTURE.name)
+    shutil.copy(fixture, folder / fixture.name)
     return folder
 
 
@@ -63,7 +63,7 @@ def _analyze(command: list[str], photos: Path, workdir: Path, *, env: dict | Non
     return json.loads(out.read_text(encoding="utf-8"))
 
 
-def test_frozen_defaults_come_from_the_bundle(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+def test_frozen_defaults_come_from_the_bundle(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, repo: Path):
     """Inside the executable the package lives in PyInstaller's unpack directory,
     not under service/ in a checkout, so the prompts are found relative to that
     directory: the build script puts them at its top level as `prompts/`."""
@@ -72,7 +72,7 @@ def test_frozen_defaults_come_from_the_bundle(monkeypatch: pytest.MonkeyPatch, t
     monkeypatch.setattr(sys, "_MEIPASS", str(tmp_path), raising=False)
     assert config._repo_root() == tmp_path
     monkeypatch.delattr(sys, "_MEIPASS")
-    assert config._repo_root() == REPO
+    assert config._repo_root() == repo
 
 
 def test_executable_carries_the_service_and_mlx(built_executable: Path, photos: Path, tmp_path: Path):
