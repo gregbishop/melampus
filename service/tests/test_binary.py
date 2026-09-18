@@ -91,16 +91,6 @@ def _analyze(command: list[str], photos: Path, workdir: Path, *, env: dict | Non
             json.loads(enriched.read_text(encoding="utf-8")))
 
 
-def _per_user_data_dir(home: Path) -> Path:
-    """Where config._data_root() lands for the executable under this HOME, in a
-    bare environment (no LOCALAPPDATA, no XDG_DATA_HOME)."""
-    if sys.platform == "darwin":
-        return home / "Library" / "Application Support" / "Melampus"
-    if sys.platform == "win32":
-        return home / "AppData" / "Local" / "Melampus"
-    return home / ".local" / "share" / "Melampus"
-
-
 def test_repo_root_is_the_bundle_when_frozen(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, repo: Path):
     """Inside the executable the package lives in PyInstaller's unpack directory,
     not under service/ in a checkout; `_repo_root()` is that directory when
@@ -428,7 +418,7 @@ def test_executable_writes_the_enriched_results_and_reads_config_from_the_per_us
     data_dir.mkdir(parents=True)
     seeded = tmp_path / "seeded.jsonl"
     ResultCache(seeded).put(ImageResult.model_validate({
-        "file": FIXTURE.name, "content_hash": content_hash(photos / FIXTURE.name),
+        "file": PHOTO, "content_hash": content_hash(photos / PHOTO),
         "status": "ok", "model": "seeded",
         "identification": {
             "taxon": "bird", "abstain": False,
@@ -449,7 +439,7 @@ def test_executable_writes_the_enriched_results_and_reads_config_from_the_per_us
     assert proc.returncode == 0, proc.stderr[-3000:]
     assert "no default location configured" in proc.stderr, proc.stderr[-3000:]
     rows = json.loads(out.read_text(encoding="utf-8"))
-    assert [r["file"] for r in rows] == [FIXTURE.name]
+    assert [r["file"] for r in rows] == [PHOTO]
     row = rows[0]
     assert set(PLUGIN_FIELDS) <= set(row), f"missing {set(PLUGIN_FIELDS) - set(row)}"
     assert row["identification"]["candidates"][0]["common_name"] == "Tricolored Heron", (

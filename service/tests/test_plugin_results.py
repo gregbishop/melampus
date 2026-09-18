@@ -21,10 +21,10 @@ from __future__ import annotations
 
 import importlib.util
 import json
-import shutil
 from pathlib import Path
 
 import pytest
+from conftest import PHOTO
 
 from melampus import cli
 from melampus.cache import ResultCache
@@ -38,7 +38,6 @@ from test_encounters import stub_frame
 
 REPO = Path(__file__).resolve().parents[2]
 CORPUS = REPO / "fixtures"
-COMMITTED_FRAME = Path(__file__).resolve().parent / "fixtures" / "0A1A2829.jpg"
 OLD_TOOL = REPO / "tools" / "make_plugin_results.py"
 FLORIDA = Location(26.45, -82.11, radius_km=50)
 
@@ -248,18 +247,15 @@ def _load_old_tool():
     return module
 
 
-def test_plugin_out_writes_every_field_the_plugin_reads(tmp_path: Path, offline_gbif, capsys):
+def test_plugin_out_writes_every_field_the_plugin_reads(photos: Path, tmp_path: Path, offline_gbif, capsys):
     """Done-when 1, on the committed frame: one `melampus-id` run writes the six
     fields MelampusImport.lua reads, next to the raw --json-out."""
-    folder = tmp_path / "photos"
-    folder.mkdir()
-    frame = folder / COMMITTED_FRAME.name
-    shutil.copy(COMMITTED_FRAME, frame)
+    frame = photos / PHOTO
     config = _config_file(tmp_path)
     _seed(tmp_path / "identifications.jsonl", [frame], {frame.name: CUCKOO})
     out = tmp_path / "plugin_results.json"
 
-    code = cli.main([str(folder), "--config", str(config), "--report-only",
+    code = cli.main([str(photos), "--config", str(config), "--report-only",
                      "--json-out", str(tmp_path / "raw.json"), "--plugin-out", str(out)])
 
     assert code == 0, capsys.readouterr().err
@@ -274,16 +270,15 @@ def test_plugin_out_writes_every_field_the_plugin_reads(tmp_path: Path, offline_
     assert f"wrote {out}" in capsys.readouterr().err
 
 
-def test_plugin_out_skips_range_checks_without_a_default_location_and_says_so(tmp_path: Path, offline_gbif, capsys):
-    folder = tmp_path / "photos"
-    folder.mkdir()
-    frame = folder / COMMITTED_FRAME.name
-    shutil.copy(COMMITTED_FRAME, frame)
+def test_plugin_out_skips_range_checks_without_a_default_location_and_says_so(
+    photos: Path, tmp_path: Path, offline_gbif, capsys
+):
+    frame = photos / PHOTO
     config = _config_file(tmp_path, with_location=False)
     _seed(tmp_path / "identifications.jsonl", [frame], {frame.name: CUCKOO})
     out = tmp_path / "plugin_results.json"
 
-    code = cli.main([str(folder), "--config", str(config), "--report-only", "--plugin-out", str(out)])
+    code = cli.main([str(photos), "--config", str(config), "--report-only", "--plugin-out", str(out)])
 
     assert code == 0
     assert offline_gbif == []
