@@ -63,10 +63,11 @@ def _analyze(command: list[str], photos: Path, workdir: Path, *, env: dict | Non
     return json.loads(out.read_text(encoding="utf-8"))
 
 
-def test_frozen_defaults_come_from_the_bundle(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, repo: Path):
+def test_repo_root_is_the_bundle_when_frozen(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, repo: Path):
     """Inside the executable the package lives in PyInstaller's unpack directory,
-    not under service/ in a checkout, so the prompts are found relative to that
-    directory: the build script puts them at its top level as `prompts/`."""
+    not under service/ in a checkout; `_repo_root()` is that directory when
+    frozen and the checkout otherwise. What is resolved against it is the
+    business of the tests on load_config's defaults."""
     from melampus import config
 
     monkeypatch.setattr(sys, "_MEIPASS", str(tmp_path), raising=False)
