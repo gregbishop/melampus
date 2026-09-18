@@ -54,3 +54,14 @@ def test_no_tracked_file_names_a_home_directory_path():
         "tracked files name an absolute home-directory path (machine-local, and "
         f"public once pushed):\n{hits.stdout}"
     )
+
+
+def test_the_lockfile_is_tracked_and_current():
+    """The README calls service/uv.lock the pinned truth; a lockfile that is not in
+    git is not one, and one that disagrees with pyproject.toml pins nothing."""
+    tracked = _git("ls-files", "--", "service/uv.lock").stdout.splitlines()
+    assert tracked == ["service/uv.lock"], "service/uv.lock is not tracked"
+    check = subprocess.run(
+        ["uv", "lock", "--check"], cwd=REPO / "service", capture_output=True, text=True
+    )
+    assert check.returncode == 0, check.stderr

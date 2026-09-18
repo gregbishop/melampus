@@ -22,7 +22,7 @@ every session.
 - stack: python
 - build: none
 - test: `.venv/bin/python -m pytest` — from the repo root, locally
-- test in CI: `uv run --with pytest pytest -q` — from `service/`, in
+- test in CI: `uv sync --locked --extra dev && uv run pytest -q` — from `service/`, in
   `.github/workflows/ci.yml`; this is the run that gates merges
 - lint: none adopted
 - run: the service half, per `docs/architecture.md`
@@ -35,7 +35,7 @@ Two things here differ from every other python repo, both deliberately:
   it is `.venv/bin/python -m pytest` from the repo root: `pytest.ini` pins
   `testpaths = service/tests` and excludes `_old/`, whose stale `melampus`
   package would otherwise shadow the real one on `sys.path`. CI runs
-  `uv run --with pytest pytest -q` from `service/`, where
+  `uv sync --locked --extra dev && uv run pytest -q` from `service/`, where
   `service/pyproject.toml` pins the same `tests/` path, because the runner
   has no `.venv` and uv resolves `service/pyproject.toml` into one (the
   lockfile is not committed yet; that has its own card). The counts differ
