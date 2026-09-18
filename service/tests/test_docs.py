@@ -9,9 +9,11 @@ docs/brief.md names the pytest command CI actually runs and explains it as
 installing from the lockfile; every doc block that installs the service, and CI, install
 from the lockfile (card #425, Done-when 3 and 2); AGENTS.md points at
 docs/brief.md without restating its values; AGENTS.md points at the standard
-and names the tracker (card #410, Done-when 3); and the Windows job runs the
+and names the tracker (card #410, Done-when 3); the Windows job runs the
 plugin tests, so the command built for cmd.exe is run by cmd.exe (card #401,
-Done-when 3).
+Done-when 3); and the release workflow builds with the commands CI uses and
+attaches one zip per platform, which readme.md's Lightroom section names
+(card #402).
 
 The checks are deliberately dumb — substring presence of the backticked name — so
 they never argue with prose style, only with absence.
@@ -28,7 +30,9 @@ CONFIG_DOC = REPO / "docs" / "config.md"
 AGENTS_MD = REPO / "AGENTS.md"
 PLUGIN_CHOICE = REPO / ".agents" / "on-purpose.json"
 BRIEF = REPO / "docs" / "brief.md"
-CI_WORKFLOW = REPO / ".github" / "workflows" / "ci.yml"
+WORKFLOWS = REPO / ".github" / "workflows"
+CI_WORKFLOW = WORKFLOWS / "ci.yml"
+RELEASE_WORKFLOW = WORKFLOWS / "release.yml"
 LUA_PLUGIN_TESTS = REPO / "service" / "tests" / "test_lua_plugin.py"
 PLUGIN_DOC = REPO / "docs" / "plugin.md"
 GITIGNORE = REPO / ".gitignore"
@@ -94,16 +98,20 @@ def test_docs_name_only_the_lowercase_files():
     assert not stale, f"docs name uppercase files that do not exist: {stale}"
 
 
-def _ci_pytest_commands() -> list[str]:
-    """The `run:` line of every ci.yml step that invokes pytest."""
-    workflow = CI_WORKFLOW.read_text(encoding="utf-8")
+def _pytest_commands(workflow: Path) -> list[str]:
+    """The `run:` line of every step in that workflow that invokes pytest."""
+    text = workflow.read_text(encoding="utf-8")
     commands = [
         command
-        for command in re.findall(r"^\s*run:\s*(.+?)\s*$", workflow, re.MULTILINE)
+        for command in re.findall(r"^\s*run:\s*(.+?)\s*$", text, re.MULTILINE)
         if "pytest" in command
     ]
-    assert commands, "ci.yml runs no pytest step"
+    assert commands, f"{workflow.name} runs no pytest step"
     return commands
+
+
+def _ci_pytest_commands() -> list[str]:
+    return _pytest_commands(CI_WORKFLOW)
 
 
 def test_brief_names_the_test_command_ci_runs():
@@ -352,3 +360,38 @@ def test_ci_pins_every_pip_install_to_an_exact_version():
         if not requirement.startswith("-") and not re.fullmatch(r"[\w.\-\[\]]+==[\w.]+", requirement)
     ]
     assert not unpinned, f"CI installs from PyPI without an exact version: {unpinned}"
+
+
+RELEASE_ZIPS = ("Melampus-macOS.zip", "Melampus-Windows.zip")
+
+
+def test_release_workflow_builds_as_ci_does_and_attaches_a_zip_per_platform():
+    """Card #402, Done-when 1: given a tag is pushed, when the release workflow
+    runs, then a GitHub release exists with Melampus-macOS.zip and
+    Melampus-Windows.zip attached. The proof is the first tagged run; this
+    gate keeps the workflow honest before it: it triggers on v* tags, its
+    pytest steps are exactly CI's (the same sync and --build-binary on each
+    runner, so what ships is what was tested, and the docs gates above cover
+    both), the zips come from tools/package_plugin.py (the one place that
+    knows the layout; no second copy in YAML), both zip names are in it, the
+    token gets `contents: write` and no other scope, and every third-party
+    action is pinned to a commit SHA with the version in a trailing comment."""
+    release = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+    assert re.search(r"^on:\n\s+push:\n\s+tags:\s*\[\s*['\"]?v\*", release, re.MULTILINE), (
+        "release.yml does not trigger on pushed v* tags")
+    assert sorted(_pytest_commands(RELEASE_WORKFLOW)) == sorted(_ci_pytest_commands()), (
+        "release.yml's build steps must be exactly ci.yml's pytest commands")
+    assert "tools/package_plugin.py" in release, "release.yml does not package with tools/package_plugin.py"
+    missing = [z for z in RELEASE_ZIPS if z not in release]
+    assert not missing, f"release.yml does not name {missing}"
+    scopes = re.findall(r"^\s+([\w-]+): (read|write|none)$", release, re.MULTILINE)
+    assert ("contents", "write") in scopes, "release.yml grants no contents: write"
+    other = [f"{scope}: {level}" for scope, level in scopes if scope != "contents"]
+    assert not other, f"release.yml grants more than contents: {other}"
+    unpinned = [
+        line.strip()
+        for line in release.splitlines()
+        if re.search(r"^\s*-?\s*uses:", line)
+        and not re.search(r"uses: \S+@[0-9a-f]{40}\s+# v\d", line)
+    ]
+    assert not unpinned, f"release.yml actions not pinned to a SHA with a version comment: {unpinned}"
