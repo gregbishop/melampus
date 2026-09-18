@@ -525,3 +525,119 @@ def test_ollama_probe_gives_up_after_its_timeout(monkeypatch):
 
 def test_ollama_probe_timeout_is_one_second():
     assert providers.OLLAMA_PROBE_SECONDS == 1.0
+
+
+# ---------------------------------------------------------------------------
+# Card #404 through the CLI: `--detect-engines`, and the default engine.
+
+
+@pytest.fixture()
+def no_local_config(monkeypatch, tmp_path):
+    """The developer's melampus.local.toml must not set the engine under a
+    test about what happens when nothing sets it."""
+    import melampus.config
+
+    monkeypatch.setattr(melampus.config, "_local_config", lambda: tmp_path / "absent.toml")
+
+
+def test_cli_detect_engines_prints_the_verdicts_as_json_in_order(
+    monkeypatch, capsys, no_ambient_keys, no_ambient_ollama
+):
+    """Acceptance for Done-when 1 to 3: `melampus-id --detect-engines` needs no
+    folder, prints one JSON list to stdout, in the owner's order, each item
+    {engine, available, reason}, and exits 0. Faked off Apple Silicon with no
+    Ollama: mlx and ollama say why not, the cloud engines say which key."""
+    from melampus.cli import main
+
+    _fake_platform(monkeypatch, "win32", "AMD64")
+
+    code = main(["--detect-engines"])
+
+    out, err = capsys.readouterr()
+    assert code == 0, err
+    verdicts = json.loads(out)
+    assert [v["engine"] for v in verdicts] == list(ENGINES)
+    assert all(set(v) == {"engine", "available", "reason"} for v in verdicts)
+    by_engine = {v["engine"]: v for v in verdicts}
+    assert by_engine["mlx"] == {"engine": "mlx", "available": False, "reason": "needs Apple Silicon"}
+    assert by_engine["ollama"]["available"] is False
+    assert providers.OLLAMA_INSTALL in by_engine["ollama"]["reason"]
+    for engine in ("openai", "claude"):
+        assert by_engine[engine]["available"] is True
+        assert "API key required" in by_engine[engine]["reason"]
+        assert providers.KEY_VARIABLES[engine][0] in by_engine[engine]["reason"]
+
+
+def test_cli_detect_engines_reports_ollama_when_it_answers(monkeypatch, capsys):
+    from melampus.cli import main
+
+    with _fake_ollama(monkeypatch):
+        assert main(["--detect-engines"]) == 0
+    verdicts = {v["engine"]: v for v in json.loads(capsys.readouterr().out)}
+    assert verdicts["ollama"]["available"] is True
+
+
+def test_cli_still_requires_a_folder_without_detect_engines(capsys):
+    from melampus.cli import main
+
+    with pytest.raises(SystemExit) as exit_:
+        main(["--backend", "scripted"])
+    assert exit_.value.code == 2
+    assert "folder" in capsys.readouterr().err
+
+
+def _chosen_engine(monkeypatch, argv: list[str]) -> str:
+    """Run the CLI to the backend seam and answer which engine it chose there;
+    the seam refuses, so nothing loads or runs."""
+    import melampus.cli
+
+    chosen: list[str] = []
+
+    def refuse(config):
+        chosen.append(config.model.backend)
+        raise providers.BackendUnavailable("stopped at the seam")
+
+    monkeypatch.setattr(melampus.cli, "build_primary_backend", refuse)
+    assert melampus.cli.main(argv) == 3
+    (engine,) = chosen
+    return engine
+
+
+def test_cli_default_engine_is_the_first_that_can_run_here(
+    monkeypatch, photos, tmp_path, capsys, no_ambient_keys, no_local_config
+):
+    """No `--backend` and no `[model] backend`: the CLI picks the first engine
+    detection says is available, in the owner's order. Off Apple Silicon with
+    Ollama answering, that is ollama; the log line says so and how to choose."""
+    _fake_platform(monkeypatch, "win32", "AMD64")
+    monkeypatch.setattr(providers, "ollama_answers", lambda: True)
+
+    engine = _chosen_engine(monkeypatch, [str(photos), "--cache", str(tmp_path / "cache.jsonl")])
+
+    assert engine == "ollama"
+    err = capsys.readouterr().err
+    assert "engine: ollama" in err and "--backend" in err, err
+
+
+def test_cli_default_engine_is_mlx_on_apple_silicon_and_openai_with_nothing_local(
+    monkeypatch, photos, tmp_path, no_ambient_keys, no_local_config, no_ambient_ollama
+):
+    argv = [str(photos), "--cache", str(tmp_path / "cache.jsonl")]
+    _fake_platform(monkeypatch, "darwin", "arm64")
+    assert _chosen_engine(monkeypatch, argv) == "mlx"
+    _fake_platform(monkeypatch, "linux", "x86_64")
+    assert _chosen_engine(monkeypatch, argv) == "openai"
+
+
+def test_cli_detection_never_overrides_a_chosen_engine(
+    monkeypatch, photos, tmp_path, no_ambient_keys, no_local_config
+):
+    """`--backend` and `[model] backend` are the user's word; detection only
+    fills the blank. Faked so detection would say ollama."""
+    _fake_platform(monkeypatch, "win32", "AMD64")
+    monkeypatch.setattr(providers, "ollama_answers", lambda: True)
+    argv = [str(photos), "--cache", str(tmp_path / "cache.jsonl")]
+    assert _chosen_engine(monkeypatch, [*argv, "--backend", "mlx"]) == "mlx"
+    config = tmp_path / "settings.toml"
+    config.write_text('[model]\nbackend = "claude"\n', encoding="utf-8")
+    assert _chosen_engine(monkeypatch, [*argv, "--config", str(config)]) == "claude"

@@ -148,6 +148,13 @@ def _works_here() -> tuple[str, ...]:
     return (*(v.engine for v in detect_engines() if v.available), SCRIPTED)
 
 
+def default_engine() -> str:
+    """What runs when nothing names an engine: the first detection says is
+    available, in the owner's order. Were none available, mlx, whose refusal
+    already says what to do."""
+    return next((v.engine for v in detect_engines() if v.available), "mlx")
+
+
 def normalise_provider(provider: str | None) -> str:
     name = (provider or "").strip().lower()
     if name not in KEY_VARIABLES:
