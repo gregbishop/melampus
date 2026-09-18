@@ -2,13 +2,26 @@
 
 from __future__ import annotations
 
+import sys
 import tomllib
 from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+
+def _repo_root() -> Path:
+    """Where prompts/, the cache and melampus.local.toml sit relative to the code.
+
+    In a checkout that is two levels up from this file. Inside the executable
+    (tools/build_binary.py) the package is unpacked into PyInstaller's temporary
+    directory, which the build lays out the same way: prompts/ at its top level.
+    """
+    bundle = getattr(sys, "_MEIPASS", None)
+    return Path(bundle) if bundle else Path(__file__).resolve().parents[2]
+
+
+REPO_ROOT = _repo_root()
 
 
 class _Base(BaseModel):
