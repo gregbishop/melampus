@@ -20,20 +20,20 @@ REPO = Path(__file__).resolve().parents[2]
 HOME_PATH = "/(Users|home)/[^/[:space:]`'\"]+/"
 
 
-def _git(*args: str) -> str:
+def _git(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        ["git", "-C", str(REPO), *args], check=True, capture_output=True, text=True
-    ).stdout
+        ["git", "-C", str(REPO), *args], check=check, capture_output=True, text=True
+    )
 
 
 def _tracked_symlinks():
-    for entry in _git("ls-files", "-s", "-z").split("\0"):
+    for entry in _git("ls-files", "-s", "-z").stdout.split("\0"):
         if not entry:
             continue
         meta, path = entry.split("\t", 1)
         mode, blob, _stage = meta.split()
         if mode == "120000":
-            yield path, _git("cat-file", "-p", blob)
+            yield path, _git("cat-file", "-p", blob).stdout
 
 
 def test_no_tracked_symlink_leaves_the_repository():
@@ -49,11 +49,7 @@ def test_no_tracked_symlink_leaves_the_repository():
 
 
 def test_no_tracked_file_names_a_home_directory_path():
-    hits = subprocess.run(
-        ["git", "-C", str(REPO), "grep", "-I", "-n", "-E", HOME_PATH],
-        capture_output=True,
-        text=True,
-    )
+    hits = _git("grep", "-I", "-n", "-E", HOME_PATH, check=False)
     assert hits.returncode == 1, (
         "tracked files name an absolute home-directory path (machine-local, and "
         f"public once pushed):\n{hits.stdout}"
