@@ -21,6 +21,13 @@ repo = "mlx-community/Qwen3-VL-32B-Instruct-8bit"
 max_edge = 1280
 ```
 
+`<repo>` in the defaults below is the checkout root. Inside the shipped
+executable (readme.md § Building the executable) it is two places: `prompts/`
+ships in the bundle and is read from the unpack directory, while the caches
+and `melampus.local.toml` live beside the executable — `dist/.melampus_cache/`
+and `dist/melampus.local.toml` for a fresh build — because the unpack directory
+is deleted at exit.
+
 ---
 
 ## `[model]`

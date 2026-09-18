@@ -336,6 +336,11 @@ Try it without any Python on the path — the scripted backend needs no weights:
 env -i PATH=/nonexistent HOME="$HOME" dist/melampus fixtures/ --backend scripted --limit 1
 ```
 
+The executable keeps its results and reads its local config beside itself:
+`dist/.melampus_cache/` and `dist/melampus.local.toml`, the same layout as the
+checkout, so a run's identifications survive the unpack directory being
+deleted at exit. `--cache` and `--config` override both, as they do for the CLI.
+
 ---
 
 ## Reviewing in Lightroom
