@@ -28,6 +28,11 @@ stage1_*.json
 plugin_results.json
 stage1_*.log
 
-# Local Claude Code config — references the private argus marketplace
+# on-purpose install outputs are machine-local: the links and the marketplace path
+# point into the on-purpose checkout by absolute path. .agents/on-purpose.json
+# records the plugin choice; the installer regenerates the rest.
+.claude/settings.json
 .claude/settings.local.json
+.agents/skills/
+.codex/agents/
 .agents/on-purpose.local.md
