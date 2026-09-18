@@ -9,7 +9,6 @@ retuned for a cloud primary without ever overriding an explicit setting.
 from __future__ import annotations
 
 import json
-import platform
 import sys
 import types
 
@@ -46,10 +45,7 @@ def stub_sdks(monkeypatch):
     monkeypatch.setitem(sys.modules, "openai", types.ModuleType("openai"))
 
 
-@pytest.mark.skipif(
-    sys.platform != "darwin" or platform.machine() != "arm64",
-    reason="the mlx default only constructs on Apple Silicon",
-)
+@pytest.mark.skipif(not providers.on_apple_silicon(), reason="the mlx default only constructs on Apple Silicon")
 def test_default_backend_is_local_mlx():
     config = _cfg()
     assert config.model.backend == "mlx"
