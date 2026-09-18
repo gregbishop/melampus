@@ -55,7 +55,7 @@ def test_default_backend_is_local_mlx():
     assert backend.repo == config.model.repo
 
 
-def test_mlx_is_refused_on_windows_with_directions(monkeypatch):
+def test_mlx_is_refused_on_windows_with_directions(monkeypatch, no_ambient_ollama):
     monkeypatch.setattr(providers.sys, "platform", "win32")
     with pytest.raises(providers.BackendUnavailable) as err:
         providers.build_primary_backend(_cfg())
@@ -63,7 +63,7 @@ def test_mlx_is_refused_on_windows_with_directions(monkeypatch):
     assert "claude" in message and "openai" in message and "--backend" in message
 
 
-def test_mlx_is_refused_on_intel_mac(monkeypatch):
+def test_mlx_is_refused_on_intel_mac(monkeypatch, no_ambient_ollama):
     """darwin alone is not enough — the pyproject marker also requires arm64,
     so an Intel Mac must get the helpful refusal, not a ModuleNotFoundError
     at warmup."""
@@ -146,7 +146,7 @@ def test_cli_rejects_a_name_that_is_not_an_engine(name, photos, tmp_path, capsys
         assert engine in err, f"the usage error does not name {engine!r}:\n{err}"
 
 
-def test_ollama_is_refused_as_not_built_yet_and_names_what_works(no_ambient_keys):
+def test_ollama_is_refused_as_not_built_yet_and_names_what_works(no_ambient_keys, no_ambient_ollama):
     """Card #403: `ollama` is one of the four names and the CLI must accept it,
     but its backend is card #406's. Until then it is refused the way mlx is
     refused off Apple Silicon: what is wrong, in plain words, and the backends
@@ -164,7 +164,7 @@ def test_ollama_is_refused_as_not_built_yet_and_names_what_works(no_ambient_keys
     assert "--backend" in message
 
 
-def test_cli_backend_ollama_exits_3_with_the_refusal(photos, tmp_path, capsys, no_ambient_keys):
+def test_cli_backend_ollama_exits_3_with_the_refusal(photos, tmp_path, capsys, no_ambient_keys, no_ambient_ollama):
     from melampus.cli import main
 
     code = main([str(photos), "--backend", "ollama", "--cache", str(tmp_path / "cache.jsonl")])
@@ -175,9 +175,10 @@ def test_cli_backend_ollama_exits_3_with_the_refusal(photos, tmp_path, capsys, n
     assert "cloud default" not in err, f"ollama is local; nothing was retuned for a cloud:\n{err}"
 
 
-def test_mlx_refusal_does_not_name_ollama_as_working(monkeypatch):
-    """Off Apple Silicon the mlx refusal lists what works here; an engine that
-    is not built yet does not work anywhere, so it stays off that list."""
+def test_mlx_refusal_does_not_name_ollama_as_working(monkeypatch, no_ambient_ollama):
+    """Off Apple Silicon the mlx refusal lists what works here; with no Ollama
+    server answering (card #404's detection decides), ollama stays off that
+    list."""
     monkeypatch.setattr(providers.sys, "platform", "win32")
     with pytest.raises(providers.BackendUnavailable) as err:
         providers.build_primary_backend(_cfg())
@@ -292,7 +293,7 @@ def test_cli_backend_scripted_writes_a_result_without_weights(photos, tmp_path, 
 
 
 def test_cli_backend_mlx_on_windows_names_apple_silicon_and_the_backends_that_work(
-    photos, tmp_path, capsys, monkeypatch
+    photos, tmp_path, capsys, monkeypatch, no_ambient_ollama
 ):
     """Card #400, Done-when 2: given the Windows executable, when the local MLX
     engine is requested, then it says clearly that MLX needs Apple Silicon and
@@ -311,3 +312,94 @@ def test_cli_backend_mlx_on_windows_names_apple_silicon_and_the_backends_that_wo
     for works_here in ("claude", "openai", "scripted"):
         assert works_here in err, f"{works_here!r} is not named as working here:\n{err}"
     assert "ollama" not in err, f"an engine that is not built yet is named as working:\n{err}"
+
+
+# ---------------------------------------------------------------------------
+# Card #404: which engines can run on this machine.
+
+
+@pytest.fixture()
+def no_ambient_ollama(monkeypatch):
+    """A developer's running Ollama must not decide what these tests assert."""
+    monkeypatch.setattr(providers, "ollama_answers", lambda: False)
+
+
+def _fake_platform(monkeypatch, platform_name: str, machine: str) -> None:
+    monkeypatch.setattr(providers.sys, "platform", platform_name)
+    monkeypatch.setattr(providers.platform, "machine", lambda: machine)
+
+
+def _verdict(engine: str) -> providers.EngineVerdict:
+    (verdict,) = [v for v in providers.detect_engines() if v.engine == engine]
+    return verdict
+
+
+def test_detection_lists_the_four_engines_in_the_owners_order(no_ambient_keys, no_ambient_ollama):
+    """The list the dialog (card #405) will show: one verdict per engine, in
+    the order BACKEND_CHOICES names them, never the test fake."""
+    verdicts = providers.detect_engines()
+    assert [v.engine for v in verdicts] == list(ENGINES)
+    for verdict in verdicts:
+        assert isinstance(verdict.available, bool)
+        assert verdict.reason, f"{verdict.engine} has no reason"
+
+
+def test_detection_mlx_is_available_on_apple_silicon(monkeypatch, no_ambient_ollama):
+    """Done-when 1: given Apple Silicon, when detection runs, then mlx is available."""
+    _fake_platform(monkeypatch, "darwin", "arm64")
+    assert _verdict("mlx").available
+
+
+@pytest.mark.parametrize(("platform_name", "machine"), [("win32", "AMD64"), ("darwin", "x86_64"), ("linux", "x86_64")])
+def test_detection_mlx_needs_apple_silicon_anywhere_else(monkeypatch, no_ambient_ollama, platform_name, machine):
+    """Done-when 1: given anything else, then mlx is unavailable with the
+    reason "needs Apple Silicon"."""
+    _fake_platform(monkeypatch, platform_name, machine)
+    verdict = _verdict("mlx")
+    assert not verdict.available
+    assert verdict.reason == "needs Apple Silicon"
+
+
+def test_detection_ollama_is_available_when_the_server_answers(monkeypatch):
+    """Done-when 2: given Ollama answering on localhost, then ollama is available."""
+    monkeypatch.setattr(providers, "ollama_answers", lambda: True)
+    assert _verdict("ollama").available
+
+
+def test_detection_ollama_points_to_the_install_when_nothing_answers(no_ambient_ollama):
+    """Done-when 2: given no answer, then ollama is unavailable with a pointer
+    to install it, and the address that was tried."""
+    verdict = _verdict("ollama")
+    assert not verdict.available
+    assert providers.OLLAMA_INSTALL in verdict.reason
+    assert providers.OLLAMA_URL in verdict.reason
+
+
+def test_ollama_address_is_one_constant_on_the_documented_default():
+    """docs/faq.mdx in Ollama's repo: "Ollama binds 127.0.0.1 port 11434 by
+    default." One constant, so card #406 can turn it into a config value."""
+    assert providers.OLLAMA_URL == "http://127.0.0.1:11434"
+
+
+@pytest.mark.parametrize("engine", ["openai", "claude"])
+def test_detection_cloud_engines_are_available_and_name_the_key_variable(
+    engine, no_ambient_keys, no_ambient_ollama
+):
+    """Done-when 3: given any machine, then openai and claude are available and
+    each says an API key is required, naming the variable it comes from."""
+    verdict = _verdict(engine)
+    assert verdict.available
+    assert "API key required" in verdict.reason
+    assert providers.KEY_VARIABLES[engine][0] in verdict.reason
+
+
+def test_the_refusal_names_what_detection_says_is_available(monkeypatch):
+    """One truth: the backends the refusal names as working here are the ones
+    detection says are available, plus the test fake. Off Apple Silicon with
+    Ollama answering, that is ollama, openai, claude, scripted, and not mlx."""
+    _fake_platform(monkeypatch, "win32", "AMD64")
+    monkeypatch.setattr(providers, "ollama_answers", lambda: True)
+    assert providers._works_here() == ("ollama", "openai", "claude", "scripted")
+    with pytest.raises(providers.BackendUnavailable) as err:
+        providers.build_primary_backend(_cfg())
+    assert "ollama, openai, claude, scripted" in str(err.value)
