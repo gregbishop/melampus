@@ -8,9 +8,11 @@ step the shipped executable did not contain. Now `melampus-id --plugin-out`
 writes them from inside the executable.
 
 Done-when 1: given the service package, when `melampus-id` is given
-`--plugin-out <path>`, then it writes the enriched results that
-tools/make_plugin_results.py writes today, from the same inputs, and the two
-outputs are byte-identical on the fixture corpus.
+`--plugin-out <path>`, then it writes the enriched results the tool wrote
+before this card, from the same inputs. The tool is now a thin caller of the
+same `enrich`, so the corpus test here proves that the tool and `--plugin-out`
+write the same bytes; the comparison against the untouched tool was made out
+of tree, at review, against the base branch's tools/make_plugin_results.py.
 
 Unit tests run over stub frames carrying only an XMP packet and a fake quality
 scorer; the integration tests run the real CLI over real pixels with the GBIF
@@ -38,7 +40,7 @@ from test_encounters import stub_frame
 
 REPO = Path(__file__).resolve().parents[2]
 CORPUS = REPO / "fixtures"
-OLD_TOOL = REPO / "tools" / "make_plugin_results.py"
+TOOL = REPO / "tools" / "make_plugin_results.py"
 FLORIDA = Location(26.45, -82.11, radius_km=50)
 
 # What GBIF would say near Florida: the cuckoo is Asian, the rest are residents.
@@ -240,8 +242,8 @@ def offline_gbif(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, int | None]
     return calls
 
 
-def _load_old_tool():
-    spec = importlib.util.spec_from_file_location("make_plugin_results", OLD_TOOL)
+def _load_tool():
+    spec = importlib.util.spec_from_file_location("make_plugin_results", TOOL)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -287,12 +289,13 @@ def test_plugin_out_skips_range_checks_without_a_default_location_and_says_so(
 
 
 @pytest.mark.skipif(not CORPUS.is_dir(), reason="corpus fixtures not present")
-def test_plugin_out_is_byte_identical_to_the_old_tool_on_the_corpus(
+def test_plugin_out_and_the_thin_tool_write_the_same_bytes_on_the_corpus(
     tmp_path: Path, offline_gbif, monkeypatch: pytest.MonkeyPatch
 ):
-    """Done-when 1, the proof: the same raw results and the same frames through
-    `melampus-id --plugin-out` and through tools/make_plugin_results.py
-    --occurrence --quality give the same bytes."""
+    """Done-when 1 as it holds at HEAD: the same raw results and the same frames
+    through `melampus-id --plugin-out` and through the thin
+    tools/make_plugin_results.py --occurrence --quality give the same bytes, so
+    the plugin's Analyze command and the executable cannot drift."""
     frames = sorted(CORPUS.glob("*.jpg"))[:8]
     species = {}
     for index, frame in enumerate(frames):
@@ -304,20 +307,20 @@ def test_plugin_out_is_byte_identical_to_the_old_tool_on_the_corpus(
     for frame in frames:
         (folder / frame.name).symlink_to(frame)
     raw = tmp_path / "raw.json"
-    new = tmp_path / "new.json"
-    old = tmp_path / "old.json"
+    from_cli = tmp_path / "from_cli.json"
+    from_tool = tmp_path / "from_tool.json"
 
     assert cli.main([str(folder), "--config", str(config), "--report-only",
-                     "--json-out", str(raw), "--plugin-out", str(new)]) == 0
+                     "--json-out", str(raw), "--plugin-out", str(from_cli)]) == 0
 
-    # The old tool reads melampus.local.toml only; point it at the same config.
+    # The tool reads melampus.local.toml only; point it at the same config.
     from melampus import config as config_module
     monkeypatch.setattr(config_module, "_local_config", lambda: config)
-    tool = _load_old_tool()
-    assert tool.main([str(OLD_TOOL), str(folder), str(raw), str(old), "--occurrence", "--quality"]) == 0
+    tool = _load_tool()
+    assert tool.main([str(TOOL), str(folder), str(raw), str(from_tool), "--occurrence", "--quality"]) == 0
 
-    assert new.read_bytes() == old.read_bytes()
-    rows = json.loads(new.read_text(encoding="utf-8"))
+    assert from_cli.read_bytes() == from_tool.read_bytes()
+    rows = json.loads(from_cli.read_text(encoding="utf-8"))
     assert len(rows) == len(frames)
     assert sum(r["range_flag"] for r in rows) == 2, "the two cuckoo frames are flagged"
     assert all(set(PLUGIN_FIELDS) <= set(r) for r in rows)
@@ -328,7 +331,7 @@ def test_the_tool_is_a_thin_caller_of_the_service_module():
     enrichment; it parses arguments and calls melampus.plugin_results. The
     Lightroom plugin still invokes it until card #401 rewires the plugin, so
     it stays, and stays thin."""
-    source = OLD_TOOL.read_text(encoding="utf-8")
+    source = TOOL.read_text(encoding="utf-8")
     assert "from melampus.plugin_results import" in source
     for own_logic in ("most_common", "quality_rank", "burst_agreement"):
         assert own_logic not in source, f"the tool still computes {own_logic!r} itself"
