@@ -101,8 +101,8 @@ the plugin built), and none can be escaped there; the message says to enter the
 key again in Settings and shows no part of it.
 
 When the preference is set, `MelampusAnalyze.lua` passes it to the executable
-as `--backend <engine>`, and the executable's own rules apply: `ollama` is
-refused as not built yet (card #406), `openai` and `claude` need their key
+as `--backend <engine>`, and the executable's own rules apply: `ollama` needs an
+Ollama server answering (card #406), `openai` and `claude` need their key
 (docs/config.md § `[model]`). When it is unset — the default, *Let Melampus
 choose* — the command carries no `--backend` and the executable decides:
 `[model] backend` in `melampus.local.toml`, else the first engine that can
