@@ -95,11 +95,12 @@ def build_primary_backend(config: MelampusConfig) -> VLMBackend:
         # check and then dies on a raw ModuleNotFoundError at warmup instead of
         # this message.
         if sys.platform != "darwin" or platform.machine() != "arm64":
+            works_here = ", ".join(b for b in BACKEND_CHOICES if b != "mlx")
             raise BackendUnavailable(
-                "The local MLX backend only runs on Apple Silicon Macs. On this "
-                "machine set [model] backend = \"anthropic\" or \"openai\" in the "
-                "config (with the matching API key), or pass --backend. "
-                "See readme.md § Windows."
+                "The local MLX backend only runs on Apple Silicon Macs. The "
+                f"backends that work on this machine are: {works_here}. Set "
+                "[model] backend in the config (with the matching API key for a "
+                "cloud provider), or pass --backend. See readme.md § Windows."
             )
         from .backend import MLXBackend
 
