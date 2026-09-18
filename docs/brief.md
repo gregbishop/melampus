@@ -37,9 +37,10 @@ Two things here differ from every other python repo, both deliberately:
   package would otherwise shadow the real one on `sys.path`. CI runs
   `uv sync --locked --extra dev && uv run pytest -q` from `service/`, where
   `service/pyproject.toml` pins the same `tests/` path, because the runner
-  has no `.venv` and uv resolves `service/pyproject.toml` into one (the
-  lockfile is not committed yet; that has its own card). The counts differ
-  only in skips: locally 2 skip (`test_escalation.py`, the anthropic and
+  has no `.venv` and `uv sync --locked` builds one from `service/uv.lock`
+  (installing exactly the lockfile, and failing if it has drifted from
+  `service/pyproject.toml`). The counts differ only in skips: locally 2
+  skip (`test_escalation.py`, the anthropic and
   openai SDKs are not installed); in CI 14 skip (those two, plus the 11
   corpus-backed tests in `test_quality.py`, because `fixtures/` is gitignored
   and absent on the runner, plus the installed-checkout test in `test_docs.py`,
