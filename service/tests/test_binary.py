@@ -18,6 +18,12 @@ it says clearly that MLX needs Apple Silicon and names the engines that work
 here. The build plan is checked on faked platforms everywhere; the executable
 itself is checked on whichever platform is running the tests.
 
+Card #436 puts the plugin's enrichment pass inside the same executable.
+Done-when 2: given the executable, when it runs with --plugin-out and
+--backend scripted on the committed fixture, then the enriched JSON is written.
+Done-when 3: given the occurrence cache and config, when the executable runs,
+then they resolve under the per-user data directory, never the unpack directory.
+
 Nothing here downloads a model: the MLX check stops at the point where the
 executable goes looking for weights.
 """
@@ -68,17 +74,31 @@ def _no_python_environment(tmp_path: Path) -> dict[str, str]:
     return env
 
 
-def _analyze(command: list[str], photos: Path, workdir: Path, *, env: dict | None) -> list:
-    """Run one invocation against the scripted backend; return what --json-out wrote."""
+def _analyze(command: list[str], photos: Path, workdir: Path, *, env: dict | None) -> tuple[list, list]:
+    """Run one invocation against the scripted backend; return what --json-out
+    and --plugin-out wrote (card #436: the enrichment runs in the same process)."""
     workdir.mkdir(exist_ok=True)
     out = workdir / "results.json"
+    enriched = workdir / "plugin_results.json"
     proc = subprocess.run(
         [*command, str(photos), "--backend", "scripted",
-         "--cache", str(workdir / "cache.jsonl"), "--json-out", str(out)],
+         "--cache", str(workdir / "cache.jsonl"), "--json-out", str(out),
+         "--plugin-out", str(enriched)],
         env=env, capture_output=True, text=True, timeout=600,
     )
     assert proc.returncode == 0, f"{command[0]} failed:\n{proc.stderr[-3000:]}"
-    return json.loads(out.read_text(encoding="utf-8"))
+    return (json.loads(out.read_text(encoding="utf-8")),
+            json.loads(enriched.read_text(encoding="utf-8")))
+
+
+def _per_user_data_dir(home: Path) -> Path:
+    """Where config._data_root() lands for the executable under this HOME, in a
+    bare environment (no LOCALAPPDATA, no XDG_DATA_HOME)."""
+    if sys.platform == "darwin":
+        return home / "Library" / "Application Support" / "Melampus"
+    if sys.platform == "win32":
+        return home / "AppData" / "Local" / "Melampus"
+    return home / ".local" / "share" / "Melampus"
 
 
 def test_repo_root_is_the_bundle_when_frozen(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, repo: Path):
@@ -377,10 +397,63 @@ def test_executable_prints_the_same_json_as_the_cli_with_no_python_on_the_path(
     """Done-when 2 (#399) and Done-when 1 (#400), on whichever platform built
     the executable. Same folder, same fake backend, same JSON — from the
     executable alone, in an environment where no python exists."""
-    expected = _analyze(VENV_CLI, photos, tmp_path / "venv", env=None)
-    actual = _analyze(
+    expected, expected_enriched = _analyze(VENV_CLI, photos, tmp_path / "venv", env=None)
+    actual, actual_enriched = _analyze(
         [str(built_executable)], photos, tmp_path / "binary",
         env=_no_python_environment(tmp_path),
     )
     assert [r["file"] for r in expected] == [PHOTO], "the CLI did not analyze the photo"
     assert actual == expected
+    assert actual_enriched == expected_enriched
+
+
+def test_executable_writes_the_enriched_results_and_reads_config_from_the_per_user_directory(
+    built_executable: Path, photos: Path, tmp_path: Path
+):
+    """Card #436, Done-when 2 and 3. Given the executable, when it runs with
+    --plugin-out and --backend scripted on the committed fixture, then the
+    enriched JSON the plugin reads is written, with all six fields — from the
+    executable alone, no python on the path. The identification it enriches
+    comes from a cache named in melampus.local.toml under the per-user data
+    directory of a fresh HOME, which is the proof that config resolves there and
+    not in the temporary unpack directory. No default location is configured, so
+    the range check is skipped and nothing touches the network."""
+    from melampus.cache import ResultCache
+    from melampus.images import content_hash
+    from melampus.plugin_results import PLUGIN_FIELDS
+    from melampus.schema import ImageResult
+
+    env = _no_python_environment(tmp_path)
+    data_dir = _per_user_data_dir(Path(env["HOME"]))
+    data_dir.mkdir(parents=True)
+    seeded = tmp_path / "seeded.jsonl"
+    ResultCache(seeded).put(ImageResult.model_validate({
+        "file": FIXTURE.name, "content_hash": content_hash(photos / FIXTURE.name),
+        "status": "ok", "model": "seeded",
+        "identification": {
+            "taxon": "bird", "abstain": False,
+            "candidates": [{"common_name": "Tricolored Heron",
+                            "scientific_name": "Egretta tricolor", "confidence": 0.8}],
+        },
+    }))
+    (data_dir / "melampus.local.toml").write_text(
+        f"[run]\ncache_path = '{seeded.as_posix()}'\n", encoding="utf-8")
+    out = tmp_path / "plugin_results.json"
+
+    proc = subprocess.run(
+        [str(built_executable), str(photos), "--backend", "scripted", "--report-only",
+         "--plugin-out", str(out)],
+        env=env, capture_output=True, text=True, timeout=600,
+    )
+
+    assert proc.returncode == 0, proc.stderr[-3000:]
+    assert "no default location configured" in proc.stderr, proc.stderr[-3000:]
+    rows = json.loads(out.read_text(encoding="utf-8"))
+    assert [r["file"] for r in rows] == [FIXTURE.name]
+    row = rows[0]
+    assert set(PLUGIN_FIELDS) <= set(row), f"missing {set(PLUGIN_FIELDS) - set(row)}"
+    assert row["identification"]["candidates"][0]["common_name"] == "Tricolored Heron", (
+        "the executable did not read melampus.local.toml from the per-user directory")
+    assert row["burst_agreement"] == 1.0 and row["range_flag"] is False
+    assert row["encounter"] == 0 and row["encounter_frames"] == 1 and row["quality_rank"] == 0.0
+    assert 0 < row["quality"] <= 100, "quality was not scored on the pixels"
