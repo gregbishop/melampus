@@ -41,6 +41,9 @@ answers at Ollama's address, and mlx's verdict is this platform's.
 Card #407: `--download-model` from the executable fetches the model with
 progress on stdout, from a fake hub on loopback, on every platform's build.
 
+Card #420: `--backend command` with a program that is not installed is
+refused before any image is read, naming the command, exit 3.
+
 Nothing here downloads a model: the MLX check stops at the point where the
 executable goes looking for weights, and the download test's host is the fake
 in conftest.py, so no real weights are ever fetched.
@@ -465,6 +468,33 @@ def test_executable_refuses_ollama_when_no_server_answers(
     assert "invalid choice" not in tail, f"the executable does not accept ollama:\n{tail}"
     assert f"No Ollama server is answering at http://127.0.0.1:{port}" in tail, tail
     assert "https://ollama.com/download" in tail, tail
+    for works_here in ("claude", "openai", "scripted"):
+        assert works_here in tail, f"{works_here!r} is not named as working here:\n{tail}"
+
+
+def test_executable_refuses_a_command_that_is_not_installed(
+    built_executable: Path, photos: Path, tmp_path: Path
+):
+    """Card #420, Done-when 2 in the frozen build: `[model] backend =
+    "command"` naming a program nothing on this machine is called, and the
+    executable exits 3 on the not-installed message, naming the command and
+    the backends that do work here, before any image is read."""
+    settings = tmp_path / "settings.toml"
+    settings.write_text(
+        '[model]\nbackend = "command"\n'
+        'command = ["melampus-no-such-command-420", "{image}", "{prompt}"]\n',
+        encoding="utf-8",
+    )
+    env = _no_python_environment(tmp_path)
+    proc = subprocess.run(
+        [str(built_executable), str(photos), "--backend", "command",
+         "--config", str(settings), "--cache", str(tmp_path / "cache.jsonl")],
+        env=env, capture_output=True, text=True, timeout=600,
+    )
+    tail = proc.stderr[-3000:]
+    assert proc.returncode == 3, f"exit {proc.returncode}:\n{tail}"
+    assert "invalid choice" not in tail, f"the executable does not accept command:\n{tail}"
+    assert "'melampus-no-such-command-420' is not installed or not on PATH" in tail, tail
     for works_here in ("claude", "openai", "scripted"):
         assert works_here in tail, f"{works_here!r} is not named as working here:\n{tail}"
 
