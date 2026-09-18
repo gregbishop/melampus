@@ -119,10 +119,18 @@ def test_build_refuses_anything_but_apple_silicon(build, monkeypatch: pytest.Mon
     assert "Apple Silicon" in capsys.readouterr().err
 
 
-def test_build_says_pyinstaller_is_missing(build, monkeypatch: pytest.MonkeyPatch, capsys):
+def test_build_says_pyinstaller_is_missing_and_where_the_install_is_documented(
+    build, monkeypatch: pytest.MonkeyPatch, capsys
+):
+    """The install command is spelled once, in readme.md; the script points
+    there rather than carrying a copy the docs gate cannot see drift."""
     monkeypatch.setitem(sys.modules, "PyInstaller", None)
     assert build.main() == 3
-    assert "PyInstaller is not installed" in capsys.readouterr().err
+    message = capsys.readouterr().err
+    assert "PyInstaller is not installed" in message
+    assert "readme.md" in message and "Building the executable" in message
+    assert "uv sync" not in message
+    assert "uv sync" not in build.__doc__
 
 
 def test_build_bundles_the_service_the_prompts_and_the_mlx_runtime(
