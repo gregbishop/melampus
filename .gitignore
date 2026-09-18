@@ -4,6 +4,9 @@ __pycache__/
 *.egg-info/
 build/
 dist/
+# The executable copied into the plugin folder for Lightroom to run (card #401)
+plugin/Melampus.lrplugin/melampus
+plugin/Melampus.lrplugin/melampus.exe
 
 # Photo corpora — large binary, not source (root only: service/tests/fixtures/
 # holds the one committed frame the binary smoke test analyzes)
