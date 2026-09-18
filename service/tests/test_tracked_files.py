@@ -49,7 +49,7 @@ def test_no_tracked_symlink_leaves_the_repository():
 
 
 def test_no_tracked_file_names_a_home_directory_path():
-    hits = _git("grep", "-I", "-n", "-E", HOME_PATH, check=False)
+    hits = _git("grep", "--cached", "-I", "-n", "-E", HOME_PATH, check=False)
     assert hits.returncode == 1, (
         "tracked files name an absolute home-directory path (machine-local, and "
         f"public once pushed):\n{hits.stdout}"
