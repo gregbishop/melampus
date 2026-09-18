@@ -14,8 +14,9 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from conftest import PHOTO
 
-from test_binary import FIXTURE, _no_python_environment, _per_user_data_dir
+from test_binary import _no_python_environment, _per_user_data_dir
 
 REPO = Path(__file__).resolve().parents[2]
 PLUGIN = REPO / "plugin" / "Melampus.lrplugin"
@@ -71,7 +72,7 @@ def test_every_plugin_file_compiles():
 
 
 def test_the_command_the_plugin_builds_runs_the_executable_beside_it(
-    built_executable: Path, tmp_path: Path
+    built_executable: Path, photos: Path, tmp_path: Path
 ):
     """Card #401, Done-when 1 at the real boundary. The plugin's Analyze module,
     run under the mock SDK with `_PLUGIN.path` pointing at a plugin folder that
@@ -86,9 +87,8 @@ def test_the_command_the_plugin_builds_runs_the_executable_beside_it(
     plugin_dir = tmp_path / "Melampus.lrplugin"
     plugin_dir.mkdir()
     (plugin_dir / built_executable.name).symlink_to(built_executable)
-    previews = tmp_path / "previews"
-    previews.mkdir()
-    shutil.copy(FIXTURE, previews / FIXTURE.name)
+    # Lightroom's previews folder: the committed frame, from conftest's fixture.
+    previews = photos
     results = previews / "results.json"
     env = _no_python_environment(tmp_path)
     data_dir = _per_user_data_dir(Path(env["HOME"]))
@@ -127,7 +127,7 @@ def test_the_command_the_plugin_builds_runs_the_executable_beside_it(
         f"exit {proc.returncode}: {proc.stderr[-2000:]}\n"
         f"{log.read_text(encoding='utf-8')[-3000:] if log.is_file() else 'no CLI log'}")
     rows = json.loads(results.read_text(encoding="utf-8"))
-    assert [r["file"] for r in rows] == [FIXTURE.name]
+    assert [r["file"] for r in rows] == [PHOTO]
     # The scripted fake answers nothing, so the row has no identification and
     # therefore no burst_agreement (that is agreement between calls); every
     # other enrichment field is scored from the pixels and the capture times.
