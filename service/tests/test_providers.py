@@ -14,6 +14,7 @@ import sys
 import types
 
 import pytest
+from conftest import PHOTO
 
 from melampus import providers
 from melampus.backend import AnthropicBackend, MLXBackend, OpenAIBackend, ScriptedBackend
@@ -174,17 +175,12 @@ def test_scripted_backend_is_selectable_and_local():
     assert backend.name == "scripted"
 
 
-def test_cli_backend_scripted_writes_a_result_without_weights(tmp_path, capsys):
+def test_cli_backend_scripted_writes_a_result_without_weights(photos, tmp_path, capsys):
     """`melampus-id FOLDER --backend scripted --json-out FILE` runs the whole
     pipeline (staging, prompts, retry, cache, export) and writes one result per
     image, attributed to the scripted backend."""
-    from PIL import Image
-
     from melampus.cli import main
 
-    photos = tmp_path / "photos"
-    photos.mkdir()
-    Image.new("RGB", (640, 480), (90, 120, 70)).save(photos / "frame.jpg")
     out = tmp_path / "results.json"
 
     code = main([
@@ -194,6 +190,6 @@ def test_cli_backend_scripted_writes_a_result_without_weights(tmp_path, capsys):
 
     assert code == 0, capsys.readouterr().err
     results = json.loads(out.read_text(encoding="utf-8"))
-    assert [r["file"] for r in results] == ["frame.jpg"]
+    assert [r["file"] for r in results] == [PHOTO]
     assert results[0]["model"] == "scripted"
     assert results[0]["status"] == "unprocessed"

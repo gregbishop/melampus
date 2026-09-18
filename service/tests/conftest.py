@@ -4,6 +4,9 @@
 the binary smoke tests run, so the build is part of the test command without
 costing every unit-test run the minutes a PyInstaller build takes. Without the
 option the smoke tests use an existing build, or skip and say how to get one.
+
+`photos` is the one-frame folder the scripted backend is run against, from
+the executable and from the CLI alike.
 """
 
 from __future__ import annotations
@@ -13,6 +16,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from PIL import Image
 
 # pytester runs a pytest inside pytest: how test_binary.py proves what this
 # file's option and fixture do without a real build.
@@ -21,6 +25,10 @@ pytest_plugins = ["pytester"]
 REPO = Path(__file__).resolve().parents[2]
 BUILD_SCRIPT = REPO / "tools" / "build_binary.py"
 EXECUTABLE = REPO / "dist" / "melampus"
+# Synthetic, like test_pipeline.py's: the scripted backend answers nothing
+# whatever the frame shows, and the corpus is gitignored, so a corpus frame
+# would only make these tests skip on the CI runner.
+PHOTO = "flat-green.jpg"
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
@@ -39,6 +47,15 @@ def repo() -> Path:
     """The checkout root, for tests that reach outside service/ (fixtures/,
     tools/, the docs)."""
     return REPO
+
+
+@pytest.fixture()
+def photos(tmp_path: Path) -> Path:
+    """A folder holding one flat JPEG, PHOTO, for the scripted backend."""
+    folder = tmp_path / "photos"
+    folder.mkdir()
+    Image.new("RGB", (2400, 1600), (90, 120, 70)).save(folder / PHOTO, exif=b"")
+    return folder
 
 
 @pytest.fixture(scope="session")
