@@ -10,6 +10,7 @@ it never argues with prose style, only with absence.
 """
 
 import json
+import re
 from pathlib import Path
 
 from melampus.config import MelampusConfig
@@ -60,3 +61,19 @@ def test_docs_name_only_the_lowercase_files():
             if "README.md" in line or "CONFIG.md" in line:
                 stale.append(f"{doc.relative_to(ROOT)}:{lineno}: {line.strip()}")
     assert not stale, f"docs name uppercase files that do not exist: {stale}"
+
+
+def test_brief_names_the_test_command_ci_runs():
+    """Rule 11: the repo's own commands are the truth. CI gates merges with its
+    own pytest invocation, so the stack contract must name that command too,
+    not only the local one."""
+    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    ci_commands = [
+        f"`{command}`"
+        for command in re.findall(r"^\s*run:\s*(.+?)\s*$", workflow, re.MULTILINE)
+        if "pytest" in command
+    ]
+    assert ci_commands, "ci.yml runs no pytest step"
+    brief = (ROOT / "docs" / "brief.md").read_text(encoding="utf-8")
+    missing = [c for c in ci_commands if c not in brief]
+    assert not missing, f"docs/brief.md's stack contract does not name what CI runs: {missing}"

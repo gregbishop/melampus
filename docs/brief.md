@@ -21,7 +21,9 @@ every session.
 
 - stack: python
 - build: none
-- test: `.venv/bin/python -m pytest` — from the repo root
+- test: `.venv/bin/python -m pytest` — from the repo root, locally
+- test in CI: `uv run --with pytest pytest -q` — from `service/`, in
+  `.github/workflows/ci.yml`; this is the run that gates merges
 - lint: none adopted
 - run: the service half, per `docs/architecture.md`
 
@@ -29,10 +31,18 @@ Two things here differ from every other python repo, both deliberately:
 
 - **The lockfile is `service/uv.lock`, not at the repo root.** A tool that
   looks only at the root concludes there's no lockfile.
-- **The test command is `.venv/bin/python -m pytest`, not `uv run pytest`.**
-  `pytest.ini` pins `testpaths = service/tests` and excludes `_old/`, whose
-  stale `melampus` package would otherwise shadow the real one on `sys.path`.
-  140 tests collect as of 2026-08-19.
+- **There are two test commands, and they collect the same tests.** Locally
+  it is `.venv/bin/python -m pytest` from the repo root: `pytest.ini` pins
+  `testpaths = service/tests` and excludes `_old/`, whose stale `melampus`
+  package would otherwise shadow the real one on `sys.path`. CI runs
+  `uv run --with pytest pytest -q` from `service/`, where
+  `service/pyproject.toml` pins the same `tests/` path, because the runner
+  has no `.venv` and uv resolves `service/pyproject.toml` into one (the
+  lockfile is not committed yet; that has its own card). The counts differ
+  only in skips: locally 2 skip (`test_escalation.py`, the anthropic and
+  openai SDKs are not installed); in CI 13 skip (those two, plus the 11
+  corpus-backed tests in `test_quality.py`, because `fixtures/` is gitignored
+  and absent on the runner). 142 tests collect as of 2026-09-18.
 
 ## the split, and why
 
