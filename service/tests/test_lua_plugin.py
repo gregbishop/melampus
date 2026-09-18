@@ -19,7 +19,7 @@ from pathlib import Path
 import pytest
 from conftest import PHOTO
 
-from test_binary import per_user_config
+from test_binary import no_python_environment, per_user_config
 
 REPO = Path(__file__).resolve().parents[2]
 PLUGIN = REPO / "plugin" / "Melampus.lrplugin"
@@ -45,8 +45,9 @@ def run_lua(script: Path, env: dict[str, str] | None = None) -> subprocess.Compl
     )
 
 
-def as_the_shell_receives_it(path: Path) -> str:
-    """A path as an argument on the line LrTasks.execute hands to the shell:
+def as_the_shell_receives_it(path: Path | str) -> str:
+    """A path or a word as an argument on the line LrTasks.execute hands to the
+    shell:
     double-quoted for cmd.exe (a Windows filename cannot hold a double quote),
     single-quoted for sh with an apostrophe closed, escaped and reopened.
     Spelled here on its own, so the plugin's quote() is checked, not
@@ -113,6 +114,97 @@ def test_every_plugin_file_compiles():
     assert proc.returncode == 0, proc.stderr
 
 
+WINDOWS = sys.platform == "win32"
+
+
+def _plugin_folder_holding(executable: Path, tmp_path: Path) -> Path:
+    """A Melampus.lrplugin folder with the executable beside the Lua, as
+    installed: copied, as the user copies it there from the download. Under a
+    name with an apostrophe, the one character sh's own quoting cannot hold
+    as it is: the command must close, escape and reopen it."""
+    plugin_dir = tmp_path / "O'Brien" / "Melampus.lrplugin"
+    plugin_dir.mkdir(parents=True)
+    shutil.copy(executable, plugin_dir / executable.name)
+    return plugin_dir
+
+
+def _command_the_plugin_builds(
+    plugin_dir: Path, previews: Path, results: Path, tmp_path: Path, *, engine: str
+) -> str:
+    """The one shell command MelampusAnalyze.lua builds under the mock SDK for
+    the platform Lightroom reports (a fake Windows Lightroom on a Windows
+    host), with `_PLUGIN.path` at `plugin_dir` and the engine preference set
+    to `engine` ("" is the default: no preference).
+
+    The mock's temp directory: under TMPDIR on a fake macOS Lightroom, the
+    Windows temp folder (TEMP, as Lightroom reports it) on a fake Windows
+    one, so the CLI log the command names lands under tmp_path either way."""
+    script = tmp_path / "command.lua"
+    script.write_text(
+        "local mock = require('lrmock')\n"
+        "mock.reset()\n"
+        "mock.install(os.getenv('MELAMPUS_PLUGIN_DIR'),"
+        " { windows = os.getenv('MELAMPUS_WINDOWS') == '1' })\n"
+        "local Analyze = dofile(os.getenv('MELAMPUS_ANALYZE'))\n"
+        "local ok, message = Analyze.run(os.getenv('MELAMPUS_PREVIEWS'),"
+        " os.getenv('MELAMPUS_RESULTS'), 'wildlife', os.getenv('MELAMPUS_ENGINE'))\n"
+        "assert(ok, message)\n"
+        "io.write(mock.state.executed[1])\n",
+        encoding="utf-8",
+    )
+    built = run_lua(script, env=os.environ | {
+        "MELAMPUS_PLUGIN_DIR": str(plugin_dir),
+        "MELAMPUS_ANALYZE": str(PLUGIN / "MelampusAnalyze.lua"),
+        "MELAMPUS_PREVIEWS": str(previews),
+        "MELAMPUS_RESULTS": str(results),
+        "MELAMPUS_ENGINE": engine,
+        "MELAMPUS_WINDOWS": "1" if WINDOWS else "0",
+        "TMPDIR": str(tmp_path),
+        "TEMP": str(tmp_path),
+    })
+    assert built.returncode == 0, built.stdout + built.stderr
+    return built.stdout
+
+
+def _cli_log_tail(tmp_path: Path) -> str:
+    """The end of the CLI log the command sent the executable's output to, in
+    the mock's temp directory under tmp_path, or a line saying no run wrote
+    one. Read as the executable wrote it: its stderr is a file here, which
+    Python encodes in the locale's encoding, the ANSI code page on Windows
+    (readme.md's "§" is one byte there) and UTF-8 elsewhere."""
+    log = next(tmp_path.rglob("melampus-cli.log"), None)
+    if log is None:
+        return "no CLI log"
+    return log.read_text(encoding="mbcs" if WINDOWS else "utf-8", errors="replace")[-3000:]
+
+
+def test_the_engine_preference_reaches_the_executable_through_the_command_the_plugin_builds(
+    built_executable: Path, photos: Path, tmp_path: Path
+):
+    """Card #403, Done-when 1 at the real boundary. With the engine preference
+    set to ollama, the command the plugin builds carries `--backend ollama`,
+    and run through the shell LrTasks.execute hands it to (sh against
+    dist/melampus, cmd.exe against dist/melampus.exe) with no python on the
+    path the executable receives it: it answers with its own refusal for an
+    engine that is not built yet (card #406), exit 3, written to the CLI log
+    the plugin points a failed run at. Nothing is sent anywhere and no
+    weights are read."""
+    plugin_dir = _plugin_folder_holding(built_executable, tmp_path)
+    env = no_python_environment(tmp_path)
+
+    command = _command_the_plugin_builds(
+        plugin_dir, photos, photos / "results.json", tmp_path, engine="ollama")
+    assert f"--backend {as_the_shell_receives_it('ollama')}" in command, command
+
+    proc = run_as_lightroom_would(command, env=env, cwd=tmp_path,
+                                  capture_output=True, text=True, timeout=600)
+
+    assert proc.returncode == 3, f"exit {proc.returncode}: {proc.stderr[-2000:]}"
+    tail = _cli_log_tail(tmp_path)
+    assert "The Ollama engine is not built yet" in tail, tail
+    assert "invalid choice" not in tail, f"the executable does not accept ollama:\n{tail}"
+
+
 def test_the_command_the_plugin_builds_runs_the_executable_beside_it(
     built_executable: Path, photos: Path, tmp_path: Path
 ):
@@ -130,55 +222,20 @@ def test_the_command_the_plugin_builds_runs_the_executable_beside_it(
     results the plugin reads must land where the command said."""
     from melampus.plugin_results import PLUGIN_FIELDS
 
-    windows = sys.platform == "win32"
-    # Under a name with an apostrophe, the one character sh's own quoting
-    # cannot hold as it is: the command must close, escape and reopen it.
-    plugin_dir = tmp_path / "O'Brien" / "Melampus.lrplugin"
-    plugin_dir.mkdir(parents=True)
-    # Copied, as the user copies it there from the download.
-    shutil.copy(built_executable, plugin_dir / built_executable.name)
+    plugin_dir = _plugin_folder_holding(built_executable, tmp_path)
     # Lightroom's previews folder: the committed frame, from conftest's fixture.
     previews = photos
     results = previews / "results.json"
     env = per_user_config(tmp_path, "[model]\nbackend = 'scripted'\n")
 
-    script = tmp_path / "command.lua"
-    script.write_text(
-        "local mock = require('lrmock')\n"
-        "mock.reset()\n"
-        "mock.install(os.getenv('MELAMPUS_PLUGIN_DIR'),"
-        " { windows = os.getenv('MELAMPUS_WINDOWS') == '1' })\n"
-        "local Analyze = dofile(os.getenv('MELAMPUS_ANALYZE'))\n"
-        "local ok, message = Analyze.run(os.getenv('MELAMPUS_PREVIEWS'),"
-        " os.getenv('MELAMPUS_RESULTS'), 'wildlife')\n"
-        "assert(ok, message)\n"
-        "io.write(mock.state.executed[1])\n",
-        encoding="utf-8",
-    )
-    # The mock's temp directory: under TMPDIR on a fake macOS Lightroom, the
-    # Windows temp folder (TEMP, as Lightroom reports it) on a fake Windows
-    # one, so the CLI log the command names lands under tmp_path either way.
-    built = run_lua(script, env=os.environ | {
-        "MELAMPUS_PLUGIN_DIR": str(plugin_dir),
-        "MELAMPUS_ANALYZE": str(PLUGIN / "MelampusAnalyze.lua"),
-        "MELAMPUS_PREVIEWS": str(previews),
-        "MELAMPUS_RESULTS": str(results),
-        "MELAMPUS_WINDOWS": "1" if windows else "0",
-        "TMPDIR": str(tmp_path),
-        "TEMP": str(tmp_path),
-    })
-    assert built.returncode == 0, built.stdout + built.stderr
-    command = built.stdout
+    command = _command_the_plugin_builds(plugin_dir, previews, results, tmp_path, engine="")
     assert as_the_shell_receives_it(plugin_dir / built_executable.name) in command, command
 
     proc = run_as_lightroom_would(command, env=env, cwd=tmp_path,
                                   capture_output=True, text=True, timeout=600)
 
-    # The command sent the CLI's output to the mock's temp directory, under tmp_path.
-    log = next(tmp_path.rglob("melampus-cli.log"), None)
     assert proc.returncode == 0, (
-        f"exit {proc.returncode}: {proc.stderr[-2000:]}\n"
-        f"{log.read_text(encoding='utf-8')[-3000:] if log else 'no CLI log'}")
+        f"exit {proc.returncode}: {proc.stderr[-2000:]}\n{_cli_log_tail(tmp_path)}")
     rows = json.loads(results.read_text(encoding="utf-8"))
     assert [r["file"] for r in rows] == [PHOTO]
     # The scripted fake answers nothing, so the row has no identification and

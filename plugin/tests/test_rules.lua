@@ -225,6 +225,42 @@ t.test('batch size is clamped to something sane', function()
 	t.equals(Rules.batchSize({}), 25)
 end)
 
+-- ── the engine preference (card #403) ──────────────────────────────────────
+-- Where inference runs is the user's choice. The preference is named engine,
+-- its values are the owner's words, and the plugin passes it to the CLI as
+-- --backend. Unset means no --backend at all: the CLI's own default applies
+-- (mlx today; the first engine that can run here once card #404 detects).
+local ENGINES = { 'mlx', 'ollama', 'openai', 'claude' }
+
+t.test('the default engine is unset, so the CLI picks', function()
+	t.equals(Rules.defaultSettings().engine, '', 'the default must mean "not set"')
+	t.equals(#Rules.engineArguments(settings()), 0, 'no --backend when no engine is set')
+	t.equals(#Rules.engineArguments(settings({ engine = '' })), 0)
+	t.equals(#Rules.engineArguments({}), 0, 'a missing pref means not set')
+end)
+
+t.test('each engine name reaches the command line as --backend', function()
+	for _, engine in ipairs(ENGINES) do
+		local args = Rules.engineArguments(settings({ engine = engine }))
+		t.isNotNil(args, engine .. ' was refused')
+		t.equals(args[1], '--backend', engine .. ': the flag')
+		t.equals(args[2], engine, engine .. ': the value')
+		t.equals(#args, 2, engine .. ': exactly the flag and the value')
+	end
+end)
+
+t.test('an unknown engine is refused with the four choices named', function()
+	local args, message = Rules.engineArguments(settings({ engine = 'anthropic' }))
+	t.isNil(args, 'an unknown engine was passed on to the command line')
+	t.isNotNil(message, 'no message for the unknown engine')
+	t.isNotNil(string.find(message, 'anthropic', 1, true), 'the message does not name what was set')
+	for _, engine in ipairs(ENGINES) do
+		t.isNotNil(string.find(message, engine, 1, true), 'the message does not name ' .. engine)
+	end
+	t.isNil(Rules.engineArguments(settings({ engine = 'MLX' })), 'names are the exact words')
+	t.isNil(Rules.engineArguments(settings({ engine = 42 })), 'a junk pref is refused, not crashed on')
+end)
+
 -- ── colour labels ──────────────────────────────────────────────────────────
 t.test('colour labels mean something specific', function()
 	local s = settings({ writeLabel = true })
