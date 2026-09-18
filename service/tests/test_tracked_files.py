@@ -61,7 +61,14 @@ def test_the_lockfile_is_tracked_and_current():
     git is not one, and one that disagrees with pyproject.toml pins nothing."""
     tracked = _git("ls-files", "--", "service/uv.lock").stdout.splitlines()
     assert tracked == ["service/uv.lock"], "service/uv.lock is not tracked"
+    # --offline: a current lock verifies from the lockfile alone (no index calls,
+    # cold cache included), and a drifted one must fail here, not re-resolve
+    # against PyPI from inside the test suite. The timeout bounds the subprocess.
     check = subprocess.run(
-        ["uv", "lock", "--check"], cwd=REPO / "service", capture_output=True, text=True
+        ["uv", "lock", "--check", "--offline"],
+        cwd=REPO / "service",
+        capture_output=True,
+        text=True,
+        timeout=60,
     )
     assert check.returncode == 0, check.stderr
