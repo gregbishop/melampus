@@ -27,6 +27,10 @@ jobs:
       - name: Install uv and lua
         run: brew install uv lua
 
-      - name: Run service and plugin tests
+      # --extra build installs the pinned PyInstaller; --build-binary makes the
+      # suite build dist/melampus first and smoke-test it (card #399, Done-when
+      # 3: the build and the smoke test are part of the test command). The
+      # build is the slow step, a few minutes on the runner.
+      - name: Run service and plugin tests, building the executable first
         working-directory: service
-        run: uv sync --locked --extra dev && uv run pytest -q
+        run: uv sync --locked --extra dev --extra build && uv run pytest -q --build-binary
