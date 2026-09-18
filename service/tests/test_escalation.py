@@ -607,8 +607,10 @@ class _StubClient:
         self.beta = type("Beta", (), {"messages": messages})()
 
 
-def test_default_provider_is_anthropic(cfg):
-    assert cfg.provider == "anthropic"
+def test_default_provider_is_claude(cfg):
+    """Card #403: the Anthropic provider is named `claude`, the same word the
+    engine setting uses, so there is one name for it."""
+    assert cfg.provider == "claude"
 
 
 def test_openai_key_resolution(monkeypatch):
@@ -657,7 +659,7 @@ def _sdk_installed(name: str) -> bool:
     return importlib.util.find_spec(name) is not None
 
 
-@pytest.mark.parametrize("provider,module", [("anthropic", "anthropic"), ("openai", "openai")])
+@pytest.mark.parametrize("provider,module", [("claude", "anthropic"), ("openai", "openai")])
 def test_missing_sdk_fails_before_any_frame_is_selected(provider, module):
     """The backends import their SDK lazily, so without an eager check the failure
     surfaced once per frame, mid-run, after selection — and every frame then got a

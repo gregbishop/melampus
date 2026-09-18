@@ -60,7 +60,7 @@ def test_mlx_is_refused_on_windows_with_directions(monkeypatch):
     with pytest.raises(providers.BackendUnavailable) as err:
         providers.build_primary_backend(_cfg())
     message = str(err.value)
-    assert "anthropic" in message and "openai" in message and "--backend" in message
+    assert "claude" in message and "openai" in message and "--backend" in message
 
 
 def test_mlx_is_refused_on_intel_mac(monkeypatch):
@@ -73,15 +73,16 @@ def test_mlx_is_refused_on_intel_mac(monkeypatch):
         providers.build_primary_backend(_cfg())
 
 
-def test_anthropic_primary_uses_provider_default_model(
+def test_claude_primary_builds_the_anthropic_backend_with_its_default_model(
     monkeypatch, no_ambient_keys, stub_sdks
 ):
+    """Card #403: `claude` is the one user-facing name of the Anthropic backend."""
     monkeypatch.setenv("MELAMPUS_ANTHROPIC_KEY", "key-from-env")
-    config = _cfg(model={"backend": "anthropic"})
+    config = _cfg(model={"backend": "claude"})
     assert providers.is_cloud_primary(config)
     backend = providers.build_primary_backend(config)
     assert isinstance(backend, AnthropicBackend)
-    assert backend.model == providers.DEFAULT_MODELS["anthropic"]
+    assert backend.model == providers.DEFAULT_MODELS["claude"]
 
 
 def test_openai_primary_respects_name_and_base_url(monkeypatch, no_ambient_keys, stub_sdks):
@@ -97,7 +98,7 @@ def test_openai_primary_respects_name_and_base_url(monkeypatch, no_ambient_keys,
 
 def test_missing_key_fails_fast_and_names_the_variable(no_ambient_keys, stub_sdks):
     with pytest.raises(ValueError) as err:
-        providers.build_primary_backend(_cfg(model={"backend": "anthropic"}))
+        providers.build_primary_backend(_cfg(model={"backend": "claude"}))
     assert "MELAMPUS_ANTHROPIC_KEY" in str(err.value)
 
 
@@ -105,7 +106,18 @@ def test_unknown_backend_is_rejected_with_choices():
     with pytest.raises(ValueError) as err:
         providers.build_primary_backend(_cfg(model={"backend": "gemini"}))
     message = str(err.value)
-    assert "gemini" in message and "anthropic" in message and "openai" in message
+    assert "gemini" in message and "claude" in message and "openai" in message
+
+
+def test_anthropic_is_not_a_backend_name():
+    """Card #403: the engine names are mlx, ollama, openai, claude. The old
+    spelling of the Anthropic backend is refused like any other unknown name,
+    so there is exactly one name for it everywhere."""
+    with pytest.raises(ValueError) as err:
+        providers.build_primary_backend(_cfg(model={"backend": "anthropic"}))
+    message = str(err.value)
+    assert "anthropic" in message and "claude" in message
+    assert "anthropic" not in providers.BACKEND_CHOICES
 
 
 def test_key_resolution_prefers_config_then_specific_then_generic(monkeypatch):
@@ -113,12 +125,12 @@ def test_key_resolution_prefers_config_then_specific_then_generic(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "generic")
     from pydantic import SecretStr
 
-    assert providers.resolve_provider_key("anthropic", SecretStr("explicit")) == "explicit"
-    assert providers.resolve_provider_key("anthropic") == "specific"
+    assert providers.resolve_provider_key("claude", SecretStr("explicit")) == "explicit"
+    assert providers.resolve_provider_key("claude") == "specific"
     monkeypatch.delenv("MELAMPUS_ANTHROPIC_KEY")
-    assert providers.resolve_provider_key("anthropic") == "generic"
+    assert providers.resolve_provider_key("claude") == "generic"
     monkeypatch.delenv("ANTHROPIC_API_KEY")
-    assert providers.resolve_provider_key("anthropic") is None
+    assert providers.resolve_provider_key("claude") is None
 
 
 def test_cloud_defaults_retuned_when_left_at_defaults():
@@ -207,5 +219,5 @@ def test_cli_backend_mlx_on_windows_names_apple_silicon_and_the_backends_that_wo
     err = capsys.readouterr().err
     assert code != 0
     assert "Apple Silicon" in err
-    for works_here in ("anthropic", "openai", "scripted"):
+    for works_here in ("claude", "openai", "scripted"):
         assert works_here in err, f"{works_here!r} is not named as working here:\n{err}"

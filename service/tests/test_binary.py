@@ -25,7 +25,7 @@ Done-when 3: given the occurrence cache and config, when the executable runs,
 then they resolve under the per-user data directory, never the unpack directory.
 
 Card #434: the executable carries the cloud SDKs on every platform. Done-when 2:
-given the executable with no API key set, when `--backend anthropic` or
+given the executable with no API key set, when `--backend claude` or
 `--backend openai` runs, then it reaches the key check and says the key is
 missing, not that the SDK is missing.
 
@@ -391,7 +391,7 @@ def test_executable_refuses_mlx_off_apple_silicon_and_names_what_works(
     tail = proc.stderr[-3000:]
     assert proc.returncode != 0, "ran the mlx backend with no MLX?"
     assert "Apple Silicon" in tail, tail
-    for works_here in ("anthropic", "openai", "scripted"):
+    for works_here in ("claude", "openai", "scripted"):
         assert works_here in tail, f"{works_here!r} is not named as working here:\n{tail}"
     for missing in ("ModuleNotFoundError", "ImportError"):
         assert missing not in tail, f"the refusal came from a missing module, not the CLI:\n{tail}"
@@ -399,7 +399,7 @@ def test_executable_refuses_mlx_off_apple_silicon_and_names_what_works(
 
 @pytest.mark.parametrize(
     ("backend", "needs_a_key"),
-    [("anthropic", "The Anthropic backend needs an API key. Set MELAMPUS_ANTHROPIC_KEY"),
+    [("claude", "The Claude backend needs an API key. Set MELAMPUS_ANTHROPIC_KEY"),
      ("openai", "The OpenAI backend needs an API key. Set MELAMPUS_OPENAI_KEY")],
 )
 def test_executable_carries_the_cloud_sdks_and_asks_for_the_key(
