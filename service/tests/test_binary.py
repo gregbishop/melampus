@@ -32,7 +32,6 @@ FIXTURE = REPO / "fixtures" / "0A1A2829.jpg"
 VENV_CLI = [sys.executable, "-m", "melampus.cli"]
 
 
-
 @pytest.fixture()
 def photos(tmp_path: Path) -> Path:
     if not FIXTURE.is_file():
@@ -48,10 +47,7 @@ def _no_python_environment(tmp_path: Path) -> dict[str, str]:
     empty = tmp_path / "empty-bin"
     empty.mkdir()
     (tmp_path / "home").mkdir()
-    env = {"PATH": str(empty), "HOME": str(tmp_path / "home")}
-    for name in ("python", "python3", "uv"):
-        assert shutil.which(name, path=env["PATH"]) is None, f"{name} is on the test PATH"
-    return env
+    return {"PATH": str(empty), "HOME": str(tmp_path / "home")}
 
 
 def _analyze(command: list[str], photos: Path, workdir: Path, *, env: dict | None) -> list:
