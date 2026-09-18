@@ -5,9 +5,10 @@ __pycache__/
 build/
 dist/
 
-# Photo corpora — large binary, not source
-fixtures/
-fixtures_full/
+# Photo corpora — large binary, not source (root only: service/tests/fixtures/
+# holds the one committed frame the binary smoke test analyzes)
+/fixtures
+/fixtures_full
 
 # Local secrets — API tokens. Never commit.
 melampus.local.toml
