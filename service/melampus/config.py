@@ -8,7 +8,7 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
 
 # The checkout root: two levels up from this file. Both roots below are it
@@ -76,6 +76,9 @@ class ModelConfig(_Base):
     #   ollama    — local, wherever Ollama runs (Windows, Linux, a Mac that prefers it).
     #   claude    — the Claude API (Anthropic). Every frame billed: see docs/config.md.
     #   openai    — OpenAI, or anything chat-completions-compatible via base_url.
+    #   command   — an installed command-line program (card #420): `command`
+    #               below names it. Selectable here and by --backend; the
+    #               plugin's picker learns it in card #423.
     # Left unset, the CLI replaces this value with the first engine detection
     # says can run here (providers.default_engine, card #404); `model_fields_set`
     # is how it tells "unset" from "set to mlx".
@@ -95,6 +98,13 @@ class ModelConfig(_Base):
     # providers.OLLAMA_URL: the address detection probes (card #404) and the
     # backend talks to are the same one.
     ollama_url: str | None = None
+    # The program the `command` backend runs, one list element per argument,
+    # with `{image}` and `{prompt}` placeholders: an argv list, never a shell
+    # string, so a prompt with spaces, quotes or newlines is one argument and
+    # nothing is quoted. Its stdout is the reply; `timeout_seconds` bounds it.
+    # Empty by default: no program is assumed installed. The templates for
+    # specific CLIs are cards #421 and #422.
+    command: list[str] = Field(default_factory=list)
     # OpenAI-compatible endpoint override: OpenRouter, LM Studio, vLLM, a proxy, …
     base_url: str | None = None
     # Never set here in tracked source. Comes from MELAMPUS_ANTHROPIC_KEY /
@@ -102,7 +112,7 @@ class ModelConfig(_Base):
     api_key: SecretStr | None = None
     # Anthropic-only; ignored elsewhere.
     effort: str = "high"
-    # Per-request ceiling for a cloud primary and for ollama.
+    # Per-request ceiling for a cloud primary, for ollama and for command.
     timeout_seconds: float = 180.0
     # Cloud primary only; the mlx backend ignores it. Same rationale as
     # escalation.max_images: a cloud primary bills every frame, and a mistyped
@@ -116,6 +126,21 @@ class ModelConfig(_Base):
     # Identification wants determinism, not creativity.
     temperature: float = 0.0
     routing_max_tokens: int = 200
+
+    @field_validator("command")
+    @classmethod
+    def _command_carries_both_placeholders(cls, command: list[str]) -> list[str]:
+        """A template that never receives the image, or never asks the
+        question, cannot answer anything: refuse it when the config loads,
+        naming the placeholder, rather than once per frame mid-run."""
+        for placeholder in ("{image}", "{prompt}"):
+            if command and not any(placeholder in argument for argument in command):
+                raise ValueError(
+                    f"[model] command has no argument carrying {placeholder}; the "
+                    "template needs both {image} and {prompt}, for example "
+                    '["my-vlm", "--image", "{image}", "--prompt", "{prompt}"]'
+                )
+        return command
 
 
 class ImageConfig(_Base):

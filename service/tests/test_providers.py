@@ -1633,3 +1633,49 @@ def test_ollama_backend_bounds_what_it_reads_of_a_reply(tmp_path):
     with pytest.raises(RuntimeError) as err:
         backend.complete(image, "prompt", 10)
     assert str(OllamaBackend.MAX_REPLY_BYTES) in str(err.value), str(err.value)
+
+
+# ---------------------------------------------------------------------------
+# Card #420: a command backend behind the model seam, driving an installed CLI.
+
+
+COMMAND = ["fake-vlm", "--image", "{image}", "--prompt", "{prompt}", "--quiet"]
+
+
+def test_command_is_a_setting_in_the_model_section(tmp_path):
+    """`[model] command` is the program to run, as a list of arguments with
+    `{image}` and `{prompt}` placeholders: an argv list, never a shell string,
+    so a prompt with spaces, quotes or newlines is one argument and nothing is
+    quoted. Unset by default: no CLI is assumed installed. The reply is read
+    from stdout; the per-request ceiling is the existing `timeout_seconds`."""
+    assert _cfg().model.command == []
+
+    settings = tmp_path / "settings.toml"
+    settings.write_text(
+        '[model]\nbackend = "command"\n'
+        'command = ["fake-vlm", "--image", "{image}", "--prompt", "{prompt}", "--quiet"]\n'
+        "timeout_seconds = 30\n",
+        encoding="utf-8",
+    )
+    config = load_config(settings, use_local=False)
+    assert config.model.backend == "command"
+    assert config.model.command == COMMAND
+    assert config.model.timeout_seconds == 30.0
+
+
+@pytest.mark.parametrize(
+    ("command", "missing"),
+    [
+        (["fake-vlm", "--prompt", "{prompt}"], "{image}"),
+        (["fake-vlm", "--image", "{image}"], "{prompt}"),
+        (["fake-vlm"], "{image}"),
+    ],
+    ids=["no-image", "no-prompt", "neither"],
+)
+def test_command_template_without_a_placeholder_is_refused_at_config_load(command, missing):
+    """A template that never receives the image, or never asks the question,
+    cannot answer anything: refused when the config loads, naming the
+    placeholder it lacks, not per frame after the run has started."""
+    with pytest.raises(ValueError) as err:
+        _cfg(model={"backend": "command", "command": command})
+    assert missing in str(err.value), str(err.value)
