@@ -33,6 +33,10 @@ Card #403 names the engines mlx, ollama, openai, claude. The executable must
 accept every one of them; `--backend ollama` is refused as not built yet
 (card #406) with the backends that do work here, exit 3.
 
+Card #404: `--detect-engines` from the executable prints, as JSON, which of
+the four can run on this machine and why or why not. On a runner nothing
+answers at Ollama's address, and mlx's verdict is this platform's.
+
 Nothing here downloads a model: the MLX check stops at the point where the
 executable goes looking for weights.
 """
@@ -502,3 +506,32 @@ def test_executable_writes_the_enriched_results_and_reads_config_from_the_per_us
     assert row["burst_agreement"] == 1.0 and row["range_flag"] is False
     assert row["encounter"] == 0 and row["encounter_frames"] == 1 and row["quality_rank"] == 0.0
     assert 0 < row["quality"] <= 100, "quality was not scored on the pixels"
+
+
+def test_executable_detects_engines_as_json_with_no_python_on_the_path(
+    built_executable: Path, tmp_path: Path
+):
+    """Card #404, from the executable alone: valid JSON on stdout, the four
+    engines in the owner's order, exit 0, no folder needed. No Ollama answers
+    on a runner, so ollama is unavailable with the install pointer; mlx's
+    verdict is whether this machine is Apple Silicon; the cloud engines are
+    available and name their key variable."""
+    from melampus import providers
+
+    proc = subprocess.run(
+        [str(built_executable), "--detect-engines"],
+        env=_no_python_environment(tmp_path), capture_output=True, text=True, timeout=600,
+    )
+    assert proc.returncode == 0, proc.stderr[-3000:]
+    verdicts = json.loads(proc.stdout)
+    assert [v["engine"] for v in verdicts] == ["mlx", "ollama", "openai", "claude"]
+    by_engine = {v["engine"]: v for v in verdicts}
+    assert by_engine["mlx"]["available"] is on_apple_silicon()
+    if not on_apple_silicon():
+        assert by_engine["mlx"]["reason"] == "needs Apple Silicon"
+    assert by_engine["ollama"]["available"] is False, "an Ollama server answered on the runner?"
+    assert providers.OLLAMA_INSTALL in by_engine["ollama"]["reason"]
+    for engine in ("openai", "claude"):
+        assert by_engine[engine]["available"] is True
+        assert "API key required" in by_engine[engine]["reason"]
+        assert providers.KEY_VARIABLES[engine][0] in by_engine[engine]["reason"]
