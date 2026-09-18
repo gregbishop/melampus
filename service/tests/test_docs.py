@@ -348,18 +348,26 @@ def test_ci_pins_every_pip_install_to_an_exact_version():
     """Security: a tool CI installs with pip outside the lockfile (uv, on the
     Windows runner) is fetched from PyPI at build time and then produces the
     executable that is uploaded as an artifact, so `pip install <name>` with no
-    `==` runs whatever PyPI serves that day. Every pip install in ci.yml names
-    an exact version."""
-    workflow = CI_WORKFLOW.read_text(encoding="utf-8")
-    pip_installs = re.findall(r"^\s*run:.*\bpip install\b(.*?)\s*$", workflow, re.MULTILINE)
-    assert pip_installs, "ci.yml has no pip install step"
+    `==` runs whatever PyPI serves that day. Every pip install in every
+    workflow names an exact version: ci.yml's executable is an artifact,
+    release.yml's is what ships (card #402)."""
+    pip_installs = [
+        (workflow.name, arguments)
+        for workflow in sorted(WORKFLOWS.glob("*.yml"))
+        for arguments in re.findall(
+            r"^\s*run:.*\bpip install\b(.*?)\s*$", workflow.read_text(encoding="utf-8"), re.MULTILINE
+        )
+    ]
+    assert {name for name, _ in pip_installs} >= {CI_WORKFLOW.name, RELEASE_WORKFLOW.name}, (
+        f"a workflow has no pip install step: {pip_installs}"
+    )
     unpinned = [
-        requirement
-        for arguments in pip_installs
+        f"{name}: {requirement}"
+        for name, arguments in pip_installs
         for requirement in arguments.split()
         if not requirement.startswith("-") and not re.fullmatch(r"[\w.\-\[\]]+==[\w.]+", requirement)
     ]
-    assert not unpinned, f"CI installs from PyPI without an exact version: {unpinned}"
+    assert not unpinned, f"a workflow installs from PyPI without an exact version: {unpinned}"
 
 
 RELEASE_ZIPS = ("Melampus-macOS.zip", "Melampus-Windows.zip")
