@@ -249,3 +249,22 @@ def test_agents_md_points_at_the_standard_and_names_the_tracker():
     assert "board=Melampus" in tracker[0], (
         f"AGENTS.md's tracker line does not name this board: {tracker[0]!r}"
     )
+
+
+def test_docs_name_the_build_and_its_smoke_test():
+    """Card #399: the executable is built by tools/build_binary.py and the test
+    command builds and smoke-tests it with --build-binary. The stack contract's
+    `build:` line and readme.md must name both, or nobody finds them."""
+    brief = BRIEF.read_text(encoding="utf-8")
+    build = re.search(r"^- build: (`[^`]+`)", brief, re.MULTILINE)
+    assert build and build.group(1) == "`.venv/bin/python tools/build_binary.py`", (
+        f"docs/brief.md's stack contract does not name the build: {build and build.group(1)!r}"
+    )
+    readme = (REPO / "readme.md").read_text(encoding="utf-8")
+    # readme.md shows commands in fenced blocks, so match the bare text.
+    missing = [
+        command for command in (build.group(1).strip("`"),
+                                ".venv/bin/python -m pytest -q --build-binary")
+        if command not in readme
+    ]
+    assert not missing, f"readme.md does not name: {missing}"
