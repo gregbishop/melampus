@@ -40,11 +40,19 @@ DEFAULT_MODELS = {
 #: answers nothing useful; it is here to prove the pipeline around it runs.
 SCRIPTED = "scripted"
 
-#: What `[model] backend` may be set to.
-BACKEND_CHOICES = ("mlx", *sorted(KEY_VARIABLES), SCRIPTED)
+#: Named so the CLI accepts it (card #403: the user's choice of engine needs a
+#: home before it needs a dialog); its backend is card #406's. Until that
+#: lands, asking for it is refused below, the way mlx is refused off Apple
+#: Silicon.
+OLLAMA = "ollama"
+
+#: The engines the user chooses between, in the owner's order, then the fake.
+#: Card #404's detection will try them in this order for a default: the first
+#: that can run on this machine. Until it lands, no `--backend` means mlx.
+BACKEND_CHOICES = ("mlx", OLLAMA, "openai", "claude", SCRIPTED)
 
 #: The backends that run on this machine and bill nobody.
-LOCAL_BACKENDS = ("mlx", SCRIPTED)
+LOCAL_BACKENDS = ("mlx", OLLAMA, SCRIPTED)
 
 
 class BackendUnavailable(RuntimeError):
@@ -57,6 +65,25 @@ def on_apple_silicon() -> bool:
     exists here. Both halves, or an Intel Mac passes the OS check and then
     dies on a raw ModuleNotFoundError at warmup instead of the message."""
     return sys.platform == "darwin" and platform.machine() == "arm64"
+
+
+def _refusal(reason: str, *, works_here: tuple[str, ...]) -> BackendUnavailable:
+    """One shape for every refusal: what is wrong, what works here, how to switch."""
+    return BackendUnavailable(
+        f"{reason} The backends that work on this machine are: "
+        f"{', '.join(works_here)}. Set [model] backend in the config (with the "
+        "matching API key for a cloud provider), or pass --backend. See "
+        "readme.md § Windows."
+    )
+
+
+def _works_here() -> tuple[str, ...]:
+    """The backends this machine can run: mlx only on Apple Silicon, and never
+    an engine that is not built yet."""
+    return tuple(
+        b for b in BACKEND_CHOICES
+        if b != OLLAMA and (b != "mlx" or on_apple_silicon())
+    )
 
 
 def normalise_provider(provider: str | None) -> str:
@@ -103,16 +130,18 @@ def build_primary_backend(config: MelampusConfig) -> VLMBackend:
 
     if kind == "mlx":
         if not on_apple_silicon():
-            works_here = ", ".join(b for b in BACKEND_CHOICES if b != "mlx")
-            raise BackendUnavailable(
-                "The local MLX backend only runs on Apple Silicon Macs. The "
-                f"backends that work on this machine are: {works_here}. Set "
-                "[model] backend in the config (with the matching API key for a "
-                "cloud provider), or pass --backend. See readme.md § Windows."
+            raise _refusal(
+                "The local MLX backend only runs on Apple Silicon Macs.",
+                works_here=_works_here(),
             )
         from .backend import MLXBackend
 
         return MLXBackend(config.model.repo, config.model.temperature)
+
+    if kind == OLLAMA:
+        raise _refusal(
+            "The Ollama engine is not built yet (card #406).", works_here=_works_here()
+        )
 
     if kind == SCRIPTED:
         from .backend import ScriptedBackend
