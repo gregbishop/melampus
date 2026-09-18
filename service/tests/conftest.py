@@ -31,6 +31,13 @@ def pytest_addoption(parser: pytest.Parser) -> None:
 
 
 @pytest.fixture(scope="session")
+def repo() -> Path:
+    """The checkout root, for tests that reach outside service/ (fixtures/,
+    tools/, the docs)."""
+    return REPO
+
+
+@pytest.fixture(scope="session")
 def built_executable(request: pytest.FixtureRequest) -> Path:
     if request.config.getoption("--build-binary"):
         subprocess.run([sys.executable, str(BUILD_SCRIPT)], cwd=REPO, check=True)
