@@ -80,7 +80,31 @@ function Rules.defaultSettings()
 		-- frame; sport asks what activity is happening. Keeping them apart stops
 		-- a footballer being routed to 'mammal' and asked for a scientific name.
 		profile = 'wildlife',
+		-- Where inference runs (card #403): one of Rules.ENGINES, passed to the
+		-- CLI as --backend. Empty means the user has not chosen, so the CLI's
+		-- own default applies: mlx today, and the first engine that can run on
+		-- this machine once card #404's detection lands.
+		engine = '',
 	}
+end
+
+--- The engines a user can choose between, in the owner's words and order.
+-- These are the CLI's --backend names; the offline test fake is not one.
+Rules.ENGINES = { 'mlx', 'ollama', 'openai', 'claude' }
+
+--- The CLI arguments that carry the engine preference: `{ '--backend', name }`
+-- when one is set, `{}` when it is not, so the CLI decides. An unknown value
+-- returns nil and a message naming the choices, so the run stops here rather
+-- than on the CLI's usage error.
+function Rules.engineArguments(settings)
+	local engine = settings and settings.engine
+	if engine == nil or engine == '' then return {} end
+	for _, known in ipairs(Rules.ENGINES) do
+		if engine == known then return { '--backend', engine } end
+	end
+	return nil, 'Melampus does not know the engine "' .. tostring(engine)
+		.. '".\n\nThe engines are: ' .. table.concat(Rules.ENGINES, ', ')
+		.. '.\n\nSet one of those in Settings, or leave it unset to let Melampus choose.'
 end
 
 -- Keyword hierarchy uses '>' as its separator, so a species name containing one
