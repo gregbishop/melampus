@@ -5,8 +5,9 @@ silently fall behind the code or the repo again (as happened when [occurrence] a
 [quality] shipped undocumented). The promises: docs/config.md names every
 implemented setting; AGENTS.md, and not .gitignore, names the install command for
 the recorded plugins; no doc names a file by an uppercase name it does not have;
-docs/brief.md names the pytest command CI actually runs; CI installs from the
-lockfile before it runs pytest (card #425, Done-when 2); AGENTS.md points at
+docs/brief.md names the pytest command CI actually runs; the README's install
+block and CI both install from the lockfile (card #425, Done-when 3 and 2);
+AGENTS.md points at
 docs/brief.md without restating its values; and AGENTS.md points at the standard
 and names the tracker (card #410, Done-when 3).
 
@@ -26,6 +27,7 @@ AGENTS_MD = REPO / "AGENTS.md"
 PLUGIN_CHOICE = REPO / ".agents" / "on-purpose.json"
 BRIEF = REPO / "docs" / "brief.md"
 GITIGNORE = REPO / ".gitignore"
+README = REPO / "readme.md"
 
 
 def _installs_from_the_lockfile(command: str) -> bool:
@@ -101,6 +103,22 @@ def test_brief_names_the_test_command_ci_runs():
     brief = BRIEF.read_text(encoding="utf-8")
     missing = [c for c in ci_commands if c not in brief]
     assert not missing, f"docs/brief.md's stack contract does not name what CI runs: {missing}"
+
+
+def test_readme_install_block_installs_from_the_lockfile():
+    """Card #425, Done-when 3: given a fresh clone, when the README setup runs,
+    then the resolved versions match the lockfile. Only `uv sync --locked` (or
+    `--frozen`) does that; `uv pip install` never reads uv.lock. Running the
+    install here would need the network, so the gate is on the command itself."""
+    readme = README.read_text(encoding="utf-8")
+    block = re.search(r"^## Install\n.*?```bash\n(.*?)```", readme, re.MULTILINE | re.DOTALL)
+    assert block, "readme.md has no bash block under ## Install"
+    commands = [line for line in block.group(1).splitlines() if line and not line.startswith("#")]
+    locked = [c for c in commands if _installs_from_the_lockfile(c)]
+    assert locked and not any("uv pip install" in c for c in commands), (
+        "readme.md's ## Install block must install with `uv sync --locked` "
+        f"(or --frozen), not re-resolve with `uv pip install`: {commands}"
+    )
 
 
 def test_ci_installs_from_the_lockfile_before_pytest():
