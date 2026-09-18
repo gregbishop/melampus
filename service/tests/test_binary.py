@@ -138,7 +138,8 @@ def test_build_bundles_the_service_the_prompts_and_the_mlx_runtime(
     """Done-when 1's ingredients, as the arguments handed to PyInstaller: one
     file, the service on the path, prompts/ at the bundle's top level, all of
     mlx (its native library and Metal shaders sit beside the module) and every
-    submodule of the packages that import model code by name at run time."""
+    submodule of the packages that import model code by name at run time —
+    written to dist/melampus, no suffix."""
     calls: list[list[str]] = []
 
     def run(arguments: list[str]) -> None:
@@ -148,6 +149,7 @@ def test_build_bundles_the_service_the_prompts_and_the_mlx_runtime(
 
     _fake_pyinstaller(monkeypatch, run)
     assert build.main() == 0
+    assert build.executable_path() == build.DIST / "melampus"
     (arguments,) = calls
     pairs = set(zip(arguments, arguments[1:]))
     assert "--onefile" in arguments
@@ -270,25 +272,10 @@ def test_build_plan_on_windows_names_the_exe_and_leaves_mlx_out(
     monkeypatch.setattr(platform, "machine", lambda: "AMD64")
     assert build_script.executable_path() == repo / "dist" / "melampus.exe"
     arguments = build_script.pyinstaller_arguments(Path("entry.py"))
-    assert "--collect-all" not in arguments and "mlx" not in arguments
+    assert "--collect-all" not in arguments
     assert not any(a.startswith("mlx") for a in arguments), arguments
     assert "--collect-submodules" not in arguments
     assert f"{repo / 'prompts'};prompts" in arguments
-
-
-def test_build_plan_on_apple_silicon_carries_mlx(
-    build_script: types.ModuleType, monkeypatch: pytest.MonkeyPatch, repo: Path
-):
-    """Card #399 unchanged: on Apple Silicon the executable is dist/melampus
-    and carries mlx (collected whole) with mlx_vlm, mlx_lm and transformers."""
-    monkeypatch.setattr(sys, "platform", "darwin")
-    monkeypatch.setattr(platform, "machine", lambda: "arm64")
-    assert build_script.executable_path() == repo / "dist" / "melampus"
-    arguments = build_script.pyinstaller_arguments(Path("entry.py"))
-    assert arguments[arguments.index("--collect-all") + 1] == "mlx"
-    collected = [arguments[i + 1] for i, a in enumerate(arguments) if a == "--collect-submodules"]
-    assert collected == ["mlx_vlm", "mlx_lm", "transformers"]
-    assert f"{repo / 'prompts'}:prompts" in arguments
 
 
 # Settings that reach the JSON — max_tokens through run_fingerprint, max_retries
