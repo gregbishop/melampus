@@ -7,10 +7,15 @@ one class here and changing nothing else.
 
 from __future__ import annotations
 
+import base64
+import json
 import time
+import urllib.error
+import urllib.request
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 
 @dataclass(slots=True)
@@ -314,6 +319,123 @@ class OpenAIBackend(VLMBackend):
             prompt_tokens=getattr(usage, "prompt_tokens", None),
             generated_tokens=getattr(usage, "completion_tokens", None),
             refused=finish == "content_filter",
+        )
+
+
+class OllamaBackend(VLMBackend):
+    """A local Ollama server behind the same interface (card #406): local
+    inference on Windows and Linux, and on Macs that prefer it, through the
+    engine most users already have.
+
+    One request per completion, from Ollama's docs/api.md § Generate a chat
+    completion: POST {url}/api/chat with a JSON body of `model`, one user
+    message carrying the prompt as `content` and the image as one base64
+    string in `images`, `stream` false so a single response object comes
+    back, and `options` of `num_predict` (docs/modelfile.mdx: the maximum
+    number of tokens to predict) and `temperature`. The reply's text is
+    `message.content`; the counts are `prompt_eval_count` and `eval_count`.
+    The text goes through the same JSON extraction and schema validation as
+    every other backend's (identify.py): nothing here parses candidates.
+
+    The standard library speaks it: the cloud backends each use their vendor's
+    SDK, so there is no shared HTTP client to reuse, and a dependency for four
+    JSON fields would be a new path for nothing. As with every backend, only
+    the bytes of the staged, metadata-free image travel: no path, no filename.
+
+    Whether a server is there at all is the factory's question
+    (providers.build_primary_backend probes before building this), so the
+    not-running message can name the install and exit 3 before any image is
+    read. Here a failure mid-run maps to a plain error naming the address or
+    the status, which identify() records on that frame while the batch goes on.
+    """
+
+    ENDPOINT = "/api/chat"
+
+    def __init__(
+        self,
+        model: str,
+        url: str,
+        *,
+        temperature: float = 0.0,
+        timeout: float = 180.0,
+        client: Callable | None = None,
+    ) -> None:
+        self.name = model
+        self.model = model
+        self.url = url.rstrip("/")
+        self.temperature = temperature
+        self.timeout = timeout
+        # Shaped like urllib.request.urlopen(request, timeout=...): the tests hand
+        # in a fake at this edge, the way the cloud backends take a client.
+        self._urlopen = client or urllib.request.urlopen
+
+    def _request(self, image_path: Path, prompt: str, max_tokens: int) -> urllib.request.Request:
+        image = base64.b64encode(Path(image_path).read_bytes()).decode("ascii")
+        body = {
+            "model": self.model,
+            "messages": [{"role": "user", "content": prompt, "images": [image]}],
+            "stream": False,
+            "options": {"num_predict": max_tokens, "temperature": self.temperature},
+        }
+        return urllib.request.Request(
+            f"{self.url}{self.ENDPOINT}",
+            data=json.dumps(body).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+
+    def _send(self, request: urllib.request.Request) -> bytes:
+        try:
+            with self._urlopen(request, timeout=self.timeout) as response:
+                return response.read()
+        except urllib.error.HTTPError as exc:
+            raise RuntimeError(
+                f"Ollama answered {exc.code}: {self._error_text(exc)}"
+            ) from exc
+        except urllib.error.URLError as exc:
+            if isinstance(exc.reason, TimeoutError):
+                raise self._timed_out() from exc
+            raise ConnectionError(
+                f"no Ollama server answering at {self.url} ({exc.reason}); "
+                "start Ollama, or set [model] ollama_url to where it listens"
+            ) from exc
+        except TimeoutError as exc:
+            raise self._timed_out() from exc
+
+    def _timed_out(self) -> TimeoutError:
+        return TimeoutError(
+            f"Ollama at {self.url} did not answer within {self.timeout:g}s; "
+            f"{self.model} may still be loading, or raise [model] timeout_seconds"
+        )
+
+    @staticmethod
+    def _error_text(exc: urllib.error.HTTPError) -> str:
+        """Ollama's own words when the body is its {"error": ...} object,
+        else the body as it came (a proxy's HTML, say), else the status line."""
+        body = exc.read().decode("utf-8", "replace").strip()
+        try:
+            error = json.loads(body).get("error")
+        except (json.JSONDecodeError, AttributeError):
+            error = None
+        return error or body or exc.reason
+
+    def complete(self, image_path: Path, prompt: str, max_tokens: int) -> Completion:
+        request = self._request(image_path, prompt, max_tokens)
+        started = time.perf_counter()
+        raw = self._send(request)
+        elapsed = time.perf_counter() - started
+        try:
+            reply = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                f"Ollama's reply from {self.url} was not JSON: {raw[:120]!r}"
+            ) from exc
+        message = reply.get("message") or {}
+        return Completion(
+            text=message.get("content") or "",
+            seconds=elapsed,
+            prompt_tokens=reply.get("prompt_eval_count"),
+            generated_tokens=reply.get("eval_count"),
         )
 
 
