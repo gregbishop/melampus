@@ -11,12 +11,12 @@ the executable and from the CLI alike.
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
-from PIL import Image
 
 # pytester runs a pytest inside pytest: how test_binary.py proves what this
 # file's option and fixture do without a real build.
@@ -25,10 +25,11 @@ pytest_plugins = ["pytester"]
 REPO = Path(__file__).resolve().parents[2]
 BUILD_SCRIPT = REPO / "tools" / "build_binary.py"
 EXECUTABLE = REPO / "dist" / "melampus"
-# Synthetic, like test_pipeline.py's: the scripted backend answers nothing
-# whatever the frame shows, and the corpus is gitignored, so a corpus frame
-# would only make these tests skip on the CI runner.
-PHOTO = "flat-green.jpg"
+# The frame test_quality.py leans on, downscaled to 1200 px and stripped of
+# metadata so it can be committed: the corpus is gitignored and CI has none,
+# and the smoke test must analyze the same image on every platform (card #400).
+FIXTURE = Path(__file__).with_name("fixtures") / "0A1A2829.jpg"
+PHOTO = FIXTURE.name
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
@@ -51,10 +52,10 @@ def repo() -> Path:
 
 @pytest.fixture()
 def photos(tmp_path: Path) -> Path:
-    """A folder holding one flat JPEG, PHOTO, for the scripted backend."""
+    """A folder holding one JPEG, PHOTO: a copy of the committed frame."""
     folder = tmp_path / "photos"
     folder.mkdir()
-    Image.new("RGB", (2400, 1600), (90, 120, 70)).save(folder / PHOTO, exif=b"")
+    shutil.copy(FIXTURE, folder / PHOTO)
     return folder
 
 
