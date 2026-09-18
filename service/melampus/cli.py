@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -167,6 +168,40 @@ def _run_escalation(paths, local_cache: ResultCache, config, *,
     return 0
 
 
+def _write_plugin_results(paths: list[Path], cache: ResultCache, config, destination: Path) -> None:
+    """The enrichment pass the Lightroom plugin reads (card #436).
+
+    Quality is always scored: the plugin sets no star rating without it. Range
+    checks need a default location and are the one step that touches the
+    network; without one they are skipped and the log says so.
+    """
+    from .occurrence import range_lookup
+    from .plugin_results import enrich, write_plugin_results
+
+    lookup = range_lookup(config.occurrence)
+    if lookup is None:
+        print("no default location configured; skipping range checks", file=sys.stderr)
+
+    def progress(done: int, total: int) -> None:
+        if done == 1:
+            print(f"scoring quality for {total} frames ...", file=sys.stderr)
+        if done % 250 == 0:
+            print(f"  {done}/{total}", file=sys.stderr)
+
+    records = [json.loads(r.model_dump_json()) for r in cache.results()]
+    outcome = enrich(paths, records, config, lookup=lookup, on_progress=progress)
+    write_plugin_results(destination, outcome.rows)
+    print(f"\nwrote {destination}", file=sys.stderr)
+    print(f"  records          : {len(outcome.rows)}", file=sys.stderr)
+    print(f"  with agreement   : {sum(1 for r in outcome.rows if 'burst_agreement' in r)}",
+          file=sys.stderr)
+    print(f"  range-flagged    : {outcome.flagged_encounters} encounters", file=sys.stderr)
+    if outcome.quality_scores:
+        vals = sorted(outcome.quality_scores.values())
+        print(f"  quality scored   : {len(vals)} (median {vals[len(vals) // 2]:.0f})",
+              file=sys.stderr)
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     ap = argparse.ArgumentParser(prog="melampus-id", description=__doc__)
@@ -192,6 +227,11 @@ def main(argv: list[str] | None = None) -> int:
                     help="stratified sample: at most N per previously-predicted species")
     ap.add_argument("--labels", type=Path, default=None, help="reference labels JSON for scoring")
     ap.add_argument("--json-out", type=Path, default=None)
+    ap.add_argument("--plugin-out", type=Path, default=None,
+                    help="also write the results enriched for the Lightroom plugin "
+                         "(quality and its rank within the burst, burst agreement, "
+                         "range flag, encounter); range checks need a default "
+                         "location in config and are the only step that uses the network")
     ap.add_argument("--report-only", action="store_true",
                     help="print tables from cache without running the model")
 
@@ -368,6 +408,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.json_out:
         cache.export_json(args.json_out)
         print(f"\nwrote {args.json_out}", file=sys.stderr)
+    if args.plugin_out:
+        _write_plugin_results(paths, cache, config, args.plugin_out)
     return 0
 
 
