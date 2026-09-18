@@ -19,8 +19,9 @@ shipped executable unpacks itself into a temporary directory at every launch, so
 there both resolve under the per-user data directory instead (card #436):
 `~/Library/Application Support/Melampus/` on macOS, `%LOCALAPPDATA%\Melampus\`
 on Windows, `$XDG_DATA_HOME/Melampus/` (or `~/.local/share/Melampus/`) elsewhere,
-with the caches in its `cache/` subfolder. `--config` and `--cache` still name any
-path explicitly. The table below writes the checkout defaults as `<data>/…`.
+with the caches in its `cache/` subfolder (so `<data>/.melampus_cache/occurrence.json`
+below is `…/Melampus/cache/occurrence.json` there). `--config` and `--cache` still
+name any path explicitly.
 
 ```toml
 # my-settings.toml — only what differs from the defaults
@@ -33,8 +34,8 @@ max_edge = 1280
 
 `<repo>` in the defaults below is the checkout root; inside the shipped
 executable (readme.md § Building the executable) it is the unpack directory,
-where `prompts/` ships in the bundle. `<data>` is the checkout root in a
-checkout and the per-user data directory above inside the executable.
+where `prompts/` ships in the bundle. `<data>` is the checkout root; the
+executable's equivalents are the per-user `cache/` files described above.
 
 ---
 
