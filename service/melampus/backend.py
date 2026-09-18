@@ -13,6 +13,7 @@ import functools
 import http.client
 import json
 import socket
+import subprocess
 import threading
 import time
 import urllib.error
@@ -835,6 +836,113 @@ class OllamaBackend(VLMBackend):
             prompt_tokens=reply.get("prompt_eval_count"),
             generated_tokens=reply.get("eval_count"),
         )
+
+
+class CommandFailed(RuntimeError):
+    """The command exited non-zero: the engine is broken (not signed in, wrong
+    flags), not the frame. The CLI surfaces it at exit 3 like the other
+    backend failures instead of recording it on every frame in turn."""
+
+
+class CommandBackend(VLMBackend):
+    """An installed command-line program behind the same interface (card
+    #420): one run per completion, the reply on stdout. Claude Code and Codex
+    CLI bill to a subscription rather than per call, so a command that takes
+    an image and a prompt is vision with no API key; the templates for those
+    two are cards #421 and #422. This class knows no program: `command` is
+    the config's argv template, one element per argument, with `{image}` and
+    `{prompt}` placeholders replaced wherever they sit. An argv list, never a
+    shell: the prompt is one argument however many spaces, quotes or newlines
+    it holds, and nothing is quoted or escaped.
+
+    `executable` is what shutil.which resolved the template's first element
+    to (providers.build_primary_backend does that before any image is read,
+    so a missing program is refused up front): it replaces the bare name in
+    the argv, which is what lets an npm-installed `.cmd` shim run on Windows
+    without a shell. The child gets the parent's environment as it is, so the
+    program finds its own sign-in; nothing is added to it and no secret
+    crosses the command line. As with every backend, the image is the staged,
+    metadata-free file and only its path travels. `max_tokens` has no
+    placeholder: the program's own limits apply.
+
+    stdout goes through the same JSON extraction and schema validation as
+    every other backend's text (identify.py); nothing here parses
+    candidates. stderr is kept for error messages only.
+    """
+
+    #: How much of stderr an error message carries: enough to say what went
+    #: wrong, not a CLI's whole usage text.
+    STDERR_LINES = 3
+
+    def __init__(
+        self,
+        command: list[str],
+        *,
+        executable: str | None = None,
+        timeout: float = 180.0,
+        run: Callable | None = None,
+    ) -> None:
+        self.command = list(command)
+        # The template, so a changed flag is a changed run fingerprint and the
+        # cache cannot re-serve the old template's answers.
+        self.name = " ".join(self.command)
+        self.executable = executable or self.command[0]
+        self.timeout = timeout
+        # Shaped like subprocess.run(argv, **kwargs): the tests hand in a fake
+        # at this edge, the way the other backends take a client.
+        self._run = run or subprocess.run
+
+    @property
+    def program(self) -> str:
+        """The name the user knows the program by, for messages."""
+        return self.command[0]
+
+    def _argv(self, image_path: Path, prompt: str) -> list[str]:
+        expanded = [
+            argument.replace("{image}", str(image_path)).replace("{prompt}", prompt)
+            for argument in self.command
+        ]
+        return [self.executable, *expanded[1:]]
+
+    def _stderr_lines(self, stderr: str) -> str:
+        lines = [line for line in (stderr or "").splitlines() if line.strip()]
+        return " / ".join(lines[: self.STDERR_LINES])
+
+    def complete(self, image_path: Path, prompt: str, max_tokens: int) -> Completion:
+        argv = self._argv(image_path, prompt)
+        started = time.perf_counter()
+        try:
+            process = self._run(
+                argv,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                stdin=subprocess.DEVNULL,
+                timeout=self.timeout,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise TimeoutError(
+                f"{self.program} did not answer within {self.timeout:g}s; "
+                "raise [model] timeout_seconds if it needs longer"
+            ) from exc
+        except OSError as exc:
+            raise RuntimeError(f"{self.program} could not be run: {exc}") from exc
+        elapsed = time.perf_counter() - started
+
+        if process.returncode != 0:
+            said = self._stderr_lines(process.stderr)
+            raise CommandFailed(
+                f"{self.program} exited {process.returncode}"
+                + (f": {said}" if said else " with nothing on stderr")
+            )
+        if not (process.stdout or "").strip():
+            said = self._stderr_lines(process.stderr)
+            raise RuntimeError(
+                f"{self.program} printed nothing on stdout"
+                + (f": {said}" if said else "")
+            )
+        return Completion(text=process.stdout, seconds=elapsed)
 
 
 class ScriptedBackend(VLMBackend):

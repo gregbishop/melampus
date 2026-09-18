@@ -48,6 +48,8 @@ from test_pipeline import ID_OK, ROUTING_OK
 from melampus import providers
 from melampus.backend import (
     AnthropicBackend,
+    CommandBackend,
+    CommandFailed,
     MLXBackend,
     OllamaBackend,
     OpenAIBackend,
@@ -1897,3 +1899,117 @@ def test_command_template_without_a_placeholder_is_refused_at_config_load(comman
     with pytest.raises(ValueError) as err:
         _cfg(model={"backend": "command", "command": command})
     assert missing in str(err.value), str(err.value)
+
+
+class _FakeRun:
+    """Stands in for subprocess.run at the backend's process edge: records
+    every call, then returns a completed process with `stdout`, `stderr` and
+    `returncode`, or raises `error`."""
+
+    def __init__(self, stdout: str = "", stderr: str = "", returncode: int = 0,
+                 error: Exception | None = None):
+        self.stdout, self.stderr, self.returncode, self.error = stdout, stderr, returncode, error
+        self.calls: list[tuple[list[str], dict]] = []
+
+    def __call__(self, argv, **kwargs):
+        self.calls.append((argv, kwargs))
+        if self.error is not None:
+            raise self.error
+        return subprocess.CompletedProcess(argv, self.returncode, self.stdout, self.stderr)
+
+
+def _command_backend(run: _FakeRun, command: list[str] = COMMAND, **kwargs) -> CommandBackend:
+    return CommandBackend(command, executable="/opt/fake/bin/fake-vlm", run=run, **kwargs)
+
+
+def test_command_backend_expands_the_template_into_one_argv(tmp_path):
+    """Template expansion: each argument with `{image}` gets the image path as
+    given (absolute, the staged file), each with `{prompt}` the prompt in
+    full as one argument, spaces, quotes and newlines included, and every
+    other argument is passed untouched. The resolved executable stands in
+    for the bare name (shutil.which found it; on Windows that is how a
+    `.cmd` shim runs without a shell). subprocess.run is given the list, no
+    shell, the reply as text, the config's timeout, stdout and stderr
+    captured, and nothing on stdin, so a program that reads it cannot hang."""
+    image = tmp_path / "image.jpg"
+    image.write_bytes(b"jpeg")
+    run = _FakeRun(stdout=ID_OK)
+    backend = _command_backend(run, timeout=42.0)
+    prompt = 'Identify the "bird".\n\nReply with JSON: {"taxon": ...}'
+
+    backend.complete(image, prompt, 900)
+
+    ((argv, kwargs),) = run.calls
+    assert argv == ["/opt/fake/bin/fake-vlm", "--image", str(image), "--prompt", prompt, "--quiet"]
+    assert kwargs["timeout"] == 42.0
+    assert kwargs["text"] is True
+    assert kwargs["capture_output"] is True
+    assert kwargs["stdin"] is subprocess.DEVNULL
+    assert kwargs.get("shell", False) is False
+    assert "env" not in kwargs, "the child gets the parent's environment as it is; nothing is added"
+
+
+def test_command_backend_expands_a_placeholder_inside_a_longer_argument(tmp_path):
+    """`--image={image}` is one argument too: the placeholder is replaced
+    wherever it sits, so a CLI that takes `--flag=value` works."""
+    image = tmp_path / "image.jpg"
+    image.write_bytes(b"jpeg")
+    run = _FakeRun(stdout=ID_OK)
+    backend = _command_backend(run, ["fake-vlm", "--image={image}", "--prompt={prompt}"])
+
+    backend.complete(image, "what is this?", 10)
+
+    ((argv, _),) = run.calls
+    assert argv == ["/opt/fake/bin/fake-vlm", f"--image={image}", "--prompt=what is this?"]
+
+
+def test_command_backend_reads_stdout_into_a_completion(tmp_path):
+    """Reply parsing: stdout is the text, handed as it came to the same JSON
+    extraction and schema validation every backend's text goes through
+    (identify.py); nothing here parses candidates. No token counts: a
+    command reports none. The name is the template, so a changed flag is a
+    changed run fingerprint and the cache cannot re-serve the old template's
+    answers (architecture.md § Caching and resume)."""
+    image = tmp_path / "image.jpg"
+    image.write_bytes(b"jpeg")
+    backend = _command_backend(_FakeRun(stdout=f"Here you go:\n{ID_OK}\n", stderr="warning: slow"))
+
+    completion = backend.complete(image, "prompt", 900)
+
+    assert completion.text == f"Here you go:\n{ID_OK}\n"
+    assert completion.prompt_tokens is None and completion.generated_tokens is None
+    assert completion.refused is False
+    assert completion.seconds >= 0
+    assert backend.name == "fake-vlm --image {image} --prompt {prompt} --quiet"
+
+
+@pytest.mark.parametrize(
+    ("run", "expected", "said"),
+    [
+        (_FakeRun(returncode=2, stderr="not logged in\nrun `fake-vlm login` first\nmore\nand more"),
+         CommandFailed, "fake-vlm exited 2: not logged in / run `fake-vlm login` first / more"),
+        (_FakeRun(returncode=1), CommandFailed, "fake-vlm exited 1 with nothing on stderr"),
+        (_FakeRun(error=subprocess.TimeoutExpired(["fake-vlm"], 42.0)),
+         TimeoutError, "fake-vlm did not answer within 42s"),
+        (_FakeRun(stdout="  \n", stderr="usage: fake-vlm ..."),
+         RuntimeError, "fake-vlm printed nothing on stdout: usage: fake-vlm ..."),
+        (_FakeRun(error=PermissionError(13, "Permission denied")),
+         RuntimeError, "fake-vlm could not be run: [Errno 13] Permission denied"),
+    ],
+    ids=["non-zero", "non-zero-silent", "timeout", "empty-stdout", "not-runnable"],
+)
+def test_command_backend_maps_each_failure_to_a_plain_error(tmp_path, run, expected, said):
+    """Error mapping: a non-zero exit is CommandFailed naming the command,
+    the exit code and the first lines of stderr (the CLI surfaces it at
+    exit 3, the way the other backend failures are); a timeout is
+    TimeoutError naming the ceiling to raise; empty stdout and a program
+    that cannot be started are plain RuntimeErrors naming the command,
+    recorded on the frame while the batch goes on. Never a traceback into
+    subprocess."""
+    image = tmp_path / "image.jpg"
+    image.write_bytes(b"jpeg")
+    backend = _command_backend(run, timeout=42.0)
+    with pytest.raises(expected) as err:
+        backend.complete(image, "prompt", 10)
+    assert said in str(err.value), str(err.value)
+    assert not isinstance(err.value, subprocess.SubprocessError)
