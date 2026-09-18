@@ -55,16 +55,20 @@ local function unloadPlugin()
 end
 
 --- Run the real import file end to end and hand back the resulting state.
--- `photos` is a list of { fileName, rawMetadata, pluginProperties }; `options`
--- goes through to mock.reset (confirmAnswer, existing, dropWrites), with the
--- offer accepted unless it says otherwise. Raises if the import does.
+-- `records` is what the results file holds, or nil for no results file
+-- configured at all, as on a fresh install. `photos` is a list of
+-- { fileName, rawMetadata, pluginProperties }; `options` goes through to
+-- mock.reset (confirmAnswer, existing, dropWrites), with the offer accepted
+-- unless it says otherwise. Raises if the import does.
 local function runImport(records, photos, prefs, options)
 	options = options or {}
 	options.prefs = prefs or {}
 	options.confirmAnswer = options.confirmAnswer or 'ok'
-	writeResults(RESULTS, records)
 	mock.reset(options)
-	mock.state.prefs.resultsPath = RESULTS
+	if records then
+		writeResults(RESULTS, records)
+		mock.state.prefs.resultsPath = RESULTS
+	end
 	for _, spec in ipairs(photos) do
 		local photo = mock.addPhoto(spec[1], spec[2] or {})
 		for k, v in pairs(spec[3] or {}) do photo._plugin[k] = v end
@@ -404,6 +408,21 @@ t.test('analysing runs the executable beside the plugin, in one command', functi
 		'the command does not start with the executable:\n' .. executed[1])
 	t.isNil(string.find(executed[1], 'cd ', 1, true),
 		'the command changes directory, which only a checkout needed:\n' .. executed[1])
+end)
+
+t.test('with no results file configured, the executable analyses the selection', function()
+	-- docs/plugin.md: leave the results path empty and the plugin analyses. A
+	-- fresh install has no results file, so its first run must reach the offer
+	-- and run the executable, not ask for a file from a Python checkout.
+	local executable = PLUGIN .. '/melampus'
+	runImport(nil, { { 'first_01.CR3' }, { 'first_02.CR3' } }, defaultPrefs(),
+		{ existing = { [executable] = true } })
+	t.isNotNil(dialogMatching('never been analysed'),
+		'no offer to analyse; first dialog: ' .. tostring((mock.state.dialogs[1] or {}).body))
+	t.isNil(dialogMatching('plugin_results.json'), 'asked for a results file instead of analysing')
+	local executed = mock.state.executed or {}
+	t.equals(#executed, 1, 'the executable did not run')
+	assertRunsTheExecutable(executed[1], "'" .. executable .. "'")
 end)
 
 t.test('on Windows the command names melampus.exe with cmd.exe quoting', function()
