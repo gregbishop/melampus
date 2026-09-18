@@ -38,10 +38,15 @@ GITIGNORE = REPO / ".gitignore"
 README = REPO / "readme.md"
 
 
-def _installs_from_the_lockfile(command: str) -> bool:
-    """`uv sync --locked` (or `--frozen`) installs exactly uv.lock; anything else
-    re-resolves from pyproject.toml's bounds."""
-    return bool(re.search(r"\buv sync\b[^&|;]*--(locked|frozen)\b", command))
+LOCKFILE_FLAGS = ("--locked", "--frozen")
+
+
+def _installs_from_the_lockfile(command: str, flags: tuple[str, ...] = LOCKFILE_FLAGS) -> bool:
+    """`uv sync` with one of `flags` installs exactly uv.lock; anything else
+    re-resolves from pyproject.toml's bounds. `--locked` also fails when the lock
+    has drifted from pyproject.toml; `--frozen` installs the stale lock anyway."""
+    accepted = "|".join(re.escape(flag) for flag in flags)
+    return bool(re.search(rf"\buv sync\b[^&|;]*(?:{accepted})\b", command))
 
 
 def test_every_config_field_is_documented():
@@ -168,10 +173,13 @@ def test_readme_install_block_installs_from_the_lockfile():
 
 def test_ci_installs_from_the_lockfile_before_pytest():
     """Card #425, Done-when 2: given CI, when it installs, then it installs from
-    the lockfile and fails if the lockfile and pyproject disagree. That is
-    `uv sync --locked` (or `--frozen`); `uv pip install` re-resolves instead."""
-    not_locked = [c for c in _ci_pytest_commands() if not _installs_from_the_lockfile(c)]
-    assert not not_locked, f"CI's pytest step does not install with uv sync --locked/--frozen: {not_locked}"
+    the lockfile and fails if the lockfile and pyproject disagree. Only
+    `uv sync --locked` does both: `--frozen` installs a stale lock without
+    complaint, and `uv pip install` re-resolves instead."""
+    not_locked = [
+        c for c in _ci_pytest_commands() if not _installs_from_the_lockfile(c, flags=("--locked",))
+    ]
+    assert not not_locked, f"CI's pytest step does not install with uv sync --locked: {not_locked}"
 
 
 def test_brief_explains_ci_as_installing_from_the_lockfile():
