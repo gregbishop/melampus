@@ -652,6 +652,91 @@ t.test('the Settings dialog is worded for both platforms and the executable flow
 	end
 end)
 
+-- ── asking the executable which engines can run here (card #405) ───────────
+-- The dialog's picker shows what `melampus --detect-engines` says. The plugin
+-- runs the executable beside it once, reads the JSON it printed, and hands the
+-- decoded list to Rules.engineItems; a missing executable is the same message
+-- the analysis gives, never a crash.
+local DETECTION = '[{"engine": "mlx", "available": true, "reason": "runs locally on this Apple Silicon Mac"},'
+	.. ' {"engine": "ollama", "available": false, "reason": "no Ollama server at http://127.0.0.1:11434; install it from https://ollama.com/download"},'
+	.. ' {"engine": "openai", "available": true, "reason": "API key required: set MELAMPUS_OPENAI_KEY (or OPENAI_API_KEY)"},'
+	.. ' {"engine": "claude", "available": true, "reason": "API key required: set MELAMPUS_ANTHROPIC_KEY (or ANTHROPIC_API_KEY)"}]'
+
+--- A fake executable for the mock's LrTasks.execute: answers a --detect-engines
+--- command by writing `text` to the file the command's stdout is redirected to,
+--- and exits with `code`.
+local function answersDetection(text, code)
+	return function(command)
+		if not string.find(command, '--detect-engines', 1, true) then return 0 end
+		local target = string.match(command, ">'([^']+)'")
+		local handle = assert(io.open(target, 'w'))
+		handle:write(text)
+		handle:close()
+		return code or 0
+	end
+end
+
+--- Load MelampusAnalyze.lua under a fake macOS Lightroom with the executable
+--- beside the plugin, played by answersDetection(text, code).
+local function loadAnalyzeAnswering(text, code)
+	return loadUnderMock('MelampusAnalyze',
+		{ existing = { [MAC_EXECUTABLE] = true }, onExecute = answersDetection(text, code) })
+end
+
+--- The one line detection runs on macOS: the executable beside the plugin
+--- asked for its verdicts, its stdout to a file in the mock's temp directory
+--- and its stderr to the CLI log there, every path single-quoted for sh.
+local function macDetectionCommand()
+	local temp = mock.state.tempDir
+	return string.format("'%s' --detect-engines >'%s/melampus-engines.json' 2>'%s/melampus-cli.log'",
+		MAC_EXECUTABLE, temp, temp)
+end
+
+t.test('detection runs the executable once with --detect-engines and returns the decoded list', function()
+	local Analyze = loadAnalyzeAnswering(DETECTION)
+	local verdicts, problem = Analyze.detectEngines()
+	t.isNotNil(verdicts, 'no verdicts: ' .. tostring(problem))
+	t.equals(#mock.state.executed, 1, 'detection should run the executable exactly once')
+	t.equals(mock.state.executed[1], macDetectionCommand(), 'not the one command that asks for the verdicts')
+	t.equals(#verdicts, 4)
+	t.equals(verdicts[2].engine, 'ollama')
+	t.isFalse(verdicts[2].available)
+	t.isNotNil(string.find(verdicts[2].reason, 'https://ollama.com/download', 1, true))
+end)
+
+t.test('a missing executable makes detection say so, with the plugin folder and the file', function()
+	local Analyze = loadUnderMock('MelampusAnalyze')
+	local verdicts, problem = Analyze.detectEngines()
+	t.isNil(verdicts)
+	t.isNil(mock.state.executed, 'ran a command with no executable to run')
+	t.equals(problem, missingExecutableMessage('melampus', PLUGIN),
+		'not the message for a missing executable')
+end)
+
+t.test('an executable that fails or prints no list makes detection say so, never raise', function()
+	local verdicts, problem = loadAnalyzeAnswering('Traceback (most recent call last)', 1).detectEngines()
+	t.isNil(verdicts, 'a failed run produced verdicts')
+	t.isNotNil(string.find(problem, 'exit 1', 1, true), 'the message does not give the exit code:\n' .. tostring(problem))
+
+	verdicts, problem = loadAnalyzeAnswering('{"not": "a list"}').detectEngines()
+	t.isNil(verdicts, 'an object is not the verdict list')
+	t.isNotNil(problem)
+
+	verdicts, problem = loadAnalyzeAnswering('').detectEngines()
+	t.isNil(verdicts, 'empty output is not the verdict list')
+	t.isNotNil(problem)
+end)
+
+t.test('on Windows detection names melampus.exe with cmd.exe quoting', function()
+	local Analyze = loadAnalyzeOnWindows(true)
+	Analyze.detectEngines()
+	-- Every path double-quoted and the whole line wrapped, as cmd.exe needs it.
+	t.equals(mock.state.executed[1], string.format(
+		'""%s" --detect-engines >"%s\\melampus-engines.json" 2>"%s\\melampus-cli.log""',
+		WIN_EXECUTABLE, WIN_TEMP, WIN_TEMP),
+		'not the one command that asks melampus.exe for the verdicts, as cmd.exe needs it')
+end)
+
 os.remove(RESULTS)
 mock.cleanUp()
 return t.summary()

@@ -22,6 +22,7 @@ local LrFileUtils = import 'LrFileUtils'
 local LrPathUtils = import 'LrPathUtils'
 local LrTasks = import 'LrTasks'
 
+local Json = require 'MelampusJson'
 local Log = require 'MelampusLog'
 local Rules = require 'MelampusRules'
 
@@ -189,8 +190,49 @@ end
 -- location guaranteed to exist on both platforms (the plugin-log directory is
 -- not — Log.path() is a macOS layout). Outside previewFolder so cleanUp()
 -- does not take the evidence with it.
+local function tempPath(name)
+	return LrPathUtils.child(LrPathUtils.getStandardFilePath('temp'), name)
+end
+
 local function cliLogPath()
-	return LrPathUtils.child(LrPathUtils.getStandardFilePath('temp'), 'melampus-cli.log')
+	return tempPath('melampus-cli.log')
+end
+
+--- The one message for an executable that is not beside the plugin: which
+-- folder should hold it and what the file is called, and nothing about how
+-- it might be built.
+local function missingExecutable()
+	return 'Melampus could not find its analysis program.\n\n'
+		.. 'The plugin folder should contain a file named '
+		.. Analyze.executableName() .. ':\n' .. tostring(pluginDir())
+		.. '\n\nCopy it there from the Melampus download and try again.'
+end
+
+--- Ask the executable which engines can run here: `--detect-engines` (card
+-- #404) prints a JSON list of { engine, available, reason }. Returns the
+-- decoded list, or nil plus a message: the executable is missing, exited
+-- non-zero, or printed something other than the list. Runs the executable
+-- once per call; the Settings dialog calls it once, when it opens.
+function Analyze.detectEngines()
+	local executable = Analyze.executablePath()
+	if not executable or not LrFileUtils.exists(executable) then
+		return nil, missingExecutable()
+	end
+	local output, cliLog = tempPath('melampus-engines.json'), cliLogPath()
+	local command = shellLine(quote(executable) .. ' --detect-engines >'
+		.. quote(output) .. ' 2>' .. quote(cliLog))
+	Log.info('running: ' .. command)
+	local code = LrTasks.execute(command)
+	if code ~= 0 then
+		return nil, 'Melampus could not ask its analysis program which engines can run here '
+			.. '(exit ' .. tostring(code) .. ').\n\nSee the logs:\n' .. Log.path() .. '\n' .. cliLog
+	end
+	local verdicts, err = Json.decode(LrFileUtils.readFile(output) or '')
+	if type(verdicts) ~= 'table' or verdicts[1] == nil then
+		return nil, 'Melampus did not understand what its analysis program said about the engines'
+			.. (err and (': ' .. tostring(err)) or '') .. '.\n\nSee the log:\n' .. output
+	end
+	return verdicts
 end
 
 --- Run the identification pipeline over a folder of previews, writing the
@@ -202,10 +244,7 @@ function Analyze.run(previewFolder, resultsPath, profile, engine)
 	local folder = pluginDir()
 	local executable = Analyze.executablePath()
 	if not executable or not LrFileUtils.exists(executable) then
-		return false, 'Melampus could not find its analysis program.\n\n'
-			.. 'The plugin folder should contain a file named '
-			.. Analyze.executableName() .. ':\n' .. tostring(folder)
-			.. '\n\nCopy it there from the Melampus download and try again.'
+		return false, missingExecutable()
 	end
 
 	local chosen, engineError = Rules.chosenEngine({ engine = engine })
