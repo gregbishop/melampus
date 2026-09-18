@@ -29,4 +29,5 @@ plugin_results.json
 stage1_*.log
 
 # Local Claude Code config — references the private argus marketplace
-.claude/
+.claude/settings.local.json
+.agents/on-purpose.local.md
