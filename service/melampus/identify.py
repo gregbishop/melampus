@@ -14,7 +14,7 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from .backend import VLMBackend
+from .backend import CommandFailed, VLMBackend
 from .config import MelampusConfig
 from .images import staged_pixels
 from .prompts import ROUTING_FOR_PROFILE, ROUTING_PROMPT, PromptLibrary
@@ -161,6 +161,9 @@ class Identifier:
             try:
                 with staged_pixels(path, edge, self.config.image.jpeg_quality) as staged:
                     result = self._identify_staged(staged, path.name, content)
+            except CommandFailed:
+                # The engine, not the file: every frame would fail the same way.
+                raise
             except Exception as exc:  # noqa: BLE001 - one bad file must not abort a batch
                 return ImageResult(
                     file=path.name, content_hash=content, status="error",

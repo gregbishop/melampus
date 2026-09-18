@@ -13,6 +13,8 @@ import contextlib
 import http.client
 import io
 import json
+import os
+import shutil
 import signal
 import socket
 import socketserver
@@ -23,6 +25,7 @@ import threading
 import time
 import types
 import urllib.error
+from pathlib import Path
 import urllib.request
 from http.server import ThreadingHTTPServer
 
@@ -2013,3 +2016,241 @@ def test_command_backend_maps_each_failure_to_a_plain_error(tmp_path, run, expec
         backend.complete(image, "prompt", 10)
     assert said in str(err.value), str(err.value)
     assert not isinstance(err.value, subprocess.SubprocessError)
+
+
+def test_command_is_selectable_by_config_and_flag_but_not_a_picker_choice():
+    """`[model] backend = "command"` and `--backend command` select the seam;
+    the plugin's picker learns it in card #423, so BACKEND_CHOICES, the
+    engines the picker offers in the owner's order, is unchanged. It is
+    local: no cloud retuning, no cost prompt, no cloud cache file."""
+    assert providers.COMMAND == "command"
+    assert providers.BACKEND_CHOICES == (*ENGINES, providers.SCRIPTED)
+    assert providers.COMMAND in providers.LOCAL_BACKENDS
+    assert not providers.is_cloud_primary(_cfg(model={"backend": "command", "command": COMMAND}))
+
+
+def test_cli_accepts_backend_command(photos, tmp_path, capsys):
+    from melampus.cli import main
+
+    code = main([str(photos), "--backend", "command", "--report-only",
+                 "--cache", str(tmp_path / "cache.jsonl")])
+
+    assert code == 0, capsys.readouterr().err
+
+
+def test_command_not_configured_is_refused_with_the_shape(no_ambient_ollama):
+    """Engine command with no `[model] command`: refused through the same
+    BackendUnavailable path every refusal takes, saying what to set."""
+    with pytest.raises(providers.BackendUnavailable) as err:
+        providers.build_primary_backend(_cfg(model={"backend": "command"}))
+    message = str(err.value)
+    assert "[model] command" in message and "{image}" in message and "{prompt}" in message
+    assert "--backend" in message
+
+
+def test_command_not_installed_is_refused_before_any_image_is_read_and_names_the_fix(
+    monkeypatch, no_ambient_keys, no_ambient_ollama
+):
+    """Card #420, Done-when 2: given the command is missing, when the backend
+    is asked for, then the refusal names the command, says it is not
+    installed or not on PATH and how to fix that in general words (the
+    specific CLI's install pointer is #421/#422), and names the backends
+    that do work here, through BackendUnavailable (exit 3 from the CLI).
+    shutil.which runs in the factory: no image is read first."""
+    asked: list[str] = []
+
+    def which(name):
+        asked.append(name)
+        return None
+
+    monkeypatch.setattr(providers.shutil, "which", which)
+    with pytest.raises(providers.BackendUnavailable) as err:
+        providers.build_primary_backend(_cfg(model={"backend": "command", "command": COMMAND}))
+    message = str(err.value)
+    assert asked == ["fake-vlm"]
+    assert "'fake-vlm' is not installed or not on PATH" in message
+    assert "install" in message.lower() and "PATH" in message
+    for works_here in ("claude", "openai", "scripted"):
+        assert works_here in message, f"{works_here!r} is not named as working here:\n{message}"
+    assert "--backend" in message
+
+
+def test_command_primary_builds_the_backend_from_the_model_settings(monkeypatch):
+    """Given engine command and a template, the factory builds a
+    CommandBackend on the template, the path shutil.which resolved its
+    first element to, and timeout_seconds."""
+    monkeypatch.setattr(providers.shutil, "which", lambda name: f"/opt/fake/bin/{name}")
+    backend = providers.build_primary_backend(
+        _cfg(model={"backend": "command", "command": COMMAND, "timeout_seconds": 30}))
+    assert isinstance(backend, CommandBackend)
+    assert backend.command == COMMAND
+    assert backend.executable == "/opt/fake/bin/fake-vlm"
+    assert backend.timeout == 30.0
+    assert backend.name == " ".join(COMMAND)
+
+
+FAKE_CLI = "fake-vlm"
+
+_FAKE_CLI_SCRIPT = '''#!{python}
+"""A stand-in for a subscription CLI: takes an image and a prompt, prints a
+reply on stdout in the shape the real models produce. Checks what it was
+given the way a real program would notice: the image must exist, the prompt
+must not be empty."""
+import argparse
+import os
+import sys
+
+ROUTING = {routing!r}
+IDENTIFICATION = {identification!r}
+
+ap = argparse.ArgumentParser()
+ap.add_argument("--image", required=True)
+ap.add_argument("--prompt", required=True)
+ap.add_argument("--quiet", action="store_true")
+args = ap.parse_args()
+if not os.path.isfile(args.image):
+    sys.exit(f"no such image: {{args.image}}")
+if not args.prompt.strip():
+    sys.exit("empty prompt")
+if not os.path.isabs(args.image):
+    sys.exit(f"image path is not absolute: {{args.image}}")
+if {exit_code} != 0:
+    print({stderr!r}, file=sys.stderr)
+    sys.exit({exit_code})
+print("Sure, here is the identification:")
+print(ROUTING if "router" in args.prompt else IDENTIFICATION)
+'''
+
+
+def _fake_cli(monkeypatch, tmp_path, *, exit_code: int = 0, stderr: str = "") -> list[str]:
+    """Write FAKE_CLI, an executable Python script, into a folder put first
+    on PATH, and return the config template that runs it by its bare name:
+    the real shutil.which, the real subprocess, no shell. `exit_code`
+    non-zero makes it fail after reading its arguments, saying `stderr`."""
+    folder = tmp_path / "bin"
+    folder.mkdir(exist_ok=True)
+    script = folder / FAKE_CLI
+    script.write_text(_FAKE_CLI_SCRIPT.format(
+        python=sys.executable, routing=ROUTING_OK, identification=ID_OK,
+        exit_code=exit_code, stderr=stderr,
+    ), encoding="utf-8")
+    script.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{folder}{os.pathsep}{os.environ.get('PATH', '')}")
+    assert shutil.which(FAKE_CLI) == str(script)
+    return [FAKE_CLI, "--image", "{image}", "--prompt", "{prompt}", "--quiet"]
+
+
+def _command_settings(tmp_path, command: list[str]) -> Path:
+    settings = tmp_path / "settings.toml"
+    settings.write_text(
+        f'[model]\nbackend = "command"\ncommand = {json.dumps(command)}\n', encoding="utf-8")
+    return settings
+
+
+posix_only = pytest.mark.skipif(sys.platform == "win32", reason="the fake CLI is a shebang script")
+
+
+@posix_only
+def test_command_backend_returns_candidates_in_the_same_shape_as_mlx_on_the_fixture(
+    monkeypatch, photos, tmp_path
+):
+    """Card #420, Done-when 1 and 3, at the real boundary: an executable
+    script on PATH stands in for the CLI, resolved by the real shutil.which
+    and run by the real subprocess, no shell; nothing real is installed or
+    called. It reads its arguments, checks the image exists and the prompt
+    is non-empty, and answers the routing prompt then the bird prompt in
+    the shape the real models produce. The factory builds the backend, the
+    Identifier stages the committed fixture, and the result carries
+    candidates in exactly the shape the same replies take through the
+    mlx-shaped pipeline: same fields, ordered by confidence."""
+    from melampus.identify import Identifier
+
+    command = _fake_cli(monkeypatch, tmp_path)
+    config = _cfg(model={"backend": "command", "command": command})
+    backend = providers.build_primary_backend(config)
+    result = Identifier(backend, config).identify(photos / PHOTO)
+    expected = Identifier(
+        ScriptedBackend([ROUTING_OK, ID_OK], name=" ".join(command)), config
+    ).identify(photos / PHOTO)
+
+    assert result.status == "ok", result.error
+    assert result.model == " ".join(command)
+    assert result.identification == expected.identification
+    assert result.taxon_routing == expected.taxon_routing
+    assert [c.common_name for c in result.identification.ranked()] == [
+        "Tricolored Heron", "Little Blue Heron"]
+    assert result.identification.top().scientific_name == "Egretta tricolor"
+
+
+def test_command_not_installed_fires_before_any_image_is_read(tmp_path, capsys, no_ambient_ollama):
+    """Card #420, Done-when 2, at the real boundary: a command nothing on
+    this machine is called, and the folder's one image is a link to
+    nowhere, so opening it would fail loudly. The CLI exits 3 on the
+    not-installed message, naming the command, and never mentions the file:
+    the check ran before any image was read."""
+    from melampus.cli import main
+
+    folder = tmp_path / "photos"
+    folder.mkdir()
+    (folder / "nowhere.jpg").symlink_to(tmp_path / "does-not-exist.jpg")
+    settings = _command_settings(tmp_path, ["melampus-no-such-command-420", "{image}", "{prompt}"])
+
+    code = main([str(folder), "--config", str(settings), "--cache", str(tmp_path / "cache.jsonl")])
+
+    err = capsys.readouterr().err
+    assert code == 3, err
+    assert "'melampus-no-such-command-420' is not installed or not on PATH" in err
+    for about_the_file in ("nowhere", "does-not-exist", "No such file", "unreadable"):
+        assert about_the_file not in err, f"the image was touched before the command check:\n{err}"
+
+
+@posix_only
+def test_cli_backend_command_exits_3_when_the_command_exits_non_zero(
+    monkeypatch, photos, tmp_path, capsys
+):
+    """Card #420, Done-when 2: given the command exits non-zero, when the
+    service analyzes, then the run stops at exit 3 on a message naming the
+    command, its exit code and what it said on stderr, like the other
+    backend failures, rather than recording the same failure on every
+    frame in turn. Nothing is cached for the frame in flight."""
+    from melampus.cli import main
+
+    command = _fake_cli(monkeypatch, tmp_path, exit_code=2, stderr="not signed in\nrun fake-vlm login")
+    out = tmp_path / "results.json"
+
+    code = main([str(photos), "--backend", "command", "--config", str(_command_settings(tmp_path, command)),
+                 "--cache", str(tmp_path / "cache.jsonl"), "--json-out", str(out)])
+
+    err = capsys.readouterr().err
+    assert code == 3, err
+    assert "fake-vlm exited 2: not signed in / run fake-vlm login" in err
+    assert not out.exists()
+    assert not (tmp_path / "cache.jsonl").exists(), "the failed frame was cached"
+
+
+@posix_only
+def test_cli_backend_command_writes_a_json_result_from_the_configured_template(
+    monkeypatch, photos, tmp_path, capsys
+):
+    """Acceptance for Done-when 1: `melampus-id FOLDER --config FILE` with
+    `[model] backend = "command"` and the fake CLI's template in the file,
+    on the committed fixture, runs the whole pipeline and writes a JSON
+    result with the candidates, attributed to the template."""
+    from melampus.cli import main
+
+    command = _fake_cli(monkeypatch, tmp_path)
+    out = tmp_path / "results.json"
+
+    code = main([str(photos), "--config", str(_command_settings(tmp_path, command)),
+                 "--cache", str(tmp_path / "cache.jsonl"), "--json-out", str(out)])
+
+    err = capsys.readouterr().err
+    assert code == 0, err
+    assert f"loading {' '.join(command)}" in err, err
+    assert "cloud default" not in err, f"command is local; nothing was retuned for a cloud:\n{err}"
+    (result,) = json.loads(out.read_text(encoding="utf-8"))
+    assert result["file"] == PHOTO
+    assert result["status"] == "ok"
+    assert result["model"] == " ".join(command)
+    assert [c["common_name"] for c in result["identification"]["candidates"]] == [
+        "Tricolored Heron", "Little Blue Heron"]
