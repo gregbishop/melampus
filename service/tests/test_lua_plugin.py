@@ -19,7 +19,7 @@ from pathlib import Path
 import pytest
 from conftest import PHOTO
 
-from test_binary import _no_python_environment, per_user_config
+from test_binary import per_user_config
 
 REPO = Path(__file__).resolve().parents[2]
 PLUGIN = REPO / "plugin" / "Melampus.lrplugin"
@@ -197,11 +197,17 @@ def test_the_engine_preference_reaches_the_executable_through_the_command_the_pl
     and run through the shell LrTasks.execute hands it to (sh against
     dist/melampus, cmd.exe against dist/melampus.exe) with no python on the
     path the executable receives it: it answers with its own refusal for an
-    engine that is not built yet (card #406), exit 3, written to the CLI log
-    the plugin points a failed run at. Nothing is sent anywhere and no
-    weights are read."""
+    Ollama that is not running (card #406; the per-user config under the fake
+    HOME points it at a closed port, so a developer's Ollama cannot answer),
+    exit 3, written to the CLI log the plugin points a failed run at. Nothing
+    is sent anywhere and no weights are read."""
+    import socket
+
     plugin_dir = _plugin_folder_holding(built_executable, tmp_path)
-    env = _no_python_environment(tmp_path)
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    env = per_user_config(tmp_path, f'[model]\nollama_url = "http://127.0.0.1:{port}"\n')
 
     command = _command_the_plugin_builds(
         plugin_dir, photos, photos / "results.json", tmp_path, engine="ollama")
@@ -212,7 +218,7 @@ def test_the_engine_preference_reaches_the_executable_through_the_command_the_pl
 
     assert proc.returncode == 3, f"exit {proc.returncode}: {proc.stderr[-2000:]}"
     tail = _cli_log_tail(tmp_path)
-    assert "The Ollama engine is not built yet" in tail, tail
+    assert f"No Ollama server is answering at http://127.0.0.1:{port}" in tail, tail
     assert "invalid choice" not in tail, f"the executable does not accept ollama:\n{tail}"
 
 
