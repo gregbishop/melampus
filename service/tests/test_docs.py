@@ -306,3 +306,21 @@ def test_ci_builds_and_smoke_tests_the_windows_executable():
     )
     assert re.search(r"uses: actions/upload-artifact@", job), "the Windows job uploads no artifact"
     assert "dist/melampus.exe" in job, "the Windows job does not upload dist/melampus.exe"
+
+
+def test_ci_pins_every_pip_install_to_an_exact_version():
+    """Security: a tool CI installs with pip outside the lockfile (uv, on the
+    Windows runner) is fetched from PyPI at build time and then produces the
+    executable that is uploaded as an artifact, so `pip install <name>` with no
+    `==` runs whatever PyPI serves that day. Every pip install in ci.yml names
+    an exact version."""
+    workflow = (REPO / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    pip_installs = re.findall(r"^\s*run:.*\bpip install\b(.*?)\s*$", workflow, re.MULTILINE)
+    assert pip_installs, "ci.yml has no pip install step"
+    unpinned = [
+        requirement
+        for arguments in pip_installs
+        for requirement in arguments.split()
+        if not requirement.startswith("-") and not re.fullmatch(r"[\w.\-\[\]]+==[\w.]+", requirement)
+    ]
+    assert not unpinned, f"CI installs from PyPI without an exact version: {unpinned}"
