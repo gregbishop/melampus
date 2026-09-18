@@ -32,16 +32,16 @@ from melampus import cli
 from melampus.cache import ResultCache
 from melampus.config import load_config
 from melampus.images import content_hash
-from melampus.occurrence import GBIFClient, Location
+from melampus.occurrence import GBIFClient
 from melampus.plugin_results import PLUGIN_FIELDS, enrich, write_plugin_results
 from melampus.schema import ImageResult
 
 from test_encounters import stub_frame
+from test_occurrence import FLORIDA, FakeClient
 
 REPO = Path(__file__).resolve().parents[2]
 CORPUS = REPO / "fixtures"
 TOOL = REPO / "tools" / "make_plugin_results.py"
-FLORIDA = Location(26.45, -82.11, radius_km=50)
 
 # What GBIF would say near Florida: the cuckoo is Asian, the rest are residents.
 COUNTS = {"Cuculus micropterus": 0, "Egretta tricolor": 3060, "Egretta caerulea": 2954}
@@ -62,16 +62,6 @@ def record(file: str, species: list[tuple[str, str, float]] | None, *,
         }
     return {"file": file, "content_hash": content or file, "status": "ok",
             "identification": ident, "model": "test", "seconds": 1.0}
-
-
-class FakeClient(GBIFClient):
-    def __init__(self) -> None:
-        super().__init__(cache=None)
-        self.calls: list[tuple[str, int | None]] = []
-
-    def count(self, scientific_name, location, month):
-        self.calls.append((scientific_name, month))
-        return COUNTS.get(scientific_name)
 
 
 def fake_scorer(scores: dict[str, float | None]):
@@ -136,7 +126,7 @@ def test_range_flag_is_one_lookup_per_encounter_in_the_month_it_was_shot(tmp_pat
     frames = burst(tmp_path)
     records = [record("a.jpg", CUCKOO), record("b.jpg", CUCKOO), record("c.jpg", CUCKOO),
                record("d.jpg", HERON)]
-    client = FakeClient()
+    client = FakeClient(COUNTS)
     outcome = enrich(frames, records, load_config(use_local=False), score=None,
                      lookup=(client, FLORIDA))
 
@@ -153,7 +143,7 @@ def test_range_flag_never_fires_for_a_non_organism_or_a_failed_lookup(tmp_path: 
                record("b.jpg", [("American Football", "", 0.95)], taxon="football"),
                record("c.jpg", [("American Football", "", 0.95)], taxon="football"),
                record("d.jpg", [("Some Bird", "Unknownus unknownus", 0.9)])]
-    client = FakeClient()
+    client = FakeClient(COUNTS)
     rows = {r["file"]: r for r in enrich(frames, records, load_config(use_local=False), score=None,
                                           lookup=(client, FLORIDA)).rows}
 
@@ -208,7 +198,7 @@ def test_write_plugin_results_is_the_old_tools_json_shape(tmp_path: Path):
 # --------------------------------------------------------------------------- #
 # integration: the CLI, real pixels, GBIF faked at the network edge
 # --------------------------------------------------------------------------- #
-def _seed(cache_path: Path, frames: list[Path], species: dict[str, list]) -> None:
+def seed(cache_path: Path, frames: list[Path], species: dict[str, list]) -> None:
     """Results for these frames as a run would have cached them."""
     cache = ResultCache(cache_path)
     for frame in frames:
@@ -254,7 +244,7 @@ def test_plugin_out_writes_every_field_the_plugin_reads(photos: Path, tmp_path: 
     fields MelampusImport.lua reads, next to the raw --json-out."""
     frame = photos / PHOTO
     config = _config_file(tmp_path)
-    _seed(tmp_path / "identifications.jsonl", [frame], {frame.name: CUCKOO})
+    seed(tmp_path / "identifications.jsonl", [frame], {frame.name: CUCKOO})
     out = tmp_path / "plugin_results.json"
 
     code = cli.main([str(photos), "--config", str(config), "--report-only",
@@ -277,7 +267,7 @@ def test_plugin_out_skips_range_checks_without_a_default_location_and_says_so(
 ):
     frame = photos / PHOTO
     config = _config_file(tmp_path, with_location=False)
-    _seed(tmp_path / "identifications.jsonl", [frame], {frame.name: CUCKOO})
+    seed(tmp_path / "identifications.jsonl", [frame], {frame.name: CUCKOO})
     out = tmp_path / "plugin_results.json"
 
     code = cli.main([str(photos), "--config", str(config), "--report-only", "--plugin-out", str(out)])
@@ -301,7 +291,7 @@ def test_plugin_out_and_the_thin_tool_write_the_same_bytes_on_the_corpus(
     for index, frame in enumerate(frames):
         species[frame.name] = [CUCKOO, HERON, BLUE, HERON][index % 4]
     config = _config_file(tmp_path)
-    _seed(tmp_path / "identifications.jsonl", frames, species)
+    seed(tmp_path / "identifications.jsonl", frames, species)
     folder = tmp_path / "photos"
     folder.mkdir()
     for frame in frames:

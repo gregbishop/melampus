@@ -18,10 +18,10 @@ class FakeClient(GBIFClient):
     def __init__(self, counts: dict[str, int | None]) -> None:
         super().__init__(cache=None)
         self.counts = counts
-        self.calls: list[str] = []
+        self.calls: list[tuple[str, int | None]] = []
 
     def count(self, scientific_name, location, month):
-        self.calls.append(scientific_name)
+        self.calls.append((scientific_name, month))
         return self.counts.get(scientific_name)
 
 
