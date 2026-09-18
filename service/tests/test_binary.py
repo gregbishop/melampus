@@ -267,7 +267,7 @@ def test_build_plan_on_windows_names_the_exe_and_leaves_mlx_out(
     """Card #400: the same build script, run on a Windows runner, must write
     dist/melampus.exe and not ask PyInstaller to collect mlx (there is no such
     package there, and PyInstaller refuses to collect a package it cannot
-    find). PyInstaller's --add-data separator is ; on Windows, : elsewhere."""
+    find)."""
     monkeypatch.setattr(sys, "platform", "win32")
     monkeypatch.setattr(platform, "machine", lambda: "AMD64")
     assert build_script.executable_path() == repo / "dist" / "melampus.exe"
@@ -275,7 +275,7 @@ def test_build_plan_on_windows_names_the_exe_and_leaves_mlx_out(
     assert "--collect-all" not in arguments
     assert not any(a.startswith("mlx") for a in arguments), arguments
     assert "--collect-submodules" not in arguments
-    assert f"{repo / 'prompts'};prompts" in arguments
+    assert ("--add-data", f"{repo / 'prompts'}:prompts") in set(zip(arguments, arguments[1:]))
 
 
 # Settings that reach the JSON — max_tokens through run_fingerprint, max_retries
