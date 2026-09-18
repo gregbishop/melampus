@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 import tomllib
 from pathlib import Path
@@ -35,19 +36,32 @@ def _repo_root() -> Path:
 
 
 def _data_root() -> Path:
-    """Where the caches and melampus.local.toml sit: what the user owns.
+    """Where melampus.local.toml and the caches live: what the user owns (card #436).
 
-    In a checkout, the checkout root, as before. Inside the executable, the
-    directory the executable is in, which outlives the process; the unpack
-    directory does not, so a cache written there is thrown away at exit and a
-    local config there is never read. Beside the executable mirrors the
-    checkout layout and needs no per-platform decision.
+    In a checkout, the checkout root, as always. Inside the executable the unpack
+    directory is temporary — a config put there is gone at the next launch and a
+    cache written there is thrown away — so user data resolves under the
+    platform's per-user data directory instead: ~/Library/Application
+    Support/Melampus on macOS, %LOCALAPPDATA%\\Melampus on Windows (the profile's
+    AppData\\Local when the variable is unset), $XDG_DATA_HOME/Melampus or
+    ~/.local/share/Melampus elsewhere. An explicit --config or --cache still wins.
     """
-    return Path(sys.executable).resolve().parent if _bundle() else _CHECKOUT
+    if _bundle() is None:
+        return _CHECKOUT
+    if sys.platform == "darwin":
+        base = Path.home() / "Library" / "Application Support"
+    elif sys.platform == "win32":
+        base = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
+    else:
+        base = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share")
+    return base / "Melampus"
 
 
 def _cache(name: str) -> Path:
-    return _data_root() / ".melampus_cache" / name
+    """One cache file: under git-ignored `.melampus_cache/` in a checkout, under
+    a plain `cache/` inside the per-user directory, where a dotfile would only
+    hide it."""
+    return _data_root() / (".melampus_cache" if _bundle() is None else "cache") / name
 
 
 class _Base(BaseModel):

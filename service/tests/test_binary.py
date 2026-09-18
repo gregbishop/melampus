@@ -36,6 +36,7 @@ from pathlib import Path
 import pytest
 from conftest import PHOTO
 
+from melampus import config
 from melampus.config import load_config
 from melampus.providers import on_apple_silicon
 
@@ -85,8 +86,6 @@ def test_repo_root_is_the_bundle_when_frozen(monkeypatch: pytest.MonkeyPatch, tm
     not under service/ in a checkout; `_repo_root()` is that directory when
     frozen and the checkout otherwise. What is resolved against it is the
     business of the tests on load_config's defaults."""
-    from melampus import config
-
     monkeypatch.setattr(sys, "_MEIPASS", str(tmp_path), raising=False)
     assert config._repo_root() == tmp_path
     monkeypatch.delattr(sys, "_MEIPASS")
@@ -238,24 +237,79 @@ def test_frozen_prompts_come_from_the_bundle(monkeypatch: pytest.MonkeyPatch, tm
     assert load_config(use_local=False).run.prompts_dir == bundle / "prompts"
 
 
-def test_frozen_user_data_sits_beside_the_executable_not_in_the_bundle(
+def _per_user_data_dir(home: Path) -> Path:
+    """Where config._data_root() lands for the executable under this HOME, in a
+    bare environment (no LOCALAPPDATA, no XDG_DATA_HOME)."""
+    if sys.platform == "darwin":
+        return home / "Library" / "Application Support" / "Melampus"
+    if sys.platform == "win32":
+        return home / "AppData" / "Local" / "Melampus"
+    return home / ".local" / "share" / "Melampus"
+
+
+def test_frozen_config_and_caches_live_in_the_per_user_data_directory(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, repo: Path
+):
+    """Card #436, Done-when 3. The unpack directory is temporary: a config put
+    there is lost at the next launch and a cache written there is thrown away.
+    Inside the executable melampus.local.toml and the caches resolve under the
+    per-user data directory instead: ~/Library/Application Support/Melampus on
+    macOS, %LOCALAPPDATA%\\Melampus on Windows (falling back to the profile's
+    AppData\\Local when the variable is unset, as it is in a bare environment),
+    $XDG_DATA_HOME/Melampus or ~/.local/share/Melampus elsewhere. In a checkout
+    nothing moves: the repo root, as before."""
+    home = tmp_path / "home"
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.delenv("LOCALAPPDATA", raising=False)
+    monkeypatch.delenv("XDG_DATA_HOME", raising=False)
+
+    monkeypatch.setattr(sys, "_MEIPASS", str(tmp_path / "unpack"), raising=False)
+    monkeypatch.setattr(sys, "platform", "darwin")
+    assert config._data_root() == home / "Library" / "Application Support" / "Melampus"
+    monkeypatch.setattr(sys, "platform", "win32")
+    assert config._data_root() == home / "AppData" / "Local" / "Melampus"
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local"))
+    assert config._data_root() == tmp_path / "local" / "Melampus"
+    monkeypatch.setattr(sys, "platform", "linux")
+    assert config._data_root() == home / ".local" / "share" / "Melampus"
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
+    assert config._data_root() == tmp_path / "xdg" / "Melampus"
+    for platform_name in ("darwin", "win32", "linux"):
+        monkeypatch.setattr(sys, "platform", platform_name)
+        assert not config._data_root().is_relative_to(tmp_path / "unpack")
+        assert config._cache("x") == config._data_root() / "cache" / "x"
+
+    monkeypatch.delattr(sys, "_MEIPASS")
+    assert config._data_root() == repo
+    assert config._cache("x") == repo / ".melampus_cache" / "x"
+
+
+def test_frozen_user_data_lives_in_the_per_user_directory_not_in_the_bundle(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ):
-    """The unpack directory is deleted when the process exits, so a cache
-    written there is thrown away and a melampus.local.toml there is never read.
-    User data lives beside the executable, as it lives beside the code in a
-    checkout."""
+    """The frozen resolution above is what load_config's defaults use: the
+    unpack directory is deleted when the process exits, so a cache written
+    there is thrown away and a melampus.local.toml there is never read. Inside
+    the executable the caches and the local config resolve under this
+    platform's per-user data directory; prompts ship in the bundle and stay
+    there. Only user data moves."""
     tmp_path = tmp_path.resolve()
+    home = tmp_path / "home"
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.delenv("LOCALAPPDATA", raising=False)
+    monkeypatch.delenv("XDG_DATA_HOME", raising=False)
+    data = _per_user_data_dir(home)
+    data.mkdir(parents=True)
+    (data / "melampus.local.toml").write_text('[run]\nprofile = "sport"\n', encoding="utf-8")
     bundle, executable = tmp_path / "unpack", tmp_path / "dist" / "melampus"
-    executable.parent.mkdir()
-    (executable.parent / "melampus.local.toml").write_text('[run]\nprofile = "sport"\n', encoding="utf-8")
     _frozen(monkeypatch, bundle, executable)
-    config = load_config()
-    cache = executable.parent / ".melampus_cache"
-    assert config.run.cache_path == cache / "identifications.jsonl"
-    assert config.occurrence.cache_path == cache / "occurrence.json"
-    assert config.escalation.cache_path == cache / "escalations.jsonl"
-    assert config.run.profile == "sport", "melampus.local.toml beside the executable was not read"
+    settings = load_config()
+    cache = data / "cache"
+    assert settings.run.cache_path == cache / "identifications.jsonl"
+    assert settings.occurrence.cache_path == cache / "occurrence.json"
+    assert settings.escalation.cache_path == cache / "escalations.jsonl"
+    assert settings.run.prompts_dir == bundle / "prompts"
+    assert settings.run.profile == "sport", "melampus.local.toml under the per-user directory was not read"
 
 
 def test_build_plan_on_windows_names_the_exe_and_leaves_mlx_out(

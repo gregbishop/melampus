@@ -336,10 +336,12 @@ Try it without any Python on the path — the scripted backend needs no weights:
 env -i PATH=/nonexistent HOME="$HOME" dist/melampus fixtures/ --backend scripted --limit 1
 ```
 
-The executable keeps its results and reads its local config beside itself:
-`dist/.melampus_cache/` and `dist/melampus.local.toml`, the same layout as the
-checkout, so a run's identifications survive the unpack directory being
-deleted at exit. `--cache` and `--config` override both, as they do for the CLI.
+The executable keeps its results and reads its local config under the per-user
+data directory, not the unpack directory that is deleted at exit:
+`~/Library/Application Support/Melampus/` on macOS, `%LOCALAPPDATA%\Melampus\`
+on Windows, `$XDG_DATA_HOME/Melampus/` elsewhere, with the caches in its
+`cache/` subfolder (details in [docs/config.md](docs/config.md)). `--cache` and
+`--config` override both, as they do for the CLI.
 
 ### Building on Windows
 

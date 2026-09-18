@@ -12,6 +12,16 @@ service in Stage 3 will accept per-request configuration.
 melampus-id fixtures/ --config my-settings.toml
 ```
 
+Before any `--config` file, `melampus.local.toml` is read if it exists — the
+git-ignored place for keys and your home location. In a checkout it sits at the
+repo root, next to the `.melampus_cache/` folder the caches default to. The
+shipped executable unpacks itself into a temporary directory at every launch, so
+there both resolve under the per-user data directory instead (card #436):
+`~/Library/Application Support/Melampus/` on macOS, `%LOCALAPPDATA%\Melampus\`
+on Windows, `$XDG_DATA_HOME/Melampus/` (or `~/.local/share/Melampus/`) elsewhere,
+with the caches in its `cache/` subfolder. `--config` and `--cache` still name any
+path explicitly. The table below writes the checkout defaults as `<data>/…`.
+
 ```toml
 # my-settings.toml — only what differs from the defaults
 [model]
@@ -21,12 +31,10 @@ repo = "mlx-community/Qwen3-VL-32B-Instruct-8bit"
 max_edge = 1280
 ```
 
-`<repo>` in the defaults below is the checkout root. Inside the shipped
-executable (readme.md § Building the executable) it is two places: `prompts/`
-ships in the bundle and is read from the unpack directory, while the caches
-and `melampus.local.toml` live beside the executable — `dist/.melampus_cache/`
-and `dist/melampus.local.toml` for a fresh build — because the unpack directory
-is deleted at exit.
+`<repo>` in the defaults below is the checkout root; inside the shipped
+executable (readme.md § Building the executable) it is the unpack directory,
+where `prompts/` ships in the bundle. `<data>` is the checkout root in a
+checkout and the per-user data directory above inside the executable.
 
 ---
 
@@ -214,7 +222,7 @@ the result.
 | `default_longitude` | *(none)* | Pairs with `default_latitude`; both must be set to take effect. |
 | `default_location_name` | *(none)* | Human-readable label for reports; not used in queries. |
 | `radius_km` | `50.0` | Comfortably covers a refuge and its surroundings without reaching into a different faunal region. |
-| `cache_path` | `<repo>/.melampus_cache/occurrence.json` | Lookups are cached keyed on species, rounded coordinates and month (§4.3 — most shots cluster in a handful of places, so hit rates are high). No TTL: occurrence data moves slowly; delete the file to refresh. |
+| `cache_path` | `<data>/.melampus_cache/occurrence.json` | Lookups are cached keyed on species, rounded coordinates and month (§4.3 — most shots cluster in a handful of places, so hit rates are high). No TTL: occurrence data moves slowly; delete the file to refresh. |
 | `notable_threshold` | `25` | Below this many regional records a species is present but scarce: demote gently and mark notable rather than treating it as absent. |
 | `absent_penalty` | `0.15` | Multiplier on confidence for zero-record candidates. Ordinal, not a probability. |
 | `notable_penalty` | `0.6` | Multiplier for scarce candidates — the pile worth looking at. |
@@ -227,7 +235,7 @@ the result.
 |---|---|---|
 | `profile` | `"wildlife"` | Which routing prompt runs Stage A: `wildlife` asks what organism this is, `sport` what activity. Separate profiles keep a footballer from being routed to `mammal` and asked for a species, and keep each prompt under the runtime's token ceiling. |
 | `prompts_dir` | `<repo>/prompts` | Per-taxon prompt templates as editable files (CLAUDE.md §4.2). Point this elsewhere to A/B a prompt set without touching the installed package. |
-| `cache_path` | `<repo>/.melampus_cache/identifications.jsonl` | Append-only JSONL, fsynced after every image. |
+| `cache_path` | `<data>/.melampus_cache/identifications.jsonl` | Append-only JSONL, fsynced after every image. |
 | `max_retries` | `1` | One corrective retry on schema-validation failure, exactly as §4.2 specifies. Then the image is marked `unprocessed` rather than having a guess written to it. More retries mostly burn time on images the model cannot parse anyway. |
 
 ### Caching and resume
@@ -274,7 +282,7 @@ keyword travels with them.
 | `max_images` | `200` | Hard ceiling per run, bounded 0–5000 by the schema. A mistyped flag should not become an unexpected invoice. When the cap bites, the most uncertain frames go first and the rest are counted and reported — never silently dropped. |
 | `input_usd_per_mtok` | `5.0` | Estimate only. Defaults are Claude Opus 5's rate. |
 | `output_usd_per_mtok` | `25.0` | **Change both when you change provider or model**, or the printed estimate will be confidently wrong. The CLI prints the rates alongside the dollars so the assumption is visible. |
-| `cache_path` | `<repo>/.melampus_cache/escalations.jsonl` | Cloud answers live in their own file. Merged into the local cache they would carry a foreign run fingerprint, and the next local pass would decide they were stale and quietly overwrite work you paid for. |
+| `cache_path` | `<data>/.melampus_cache/escalations.jsonl` | Cloud answers live in their own file. Merged into the local cache they would carry a foreign run fingerprint, and the next local pass would decide they were stale and quietly overwrite work you paid for. |
 
 ### Keys
 
