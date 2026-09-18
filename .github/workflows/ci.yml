@@ -30,10 +30,14 @@ jobs:
       # --extra build installs the pinned PyInstaller; --build-binary makes the
       # suite build dist/melampus first and smoke-test it (card #399, Done-when
       # 3: the build and the smoke test are part of the test command). The
-      # build is the slow step, a few minutes on the runner.
+      # build is the slow step, a few minutes on the runner. --extra cloud and
+      # --extra openai put the anthropic and openai SDKs in the build venv, so
+      # the executable carries them (card #434): PyInstaller bundles what the
+      # venv has, and without them --backend anthropic prints an install hint
+      # that means nothing inside a binary.
       - name: Run service and plugin tests, building the executable first
         working-directory: service
-        run: uv sync --locked --extra dev --extra build && uv run pytest -q --build-binary
+        run: uv sync --locked --extra dev --extra build --extra cloud --extra openai && uv run pytest -q --build-binary
 
   build-windows:
     # Card #400: the Windows executable. MLX does not exist here, so the build
@@ -70,10 +74,12 @@ jobs:
       # every test that ran against dist/melampus.exe, and why each one that
       # skipped did (the one that needs MLX; the two whose mock housekeeping
       # runs through sh), rather than a row of dots.
+      # The same extras as the macOS job: the cloud backends are the only
+      # engines this executable has, so the SDKs must be in it (card #434).
       - name: Build the executable and run its smoke tests and the plugin tests
         working-directory: service
         shell: bash
-        run: uv sync --locked --extra dev --extra build && uv run pytest -v -rs tests/test_binary.py tests/test_lua_plugin.py --build-binary
+        run: uv sync --locked --extra dev --extra build --extra cloud --extra openai && uv run pytest -v -rs tests/test_binary.py tests/test_lua_plugin.py --build-binary
 
       - name: Upload melampus.exe
         uses: actions/upload-artifact@v4
