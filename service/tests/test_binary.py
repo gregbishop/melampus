@@ -26,26 +26,14 @@ import types
 from pathlib import Path
 
 import pytest
-from PIL import Image
+from conftest import PHOTO
 
 from melampus.config import load_config
 
 CONFTEST = Path(__file__).with_name("conftest.py")
-# Synthetic, like test_pipeline.py's: the scripted backend answers nothing
-# whatever the frame shows, and the corpus is gitignored, so a corpus frame
-# would only make these tests skip on the CI runner.
-PHOTO = "flat-green.jpg"
 # What `.venv/bin/melampus-id` runs, spelled so it works from any interpreter
 # that has the package installed (CI has no root .venv).
 VENV_CLI = [sys.executable, "-m", "melampus.cli"]
-
-
-@pytest.fixture()
-def photos(tmp_path: Path) -> Path:
-    folder = tmp_path / "photos"
-    folder.mkdir()
-    Image.new("RGB", (2400, 1600), (90, 120, 70)).save(folder / PHOTO, exif=b"")
-    return folder
 
 
 def _no_python_environment(tmp_path: Path) -> dict[str, str]:
