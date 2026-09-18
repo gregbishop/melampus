@@ -47,8 +47,10 @@ jobs:
 
       # Not astral-sh/setup-uv: this repository allows only GitHub-owned
       # actions. The runner's own python installs uv, as brew does on macOS.
+      # Exact-pinned: this tool comes from PyPI outside the lockfile and builds
+      # the executable that is uploaded, so it is not whatever PyPI serves today.
       - name: Install uv
-        run: pip install uv
+        run: pip install uv==0.12.17
 
       - name: Build the executable and run its smoke tests
         working-directory: service
