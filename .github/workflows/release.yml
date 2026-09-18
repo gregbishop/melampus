@@ -50,7 +50,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install uv
-        run: pip install uv
+        run: pip install uv==0.12.17
 
       # Exactly ci.yml's Lua step: Lua 5.1, Lightroom's own, so the plugin
       # tests run here as they do there, not skip.
