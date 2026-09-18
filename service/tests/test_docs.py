@@ -44,7 +44,7 @@ def test_every_config_field_is_documented():
     )
 
 
-def test_agents_md_names_the_install_command_for_the_recorded_plugins():
+def test_agents_md_names_the_install_command_and_gitignore_does_not_restate_it():
     """The install outputs (.claude/settings.json, .agents/skills, .codex/agents)
     are machine-local and untracked; a fresh clone must be told how to regenerate
     them, with the same plugins .agents/on-purpose.json records. AGENTS.md is the
