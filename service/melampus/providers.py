@@ -10,6 +10,7 @@ live here and both callers import them.
 from __future__ import annotations
 
 import platform
+import shutil
 import sys
 from dataclasses import dataclass
 from urllib.parse import urlsplit
@@ -65,8 +66,14 @@ OLLAMA_PROBE_SECONDS = 1.0
 #: Where to get Ollama when nothing answers at OLLAMA_URL.
 OLLAMA_INSTALL = "https://ollama.com/download"
 
-#: The backends that run on this machine and bill nobody.
-LOCAL_BACKENDS = ("mlx", OLLAMA, SCRIPTED)
+#: An installed command-line program driven per frame (card #420): a
+#: subscription CLI is vision with no API key. Selected by `[model] backend`
+#: or --backend, not offered by the plugin's picker until card #423 teaches
+#: detection about it, so it is not in BACKEND_CHOICES.
+COMMAND = "command"
+
+#: The backends that run on this machine and bill nobody per call.
+LOCAL_BACKENDS = ("mlx", OLLAMA, COMMAND, SCRIPTED)
 
 
 class BackendUnavailable(RuntimeError):
@@ -274,6 +281,32 @@ def build_primary_backend(config: MelampusConfig) -> VLMBackend:
         return OllamaBackend(
             settings.ollama_model, ollama_url(settings.ollama_url),
             temperature=settings.temperature, timeout=settings.timeout_seconds,
+        )
+
+    if kind == COMMAND:
+        # Resolved here, before any image is read: a program that is not
+        # there fails once, up front, with the fix, rather than once per
+        # frame mid-run. The resolved path is what runs (backend.py says why).
+        if not settings.command:
+            raise _refusal(
+                "The command backend needs [model] command: the program to run, as "
+                "a list of arguments with {image} and {prompt} placeholders "
+                "(docs/config.md § [model]).",
+                works_here=_works_here(detect_engines(settings.ollama_url)),
+            )
+        program = settings.command[0]
+        executable = shutil.which(program)
+        if executable is None:
+            raise _refusal(
+                f"The command '{program}' is not installed or not on PATH. Install "
+                "it, make sure the shell melampus runs from can find it, or name "
+                "its full path in [model] command.",
+                works_here=_works_here(detect_engines(settings.ollama_url)),
+            )
+        from .backend import CommandBackend
+
+        return CommandBackend(
+            settings.command, executable=executable, timeout=settings.timeout_seconds
         )
 
     if kind == SCRIPTED:
