@@ -49,3 +49,14 @@ def test_agents_md_names_the_install_command_for_the_recorded_plugins():
         f"AGENTS.md must tell a fresh clone to run `{command}` "
         "(the plugins recorded in .agents/on-purpose.json)"
     )
+
+
+def test_docs_name_only_the_lowercase_files():
+    """The real files are readme.md and docs/config.md. A doc that still says
+    README.md or docs/CONFIG.md, or claims another doc does, is stale."""
+    stale = []
+    for doc in [ROOT / "readme.md", AGENTS_MD, *sorted((ROOT / "docs").glob("*.md"))]:
+        for lineno, line in enumerate(doc.read_text(encoding="utf-8").splitlines(), 1):
+            if "README.md" in line or "CONFIG.md" in line:
+                stale.append(f"{doc.relative_to(ROOT)}:{lineno}: {line.strip()}")
+    assert not stale, f"docs name uppercase files that do not exist: {stale}"

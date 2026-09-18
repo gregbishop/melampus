@@ -66,9 +66,7 @@ also, as of 2026-08-19, the only CI in the estate that actually runs.
 
 ## conventions
 
-- Docs are lowercase: `readme.md`, `docs/config.md`. Some older references
-  in the build spec say `README.md` / `docs/CONFIG.md` — the lowercase names
-  are the real files.
+- Docs are lowercase: `readme.md`, `docs/config.md`.
 - `_old/` is archived. Don't collect it, don't import from it, don't tidy it.
 - Fixtures (`fixtures/`, `fixtures_full/`) are test data — large and
   intentional.
