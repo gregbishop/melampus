@@ -23,7 +23,7 @@ import json
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import Callable, Iterable, TextIO
 
 from .config import MelampusConfig
 from .encounters import cluster
@@ -46,6 +46,29 @@ class Enrichment:
     rows: list[dict] = field(default_factory=list)
     flagged_encounters: int = 0
     quality_scores: dict[str, float] = field(default_factory=dict)
+
+    def summary(self) -> str:
+        lines = [
+            f"  records          : {len(self.rows)}",
+            f"  with agreement   : {sum(1 for r in self.rows if 'burst_agreement' in r)}",
+            f"  range-flagged    : {self.flagged_encounters} encounters",
+        ]
+        if self.quality_scores:
+            vals = sorted(self.quality_scores.values())
+            lines.append(f"  quality scored   : {len(vals)} (median {vals[len(vals) // 2]:.0f})")
+        return "\n".join(lines)
+
+
+def progress_printer(stream: TextIO) -> Callable[[int, int], None]:
+    """An `on_progress` for `enrich` that narrates quality scoring to `stream`."""
+
+    def progress(done: int, total: int) -> None:
+        if done == 1:
+            print(f"scoring quality for {total} frames ...", file=stream)
+        if done % 250 == 0:
+            print(f"  {done}/{total}", file=stream)
+
+    return progress
 
 
 def _norm(name: str | None) -> str:

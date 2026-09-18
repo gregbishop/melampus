@@ -326,3 +326,14 @@ def test_plugin_out_is_byte_identical_to_the_old_tool_on_the_corpus(
     assert len(rows) == len(frames)
     assert sum(r["range_flag"] for r in rows) == 2, "the two cuckoo frames are flagged"
     assert all(set(PLUGIN_FIELDS) <= set(r) for r in rows)
+
+
+def test_the_tool_is_a_thin_caller_of_the_service_module():
+    """Done-when 4: tools/make_plugin_results.py no longer carries its own
+    enrichment; it parses arguments and calls melampus.plugin_results. The
+    Lightroom plugin still invokes it until card #401 rewires the plugin, so
+    it stays, and stays thin."""
+    source = OLD_TOOL.read_text(encoding="utf-8")
+    assert "from melampus.plugin_results import" in source
+    for own_logic in ("most_common", "quality_rank", "burst_agreement"):
+        assert own_logic not in source, f"the tool still computes {own_logic!r} itself"
