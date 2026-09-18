@@ -453,3 +453,16 @@ def test_release_workflow_builds_as_ci_does_and_attaches_a_zip_per_platform():
         and not re.search(r"uses: \S+@[0-9a-f]{40}\s+# v\d", line)
     ]
     assert not unpinned, f"release.yml actions not pinned to a SHA with a version comment: {unpinned}"
+
+
+def test_readme_lightroom_section_names_the_release_zips_and_keeps_the_from_source_path():
+    """Card #402: a user installs from a release download, one zip per
+    platform, through Plug-in Manager; readme.md's Lightroom section must name
+    both zips, and keep the copy-from-dist step for a build from source."""
+    readme = README.read_text(encoding="utf-8")
+    section = re.search(r"^## Reviewing in Lightroom\n(.*?)^## ", readme, re.MULTILINE | re.DOTALL)
+    assert section, "readme.md has no ## Reviewing in Lightroom section"
+    missing = [z for z in RELEASE_ZIPS if z not in section.group(1)]
+    assert not missing, f"readme.md's Lightroom section does not name {missing}"
+    assert "cp dist/melampus plugin/Melampus.lrplugin/" in section.group(1), (
+        "readme.md's Lightroom section lost the from-source install")

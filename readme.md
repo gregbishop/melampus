@@ -377,9 +377,23 @@ in Lightroom's own grid and loupe. No Python environment is involved. Dry run is
 on by default and nothing the user set is ever overwritten. Install steps and the
 SDK verification are in [docs/plugin.md](docs/plugin.md).
 
+**From a release.** Each tagged release on the
+[Releases page](https://github.com/gregbishop/melampus/releases) carries one
+zip per platform, `Melampus-macOS.zip` and `Melampus-Windows.zip`, holding the
+plugin folder with the executable already inside it. Unpack it (double-click,
+or `unzip Melampus-macOS.zip`), keep the `Melampus.lrplugin` folder somewhere
+it can stay, then in Lightroom: **File → Plug-in Manager → Add** and select
+that folder. It should report *Installed and running*; **Library → Plug-in
+Extras → Melampus: Settings…** opens the settings. The release workflow
+(`.github/workflows/release.yml`) builds both zips with the same commands CI
+runs, through `tools/package_plugin.py`, on every pushed `v*` tag. The
+executable is not yet signed or notarized (card #438).
+
+**From source.**
+
 ```bash
 # 1. the executable goes in the plugin folder (built as in § Building the
-#    executable, or taken from a release)
+#    executable)
 cp dist/melampus plugin/Melampus.lrplugin/     # dist\melampus.exe on Windows
 # 2. Lightroom -> File -> Plug-in Manager -> Add -> plugin/Melampus.lrplugin
 ```
