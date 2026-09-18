@@ -416,3 +416,17 @@ def test_readme_lightroom_section_names_the_release_zips_and_keeps_the_from_sour
     assert not missing, f"readme.md's Lightroom section does not name {missing}"
     assert "cp dist/melampus plugin/Melampus.lrplugin/" in section.group(1), (
         "readme.md's Lightroom section lost the from-source install")
+
+
+def test_docs_name_engine_detection_where_the_default_and_the_refusal_are_described():
+    """Card #404: the backend's default is now the first engine that can run
+    here, and `--detect-engines` is how a user (and card #405's dialog) sees
+    the verdicts. docs/config.md's `backend` row and readme.md's Windows
+    section describe the default and the refusal, so both must name the flag,
+    and neither may still promise that detection is yet to come."""
+    config_doc = CONFIG_DOC.read_text(encoding="utf-8")
+    readme = README.read_text(encoding="utf-8")
+    backend_row = next(line for line in config_doc.splitlines() if line.startswith("| `backend` |"))
+    assert "`--detect-engines`" in backend_row, "docs/config.md's backend row does not name --detect-engines"
+    assert "turns that into" not in backend_row, "docs/config.md still says detection is yet to come"
+    assert "`--detect-engines`" in readme, "readme.md does not name --detect-engines"

@@ -99,10 +99,14 @@ environment. Then everything works as on the Mac, plugin included:
 .venv\Scripts\melampus-id.exe fixtures\ --limit 3
 ```
 
-One-off runs can skip the config file: `--backend claude`. The Lightroom
-plugin detects the platform itself; its `engine` preference (docs/plugin.md
-§ The engine) passes the same name as `--backend`, and left unset it defers to
-the backend and key above.
+One-off runs can skip the config file: `--backend claude`. With no `--backend`
+and no `[model] backend`, the CLI takes the first engine that can run on this
+machine, in the order mlx, ollama, openai, claude (docs/config.md § `[model]`);
+`--detect-engines` (`melampus-id --detect-engines`, no folder needed) prints
+those verdicts as JSON, each with the reason an engine cannot run here or what
+it needs. The Lightroom plugin's `engine` preference (docs/plugin.md § The
+engine) passes the same name as `--backend`, and left unset it defers to the
+backend and key above, else to that detection.
 
 ### Available models
 
