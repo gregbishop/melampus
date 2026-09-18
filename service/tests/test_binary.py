@@ -24,6 +24,8 @@ from pathlib import Path
 
 import pytest
 
+from melampus.config import load_config
+
 # The frame test_quality.py leans on; any corpus JPEG would do.
 FIXTURE = Path("fixtures") / "0A1A2829.jpg"
 # What `.venv/bin/melampus-id` runs, spelled so it works from any interpreter
@@ -74,6 +76,40 @@ def test_repo_root_is_the_bundle_when_frozen(monkeypatch: pytest.MonkeyPatch, tm
     assert config._repo_root() == tmp_path
     monkeypatch.delattr(sys, "_MEIPASS")
     assert config._repo_root() == repo
+
+
+def _frozen(monkeypatch: pytest.MonkeyPatch, bundle: Path, executable: Path) -> None:
+    """What PyInstaller's bootloader sets before the package runs: the unpack
+    directory, and the executable itself as sys.executable."""
+    monkeypatch.setattr(sys, "_MEIPASS", str(bundle), raising=False)
+    monkeypatch.setattr(sys, "executable", str(executable))
+
+
+def test_frozen_prompts_come_from_the_bundle(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    """The build script puts prompts/ at the top level of the unpack directory."""
+    bundle, executable = tmp_path / "unpack", tmp_path / "dist" / "melampus"
+    _frozen(monkeypatch, bundle, executable)
+    assert load_config(use_local=False).run.prompts_dir == bundle / "prompts"
+
+
+def test_frozen_user_data_sits_beside_the_executable_not_in_the_bundle(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    """The unpack directory is deleted when the process exits, so a cache
+    written there is thrown away and a melampus.local.toml there is never read.
+    User data lives beside the executable, as it lives beside the code in a
+    checkout."""
+    tmp_path = tmp_path.resolve()
+    bundle, executable = tmp_path / "unpack", tmp_path / "dist" / "melampus"
+    executable.parent.mkdir()
+    (executable.parent / "melampus.local.toml").write_text('[run]\nprofile = "sport"\n', encoding="utf-8")
+    _frozen(monkeypatch, bundle, executable)
+    config = load_config()
+    cache = executable.parent / ".melampus_cache"
+    assert config.run.cache_path == cache / "identifications.jsonl"
+    assert config.occurrence.cache_path == cache / "occurrence.json"
+    assert config.escalation.cache_path == cache / "escalations.jsonl"
+    assert config.run.profile == "sport", "melampus.local.toml beside the executable was not read"
 
 
 def test_executable_carries_the_service_and_mlx(built_executable: Path, photos: Path, tmp_path: Path):
