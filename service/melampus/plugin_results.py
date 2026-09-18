@@ -29,6 +29,7 @@ from .config import MelampusConfig
 from .encounters import cluster
 from .occurrence import GBIFClient, Location, applies_to
 from .quality import QualityResult, analyze_quality
+from .report import taxon_key
 
 #: What MelampusImport.lua reads beyond the raw result.
 PLUGIN_FIELDS = ("quality", "quality_rank", "burst_agreement", "range_flag",
@@ -69,10 +70,6 @@ def progress_printer(stream: TextIO) -> Callable[[int, int], None]:
             print(f"  {done}/{total}", file=stream)
 
     return progress
-
-
-def _norm(name: str | None) -> str:
-    return "".join(c for c in (name or "").lower() if c.isalnum())
 
 
 def _top(rec: dict) -> dict | None:
@@ -125,7 +122,7 @@ def enrich(
             ident = rec.get("identification") or {}
             top = _top(rec)
             if not ident.get("abstain") and top is not None:
-                names.append(_norm(top.get("common_name")))
+                names.append(taxon_key(top.get("common_name")))
 
         agreement = None
         if names:

@@ -15,8 +15,8 @@ from pathlib import Path
 from .schema import ImageResult
 
 
-def _norm(name: str | None) -> str:
-    """Comparison key for a taxon name.
+def taxon_key(name: str | None) -> str:
+    """Comparison key for a taxon name, shared with plugin_results.enrich.
 
     Hyphenation and spacing of English bird names is genuinely inconsistent between
     authorities — "Tricolored Heron" / "Tri-colored Heron", "Night-Heron" /
@@ -124,7 +124,7 @@ def score(results: list[ImageResult], labels_path: Path) -> tuple[Scores, str]:
             continue
         s.n_labelled += 1
         expected = label.get("expected_outcome", "identify")
-        truth = _norm(label.get("common_name"))
+        truth = taxon_key(label.get("common_name"))
         truth_label = _display(label.get("common_name"))
         ident = record.identification
 
@@ -133,9 +133,9 @@ def score(results: list[ImageResult], labels_path: Path) -> tuple[Scores, str]:
             continue
 
         ranked = ident.ranked()
-        predicted_names = [_norm(c.common_name) for c in ranked]
-        predicted_sci = [_norm(c.scientific_name) for c in ranked]
-        ref_sci = _norm(label.get("scientific_name"))
+        predicted_names = [taxon_key(c.common_name) for c in ranked]
+        predicted_sci = [taxon_key(c.scientific_name) for c in ranked]
+        ref_sci = taxon_key(label.get("scientific_name"))
         abstained = ident.abstain or not ranked
         if abstained:
             s.abstained += 1
