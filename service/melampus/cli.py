@@ -208,11 +208,12 @@ def main(argv: list[str] | None = None) -> int:
                          "alone, over the defaults, is the whole configuration")
     ap.add_argument("--model", default=None, help="override model repo")
     ap.add_argument("--backend", choices=BACKEND_CHOICES, default=None,
-                    help="which engine answers: mlx locally, ollama (not built "
-                         "yet, card #406), openai or claude for machines with no "
-                         "local runtime, or scripted (a fake that answers nothing; "
-                         "for smoke tests without weights). Default: the first "
-                         "that can run here, per --detect-engines")
+                    help="which engine answers: mlx locally on Apple Silicon, "
+                         "ollama locally through an Ollama server, openai or "
+                         "claude for machines with no local runtime, or scripted "
+                         "(a fake that answers nothing; for smoke tests without "
+                         "weights). Default: the first that can run here, per "
+                         "--detect-engines")
     ap.add_argument("--detect-engines", action="store_true",
                     help="print, as JSON, which engines can run on this machine "
                          "and why or why not, then exit; needs no folder")
@@ -259,7 +260,10 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     if args.detect_engines:
-        print(json.dumps([asdict(v) for v in detect_engines()], indent=2))
+        # The address probed is the configured one, so the verdict cannot
+        # disagree with what --backend ollama would talk to.
+        ollama_at = load_config(args.config).model.ollama_url
+        print(json.dumps([asdict(v) for v in detect_engines(ollama_at)], indent=2))
         return 0
     if args.folder is None:
         ap.error("the following arguments are required: folder")
@@ -289,7 +293,7 @@ def main(argv: list[str] | None = None) -> int:
         # Nothing named an engine: neither --backend nor [model] backend. The
         # first that can run here answers (card #404), before anything reads
         # the choice: the cloud retuning below, the cache file, the refusals.
-        config.model.backend = default_engine()
+        config.model.backend = default_engine(config.model.ollama_url)
         print(
             f"engine: {config.model.backend} (the first that can run here; "
             "--backend or [model] backend chooses, --detect-engines explains)",
@@ -368,7 +372,7 @@ def main(argv: list[str] | None = None) -> int:
                 print("  cancelled; nothing was sent", file=sys.stderr)
                 return 0
         else:
-            print(f"loading {config.model.repo} ...", file=sys.stderr)
+            print(f"loading {backend.name} ...", file=sys.stderr)
             backend.warmup()
 
         def progress(result: ImageResult, stats: BatchStats) -> None:
