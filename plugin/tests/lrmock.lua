@@ -63,6 +63,9 @@ function M.reset(options)
 		-- Paths LrFileUtils.exists reports as present without touching the
 		-- disk: the executable beside the plugin, on either platform.
 		existing = options.existing or {},
+		-- Plays the executable for LrTasks.execute: given the command, it
+		-- writes what the real one would and returns its exit code.
+		onExecute = options.onExecute,
 		-- How many previews the plugin asked for in this run.
 		previewsRequested = 0,
 	}
@@ -370,6 +373,9 @@ namespaces.LrTasks = {
 	execute = function(cmd)
 		M.state.executed = M.state.executed or {}
 		M.state.executed[#M.state.executed + 1] = cmd
+		-- state.onExecute plays the executable: given the command, it writes
+		-- what the real one would and returns its exit code.
+		if M.state.onExecute then return M.state.onExecute(cmd) or 0 end
 		return M.state.executeCode or 0
 	end,
 }

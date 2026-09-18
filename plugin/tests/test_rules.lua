@@ -261,6 +261,107 @@ t.test('an unknown engine is refused with the four choices named', function()
 	t.isNil(Rules.engineArguments(settings({ engine = 42 })), 'a junk pref is refused, not crashed on')
 end)
 
+-- ── detection to picker items (card #405) ─────────────────────────────────
+-- The CLI decides what can run here (--detect-engines, card #404); the dialog
+-- only shows it. Rules.engineItems turns the decoded verdict list into the
+-- picker's items, in the owner's order, with the unavailable ones disabled and
+-- carrying their reason, and a note to show under the picker.
+local function verdicts(overrides)
+	local list = {
+		{ engine = 'mlx', available = true, reason = 'runs locally on this Apple Silicon Mac' },
+		{ engine = 'ollama', available = false,
+			reason = 'no Ollama server at http://127.0.0.1:11434; install it from https://ollama.com/download' },
+		{ engine = 'openai', available = true, reason = 'API key required: set MELAMPUS_OPENAI_KEY (or OPENAI_API_KEY)' },
+		{ engine = 'claude', available = true, reason = 'API key required: set MELAMPUS_ANTHROPIC_KEY (or ANTHROPIC_API_KEY)' },
+	}
+	for _, v in ipairs(list) do
+		local o = overrides and overrides[v.engine]
+		if o then for k, value in pairs(o) do v[k] = value end end
+	end
+	return list
+end
+
+--- The items' values after the first, which lets the CLI choose.
+local function engineValues(items)
+	local values = {}
+	for i = 2, #items do values[#values + 1] = items[i].value end
+	return values
+end
+
+t.test('the picker lists the four engines in the owner\'s order, after letting Melampus choose', function()
+	local items = Rules.engineItems(verdicts())
+	t.equals(items[1].value, '', 'the first item must be the unset preference: let the CLI choose')
+	t.isTrue(items[1].enabled, 'letting Melampus choose is always allowed')
+	t.equals(#items, 5, 'the automatic item and the four engines')
+	for i, engine in ipairs(ENGINES) do
+		t.equals(items[i + 1].value, engine, 'item ' .. (i + 1))
+		t.isNotNil(items[i + 1].title, engine .. ' has no title')
+	end
+end)
+
+t.test('unavailable engines are disabled and carry the reason detection gave', function()
+	local items, note = Rules.engineItems(verdicts({ mlx = { available = false, reason = 'needs Apple Silicon' } }))
+	local byValue = {}
+	for _, item in ipairs(items) do byValue[item.value] = item end
+	t.isFalse(byValue.mlx.enabled, 'mlx should be greyed')
+	t.equals(byValue.mlx.reason, 'needs Apple Silicon')
+	t.isFalse(byValue.ollama.enabled, 'ollama should be greyed')
+	t.isNotNil(string.find(byValue.ollama.reason, 'no Ollama server', 1, true))
+	t.isTrue(byValue.openai.enabled, 'openai is available')
+	t.isTrue(byValue.claude.enabled, 'claude is available')
+	t.isNotNil(string.find(note, 'needs Apple Silicon', 1, true), 'the note does not carry the mlx reason:\n' .. note)
+	t.isNotNil(string.find(note, 'no Ollama server', 1, true), 'the note does not carry the ollama reason:\n' .. note)
+	t.isNil(string.find(note, 'API key required', 1, true), 'the note explains available engines:\n' .. note)
+end)
+
+t.test('a reason that names a web address becomes the item\'s link', function()
+	local items = Rules.engineItems(verdicts())
+	local byValue = {}
+	for _, item in ipairs(items) do byValue[item.value] = item end
+	t.equals(byValue.ollama.link, 'https://ollama.com/download')
+	t.isNil(byValue.mlx.link, 'no address in the mlx reason')
+	t.isNil(byValue.openai.link, 'no address in the openai reason')
+	local answering = verdicts({ ollama = { available = true, reason = 'Ollama is answering at http://127.0.0.1:11434' } })
+	items = Rules.engineItems(answering)
+	for _, item in ipairs(items) do byValue[item.value] = item end
+	t.isTrue(byValue.ollama.enabled)
+	t.isNil(byValue.ollama.link, 'an available engine needs no link')
+end)
+
+t.test('without verdicts nothing is greyed and the note says why', function()
+	local problem = 'Melampus could not find its analysis program.'
+	local items, note = Rules.engineItems(nil, problem)
+	t.equals(#items, 5)
+	for _, item in ipairs(items) do
+		t.isTrue(item.enabled, item.value .. ' was greyed with no verdict to grey it')
+		t.isNil(item.link)
+	end
+	for i, engine in ipairs(ENGINES) do t.equals(items[i + 1].value, engine) end
+	t.equals(note, problem)
+	-- Junk from the executable is the same case, and never a crash.
+	items, note = Rules.engineItems({ 'not', 'verdicts' }, problem)
+	t.equals(#items, 5)
+	t.isTrue(items[3].enabled)
+	t.equals(note, problem)
+	items, note = Rules.engineItems({})
+	t.equals(#items, 5)
+	t.equals(note, '', 'nothing to say when there are no verdicts and no problem')
+end)
+
+t.test('when every engine is available the note is empty', function()
+	local _, note = Rules.engineItems(verdicts({ ollama = { available = true, reason = 'Ollama is answering' } }))
+	t.equals(note, '')
+end)
+
+t.test('each cloud engine names the variable its key travels in; local engines none', function()
+	t.equals(Rules.keyVariable('openai'), 'MELAMPUS_OPENAI_KEY')
+	t.equals(Rules.keyVariable('claude'), 'MELAMPUS_ANTHROPIC_KEY')
+	t.isNil(Rules.keyVariable('mlx'))
+	t.isNil(Rules.keyVariable('ollama'))
+	t.isNil(Rules.keyVariable(''))
+	t.isNil(Rules.keyVariable(nil))
+end)
+
 -- ── colour labels ──────────────────────────────────────────────────────────
 t.test('colour labels mean something specific', function()
 	local s = settings({ writeLabel = true })
