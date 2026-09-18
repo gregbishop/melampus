@@ -239,3 +239,25 @@ def test_docs_name_the_build_and_its_smoke_test():
         if command not in readme
     ]
     assert not missing, f"readme.md does not name: {missing}"
+
+
+def test_ci_builds_and_smoke_tests_the_windows_executable():
+    """Card #400, Done-when 1: given the CI workflow runs on a Windows runner,
+    when it finishes, then a melampus.exe exists that starts and analyzes a
+    fixture image with the scripted backend. The proof is the run itself; this
+    gate keeps the job in the workflow: a job on a Windows runner whose pytest
+    step builds with --build-binary, as the test command does, and runs the
+    binary smoke tests, and which uploads dist/melampus.exe as an artifact."""
+    workflow = (REPO / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    jobs = re.split(r"^  (?=\w[\w-]*:\s*$)", workflow.split("\njobs:\n", 1)[1], flags=re.MULTILINE)
+    windows = [job for job in jobs if re.search(r"runs-on: windows-", job)]
+    assert windows, "ci.yml has no job on a Windows runner"
+    job = windows[0]
+    pytest_steps = [c for c in _ci_pytest_commands() if c in job]
+    assert pytest_steps, "the Windows job runs no pytest step"
+    assert all("--build-binary" in c and "tests/test_binary.py" in c for c in pytest_steps), (
+        f"the Windows job's pytest step must build with --build-binary and run "
+        f"the binary smoke tests: {pytest_steps}"
+    )
+    assert re.search(r"uses: actions/upload-artifact@", job), "the Windows job uploads no artifact"
+    assert "dist/melampus.exe" in job, "the Windows job does not upload dist/melampus.exe"
