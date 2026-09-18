@@ -5,9 +5,9 @@ silently fall behind the code or the repo again (as happened when [occurrence] a
 [quality] shipped undocumented). The promises: docs/config.md names every
 implemented setting; AGENTS.md, and not .gitignore, names the install command for
 the recorded plugins; no doc names a file by an uppercase name it does not have;
-docs/brief.md names the pytest command CI actually runs; the README's install
-block and CI both install from the lockfile (card #425, Done-when 3 and 2);
-AGENTS.md points at
+docs/brief.md names the pytest command CI actually runs and explains it as
+installing from the lockfile; the README's install block and CI both install
+from the lockfile (card #425, Done-when 3 and 2); AGENTS.md points at
 docs/brief.md without restating its values; and AGENTS.md points at the standard
 and names the tracker (card #410, Done-when 3).
 
@@ -127,6 +127,21 @@ def test_ci_installs_from_the_lockfile_before_pytest():
     `uv sync --locked` (or `--frozen`); `uv pip install` re-resolves instead."""
     not_locked = [c for c in _ci_pytest_commands() if not _installs_from_the_lockfile(c)]
     assert not not_locked, f"CI's pytest step does not install with uv sync --locked/--frozen: {not_locked}"
+
+
+def test_brief_explains_ci_as_installing_from_the_lockfile():
+    """The brief's paragraph on the two test commands explains what CI does with
+    service/pyproject.toml. Since card #425 CI installs service/uv.lock with
+    `uv sync --locked` rather than resolving pyproject, so the paragraph must
+    name the lockfile and cannot still call it uncommitted."""
+    brief = BRIEF.read_text(encoding="utf-8")
+    paragraph = re.search(r"^- \*\*There are two test commands.*?(?=\n\n)", brief, re.MULTILINE | re.DOTALL)
+    assert paragraph, "docs/brief.md no longer explains the two test commands"
+    explanation = paragraph.group(0)
+    assert "`service/uv.lock`" in explanation and "not committed" not in explanation, (
+        "docs/brief.md's two-test-commands paragraph must say CI installs from "
+        f"`service/uv.lock` and must not call the lockfile uncommitted:\n{explanation}"
+    )
 
 
 def test_agents_md_points_at_the_brief_without_restating_it():
