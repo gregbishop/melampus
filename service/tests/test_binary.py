@@ -543,7 +543,7 @@ def test_executable_carries_the_cloud_sdks_and_asks_for_the_key(
     tail = proc.stderr[-3000:]
     assert proc.returncode == 3, f"exit {proc.returncode}:\n{tail}"
     _assert_no_missing_module(
-        tail, f"the executable does not carry the {backend} SDK", ("SDK is not installed", *MISSING_MODULE)
+        tail, f"the executable does not carry the {backend} SDK", ("is not installed. Run:", *MISSING_MODULE)
     )
     assert needs_a_key in tail, f"did not reach the key check:\n{tail}"
 

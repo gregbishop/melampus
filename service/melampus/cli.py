@@ -76,7 +76,7 @@ def _run_escalation(paths, local_cache: ResultCache, config, *,
         except ImportError:
             extra = "openai" if config.escalation.provider == "openai" else "cloud"
             print(
-                f"The {config.escalation.provider} SDK is not installed. Run:\n"
+                f"The SDK for the {config.escalation.provider} backend is not installed. Run:\n"
                 f'  uv pip install --python {_venv_python()} "./service[{extra}]"',
                 file=sys.stderr,
             )
@@ -291,7 +291,7 @@ def main(argv: list[str] | None = None) -> int:
         except ImportError:
             extra = "openai" if config.model.backend == "openai" else "cloud"
             print(
-                f"The {config.model.backend} SDK is not installed. Run:\n"
+                f"The SDK for the {config.model.backend} backend is not installed. Run:\n"
                 f'  uv pip install --python {_venv_python()} "./service[{extra}]"',
                 file=sys.stderr,
             )
