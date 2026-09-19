@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -57,12 +58,27 @@ def as_the_shell_receives_it(path: Path | str) -> str:
     return "'" + str(path).replace("'", "'\\''") + "'"
 
 
+SUMMARY = re.compile(r"^(\d+) passed, (\d+) failed$", re.MULTILINE)
+
+
+def assert_suite_green(proc: subprocess.CompletedProcess) -> None:
+    """The gate every Lua suite passes through. Card #443: the harness's
+    summary line is parsed into its counts, never substring-matched ("10
+    failed" contains "0 failed"), and the exit code is checked as well."""
+    output = proc.stdout + proc.stderr
+    assert proc.returncode == 0, output
+    summary = SUMMARY.search(proc.stdout)
+    assert summary, f"no summary line from the harness:\n{output}"
+    passed, failed = (int(n) for n in summary.groups())
+    assert failed == 0, output
+    assert passed > 0, output
+
+
 def run_lua_suite(script: Path, env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
-    """Run one of the plugin's Lua test suites and assert its verdict: the
-    interpreter exited 0 and the suite reported 0 failed."""
+    """Run one of the plugin's Lua test suites and assert its verdict through
+    assert_suite_green."""
     proc = run_lua(script, env=env)
-    assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert "0 failed" in proc.stdout, proc.stdout
+    assert_suite_green(proc)
     return proc
 
 
@@ -120,13 +136,54 @@ def test_settings_dialog_against_a_mock_lightroom(tmp_path: Path):
     The files the fake executable writes land under tmp_path (the mock's
     temp directory is TMPDIR), and Cancel's marker folder is made by the
     mock through sh, so this suite runs where the import suite does."""
-    proc = run_lua(TESTS / "test_settings_dialog.lua", env=os.environ | {"TMPDIR": str(tmp_path)})
-    assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert "0 failed" in proc.stdout, proc.stdout
+    run_lua_suite(TESTS / "test_settings_dialog.lua", env=os.environ | {"TMPDIR": str(tmp_path)})
 
 
 def test_json_decoder():
     run_lua_suite(TESTS / "test_json.lua")
+
+def _summary(stdout: str, returncode: int = 0) -> subprocess.CompletedProcess:
+    return subprocess.CompletedProcess(args=["lua"], returncode=returncode, stdout=stdout, stderr="")
+
+
+@pytest.mark.parametrize("stdout", [
+    "  FAIL a case: boom\n10 passed, 10 failed\n",
+    "0 passed, 0 failed\n",
+    "no summary line at all\n",
+])
+def test_the_gate_fails_a_summary_that_is_not_green(stdout: str):
+    """Card #443: "10 failed" contains "0 failed", so the counts are parsed,
+    never substring-matched; no passes is not green either."""
+    with pytest.raises(AssertionError):
+        assert_suite_green(_summary(stdout))
+
+
+def test_the_gate_fails_a_green_summary_from_a_process_that_exited_non_zero():
+    with pytest.raises(AssertionError):
+        assert_suite_green(_summary("3 passed, 0 failed\n", returncode=1))
+
+
+def test_the_gate_passes_a_green_summary():
+    assert_suite_green(_summary("3 passed, 0 failed\n"))
+
+
+def test_a_failing_suite_exits_non_zero_under_lua(tmp_path: Path):
+    """Card #443, done-when 2: the harness itself ends the interpreter with
+    exit 1 after a failing summary, so a failure shows without the wrapper
+    and the summary line is still printed; the gate refuses it either way."""
+    suite = tmp_path / "test_tiny.lua"
+    suite.write_text(
+        "local t = require 'harness'\n"
+        "t.test('passes', function() t.isTrue(true) end)\n"
+        "t.test('fails', function() t.isTrue(false, 'boom') end)\n"
+        "return t.summary()\n"
+    )
+    proc = run_lua(suite)
+    assert proc.returncode != 0, proc.stdout + proc.stderr
+    assert SUMMARY.search(proc.stdout).groups() == ("1", "1"), proc.stdout
+    assert "FAIL fails: " in proc.stdout and "boom" in proc.stdout, proc.stdout
+    with pytest.raises(AssertionError):
+        assert_suite_green(proc)
 
 
 def test_every_plugin_file_compiles():
