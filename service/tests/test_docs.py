@@ -207,9 +207,9 @@ def _fenced_commands(text: str) -> list[str]:
 
 
 def _section(text: str, heading: str) -> str | None:
-    """The body of a doc's `## heading` section, up to the next `## ` heading;
-    None when the doc has no such section."""
-    match = re.search(rf"^## {re.escape(heading)}\n(.*?)^## ", text, re.MULTILINE | re.DOTALL)
+    """The body of a doc's `## heading` section, up to the next `## ` heading
+    or the end of the doc; None when the doc has no such section."""
+    match = re.search(rf"^## {re.escape(heading)}\n(.*?)(?=^## |\Z)", text, re.MULTILINE | re.DOTALL)
     return match.group(1) if match else None
 
 
