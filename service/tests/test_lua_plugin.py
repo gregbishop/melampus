@@ -11,6 +11,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -24,13 +25,34 @@ TESTS = REPO / "plugin" / "tests"
 
 pytestmark = pytest.mark.skipif(shutil.which("lua") is None, reason="lua not installed")
 
+# The mock keeps its temp directory through sh (mktemp -d, mkdir -p, ls,
+# rm -rf), which cmd.exe does not speak; the suites that fake a macOS
+# Lightroom run on the macOS runner. The Windows runner runs what it can
+# run as itself: the pure suites, luac, and the plugin's own command line.
+needs_sh = pytest.mark.skipif(
+    sys.platform == "win32", reason="the mock keeps its temp directory through sh, which cmd.exe cannot run")
+
 
 def run_lua(script: Path, env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
+    # Forward slashes: the paths land in a Lua string literal, where a
+    # backslash starts an escape, and Windows opens either kind.
     return subprocess.run(
-        ["lua", "-e", f'package.path="{TESTS}/?.lua;{PLUGIN}/?.lua;"..package.path',
+        ["lua", "-e", f'package.path="{TESTS.as_posix()}/?.lua;{PLUGIN.as_posix()}/?.lua;"..package.path',
          str(script)],
         capture_output=True, text=True, cwd=TESTS, env=env,
     )
+
+
+def run_as_lightroom_would(command: str, **kwargs) -> subprocess.CompletedProcess:
+    """Hand the line to the shell LrTasks.execute hands it to: `cmd.exe /c`
+    on Windows, as the C runtime's system() does, and `sh -c` elsewhere.
+
+    Not shell=True on Windows: Python wraps the line in a pair of quotes of
+    its own before cmd.exe sees it, and cmd.exe strips only that pair, so
+    the pair the plugin wrapped the line in would still be on it."""
+    if sys.platform == "win32":
+        return subprocess.run(f'{os.environ["COMSPEC"]} /c {command}', **kwargs)
+    return subprocess.run(command, shell=True, **kwargs)
 
 
 def test_write_rules():
@@ -40,6 +62,7 @@ def test_write_rules():
     assert "0 failed" in proc.stdout, proc.stdout
 
 
+@needs_sh
 def test_import_runs_against_a_mock_lightroom():
     """Executes the real plugin files against a mock SDK: MelampusImport.lua
     end to end, and MelampusAnalyze.lua and MelampusSettings.lua loaded fresh
@@ -77,19 +100,25 @@ def test_every_plugin_file_compiles():
 def test_the_command_the_plugin_builds_runs_the_executable_beside_it(
     built_executable: Path, photos: Path, tmp_path: Path
 ):
-    """Card #401, Done-when 1 at the real boundary. The plugin's Analyze module,
-    run under the mock SDK with `_PLUGIN.path` pointing at a plugin folder that
-    holds the executable, builds one shell command; that exact command is then
-    run through sh, as Lightroom's LrTasks.execute runs it on macOS, against
-    dist/melampus with no python on the path. The scripted backend is selected
-    the way a user selects any backend for the plugin: `[model] backend` in
-    melampus.local.toml under the per-user data directory. The enriched results
-    the plugin reads must land where the command said."""
+    """Card #401, Done-when 1 and 3 at the real boundary. The plugin's Analyze
+    module, run under the mock SDK with `_PLUGIN.path` pointing at a plugin
+    folder that holds the executable, builds one shell command for the
+    platform Lightroom reports; that exact command is then run through the
+    shell LrTasks.execute hands it to on this host: sh against dist/melampus
+    on macOS, cmd.exe against dist/melampus.exe on Windows (the mock fakes a
+    Windows Lightroom there, so `quote` and `shellLine` take their Windows
+    branch and cmd.exe's own quote rule is what runs the line), with no
+    python on the path. The scripted backend is selected the way a user
+    selects any backend for the plugin: `[model] backend` in
+    melampus.local.toml under the per-user data directory. The enriched
+    results the plugin reads must land where the command said."""
     from melampus.plugin_results import PLUGIN_FIELDS
 
+    windows = sys.platform == "win32"
     plugin_dir = tmp_path / "Melampus.lrplugin"
     plugin_dir.mkdir()
-    (plugin_dir / built_executable.name).symlink_to(built_executable)
+    # Copied, as the user copies it there from the download.
+    shutil.copy(built_executable, plugin_dir / built_executable.name)
     # Lightroom's previews folder: the committed frame, from conftest's fixture.
     previews = photos
     results = previews / "results.json"
@@ -99,7 +128,8 @@ def test_the_command_the_plugin_builds_runs_the_executable_beside_it(
     script.write_text(
         "local mock = require('lrmock')\n"
         "mock.reset()\n"
-        "mock.install(os.getenv('MELAMPUS_PLUGIN_DIR'))\n"
+        "mock.install(os.getenv('MELAMPUS_PLUGIN_DIR'),"
+        " { windows = os.getenv('MELAMPUS_WINDOWS') == '1' })\n"
         "local Analyze = dofile(os.getenv('MELAMPUS_ANALYZE'))\n"
         "local ok, message = Analyze.run(os.getenv('MELAMPUS_PREVIEWS'),"
         " os.getenv('MELAMPUS_RESULTS'), 'wildlife')\n"
@@ -107,21 +137,26 @@ def test_the_command_the_plugin_builds_runs_the_executable_beside_it(
         "io.write(mock.state.executed[1])\n",
         encoding="utf-8",
     )
+    # The mock's temp directory: under TMPDIR on a fake macOS Lightroom, the
+    # Windows temp folder (TEMP, as Lightroom reports it) on a fake Windows
+    # one, so the CLI log the command names lands under tmp_path either way.
     built = run_lua(script, env=os.environ | {
         "MELAMPUS_PLUGIN_DIR": str(plugin_dir),
         "MELAMPUS_ANALYZE": str(PLUGIN / "MelampusAnalyze.lua"),
         "MELAMPUS_PREVIEWS": str(previews),
         "MELAMPUS_RESULTS": str(results),
+        "MELAMPUS_WINDOWS": "1" if windows else "0",
         "TMPDIR": str(tmp_path),
+        "TEMP": str(tmp_path),
     })
     assert built.returncode == 0, built.stdout + built.stderr
     command = built.stdout
     assert str(plugin_dir / built_executable.name) in command, command
 
-    proc = subprocess.run(command, shell=True, env=env, cwd=tmp_path,
-                          capture_output=True, text=True, timeout=600)
+    proc = run_as_lightroom_would(command, env=env, cwd=tmp_path,
+                                  capture_output=True, text=True, timeout=600)
 
-    # The mock keeps its temp directory under TMPDIR, so the CLI log is here.
+    # The command sent the CLI's output to the mock's temp directory, under tmp_path.
     log = next(tmp_path.rglob("melampus-cli.log"), None)
     assert proc.returncode == 0, (
         f"exit {proc.returncode}: {proc.stderr[-2000:]}\n"
@@ -136,6 +171,7 @@ def test_the_command_the_plugin_builds_runs_the_executable_beside_it(
     assert 0 < rows[0]["quality"] <= 100, "quality was not scored on the pixels"
 
 
+@needs_sh
 def test_the_mock_hands_its_temp_paths_to_sh_as_data(tmp_path: Path):
     """The mock SDK makes, lists and removes its temp directory through sh
     (`mktemp -d`, `mkdir -p`, `ls`, `rm -rf`), under TMPDIR. TMPDIR comes
