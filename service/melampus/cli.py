@@ -171,6 +171,29 @@ def _run_escalation(paths, local_cache: ResultCache, config, *,
     return 0
 
 
+def _download_model(repo: str) -> int:
+    """--download-model (card #407): fetch the MLX model with progress on
+    stdout in the protocol the plugin parses (docs/config.md § Downloading the
+    model). Exit 0 once complete, 3 on a failure with the fix on stderr, and
+    EXIT_CANCELLED when a signal stopped it with the partial file kept."""
+    from .download import EXIT_CANCELLED, DownloadCancelled, DownloadError, Update, cancel_on_signals, download_model
+
+    def emit(update: Update) -> None:
+        print(update.line(), flush=True)
+
+    try:
+        with cancel_on_signals():
+            path = download_model(repo, on_update=emit)
+    except DownloadCancelled:
+        emit(Update.cancelled())
+        return EXIT_CANCELLED
+    except DownloadError as exc:
+        print(str(exc), file=sys.stderr)
+        return 3
+    emit(Update.done(str(path)))
+    return 0
+
+
 def _write_plugin_results(paths: list[Path], cache: ResultCache, config, destination: Path) -> None:
     """The enrichment pass the Lightroom plugin reads (card #436).
 
@@ -209,6 +232,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--detect-engines", action="store_true",
                     help="print, as JSON, which engines can run on this machine "
                          "and why or why not, then exit; needs no folder")
+    ap.add_argument("--download-model", action="store_true",
+                    help="fetch the MLX model ([model] repo, or --model) into the "
+                         "Hugging Face cache, one 'progress <bytes done> <bytes total>' "
+                         "line per update on stdout and 'done <path>' at the end, "
+                         "then exit; resumes an interrupted download; needs no folder")
     ap.add_argument("--yes", action="store_true",
                     help="skip the cost confirmation when the primary backend is a "
                          "cloud provider (for non-interactive callers)")
@@ -257,8 +285,6 @@ def main(argv: list[str] | None = None) -> int:
         ollama_at = load_config(args.config).model.ollama_url
         print(json.dumps([asdict(v) for v in detect_engines(ollama_at)], indent=2))
         return 0
-    if args.folder is None:
-        ap.error("the following arguments are required: folder")
 
     overrides: dict = {}
     if args.model:
@@ -280,6 +306,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.escalate_base_url:
         overrides.setdefault("escalation", {})["base_url"] = args.escalate_base_url
     config = load_config(args.config, use_local=not args.no_local_config, **overrides)
+
+    if args.download_model:
+        return _download_model(config.model.repo)
+    if args.folder is None:
+        ap.error("the following arguments are required: folder")
 
     if "backend" not in config.model.model_fields_set:
         # Nothing named an engine: neither --backend nor [model] backend. The
