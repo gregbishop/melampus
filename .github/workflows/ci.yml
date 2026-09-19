@@ -79,7 +79,7 @@ jobs:
       - name: Build the executable and run its smoke tests and the plugin tests
         working-directory: service
         shell: bash
-        run: uv sync --locked --extra dev --extra build --extra cloud --extra openai && uv run pytest -v -rs tests/test_binary.py tests/test_lua_plugin.py --build-binary
+        run: uv sync --locked --extra dev --extra build --extra cloud --extra openai && uv run pytest -v -rs tests/test_binary.py tests/test_lua_plugin.py tests/test_package_plugin.py --build-binary
 
       - name: Upload melampus.exe
         uses: actions/upload-artifact@v4

@@ -31,13 +31,14 @@ every session.
   that gates merges, so it builds the executable and smoke-tests it on every
   run; the `cloud` and `openai` extras are there so the executable carries
   both SDKs (card #434)
-- build in CI: `uv sync --locked --extra dev --extra build --extra cloud --extra openai && uv run pytest -v -rs tests/test_binary.py tests/test_lua_plugin.py --build-binary`
+- build in CI: `uv sync --locked --extra dev --extra build --extra cloud --extra openai && uv run pytest -v -rs tests/test_binary.py tests/test_lua_plugin.py tests/test_package_plugin.py --build-binary`
   — from `service/`, in the same workflow's `build-windows` job on a Windows
   runner; builds `melampus.exe` the way the test command does, runs the
   executable's smoke tests against it, runs the plugin tests with the Lua the
   job installs (Lua 5.1, Lightroom's own) so the command the plugin builds for
-  cmd.exe is run by cmd.exe against `melampus.exe`, and uploads it as the
-  `melampus-windows` artifact
+  cmd.exe is run by cmd.exe against `melampus.exe`, runs the packaging tests
+  so the Windows zip ships from a script tested on Windows (card #402), and
+  uploads it as the `melampus-windows` artifact
 - lint: none adopted
 - run: the service half, per `docs/architecture.md`
 
