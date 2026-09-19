@@ -153,6 +153,33 @@ local function shellLine(command)
 	return command
 end
 
+--- Why the command must not run on Windows, or nil when it may.
+-- cmd.exe expands %NAME% even inside double quotes, silently rewriting the
+-- path before execution. Refusing loudly beats running against a path the
+-- user never named. The message names the path that has the "%" and the fix
+-- for that path: the plugin folder is where the user put it; the other three
+-- are in the Windows temp folder.
+local function windowsPathRefusal(folder, previewFolder, resultsPath, cliLog)
+	if not WIN_ENV then return nil end
+	local inTemp = 'Melampus keeps this in the Windows temp folder. Set TEMP to a '
+		.. 'folder whose path has no "%" and try again.'
+	local checked = {
+		{ 'plugin folder', folder,
+			'Move the plugin to a folder whose path has no "%" and try again.' },
+		{ 'previews folder', previewFolder, inTemp },
+		{ 'results file', resultsPath, inTemp },
+		{ 'log file', cliLog, inTemp },
+	}
+	for _, entry in ipairs(checked) do
+		local what, path, advice = entry[1], tostring(entry[2]), entry[3]
+		if path:find('%%') then
+			return 'The ' .. what .. ' path contains "%", which the Windows '
+				.. 'shell rewrites:\n' .. path .. '\n\n' .. advice
+		end
+	end
+	return nil
+end
+
 --- Where the CLI's own output goes. Not the null device: the cloud-primary
 -- cost estimate (and any refusal, e.g. the model.max_images ceiling) prints to
 -- stderr, and a non-interactive caller that discards it has erased the only
@@ -180,29 +207,8 @@ function Analyze.run(previewFolder, resultsPath, profile)
 	end
 
 	local cliLog = cliLogPath()
-	if WIN_ENV then
-		-- cmd.exe expands %NAME% even inside double quotes, silently rewriting
-		-- the path before execution. Refusing loudly beats running against a
-		-- path the user never named. The message names the path that has the
-		-- "%" and the fix for that path: the plugin folder is where the user
-		-- put it; the other three are in the Windows temp folder.
-		local inTemp = 'Melampus keeps this in the Windows temp folder. Set TEMP to a '
-			.. 'folder whose path has no "%" and try again.'
-		local checked = {
-			{ 'plugin folder', folder,
-				'Move the plugin to a folder whose path has no "%" and try again.' },
-			{ 'previews folder', previewFolder, inTemp },
-			{ 'results file', resultsPath, inTemp },
-			{ 'log file', cliLog, inTemp },
-		}
-		for _, entry in ipairs(checked) do
-			local what, path, advice = entry[1], tostring(entry[2]), entry[3]
-			if path:find('%%') then
-				return false, 'The ' .. what .. ' path contains "%", which the Windows '
-					.. 'shell rewrites:\n' .. path .. '\n\n' .. advice
-			end
-		end
-	end
+	local refusal = windowsPathRefusal(folder, previewFolder, resultsPath, cliLog)
+	if refusal then return false, refusal end
 
 	-- Identification and enrichment, one process. Long-running, so it must not
 	-- be inside any write gate.
