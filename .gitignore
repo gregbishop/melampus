@@ -8,10 +8,16 @@ dist/
 plugin/Melampus.lrplugin/melampus
 plugin/Melampus.lrplugin/melampus.exe
 
-# Photo corpora — large binary, not source (root only: service/tests/fixtures/
-# holds the one committed frame the binary smoke test analyzes)
-/fixtures
-/fixtures_full
+# Photo corpora — large binary, not source, at any depth (card #441). No trailing
+# slash: a checkout may borrow the corpus through a symlink named fixtures, which
+# a directory-only rule would not match. The one exception is re-included after:
+# service/tests/fixtures/ holds the one committed frame the binary smoke test
+# analyzes. The negation works because only that folder is excluded, not its
+# parent (gitignore: "It is not possible to re-include a file if a parent
+# directory of that file is excluded").
+fixtures
+fixtures_full
+!/service/tests/fixtures
 
 # Local secrets — API tokens. Never commit.
 melampus.local.toml
