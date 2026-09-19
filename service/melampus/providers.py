@@ -85,8 +85,9 @@ OLLAMA_INSTALL = "https://ollama.com/download"
 
 #: An installed command-line program driven per frame (card #420): a
 #: subscription CLI is vision with no API key. Selected by `[model] backend`
-#: or --backend, not offered by the plugin's picker until card #423 teaches
-#: detection about it, so it is not in BACKEND_CHOICES.
+#: or --backend; detection knows no program to check for, so the plugin's
+#: picker does not offer it (the two named CLIs below it does, card #423)
+#: and it is not in BACKEND_CHOICES.
 COMMAND = "command"
 
 #: What a `command` may not resolve to: Windows launches a batch file through
@@ -694,8 +695,8 @@ def detect_engines(
     ollama_at: str | None = None, commands: dict[str, list[str]] | None = None
 ) -> list[EngineVerdict]:
     """One verdict per engine, in the owner's order (BACKEND_CHOICES without the
-    test fake), then claude-code and codex (cards #421, #422; the picker
-    learns them in #423).
+    test fake), then claude-code and codex (cards #421, #422): the plugin's
+    picker is built from this list, in this order (card #423).
     This is the one place that knows whether an engine can run here: the
     refusals' "what works" list and the CLI's default both come from it, so
     they cannot disagree with what the dialog (card #405) shows. `ollama_at`

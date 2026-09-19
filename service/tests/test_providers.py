@@ -514,9 +514,9 @@ def assert_no_image_was_touched(err: str, check: str) -> None:
 def test_detection_lists_the_engines_in_the_owners_order_then_the_subscription_clis(
     no_ambient_keys, no_ambient_ollama
 ):
-    """The list the dialog (card #405) will show: one verdict per engine, in
+    """The list the dialog (card #405) shows: one verdict per engine, in
     the order BACKEND_CHOICES names them, then claude-code and codex (cards
-    #421, #422; the picker learns them in #423), never the test fake."""
+    #421, #422, in the picker since #423), never the test fake."""
     verdicts = providers.detect_engines()
     assert [v.engine for v in verdicts] == [*ENGINES, providers.CLAUDE_CODE, providers.CODEX]
     for verdict in verdicts:
@@ -2689,8 +2689,8 @@ def test_command_backend_sees_the_exit_through_waitid_where_there_is_no_kqueue(m
 
 def test_command_is_selectable_by_config_and_flag_but_not_a_picker_choice():
     """`[model] backend = "command"` and `--backend command` select the seam;
-    the plugin's picker learns it in card #423, so BACKEND_CHOICES, the
-    engines the picker offers in the owner's order, is unchanged. It is
+    the plugin's picker does not offer it (detection has no program to check
+    for), so BACKEND_CHOICES, the owner's four in order, is unchanged. It is
     local: no cloud retuning, no cost prompt, no cloud cache file."""
     assert providers.COMMAND == "command"
     assert providers.BACKEND_CHOICES == (*ENGINES, providers.SCRIPTED)
@@ -3821,8 +3821,8 @@ def test_the_cli_is_an_engine_name_on_the_command_seam(cli, name):
     (the owner's words), named configurations of the command seam and not
     new backends: local (bills to a subscription, not per call: no cloud
     retuning, no cost prompt, no cloud cache file), selectable by config
-    and --backend, and not yet a picker choice (the picker learns them in
-    #423), so BACKEND_CHOICES is unchanged."""
+    and --backend, and picker choices after the owner's four (card #423,
+    through detect_engines), so BACKEND_CHOICES is unchanged."""
     assert cli.engine == name
     assert cli.engine in providers.LOCAL_BACKENDS
     assert providers.BACKEND_CHOICES == (*ENGINES, providers.SCRIPTED)
