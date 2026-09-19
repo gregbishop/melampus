@@ -362,6 +362,97 @@ t.test('each cloud engine names the variable its key travels in; local engines n
 	t.isNil(Rules.keyVariable(nil))
 end)
 
+-- ── the model download's protocol and button (card #408) ───────────────────
+-- The executable prints `progress <done> <total>`, `done <path>` and
+-- `cancelled` (docs/config.md § Downloading the model); the plugin reads the
+-- last of them from a file. The sample lines are shared with the Python test
+-- of download.Update so the two parsers cannot drift.
+local function sampleLines()
+	local here = debug.getinfo(1, 'S').source:match('^@(.*)[/\\]') or '.'
+	local path = here .. '/../../service/tests/fixtures/download-lines.txt'
+	local rows = {}
+	for row in io.lines(path) do
+		if row:sub(1, 1) ~= '#' then
+			local fields = {}
+			for field in (row .. '\t'):gmatch('([^\t]*)\t') do fields[#fields + 1] = field end
+			rows[#rows + 1] = fields
+		end
+	end
+	assert(#rows >= 10, 'the sample lines were not read from ' .. path)
+	return rows
+end
+
+t.test('the download line parser agrees with the Python one on every shared sample line', function()
+	local seen = { progress = 0, done = 0, cancelled = 0, rejected = 0 }
+	for _, row in ipairs(sampleLines()) do
+		local line, state = row[1], row[2]
+		local update = Rules.parseDownloadLine(line)
+		seen[state] = seen[state] + 1
+		if state == 'rejected' then
+			t.isNil(update, 'accepted a line that is not an update: ' .. line)
+		else
+			t.isNotNil(update, 'rejected ' .. line)
+			t.equals(update.state, state, line)
+			if state == 'progress' then
+				t.equals(update.bytesDone, tonumber(row[3]), line)
+				t.equals(update.bytesTotal, tonumber(row[4]), line)
+			elseif state == 'done' then
+				t.equals(update.path, row[3], line)
+			end
+			local withNewline = Rules.parseDownloadLine(line .. '\r\n')
+			t.equals(withNewline.state, state, 'a line read with its line ending: ' .. line)
+			t.equals(withNewline.path, update.path)
+		end
+	end
+	for _, state in ipairs({ 'progress', 'done', 'cancelled', 'rejected' }) do
+		t.isTrue(seen[state] > 0, 'no sample line of kind ' .. state)
+	end
+end)
+
+t.test('the latest update in the progress file is the last line that parses', function()
+	local text = 'progress 0 100\nprogress 40 100\nprogress 70 100\n'
+	local latest = Rules.latestDownloadUpdate(text)
+	t.equals(latest.state, 'progress')
+	t.equals(latest.bytesDone, 70)
+	t.equals(latest.bytesTotal, 100)
+	latest = Rules.latestDownloadUpdate(text .. 'done /hf/hub/models--x--y/snapshots/abc\n')
+	t.equals(latest.state, 'done')
+	t.equals(latest.path, '/hf/hub/models--x--y/snapshots/abc')
+	-- A line still being written is not an update yet; the previous one stands.
+	latest = Rules.latestDownloadUpdate(text .. 'progress 80')
+	t.equals(latest.bytesDone, 70)
+	t.isNil(Rules.latestDownloadUpdate(''), 'nothing yet')
+	t.isNil(Rules.latestDownloadUpdate(nil), 'no file yet')
+	t.isNil(Rules.latestDownloadUpdate('warning: something on stderr\n'))
+end)
+
+t.test('the download button names the model and its size, or says the size is unknown', function()
+	local repo = 'mlx-community/Qwen3-VL-30B-A3B-Instruct-4bit'
+	t.equals(Rules.downloadTitle({ repo = repo, bytes_total = 18300000000 }),
+		'Download ' .. repo .. ' (18.3 GB)')
+	t.equals(Rules.downloadTitle({ repo = repo, bytes_total = 734000000 }),
+		'Download ' .. repo .. ' (734 MB)')
+	-- JSON null decodes to nil: the hub could not be reached.
+	t.equals(Rules.downloadTitle({ repo = repo }), 'Download ' .. repo .. ' (size unknown)')
+end)
+
+t.test('progress reads as bytes of the total and a portion between 0 and 1', function()
+	local text, portion = Rules.downloadProgress({ state = 'progress', bytesDone = 3100000000, bytesTotal = 18300000000 })
+	t.equals(text, '3.1 GB of 18.3 GB')
+	t.isTrue(math.abs(portion - 3100000000 / 18300000000) < 1e-9)
+	text, portion = Rules.downloadProgress({ state = 'progress', bytesDone = 0, bytesTotal = 0 })
+	t.equals(portion, 0, 'no division by zero before the total is known')
+end)
+
+t.test('the engine the picker resolves to is the picked one, else the first detection says can run', function()
+	t.equals(Rules.resolvedEngine('ollama', verdicts()), 'ollama')
+	t.equals(Rules.resolvedEngine('', verdicts()), 'mlx', 'the default on an Apple Silicon Mac is mlx')
+	t.equals(Rules.resolvedEngine(nil, verdicts()), 'mlx')
+	t.equals(Rules.resolvedEngine('', verdicts({ mlx = { available = false, reason = 'needs Apple Silicon' } })),
+		'openai', 'the first available in the owner\'s order')
+	t.isNil(Rules.resolvedEngine('', nil), 'without detection nothing is resolved')
+end)
+
 -- ── colour labels ──────────────────────────────────────────────────────────
 t.test('colour labels mean something specific', function()
 	local s = settings({ writeLabel = true })

@@ -60,35 +60,43 @@ def _incomplete(cache: Path) -> list[Path]:
     return sorted((cache / f"models--{FAKE_REPO.replace('/', '--')}" / "blobs").glob("*.incomplete"))
 
 
-@pytest.mark.parametrize(
-    ("update", "line"),
-    [
-        (Update.progress(0, 18_300_000_000), "progress 0 18300000000"),
-        (Update.progress(4_096, 4_096), "progress 4096 4096"),
-        (Update.done("/hf/hub/models--x--y/snapshots/abc"), "done /hf/hub/models--x--y/snapshots/abc"),
-        (Update.done("C:\\Users\\me\\AppData\\Local\\hf hub\\snapshots\\abc"),
-         "done C:\\Users\\me\\AppData\\Local\\hf hub\\snapshots\\abc"),
-        (Update.cancelled(), "cancelled"),
-    ],
-)
-def test_progress_protocol_prints_and_parses_the_same_line(update: Update, line: str):
+# The sample lines both parsers are tested against, so the Lua one in the
+# plugin (Rules.parseDownloadLine, plugin/tests/test_rules.lua) cannot drift
+# from this one: `<input>\t<state>[\t<field>...]`, `rejected` for a non-update.
+SAMPLE_LINES = Path(__file__).with_name("fixtures") / "download-lines.txt"
+
+
+def sample_lines() -> list[tuple[str, list[str]]]:
+    rows = []
+    for row in SAMPLE_LINES.read_text(encoding="utf-8").splitlines():
+        if row.startswith("#"):
+            continue
+        line, *expected = row.split("\t")
+        rows.append((line, expected))
+    assert len(rows) >= 10 and any(e == ["rejected"] for _, e in rows) and any(e[0] == "done" for _, e in rows)
+    return rows
+
+
+@pytest.mark.parametrize(("line", "expected"), sample_lines(), ids=lambda value: repr(value)[:40])
+def test_progress_protocol_prints_and_parses_the_same_line(line: str, expected: list[str]):
     """One line per update, machine-readable and stable: `progress <done> <total>`
     while bytes arrive, `done <path>` once the model is complete, `cancelled`
     when a signal stopped it. A path may hold spaces, so it is the rest of the
-    line."""
+    line. The plugin must be able to tell an update from any other line."""
+    if expected == ["rejected"]:
+        with pytest.raises(ValueError):
+            Update.parse(line)
+        return
+    state, *fields = expected
+    update = {
+        "progress": lambda: Update.progress(int(fields[0]), int(fields[1])),
+        "done": lambda: Update.done(fields[0]),
+        "cancelled": lambda: Update.cancelled(),
+    }[state]()
     assert update.line() == line
     assert Update.parse(line) == update
     assert Update.parse(line + "\n") == update, "a line read from a pipe keeps its newline"
-
-
-@pytest.mark.parametrize("line", [
-    "", "progress", "progress 1", "progress one two", "progress 1 2 3",
-    "done", "cancelled now", "Downloading bytes: 100%", "engine: mlx",
-])
-def test_progress_protocol_rejects_what_is_not_an_update(line: str):
-    """The plugin must be able to tell an update from any other line."""
-    with pytest.raises(ValueError):
-        Update.parse(line)
+    assert Update.parse(line + "\r\n") == update
 
 
 def test_download_fetches_every_file_from_the_hub_and_reports_bytes_done_of_total(
