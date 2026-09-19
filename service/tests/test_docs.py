@@ -6,7 +6,9 @@ silently fall behind the code or the repo again (as happened when [occurrence] a
 implemented setting; AGENTS.md, and not .gitignore, names the install command for
 the recorded plugins, and on a clone where an installer has run, that documented
 command runs; no doc names a file by an uppercase name it does not have;
-docs/brief.md names the pytest command CI actually runs; AGENTS.md points at
+docs/brief.md names the pytest command CI actually runs and explains it as
+installing from the lockfile; every doc block that installs the service, and CI, install
+from the lockfile (card #425, Done-when 3 and 2); AGENTS.md points at
 docs/brief.md without restating its values; and AGENTS.md points at the standard
 and names the tracker (card #410, Done-when 3).
 
@@ -33,6 +35,19 @@ PLUGIN_CHOICE = REPO / ".agents" / "on-purpose.json"
 INSTALLED_SKILLS = REPO / ".agents" / "skills"
 BRIEF = REPO / "docs" / "brief.md"
 GITIGNORE = REPO / ".gitignore"
+README = REPO / "readme.md"
+DOCS = [README, AGENTS_MD, *sorted((REPO / "docs").glob("*.md"))]
+
+
+LOCKFILE_FLAGS = ("--locked", "--frozen")
+
+
+def _installs_from_the_lockfile(command: str, flags: tuple[str, ...] = LOCKFILE_FLAGS) -> bool:
+    """`uv sync` with one of `flags` installs exactly uv.lock; anything else
+    re-resolves from pyproject.toml's bounds. `--locked` also fails when the lock
+    has drifted from pyproject.toml; `--frozen` installs the stale lock anyway."""
+    accepted = "|".join(re.escape(flag) for flag in flags)
+    return bool(re.search(rf"\buv sync\b[^&|;]*(?:{accepted})\b", command))
 
 
 def test_every_config_field_is_documented():
@@ -112,27 +127,96 @@ def test_docs_name_only_the_lowercase_files():
     """The real files are readme.md and docs/config.md. A doc that still says
     README.md or docs/CONFIG.md, or claims another doc does, is stale."""
     stale = []
-    for doc in [REPO / "readme.md", AGENTS_MD, *sorted((REPO / "docs").glob("*.md"))]:
+    for doc in DOCS:
         for lineno, line in enumerate(doc.read_text(encoding="utf-8").splitlines(), 1):
             if "README.md" in line or "CONFIG.md" in line:
                 stale.append(f"{doc.relative_to(REPO)}:{lineno}: {line.strip()}")
     assert not stale, f"docs name uppercase files that do not exist: {stale}"
 
 
+def _ci_pytest_commands() -> list[str]:
+    """The `run:` line of every ci.yml step that invokes pytest."""
+    workflow = (REPO / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    commands = [
+        command
+        for command in re.findall(r"^\s*run:\s*(.+?)\s*$", workflow, re.MULTILINE)
+        if "pytest" in command
+    ]
+    assert commands, "ci.yml runs no pytest step"
+    return commands
+
+
 def test_brief_names_the_test_command_ci_runs():
     """Rule 11: the repo's own commands are the truth. CI gates merges with its
     own pytest invocation, so the stack contract must name that command too,
     not only the local one."""
-    workflow = (REPO / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
-    ci_commands = [
-        f"`{command}`"
-        for command in re.findall(r"^\s*run:\s*(.+?)\s*$", workflow, re.MULTILINE)
-        if "pytest" in command
-    ]
-    assert ci_commands, "ci.yml runs no pytest step"
+    ci_commands = [f"`{command}`" for command in _ci_pytest_commands()]
     brief = BRIEF.read_text(encoding="utf-8")
     missing = [c for c in ci_commands if c not in brief]
     assert not missing, f"docs/brief.md's stack contract does not name what CI runs: {missing}"
+
+
+def _fenced_commands(text: str) -> list[str]:
+    """Every non-blank, non-comment line inside a fenced code block of a doc."""
+    return [
+        line
+        for block in re.findall(r"^```\w*\n(.*?)^```", text, re.MULTILINE | re.DOTALL)
+        for line in block.splitlines()
+        if line and not line.startswith("#")
+    ]
+
+
+def test_install_blocks_install_from_the_lockfile():
+    """Card #425, Done-when 3: given a fresh clone, when the README setup runs,
+    then the resolved versions match the lockfile. Only `uv sync --locked` (or
+    `--frozen`) does that; `uv pip install` never reads uv.lock. The setup is
+    every fenced block that installs the service, not only `## Install`: the
+    Windows block and the provider-extras blocks (README and docs/config.md)
+    would otherwise re-resolve from pyproject's bounds, and because `uv sync`
+    is exact, an SDK added with `uv pip install` is removed the next time the
+    Install block runs. Running the installs here would need the network, so
+    the gate is on the commands themselves."""
+    readme = README.read_text(encoding="utf-8")
+    install = re.search(r"^## Install\n(.*?)^## ", readme, re.MULTILINE | re.DOTALL)
+    assert install and any(_installs_from_the_lockfile(c) for c in _fenced_commands(install.group(1))), (
+        "readme.md's ## Install section must install with `uv sync --locked`"
+    )
+    unlocked = [
+        f"{doc.relative_to(REPO)}: {command}"
+        for doc in DOCS
+        for command in _fenced_commands(doc.read_text(encoding="utf-8"))
+        if re.search(r"\buv (pip install|sync)\b", command) and not _installs_from_the_lockfile(command)
+    ]
+    assert not unlocked, (
+        "every doc block that installs the service must use `uv sync --locked` "
+        f"(or --frozen), not re-resolve with `uv pip install`: {unlocked}"
+    )
+
+
+def test_ci_installs_from_the_lockfile_before_pytest():
+    """Card #425, Done-when 2: given CI, when it installs, then it installs from
+    the lockfile and fails if the lockfile and pyproject disagree. Only
+    `uv sync --locked` does both: `--frozen` installs a stale lock without
+    complaint, and `uv pip install` re-resolves instead."""
+    not_locked = [
+        c for c in _ci_pytest_commands() if not _installs_from_the_lockfile(c, flags=("--locked",))
+    ]
+    assert not not_locked, f"CI's pytest step does not install with uv sync --locked: {not_locked}"
+
+
+def test_brief_explains_ci_as_installing_from_the_lockfile():
+    """The brief's paragraph on the two test commands explains what CI does with
+    service/pyproject.toml. Since card #425 CI installs service/uv.lock with
+    `uv sync --locked` rather than resolving pyproject, so the paragraph must
+    name the lockfile and cannot still call it uncommitted."""
+    brief = BRIEF.read_text(encoding="utf-8")
+    paragraph = re.search(r"^- \*\*There are two test commands.*?(?=\n\n)", brief, re.MULTILINE | re.DOTALL)
+    assert paragraph, "docs/brief.md no longer explains the two test commands"
+    explanation = paragraph.group(0)
+    assert "`service/uv.lock`" in explanation and "not committed" not in explanation, (
+        "docs/brief.md's two-test-commands paragraph must say CI installs from "
+        f"`service/uv.lock` and must not call the lockfile uncommitted:\n{explanation}"
+    )
 
 
 def test_agents_md_points_at_the_brief_without_restating_it():
