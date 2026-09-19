@@ -42,6 +42,7 @@ PLUGIN_CHOICE = REPO / ".agents" / "on-purpose.json"
 INSTALLED_SKILLS = REPO / ".agents" / "skills"
 BRIEF = REPO / "docs" / "brief.md"
 WORKFLOWS = REPO / ".github" / "workflows"
+WORKFLOW_SUFFIXES = (".yml", ".yaml")  # GitHub runs both
 CI_WORKFLOW = WORKFLOWS / "ci.yml"
 LUA_PLUGIN_TESTS = REPO / "service" / "tests" / "test_lua_plugin.py"
 PLUGIN_DOC = REPO / "docs" / "plugin.md"
@@ -154,14 +155,20 @@ def test_docs_name_only_the_lowercase_files():
     assert not stale, f"docs name uppercase files that do not exist: {stale}"
 
 
+def _workflows() -> list[Path]:
+    """Every workflow file in .github/workflows, read at call time."""
+    return sorted(path for path in WORKFLOWS.iterdir() if path.suffix in WORKFLOW_SUFFIXES)
+
+
 def test_docs_name_only_workflows_that_exist():
     """Card #402, round 2: the release steps were folded into ci.yml and
     release.yml removed. A doc that still names a workflow file that is not
     in .github/workflows is stale."""
+    suffixes = "|".join(re.escape(suffix) for suffix in WORKFLOW_SUFFIXES)
     stale = []
     for doc in DOCS:
         for lineno, line in enumerate(doc.read_text(encoding="utf-8").splitlines(), 1):
-            for name in re.findall(r"\.github/workflows/([\w.-]+\.ya?ml)", line):
+            for name in re.findall(rf"\.github/workflows/([\w.-]+(?:{suffixes}))", line):
                 if not (WORKFLOWS / name).is_file():
                     stale.append(f"{doc.relative_to(REPO)}:{lineno}: {name}")
     assert not stale, f"docs name workflow files that do not exist: {stale}"
@@ -430,7 +437,7 @@ def test_every_workflow_pins_every_pip_install_to_an_exact_version():
     pull request and, on a v* tag, what ships (card #402)."""
     pip_installs = [
         (workflow.name, arguments)
-        for workflow in sorted(WORKFLOWS.glob("*.yml"))
+        for workflow in _workflows()
         for arguments in re.findall(
             r"^\s*run:.*\bpip install\b(.*?)\s*$", workflow.read_text(encoding="utf-8"), re.MULTILINE
         )
@@ -497,7 +504,7 @@ def test_ci_packages_a_zip_per_platform_and_a_tag_releases_both():
     release job's) is pinned to a commit SHA with the version in a trailing
     comment. ci.yml's earlier `uses:` lines are card #439's."""
     ci = CI_WORKFLOW.read_text(encoding="utf-8")
-    copies = [w.name for w in WORKFLOWS.glob("*.y*ml") if w != CI_WORKFLOW and "pytest" in w.read_text(encoding="utf-8")]
+    copies = [w.name for w in _workflows() if w != CI_WORKFLOW and "pytest" in w.read_text(encoding="utf-8")]
     assert not copies, f"a second workflow copies ci.yml's build steps; extend ci.yml instead: {copies}"
 
     on = re.search(r"^on:\n((?:  .*\n)+)", ci, re.MULTILINE)
