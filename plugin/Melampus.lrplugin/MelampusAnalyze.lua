@@ -175,14 +175,28 @@ function Analyze.run(previewFolder, resultsPath, profile)
 	end
 
 	local cliLog = cliLogPath()
-	if WIN_ENV and (tostring(pluginDir) .. tostring(previewFolder) .. tostring(resultsPath)
-			.. tostring(cliLog)):find('%%') then
+	if WIN_ENV then
 		-- cmd.exe expands %NAME% even inside double quotes, silently rewriting
 		-- the path before execution. Refusing loudly beats running against a
-		-- path the user never named.
-		return false, 'A path contains "%", which the Windows shell rewrites:\n'
-			.. pluginDir .. '\n' .. previewFolder
-			.. '\n\nMove the plugin to a path without "%" characters.'
+		-- path the user never named. The message names the path that has the
+		-- "%" and the fix for that path: the plugin folder is where the user
+		-- put it; the other three are in the Windows temp folder.
+		local inTemp = 'Melampus keeps this in the Windows temp folder. Set TEMP to a '
+			.. 'folder whose path has no "%" and try again.'
+		local checked = {
+			{ 'plugin folder', pluginDir,
+				'Move the plugin to a folder whose path has no "%" and try again.' },
+			{ 'previews folder', previewFolder, inTemp },
+			{ 'results file', resultsPath, inTemp },
+			{ 'log file', cliLog, inTemp },
+		}
+		for _, entry in ipairs(checked) do
+			local what, path, advice = entry[1], tostring(entry[2]), entry[3]
+			if path:find('%%') then
+				return false, 'The ' .. what .. ' path contains "%", which the Windows '
+					.. 'shell rewrites:\n' .. path .. '\n\n' .. advice
+			end
+		end
 	end
 
 	-- Identification and enrichment, one process. Long-running, so it must not
