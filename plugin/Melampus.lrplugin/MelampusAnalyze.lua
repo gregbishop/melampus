@@ -208,8 +208,8 @@ function Analyze.run(previewFolder, resultsPath, profile, engine)
 			.. '\n\nCopy it there from the Melampus download and try again.'
 	end
 
-	local engineArguments, engineError = Rules.engineArguments({ engine = engine })
-	if not engineArguments then return false, engineError end
+	local chosen, engineError = Rules.chosenEngine({ engine = engine })
+	if engineError then return false, engineError end
 
 	local cliLog = cliLogPath()
 	local refusal = windowsPathRefusal(folder, previewFolder, resultsPath, cliLog)
@@ -226,8 +226,9 @@ function Analyze.run(previewFolder, resultsPath, profile, engine)
 		'--profile', quote(profile or 'wildlife'),
 	}
 	-- --backend only when the user chose an engine; otherwise the CLI decides.
-	if engineArguments[1] then
-		parts[#parts + 1] = engineArguments[1] .. ' ' .. quote(engineArguments[2])
+	if chosen then
+		parts[#parts + 1] = '--backend'
+		parts[#parts + 1] = quote(chosen)
 	end
 	parts[#parts + 1] = '--plugin-out ' .. quote(resultsPath)
 	parts[#parts + 1] = '--yes'
