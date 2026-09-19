@@ -61,6 +61,7 @@ def _documented_install_command():
         "AGENTS.md must tell a fresh clone to run `node <on-purpose checkout>/bin/install.mjs "
         f"{' '.join(plugins)}` (the plugins recorded in .agents/on-purpose.json)"
     )
+    assert len(commands) == 1, f"AGENTS.md names {len(commands)} install commands; one, for the recorded plugins"
     [(_installer, named_plugins)] = commands
     assert named_plugins.split() == plugins, (
         f"AGENTS.md's install command names {named_plugins.split()}, "
