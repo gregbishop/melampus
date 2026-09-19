@@ -453,10 +453,11 @@ def main(argv: list[str] | None = None) -> int:
         # reads it (--config and --no-local-config alike), so the verdict
         # cannot disagree with what --backend ollama would talk to; the
         # CLI template probed is the configured one the same way.
-        # The dialog's contract (card #404): engine, available, reason. A
-        # verdict's resolved executable is the factory's, not the dialog's.
+        # The dialog's contract (cards #404 and #423): engine, title,
+        # available, reason. A verdict's resolved executable is the
+        # factory's, not the dialog's.
         print(json.dumps([
-            {"engine": v.engine, "available": v.available, "reason": v.reason}
+            {"engine": v.engine, "title": v.title, "available": v.available, "reason": v.reason}
             for v in detect_engines(config.model.ollama_url, cli_commands(config.model))
         ], indent=2))
         return 0

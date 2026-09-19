@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import dataclasses
 import errno
 import http.client
 import io
@@ -598,7 +599,7 @@ def test_default_engine_is_always_one_detection_names_available(
     verdicts = providers.detect_engines()
     assert providers.default_engine() == next(v.engine for v in verdicts if v.available) == "openai"
 
-    nothing_available = [providers.EngineVerdict(v.engine, False, v.reason) for v in verdicts]
+    nothing_available = [dataclasses.replace(v, available=False) for v in verdicts]
     monkeypatch.setattr(providers, "detect_engines", lambda ollama_at=None: nothing_available)
     with pytest.raises(StopIteration):
         providers.default_engine()
@@ -1315,9 +1316,11 @@ def test_cli_detect_engines_prints_the_verdicts_as_json_in_order(
     assert code == 0, err
     verdicts = json.loads(out)
     assert [v["engine"] for v in verdicts] == [*ENGINES, providers.CLAUDE_CODE, providers.CODEX]
-    assert all(set(v) == {"engine", "available", "reason"} for v in verdicts)
+    assert all(set(v) == {"engine", "title", "available", "reason"} for v in verdicts)
+    assert all(v["title"] for v in verdicts), "a verdict with no title for the picker"
     by_engine = {v["engine"]: v for v in verdicts}
-    assert by_engine["mlx"] == {"engine": "mlx", "available": False, "reason": "needs Apple Silicon"}
+    assert by_engine["mlx"] == {
+        "engine": "mlx", "title": "MLX — local, Apple Silicon", "available": False, "reason": "needs Apple Silicon"}
     assert by_engine["ollama"]["available"] is False
     assert providers.OLLAMA_INSTALL in by_engine["ollama"]["reason"]
     for engine in ("openai", "claude"):
@@ -4720,6 +4723,33 @@ def test_claude_code_that_lapses_mid_run_stops_the_batch_at_the_first_reply(
     assert code == 3, err
     assert "not signed in" in err and providers.CLAUDE_CODE_SIGN_IN in err
     assert not out.exists() and not (tmp_path / "cache.jsonl").exists()
+
+
+@posix_only
+def test_detection_titles_every_engine_for_the_picker(monkeypatch, tmp_path, no_ambient_keys, no_ambient_ollama):
+    """Card #423: the picker's titles come from the verdict, the one source,
+    not a table in Lua. Every verdict carries a title; the four engines'
+    are the plain names, and the two CLIs' name the program (CliEngine
+    .title) and that no key is needed, the same in every state: not
+    installed, installed but not signed in, signed in."""
+    for cli in (providers.CLAUDE_CODE_CLI, providers.CODEX_CLI):
+        _no_engine_cli(monkeypatch, tmp_path, cli)
+    titles = {v.engine: v.title for v in providers.detect_engines()}
+    assert titles == {
+        "mlx": "MLX — local, Apple Silicon",
+        "ollama": "Ollama — local",
+        "openai": "OpenAI — cloud, needs an API key",
+        "claude": "Claude — cloud, needs an API key",
+        "claude-code": "Claude Code — subscription, no API key",
+        "codex": "Codex CLI — subscription, no API key",
+    }
+    assert titles["claude-code"].startswith(providers.CLAUDE_CODE_CLI.title)
+    assert titles["codex"].startswith(providers.CODEX_CLI.title)
+    for mode in ("not-signed-in", "signed-in"):
+        for cli in (providers.CLAUDE_CODE_CLI, providers.CODEX_CLI):
+            _fake_engine_cli(monkeypatch, tmp_path, cli, mode=mode)
+        assert _verdict("claude-code").title == titles["claude-code"], mode
+        assert _verdict("codex").title == titles["codex"], mode
 
 
 # --- card #422: what is Codex CLI's own -----------------------------------
