@@ -10,11 +10,14 @@ running the installer again.
 Checks against the git index rather than the working tree: no tracked symlink
 resolves outside the repository, no tracked file names an absolute home-directory
 path, and service/uv.lock is tracked. One check against the working tree: that
-lockfile is current with service/pyproject.toml.
+lockfile is current with service/pyproject.toml. And one against .gitignore: a
+photo corpus folder is ignored wherever it lands in the checkout (card #441).
 """
 
 import subprocess
 from pathlib import Path
+
+import pytest
 
 REPO = Path(__file__).resolve().parents[2]
 # POSIX ERE, for git grep.
@@ -78,3 +81,50 @@ def test_the_lockfile_is_current_with_pyproject():
         timeout=60,
     )
     assert check.returncode == 0, check.stderr
+
+
+# Card #441. Ignored: a corpus folder anywhere in the checkout. Not ignored: the
+# one committed frame's folder. The rules are checked against a copy of
+# .gitignore in a throwaway repository: `git check-ignore` on `fixtures/x.jpg`
+# refuses a checkout where `fixtures` is a symlink to the corpus, and the
+# verdict must not depend on what a given checkout has under that name.
+CORPUS_PATHS = [
+    # A symlink to the corpus, the way a checkout borrows one; it is not a
+    # directory, so a directory-only rule (`fixtures/`) would let it through.
+    "fixtures",
+    "fixtures/x.jpg",
+    "fixtures_full/x.jpg",
+    "service/fixtures/x.jpg",
+    "plugin/fixtures/x.jpg",
+    "service/tests/quality/fixtures/x.jpg",
+    "fixtures_full/nested/x.jpg",
+]
+COMMITTED_FRAME = "service/tests/fixtures/0A1A2829.jpg"
+
+
+def _check_ignore(tmp_path: Path, path: str) -> subprocess.CompletedProcess[str]:
+    """`git check-ignore -v` verdict for `path` under the checkout's .gitignore."""
+    repo = tmp_path / "repo"
+    repo.mkdir(exist_ok=True)
+    (repo / ".gitignore").write_bytes((REPO / ".gitignore").read_bytes())
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    # 0: ignored (stdout names the source rule); 1: not ignored; other: error.
+    return subprocess.run(
+        ["git", "check-ignore", "-v", "--", path],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    )
+
+
+@pytest.mark.parametrize("path", CORPUS_PATHS)
+def test_a_corpus_folder_is_ignored_anywhere_in_the_checkout(tmp_path, path):
+    verdict = _check_ignore(tmp_path, path)
+    assert verdict.returncode == 0, f"{path} is committable: {verdict.stderr}"
+    source = verdict.stdout.split(":", 1)[0]
+    assert source == ".gitignore", verdict.stdout
+
+
+def test_the_committed_frame_is_not_ignored(tmp_path):
+    verdict = _check_ignore(tmp_path, COMMITTED_FRAME)
+    assert verdict.returncode == 1, f"{COMMITTED_FRAME} is ignored: {verdict.stdout}"
