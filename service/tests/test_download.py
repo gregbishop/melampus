@@ -15,6 +15,7 @@ both directions: the lines the command prints, and the parse the plugin will do.
 from __future__ import annotations
 
 import errno
+import json
 import os
 import shutil
 import signal
@@ -50,14 +51,19 @@ from melampus import download
 from melampus.cli import main
 from melampus.config import ModelConfig
 from melampus.download import (
+    CANCEL_MARKER,
     EXIT_CANCELLED,
     DownloadCancelled,
     DownloadError,
+    Status,
     Update,
     _hub_client,
     _token_may_go,
+    cancel_marker_path,
     cancel_on_signals,
     download_model,
+    model_status,
+    remove_model,
 )
 
 
@@ -997,3 +1003,173 @@ def test_cli_cancelled_by_a_signal_keeps_the_partial_file_and_the_next_run_resum
     assert updates[0].bytes_done == kept + len(FAKE_FILES["config.json"])
     assert snapshot_files(Path(updates[-1].path))["model.safetensors"] == big
     assert not _incomplete(Path(hub_env["HF_HOME"]) / "hub")
+
+
+# --- the model's status and removal, for the Settings button (card #408) ---
+#
+# Done-when 1 and 3 of card #408: the dialog must know, without downloading,
+# whether the model is present, how big it is and what it is called, and it
+# must be able to remove it. `--model-status` and `--remove-model` are the
+# executable's answers; both are proven against the fake hub and a cache
+# under tmp_path, never the real one.
+
+
+def _status(hub: FakeHub | None, cache: Path, repo: str = FAKE_REPO) -> Status:
+    return model_status(repo, endpoint=hub.endpoint if hub else None, cache_dir=cache)
+
+
+def test_status_of_an_absent_model_reports_not_installed_with_the_size_from_the_hub(
+    fake_hub: FakeHub, tmp_path: Path
+):
+    """The button's title needs the name and the size before any byte moves:
+    the size comes from the hub's file listing, present-ness from the cache."""
+    status = _status(fake_hub, tmp_path / "hub")
+
+    assert status == Status(FAKE_REPO, installed=False, bytes_total=FAKE_TOTAL, bytes_done=0,
+                            path=None, cancel_path=str(cancel_marker_path()))
+    assert not [r for r in fake_hub.requests if r.method == "GET" and "/resolve/" in r.path], "status moved bytes"
+
+
+def test_status_of_a_partial_download_counts_the_bytes_already_in_the_cache(fake_hub: FakeHub, tmp_path: Path):
+    fake_hub.cut_after = DOWNLOAD_CHUNK_SIZE + 4096
+    with pytest.raises(DownloadError):
+        _fetch(fake_hub, tmp_path / "hub")
+
+    status = _status(fake_hub, tmp_path / "hub")
+
+    assert status.installed is False and status.path is None
+    assert status.bytes_done == DOWNLOAD_CHUNK_SIZE + len(FAKE_FILES["config.json"])
+    assert status.bytes_total == FAKE_TOTAL
+
+
+def test_status_of_an_installed_model_reports_it_with_its_path(fake_hub: FakeHub, tmp_path: Path):
+    path, _ = _fetch(fake_hub, tmp_path / "hub")
+
+    status = _status(fake_hub, tmp_path / "hub")
+
+    assert status.installed is True
+    assert status.path == str(path)
+    assert status.bytes_done == status.bytes_total == FAKE_TOTAL
+
+
+def test_status_with_no_host_answering_says_the_size_is_unknown_and_never_fails(
+    fake_hub: FakeHub, tmp_path: Path
+):
+    """The network being down is not a reason for Settings not to open: the
+    status still says what the cache holds, with `bytes_total` null."""
+    path, _ = _fetch(fake_hub, tmp_path / "hub")
+    port = closed_port()
+
+    status = model_status(FAKE_REPO, endpoint=f"http://127.0.0.1:{port}", cache_dir=tmp_path / "hub")
+
+    assert status.bytes_total is None
+    assert status.installed is True and status.path == str(path)
+    assert status.bytes_done == FAKE_TOTAL
+    absent = model_status("fake-org/other", endpoint=f"http://127.0.0.1:{port}", cache_dir=tmp_path / "hub")
+    assert absent == Status("fake-org/other", installed=False, bytes_total=None, bytes_done=0,
+                            path=None, cancel_path=str(cancel_marker_path()))
+
+
+def test_the_cancel_marker_lives_under_the_per_user_data_directory_beside_the_caches():
+    """The plugin writes this file to cancel (docs/config.md § Downloading the
+    model); it is named once here and the status carries it, so the plugin
+    never derives the per-user directory itself."""
+    from melampus import config
+
+    marker = cancel_marker_path()
+    assert marker.name == CANCEL_MARKER == "download-cancel"
+    assert marker == config._cache(CANCEL_MARKER)
+    assert marker.is_relative_to(config._data_root())
+
+
+def test_remove_deletes_the_installed_model_from_the_cache(fake_hub: FakeHub, tmp_path: Path):
+    """Done-when 3 (#408), Remove: the repo's whole cache folder goes, through
+    the hub library's own deletion, and the status reads absent again."""
+    path, _ = _fetch(fake_hub, tmp_path / "hub")
+
+    removed = remove_model(FAKE_REPO, cache_dir=tmp_path / "hub")
+
+    assert removed == tmp_path / "hub" / FAKE_FOLDER
+    assert not removed.exists() and not path.exists()
+    status = _status(fake_hub, tmp_path / "hub")
+    assert status.installed is False and status.bytes_done == 0 and status.path is None
+
+
+def test_remove_with_nothing_installed_says_so(fake_hub: FakeHub, tmp_path: Path):
+    with pytest.raises(DownloadError) as failure:
+        remove_model(FAKE_REPO, cache_dir=tmp_path / "hub")
+    assert FAKE_REPO in str(failure.value) and "nothing to remove" in str(failure.value)
+
+
+def test_remove_refuses_while_a_download_holds_the_lock(fake_hub: FakeHub, tmp_path: Path):
+    """A running download holds the hub library's per-file lock on the blob it
+    is appending to (the one `_fetch` takes); removing the model out from
+    under it is refused, exit 3 from the CLI, and the model stays."""
+    from huggingface_hub.utils import WeakFileLock
+
+    path, _ = _fetch(fake_hub, tmp_path / "hub")
+    lock_dir = tmp_path / "hub" / ".locks" / FAKE_FOLDER
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    with WeakFileLock(lock_dir / "abc.lock"):
+        with pytest.raises(DownloadError) as failure:
+            remove_model(FAKE_REPO, cache_dir=tmp_path / "hub")
+    assert "running" in str(failure.value) and FAKE_REPO in str(failure.value)
+    assert path.exists(), "the model was removed under a running download"
+    assert remove_model(FAKE_REPO, cache_dir=tmp_path / "hub").exists() is False, "the lock outlived its holder"
+
+
+def test_model_status_and_remove_model_flags_follow_the_download_flag(monkeypatch, capsys, tmp_path):
+    """Both need no folder and take [model] repo or --model; status prints one
+    JSON object, remove prints `removed <path>`; a refusal is exit 3 with the
+    message on stderr and nothing on stdout."""
+    seen = []
+    monkeypatch.setattr(download, "model_status", lambda repo: seen.append(("status", repo)) or Status(
+        repo, installed=False, bytes_total=None, bytes_done=0, path=None, cancel_path="/data/download-cancel"))
+    monkeypatch.setattr(download, "remove_model", lambda repo: seen.append(("remove", repo)) or tmp_path / "gone")
+
+    assert main(["--model-status", "--no-local-config"]) == 0
+    assert main(["--remove-model", "--no-local-config", "--model", "fake-org/other"]) == 0
+    out, err = capsys.readouterr()
+    assert seen == [("status", ModelConfig().repo), ("remove", "fake-org/other")]
+    status_line, removed_line = out.splitlines()
+    assert json.loads(status_line) == {
+        "repo": ModelConfig().repo, "installed": False, "bytes_total": None,
+        "bytes_done": 0, "path": None, "cancel_path": "/data/download-cancel"}
+    assert removed_line == f"removed {tmp_path / 'gone'}"
+
+    def refuse(repo):
+        raise DownloadError("a download of x is running; cancel it first")
+
+    monkeypatch.setattr(download, "remove_model", refuse)
+    assert main(["--remove-model", "--no-local-config"]) == 3
+    out, err = capsys.readouterr()
+    assert out == "" and "cancel it first" in err
+
+
+def test_cli_reports_absent_then_installed_then_removed_against_the_fake_hub(
+    fake_hub: FakeHub, hub_env: dict[str, str]
+):
+    """Done-when 1 and 3 (#408) through the entry point, in the order the
+    Settings dialog will see them: absent with the size, installed with the
+    path after `--download-model`, absent again after `--remove-model`."""
+    before = _cli(["--model-status", "--model", FAKE_REPO], hub_env)
+    assert before.returncode == 0, before.stderr[-3000:]
+    status = json.loads(before.stdout)
+    assert status["repo"] == FAKE_REPO and status["installed"] is False
+    assert status["bytes_total"] == FAKE_TOTAL and status["bytes_done"] == 0 and status["path"] is None
+    assert status["cancel_path"].endswith(CANCEL_MARKER)
+
+    downloaded = _cli(["--download-model", "--model", FAKE_REPO], hub_env)
+    assert downloaded.returncode == 0, downloaded.stderr[-3000:]
+    snapshot = Update.parse(downloaded.stdout.splitlines()[-1]).path
+
+    after = _cli(["--model-status", "--model", FAKE_REPO], hub_env)
+    assert after.returncode == 0, after.stderr[-3000:]
+    status = json.loads(after.stdout)
+    assert status["installed"] is True and status["path"] == snapshot
+    assert status["bytes_done"] == status["bytes_total"] == FAKE_TOTAL
+
+    removed = _cli(["--remove-model", "--model", FAKE_REPO], hub_env)
+    assert removed.returncode == 0, removed.stderr[-3000:]
+    assert removed.stdout.startswith("removed ") and not Path(snapshot).exists()
+    assert json.loads(_cli(["--model-status", "--model", FAKE_REPO], hub_env).stdout)["installed"] is False

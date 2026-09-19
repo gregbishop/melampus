@@ -203,6 +203,30 @@ def _download_model(repo: str) -> int:
     return 0
 
 
+def _model_status(repo: str) -> int:
+    """--model-status (card #408): one JSON object on stdout saying whether the
+    MLX model is in the cache, its size, and where the plugin writes to
+    cancel a download. Never fails for the network: the size is null then."""
+    from .download import model_status
+
+    print(model_status(repo).json())
+    return 0
+
+
+def _remove_model(repo: str) -> int:
+    """--remove-model (card #408): delete the MLX model from the cache, exit 0
+    with `removed <path>`; exit 3 with the reason on stderr when nothing is
+    installed or a download of it is running."""
+    from .download import DownloadError, remove_model
+
+    try:
+        path = remove_model(repo)
+    except DownloadError as exc:
+        return _fail(str(exc))
+    print(f"removed {path}")
+    return 0
+
+
 def _write_plugin_results(paths: list[Path], cache: ResultCache, config, destination: Path) -> None:
     """The enrichment pass the Lightroom plugin reads (card #436).
 
@@ -246,6 +270,14 @@ def main(argv: list[str] | None = None) -> int:
                          "Hugging Face cache, one 'progress <bytes done> <bytes total>' "
                          "line per update on stdout and 'done <path>' at the end, "
                          "then exit; resumes an interrupted download; needs no folder")
+    ap.add_argument("--model-status", action="store_true",
+                    help="print, as one JSON object, whether the MLX model ([model] repo, "
+                         "or --model) is in the Hugging Face cache, its size and path, "
+                         "then exit; needs no folder or network")
+    ap.add_argument("--remove-model", action="store_true",
+                    help="delete the MLX model ([model] repo, or --model) from the "
+                         "Hugging Face cache and print 'removed <path>', then exit; "
+                         "refused while a download of it is running; needs no folder")
     ap.add_argument("--yes", action="store_true",
                     help="skip the cost confirmation when the primary backend is a "
                          "cloud provider (for non-interactive callers)")
@@ -317,6 +349,10 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.download_model:
         return _download_model(config.model.repo)
+    if args.model_status:
+        return _model_status(config.model.repo)
+    if args.remove_model:
+        return _remove_model(config.model.repo)
     if args.folder is None:
         ap.error("the following arguments are required: folder")
 
