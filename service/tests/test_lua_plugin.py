@@ -41,11 +41,14 @@ def test_write_rules():
 
 
 def test_import_runs_against_a_mock_lightroom():
-    """Executes the real MelampusImport.lua end to end against a mock SDK.
+    """Executes the real plugin files against a mock SDK: MelampusImport.lua
+    end to end, and MelampusAnalyze.lua and MelampusSettings.lua loaded fresh
+    under it, on a fake macOS and a fake Windows Lightroom.
 
     Catches what unit tests could not: keywords failing to attach, ratings not
-    written, overwrite protection, dry run writing nothing, idempotency, and
-    file I/O inside a write gate.
+    written, overwrite protection, dry run writing nothing, idempotency, file
+    I/O inside a write gate, the command built for the executable beside the
+    plugin, and what the dialogs say.
 
     It does NOT reproduce every real SDK behaviour — see docs/plugin.md for
     what remains unverified.

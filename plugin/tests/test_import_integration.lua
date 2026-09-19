@@ -1,9 +1,12 @@
 --[[
-Runs the real MelampusImport.lua against a mock Lightroom SDK.
+Runs the real plugin files against a mock Lightroom SDK: MelampusImport.lua end
+to end, and MelampusAnalyze.lua and MelampusSettings.lua loaded fresh under the
+mock, on a fake macOS and a fake Windows Lightroom.
 
 This is the test that was missing. Everything before it checked decision logic
-in isolation; this executes the actual file the plugin loads, with a real
-results JSON on disk, and asserts on what landed in the catalog.
+in isolation; this executes the actual files the plugin loads, with a real
+results JSON on disk, and asserts on what landed in the catalog, on the command
+the plugin builds for the executable beside it, and on what its dialogs say.
 
 It is what would have caught the two failures seen in a real catalog: keywords
 failing to attach, and a counter reporting success for photos that got nothing.
@@ -55,6 +58,22 @@ local function unloadPlugin()
 	end
 end
 
+--- Load one plugin file fresh, dropping the modules first, and hand back what
+--- it returns.
+local function loadPluginFile(name)
+	unloadPlugin()
+	return dofile(PLUGIN .. '/' .. name .. '.lua')
+end
+
+--- Reset the mock, install it for a plugin folder (this one by default), and
+--- load one plugin file fresh under it: the shape every load outside runImport
+--- takes.
+local function loadUnderMock(name, resetOptions, folder, installOptions)
+	mock.reset(resetOptions)
+	mock.install(folder or PLUGIN, installOptions)
+	return loadPluginFile(name)
+end
+
 --- Run the real import file end to end and hand back the resulting state.
 -- `records` is what the results file holds, or nil for no results file
 -- configured at all, as on a fresh install. `photos` is a list of
@@ -82,8 +101,7 @@ local function runImport(records, photos, prefs, options)
 end
 
 local function defaultPrefs(extra)
-	unloadPlugin()
-	local Rules = dofile(PLUGIN .. '/MelampusRules.lua')
+	local Rules = loadPluginFile('MelampusRules')
 	local prefs = Rules.defaultSettings()
 	prefs.dryRun = false
 	for k, v in pairs(extra or {}) do prefs[k] = v end
@@ -370,12 +388,6 @@ local function runAnalysis(existing)
 	return mock.state.executed or {}
 end
 
---- Load MelampusAnalyze.lua under the installed mock, fresh.
-local function loadAnalyze()
-	unloadPlugin()
-	return dofile(PLUGIN .. '/MelampusAnalyze.lua')
-end
-
 local WIN_PLUGIN = 'C:\\Users\\photographer\\AppData\\Roaming\\Adobe\\Lightroom\\Modules\\Melampus.lrplugin'
 local WIN_PREVIEWS = 'C:\\Users\\photographer\\AppData\\Local\\Temp\\melampus-previews-1'
 
@@ -384,9 +396,7 @@ local WIN_PREVIEWS = 'C:\\Users\\photographer\\AppData\\Local\\Temp\\melampus-pr
 local function loadAnalyzeOnWindows(executablePresent)
 	local existing = {}
 	if executablePresent then existing[WIN_PLUGIN .. '\\melampus.exe'] = true end
-	mock.reset({ existing = existing })
-	mock.install(WIN_PLUGIN, { windows = true })
-	return loadAnalyze()
+	return loadUnderMock('MelampusAnalyze', { existing = existing }, WIN_PLUGIN, { windows = true })
 end
 
 --- The words a setup instruction would use; none belongs in a plugin dialog.
@@ -547,10 +557,7 @@ local function viewBoundTo(view, key, group)
 end
 
 t.test('the Settings dialog is worded for both platforms and the executable flow', function()
-	mock.reset({ prefs = defaultPrefs() })
-	mock.install(PLUGIN)
-	unloadPlugin()
-	dofile(PLUGIN .. '/MelampusSettings.lua')
+	loadUnderMock('MelampusSettings', { prefs = defaultPrefs() })
 	local dialog = mock.state.dialogs[1]
 	t.isNotNil(dialog and dialog.modal and dialog.contents or nil,
 		'the Settings dialog was not presented with its contents')
