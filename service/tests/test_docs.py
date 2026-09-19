@@ -534,3 +534,30 @@ def test_config_doc_quotes_the_claude_code_template_from_its_one_source():
     assert "`claude-code`" in readme and "--backend claude-code" in readme
     architecture = (REPO / "docs" / "architecture.md").read_text(encoding="utf-8")
     assert "claude-code" in architecture
+
+
+def test_config_doc_quotes_the_codex_template_from_its_one_source():
+    """Card #422: one place holds Codex CLI's template,
+    providers.CODEX_COMMAND. docs/config.md quotes it as the
+    `[model] command` a user would set to override it, in a TOML block
+    that parses to exactly that list, so the doc cannot rot into a second
+    copy; and it says what to install, how to sign in, that runs bill to
+    the plan, and what happens at its usage limit."""
+    import tomllib
+
+    from melampus import providers
+
+    text = (REPO / "docs" / "config.md").read_text(encoding="utf-8")
+    blocks = [
+        block for block in re.findall(r"```toml\n(.*?)```", text, re.DOTALL)
+        if 'backend = "codex"' in block
+    ]
+    assert blocks, "docs/config.md has no ```toml block with backend = \"codex\""
+    (block,) = blocks
+    assert tomllib.loads(block)["model"]["command"] == providers.CODEX_COMMAND
+    for said in (providers.CODEX_INSTALL, f"`{providers.CODEX_SIGN_IN}`", "usage limit"):
+        assert said in text, f"docs/config.md does not say {said!r}"
+    readme = (REPO / "readme.md").read_text(encoding="utf-8")
+    assert "`codex`" in readme and "--backend codex" in readme
+    architecture = (REPO / "docs" / "architecture.md").read_text(encoding="utf-8")
+    assert "`codex`" in architecture and "CODEX_COMMAND" in architecture
