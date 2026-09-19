@@ -117,14 +117,19 @@ def test_import_runs_against_a_mock_lightroom():
 
 
 @needs_sh
-def test_settings_dialog_against_a_mock_lightroom():
+def test_settings_dialog_against_a_mock_lightroom(tmp_path: Path):
     """Card #405: executes the real MelampusSettings.lua against the mock SDK.
     The engine picker lists the four engines in order with the ones detection
     says cannot run here greyed and their reasons shown; the Ollama link is
     there exactly when ollama is unavailable; the API key field shows only for
     the picked cloud engine and stores through LrPasswords, never the
-    preferences, a file, or the log; a missing executable greys nothing."""
-    run_lua_suite(TESTS / "test_settings_dialog.lua")
+    preferences, a file, or the log; a missing executable greys nothing.
+    Card #408: the download plumbing, stepped through the mock's tasks: the
+    command with stdout redirected on both shells, the poller reading the
+    progress file, Cancel writing the marker, exit 3 with the log's tail.
+    The files the fake executable writes land under tmp_path (the mock's
+    temp directory is TMPDIR)."""
+    run_lua_suite(TESTS / "test_settings_dialog.lua", env=os.environ | {"TMPDIR": str(tmp_path)})
 
 
 def test_json_decoder():
