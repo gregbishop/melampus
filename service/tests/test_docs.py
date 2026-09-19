@@ -4,15 +4,17 @@ Each test here makes one promise a doc carries mechanical, so the doc cannot
 silently fall behind the code or the repo again (as happened when [occurrence] and
 [quality] shipped undocumented). The promises: docs/config.md names every
 implemented setting; AGENTS.md, and not .gitignore, names the install command for
-the recorded plugins, and the installer it names runs on this machine; no doc names
-a file by an uppercase name it does not have;
+the recorded plugins, and on a clone where that installer has run, it is the one
+the clone was installed from; no doc names a file by an uppercase name it does not
+have;
 docs/brief.md names the pytest command CI actually runs; AGENTS.md points at
 docs/brief.md without restating its values; and AGENTS.md points at the standard
 and names the tracker (card #410, Done-when 3).
 
 The checks are deliberately dumb — substring presence of the backticked name — so
 they never argue with prose style, only with absence. The one exception runs the
-named installer, because a path that only read well was itself the drift.
+named installer where it is installed, because a path that only read well was
+itself the drift.
 """
 
 import json
@@ -21,12 +23,15 @@ import re
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from melampus.config import MelampusConfig
 
 REPO = Path(__file__).resolve().parents[2]
 CONFIG_DOC = REPO / "docs" / "config.md"
 AGENTS_MD = REPO / "AGENTS.md"
 PLUGIN_CHOICE = REPO / ".agents" / "on-purpose.json"
+INSTALLED_SKILLS = REPO / ".agents" / "skills"
 BRIEF = REPO / "docs" / "brief.md"
 GITIGNORE = REPO / ".gitignore"
 
@@ -48,19 +53,9 @@ def test_every_config_field_is_documented():
     )
 
 
-def test_agents_md_names_the_install_command_and_gitignore_does_not_restate_it():
-    """The install outputs (.claude/settings.json, .agents/skills, .codex/agents)
-    are machine-local and untracked; a fresh clone must be told how to regenerate
-    them, with the same plugins .agents/on-purpose.json records. AGENTS.md is the
-    one place that says so: .gitignore, which lists those outputs, points there
-    rather than restating the command, so a plugin added later moves one file.
-
-    The installer the command names must be the one on this machine: a command
-    that merely reads well left a fresh clone without the plugins and the secret
-    hook. Run with no plugins, the installer prints its usage and exits 2 before
-    it touches git or the repo, so that run is the check. CI has no on-purpose
-    checkout (it is machine-local, like fixtures/), so only the run is left out
-    there; the rest of the test still gates."""
+def _documented_installer() -> str:
+    """The installer path in the one `node <path>/install.mjs <plugins>` command
+    AGENTS.md carries, checked against the plugins .agents/on-purpose.json records."""
     plugins = json.loads(PLUGIN_CHOICE.read_text(encoding="utf-8"))["plugins"]
     commands = re.findall(r"`node (\S+/install\.mjs) ([^`]*)`", AGENTS_MD.read_text(encoding="utf-8"))
     assert commands, (
@@ -72,18 +67,45 @@ def test_agents_md_names_the_install_command_and_gitignore_does_not_restate_it()
         f"AGENTS.md's install command names {named_plugins.split()}, "
         f".agents/on-purpose.json records {plugins}"
     )
-    if not os.environ.get("CI"):
-        path = Path(installer).expanduser()
-        assert path.is_file(), f"AGENTS.md names {installer}, which does not exist on this machine"
-        run = subprocess.run(["node", str(path)], cwd=REPO, capture_output=True, text=True)
-        assert run.returncode == 2 and "usage: install.mjs" in run.stderr, (
-            f"`node {installer}` is not the on-purpose installer: "
-            f"exit {run.returncode}, stderr {run.stderr.strip()!r}"
-        )
+    return installer
+
+
+def test_agents_md_names_the_install_command_and_gitignore_does_not_restate_it():
+    """The install outputs (.claude/settings.json, .agents/skills, .codex/agents)
+    are machine-local and untracked; a fresh clone must be told how to regenerate
+    them, with the same plugins .agents/on-purpose.json records. AGENTS.md is the
+    one place that says so: .gitignore, which lists those outputs, points there
+    rather than restating the command, so a plugin added later moves one file.
+    This gate reads only the repository, so it holds on any clone and in CI."""
+    _documented_installer()
     gitignore = GITIGNORE.read_text(encoding="utf-8")
     assert "install.mjs" not in gitignore, (
         ".gitignore restates the install command that AGENTS.md is gated for; "
         "say the installer regenerates the ignored outputs and point at AGENTS.md"
+    )
+
+
+def test_documented_installer_is_the_one_this_clone_was_installed_from():
+    """A command that merely reads well left a fresh clone without the plugins
+    and the secret hook. Where the installer has run, .agents/skills holds its
+    symlinks into the on-purpose checkout it ran from, so that checkout is known
+    without naming it: the documented command must point at that checkout's
+    installer, and it must run (with no plugins it prints usage and exits 2
+    before touching git or the repo). A clone without those outputs, CI included,
+    has no installation to check against and skips; the gate above still holds."""
+    links = [p for p in INSTALLED_SKILLS.iterdir() if p.is_symlink()] if INSTALLED_SKILLS.is_dir() else []
+    if not links:
+        pytest.skip("on-purpose is not installed in this clone (no links in .agents/skills)")
+    # Each link targets <checkout>/plugins/<plugin>/skills/<skill>.
+    checkout = Path(os.readlink(links[0])).parents[3]
+    installer = Path(_documented_installer()).expanduser()
+    assert installer == checkout / "bin" / "install.mjs", (
+        f"AGENTS.md names {installer}, but this clone was installed from {checkout}"
+    )
+    run = subprocess.run(["node", str(installer)], cwd=REPO, capture_output=True, text=True)
+    assert run.returncode == 2 and "usage: install.mjs" in run.stderr, (
+        f"`node {installer}` is not the on-purpose installer: "
+        f"exit {run.returncode}, stderr {run.stderr.strip()!r}"
     )
 
 

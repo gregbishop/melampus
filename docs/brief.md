@@ -40,9 +40,10 @@ Two things here differ from every other python repo, both deliberately:
   has no `.venv` and uv resolves `service/pyproject.toml` into one (the
   lockfile is not committed yet; that has its own card). The counts differ
   only in skips: locally 2 skip (`test_escalation.py`, the anthropic and
-  openai SDKs are not installed); in CI 13 skip (those two, plus the 11
+  openai SDKs are not installed); in CI 14 skip (those two, plus the 11
   corpus-backed tests in `test_quality.py`, because `fixtures/` is gitignored
-  and absent on the runner).
+  and absent on the runner, plus the installed-checkout test in `test_docs.py`,
+  because the runner has no on-purpose install outputs).
 
 ## the split, and why
 
