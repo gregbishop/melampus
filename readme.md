@@ -51,8 +51,9 @@ from too; `--locked` fails rather than re-resolve if the lock has drifted from
 `service/pyproject.toml`.
 
 Model weights are **not bundled**. They download on first use into the standard
-HuggingFace cache, or fetch them ahead of time with the command the Lightroom
-plugin will drive (card #408):
+HuggingFace cache; the Lightroom plugin's Settings dialog has a Download button
+for the model (docs/plugin.md § The engine); or fetch them ahead of time with
+the command that button drives:
 
 ```bash
 .venv/bin/melampus-id --download-model
