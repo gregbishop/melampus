@@ -14,6 +14,7 @@ import platform
 import shutil
 import subprocess
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
@@ -226,53 +227,85 @@ def _key_required(engine: str) -> str:
     return f"API key required: set {specific} (or {generic})"
 
 
-def claude_code_verdict(program: str | None = None) -> EngineVerdict:
-    """Whether Claude Code can be the engine here (card #421): `program`
-    (CLAUDE_CODE_PROGRAM unless a template names another) must be on PATH,
-    and its status check must say signed in. Never raises; a verdict
-    reports. The reasons are the words the user sees: not installed with
-    where to get it, not signed in with the command that signs in, a check
-    that did not answer, or available and billing to the subscription."""
-    program = program or CLAUDE_CODE_PROGRAM
-    executable = shutil.which(program)
-    if executable is None:
-        return EngineVerdict(
-            CLAUDE_CODE, False,
-            f"Claude Code is not installed: nothing on PATH is called '{program}'; "
-            f"install it from {CLAUDE_CODE_INSTALL}, then sign in with `{CLAUDE_CODE_SIGN_IN}`",
-        )
-    try:
-        status = subprocess.run(
-            [executable, *CLAUDE_CODE_STATUS],
-            capture_output=True, text=True, encoding="utf-8", errors="replace",
-            stdin=subprocess.DEVNULL, timeout=CLAUDE_CODE_PROBE_SECONDS,
-        )
-    except subprocess.TimeoutExpired:
-        return EngineVerdict(
-            CLAUDE_CODE, False,
-            f"`{program} {' '.join(CLAUDE_CODE_STATUS)}` did not answer within "
-            f"{CLAUDE_CODE_PROBE_SECONDS:g}s",
-        )
-    except OSError as exc:
-        return EngineVerdict(CLAUDE_CODE, False, f"'{program}' could not be run: {exc}")
-    if status.returncode != 0:
-        return EngineVerdict(
-            CLAUDE_CODE, False,
-            f"Claude Code is installed but not signed in; run `{CLAUDE_CODE_SIGN_IN}`",
-        )
+@dataclass(frozen=True, slots=True)
+class CliEngine:
+    """A subscription CLI behind the command seam, in the owner's words: the
+    engine's name, the program shutil.which looks for, where to get it, how
+    to sign in, the documented cheap status check, the built-in template,
+    the decoder that turns its stdout into the reply, and how its status
+    output names the account. What differs between Claude Code and Codex
+    is data here; the verdict and the factory are one function each."""
+
+    engine: str
+    title: str
+    program: str
+    install: str
+    sign_in: str
+    status: tuple[str, ...]
+    command: list[str]
+    decode: Callable[[str], str]
+    #: The account kind out of a passed status check's output, or "".
+    account: Callable[[subprocess.CompletedProcess], str]
+
+
+def _claude_code_account(status: subprocess.CompletedProcess) -> str:
+    """`claude auth status --json`: authMethod and subscriptionType."""
     try:
         account = json.loads(status.stdout)
     except ValueError:
         account = {}
-    signed_in_as = ", ".join(
+    return ", ".join(
         str(account[key]) for key in ("authMethod", "subscriptionType")
         if isinstance(account, dict) and account.get(key)
     )
+
+
+def _cli_verdict(cli: CliEngine, program: str | None, probe_seconds: float) -> EngineVerdict:
+    """Whether a subscription CLI can be the engine here: `program` (the
+    CLI's own unless a template names another) must be on PATH, and its
+    status check must say signed in within `probe_seconds`. Never raises; a
+    verdict reports. The reasons are the words the user sees: not installed
+    with where to get it, not signed in with the command that signs in, a
+    check that did not answer, or available and billing to the subscription."""
+    program = program or cli.program
+    executable = shutil.which(program)
+    if executable is None:
+        return EngineVerdict(
+            cli.engine, False,
+            f"{cli.title} is not installed: nothing on PATH is called '{program}'; "
+            f"install it from {cli.install}, then sign in with `{cli.sign_in}`",
+        )
+    try:
+        status = subprocess.run(
+            [executable, *cli.status],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            stdin=subprocess.DEVNULL, timeout=probe_seconds,
+        )
+    except subprocess.TimeoutExpired:
+        return EngineVerdict(
+            cli.engine, False,
+            f"`{program} {' '.join(cli.status)}` did not answer within {probe_seconds:g}s",
+        )
+    except OSError as exc:
+        return EngineVerdict(cli.engine, False, f"'{program}' could not be run: {exc}")
+    if status.returncode != 0:
+        return EngineVerdict(
+            cli.engine, False,
+            f"{cli.title} is installed but not signed in; run `{cli.sign_in}`",
+        )
+    signed_in_as = cli.account(status)
     return EngineVerdict(
-        CLAUDE_CODE, True,
-        "Claude Code is signed in" + (f" ({signed_in_as})" if signed_in_as else "")
+        cli.engine, True,
+        f"{cli.title} is signed in" + (f" ({signed_in_as})" if signed_in_as else "")
         + "; every frame bills to that subscription, not to an API key",
     )
+
+
+def claude_code_verdict(program: str | None = None) -> EngineVerdict:
+    """Whether Claude Code can be the engine here (card #421): `claude` on
+    PATH and `claude auth status` saying signed in, under
+    CLAUDE_CODE_PROBE_SECONDS. Never raises; a verdict reports."""
+    return _cli_verdict(CLAUDE_CODE_CLI, program, CLAUDE_CODE_PROBE_SECONDS)
 
 
 def detect_engines(ollama_at: str | None = None) -> list[EngineVerdict]:
@@ -328,6 +361,31 @@ def claude_code_reply(stdout: str) -> str:
             )
         raise CommandFailed(f"Claude Code reported an error: {result}")
     return result
+
+
+#: Claude Code, as the one verdict and the one factory branch see it.
+CLAUDE_CODE_CLI = CliEngine(
+    CLAUDE_CODE, "Claude Code", CLAUDE_CODE_PROGRAM, CLAUDE_CODE_INSTALL, CLAUDE_CODE_SIGN_IN,
+    CLAUDE_CODE_STATUS, CLAUDE_CODE_COMMAND, claude_code_reply, _claude_code_account,
+)
+
+
+def _cli_backend(cli: CliEngine, settings, verdict: Callable[[str], EngineVerdict]) -> VLMBackend:
+    """The seam configured for one subscription CLI: the built-in template
+    unless the user set [model] command, and the reply decoded from the
+    CLI's stdout. `verdict` is asked before any image is read, like the
+    `command` engine's shutil.which: a CLI that is not installed or not
+    signed in is refused once, up front, with the fix."""
+    command = list(settings.command or cli.command)
+    said = verdict(command[0])
+    if not said.available:
+        raise _refusal(f"{said.reason}.", works_here=_works_here(detect_engines(settings.ollama_url)))
+    from .backend import CommandBackend
+
+    return CommandBackend(
+        command, executable=shutil.which(command[0]), timeout=settings.timeout_seconds,
+        decode=cli.decode,
+    )
 
 
 def _works_here(verdicts: list[EngineVerdict]) -> tuple[str, ...]:
@@ -445,19 +503,7 @@ def build_primary_backend(config: MelampusConfig) -> VLMBackend:
         )
 
     if kind == CLAUDE_CODE:
-        # The seam configured for Claude Code: the built-in template unless
-        # the user set [model] command, and the reply unwrapped from the
-        # result object. Resolved before any image is read, like `command`.
-        command = list(settings.command or CLAUDE_CODE_COMMAND)
-        verdict = claude_code_verdict(command[0])
-        if not verdict.available:
-            raise _refusal(f"{verdict.reason}.", works_here=_works_here(detect_engines(settings.ollama_url)))
-        from .backend import CommandBackend
-
-        return CommandBackend(
-            command, executable=shutil.which(command[0]), timeout=settings.timeout_seconds,
-            decode=claude_code_reply,
-        )
+        return _cli_backend(CLAUDE_CODE_CLI, settings, claude_code_verdict)
 
     if kind == SCRIPTED:
         from .backend import ScriptedBackend
