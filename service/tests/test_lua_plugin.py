@@ -152,6 +152,25 @@ def test_the_gate_passes_a_green_summary():
     assert_suite_green(_summary("3 passed, 0 failed\n"))
 
 
+def test_a_failing_suite_exits_non_zero_under_lua(tmp_path: Path):
+    """Card #443, done-when 2: the harness itself ends the interpreter with
+    exit 1 after a failing summary, so a failure shows without the wrapper
+    and the summary line is still printed; the gate refuses it either way."""
+    suite = tmp_path / "test_tiny.lua"
+    suite.write_text(
+        "local t = require 'harness'\n"
+        "t.test('passes', function() t.isTrue(true) end)\n"
+        "t.test('fails', function() t.isTrue(false, 'boom') end)\n"
+        "return t.summary()\n"
+    )
+    proc = run_lua(suite)
+    assert proc.returncode != 0, proc.stdout + proc.stderr
+    assert SUMMARY.search(proc.stdout).groups() == ("1", "1"), proc.stdout
+    assert "FAIL fails: " in proc.stdout and "boom" in proc.stdout, proc.stdout
+    with pytest.raises(AssertionError):
+        assert_suite_green(proc)
+
+
 def test_every_plugin_file_compiles():
     """luac -p on the whole plugin, so a syntax error never reaches Lightroom."""
     if shutil.which("luac") is None:
