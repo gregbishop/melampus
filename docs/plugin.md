@@ -115,8 +115,10 @@ skip cleanly when no interpreter is present:
 - **8 JSON tests** plus a parse of 1,093 real records.
 - **`luac -p` over every plugin file**, which has already caught a real bug.
 
-Note that Lightroom runs **Lua 5.1** while the local interpreter is 5.5. These
-catch logic errors, not dialect differences.
+Lightroom itself runs **Lua 5.1**. A local run and the macOS CI job use
+whatever Lua is installed (brew's, currently 5.5), so there these catch logic
+errors only; the Windows CI job installs Lua 5.1, Lightroom's own, and runs the
+same suites on it, so dialect differences are caught there.
 
 ---
 

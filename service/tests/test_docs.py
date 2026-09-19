@@ -38,6 +38,7 @@ INSTALLED_SKILLS = REPO / ".agents" / "skills"
 BRIEF = REPO / "docs" / "brief.md"
 CI_WORKFLOW = REPO / ".github" / "workflows" / "ci.yml"
 LUA_PLUGIN_TESTS = REPO / "service" / "tests" / "test_lua_plugin.py"
+PLUGIN_DOC = REPO / "docs" / "plugin.md"
 GITIGNORE = REPO / ".gitignore"
 README = REPO / "readme.md"
 DOCS = [README, AGENTS_MD, *sorted((REPO / "docs").glob("*.md"))]
@@ -334,8 +335,8 @@ def test_ci_runs_the_plugin_command_through_cmd_exe_on_windows():
     Lua interpreter on the runner (the suite self-skips without one),
     installed by a step of the job, and the file on its pytest line. The Lua
     the job installs is Lua 5.1, Lightroom's own, so on that runner the file
-    catches dialect errors too; its module docstring cannot still say it
-    catches logic errors and not dialect ones."""
+    catches dialect errors too; neither its module docstring nor docs/plugin.md's
+    § Tests can still say the suites catch logic errors and not dialect ones."""
     job = _windows_job()
     installs_lua = [
         line for line in job.splitlines()
@@ -347,9 +348,14 @@ def test_ci_runs_the_plugin_command_through_cmd_exe_on_windows():
         "the Windows job's pytest step must run tests/test_lua_plugin.py, so the "
         f"command the plugin builds for cmd.exe is run by cmd.exe: {pytest_steps}"
     )
-    assert "not dialect ones" not in LUA_PLUGIN_TESTS.read_text(encoding="utf-8"), (
-        "test_lua_plugin.py's docstring still says it catches logic errors, not dialect "
-        "ones; the Windows job runs it on Lua 5.1"
+    still_says_not_dialect = [
+        text.relative_to(REPO).as_posix()
+        for text in (LUA_PLUGIN_TESTS, PLUGIN_DOC)
+        if "not dialect" in text.read_text(encoding="utf-8")
+    ]
+    assert not still_says_not_dialect, (
+        f"{still_says_not_dialect} still say the Lua suites catch logic errors, not "
+        "dialect ones; the Windows job runs them on Lua 5.1"
     )
 
 
