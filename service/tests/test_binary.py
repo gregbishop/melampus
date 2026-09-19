@@ -42,7 +42,9 @@ Card #407: `--download-model` from the executable fetches the model with
 progress on stdout, from a fake hub on loopback, on every platform's build.
 
 Card #420: `--backend command` with a program that is not installed is
-refused before any image is read, naming the command, exit 3.
+refused before any image is read, naming the command, exit 3. Card #421:
+`--backend claude-code` with no `claude` on PATH, likewise, naming where to
+install it.
 
 Nothing here downloads a model: the MLX check stops at the point where the
 executable goes looking for weights, and the download test's host is the fake
@@ -607,6 +609,25 @@ def test_executable_refuses_a_command_that_is_not_installed(
         assert works_here in tail, f"{works_here!r} is not named as working here:\n{tail}"
 
 
+def test_executable_refuses_claude_code_that_is_not_installed(
+    built_executable: Path, photos: Path, tmp_path: Path
+):
+    """Card #421, Done-when 2 in the frozen build: `--backend claude-code`
+    on a PATH with no `claude`, and the executable exits 3 on the
+    not-installed message, naming where to install it and how to sign in,
+    and the backends that do work here, before any image is read."""
+    env = no_python_environment(tmp_path)
+    assert shutil.which("claude", path=env["PATH"]) is None
+    proc = _request_backend(built_executable, photos, tmp_path, "claude-code", env=env)
+    tail = proc.stderr[-3000:]
+    assert proc.returncode == 3, f"exit {proc.returncode}:\n{tail}"
+    assert "invalid choice" not in tail, f"the executable does not accept claude-code:\n{tail}"
+    assert "Claude Code is not installed" in tail, tail
+    assert "https://code.claude.com/docs/en/setup" in tail and "claude auth login" in tail, tail
+    for works_here in ("claude", "openai", "scripted"):
+        assert works_here in tail, f"{works_here!r} is not named as working here:\n{tail}"
+
+
 def test_executable_prints_the_same_json_as_the_cli_with_no_python_on_the_path(
     built_executable: Path, photos: Path, tmp_path: Path
 ):
@@ -674,10 +695,12 @@ def test_executable_detects_engines_as_json_with_no_python_on_the_path(
     built_executable: Path, tmp_path: Path
 ):
     """Card #404, from the executable alone: valid JSON on stdout, the four
-    engines in the owner's order, exit 0, no folder needed. No Ollama answers
-    on a runner, so ollama is unavailable with the install pointer; mlx's
-    verdict is whether this machine is Apple Silicon; the cloud engines are
-    available and name their key variable."""
+    engines in the owner's order then claude-code (card #421), exit 0, no
+    folder needed. No Ollama answers on a runner, so ollama is unavailable
+    with the install pointer; mlx's verdict is whether this machine is Apple
+    Silicon; the cloud engines are available and name their key variable;
+    with no `claude` on the PATH, claude-code is not installed, with where
+    to get it."""
     from melampus import providers
 
     proc = subprocess.run(
@@ -686,8 +709,11 @@ def test_executable_detects_engines_as_json_with_no_python_on_the_path(
     )
     assert proc.returncode == 0, proc.stderr[-3000:]
     verdicts = json.loads(proc.stdout)
-    assert [v["engine"] for v in verdicts] == ["mlx", "ollama", "openai", "claude"]
+    assert [v["engine"] for v in verdicts] == ["mlx", "ollama", "openai", "claude", "claude-code"]
     by_engine = {v["engine"]: v for v in verdicts}
+    assert by_engine["claude-code"]["available"] is False, "a claude on the empty PATH?"
+    assert "not installed" in by_engine["claude-code"]["reason"]
+    assert providers.CLAUDE_CODE_INSTALL in by_engine["claude-code"]["reason"]
     assert by_engine["mlx"]["available"] is on_apple_silicon()
     if not on_apple_silicon():
         assert by_engine["mlx"]["reason"] == "needs Apple Silicon"
