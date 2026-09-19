@@ -379,6 +379,16 @@ end
 local WIN_PLUGIN = 'C:\\Users\\photographer\\AppData\\Roaming\\Adobe\\Lightroom\\Modules\\Melampus.lrplugin'
 local WIN_PREVIEWS = 'C:\\Users\\photographer\\AppData\\Local\\Temp\\melampus-previews-1'
 
+--- Load MelampusAnalyze.lua under a fake Windows Lightroom, with or without
+--- melampus.exe beside the plugin.
+local function loadAnalyzeOnWindows(executablePresent)
+	local existing = {}
+	if executablePresent then existing[WIN_PLUGIN .. '\\melampus.exe'] = true end
+	mock.reset({ existing = existing })
+	mock.install(WIN_PLUGIN, { windows = true })
+	return loadAnalyze()
+end
+
 --- The words a setup instruction would use; none belongs in a plugin dialog.
 local function assertNoSetupInstructions(message)
 	local lower = string.lower(message)
@@ -439,9 +449,7 @@ t.test('with no results file configured, the executable analyses the selection',
 end)
 
 t.test('on Windows the command names melampus.exe with cmd.exe quoting', function()
-	mock.reset({ existing = { [WIN_PLUGIN .. '\\melampus.exe'] = true } })
-	mock.install(WIN_PLUGIN, { windows = true })
-	local Analyze = loadAnalyze()
+	local Analyze = loadAnalyzeOnWindows(true)
 	local ok, message = Analyze.run(WIN_PREVIEWS, WIN_PREVIEWS .. '\\results.json', 'wildlife')
 	t.isTrue(ok, 'run failed: ' .. tostring(message))
 	local command = mock.state.executed[1]
@@ -470,9 +478,7 @@ t.test('the "%" refusal names the path that has it, and the fix for that path', 
 	-- cmd.exe rewrites %NAME% even inside quotes; the plugin refuses rather
 	-- than run against a path the user never named. Moving the plugin is the
 	-- fix only when the "%" is in the plugin folder.
-	mock.reset({ existing = { [WIN_PLUGIN .. '\\melampus.exe'] = true } })
-	mock.install(WIN_PLUGIN, { windows = true })
-	local Analyze = loadAnalyze()
+	local Analyze = loadAnalyzeOnWindows(true)
 	local previews = 'C:\\Users\\photo%grapher\\AppData\\Local\\Temp\\melampus-previews-1'
 	local ok, message = Analyze.run(previews, previews .. '\\results.json', 'wildlife')
 	t.isFalse(ok, 'ran with a "%" in the previews path')
@@ -502,9 +508,7 @@ t.test('a missing executable names the plugin folder and the file it should hold
 end)
 
 t.test('a missing executable on Windows names melampus.exe and the plugin folder', function()
-	mock.reset()
-	mock.install(WIN_PLUGIN, { windows = true })
-	local Analyze = loadAnalyze()
+	local Analyze = loadAnalyzeOnWindows(false)
 	local ok, message = Analyze.run(WIN_PREVIEWS, WIN_PREVIEWS .. '\\results.json', 'wildlife')
 	t.isFalse(ok, 'ran with no executable present')
 	t.isNil(mock.state.executed, 'ran a command with no executable to run')
