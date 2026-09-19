@@ -27,7 +27,7 @@ jobs:
     # platform anyway. macos-latest is arm64.
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       # lua enables the plugin tests (they self-skip without it); luac -p
       # syntax-checks every plugin file inside the suite.
@@ -69,7 +69,7 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       # Not astral-sh/setup-uv: this repository allows only GitHub-owned
       # actions. The runner's own python installs uv, as brew does on macOS.
@@ -104,7 +104,7 @@ jobs:
         run: uv sync --locked --extra dev --extra build --extra cloud --extra openai && uv run pytest -v -rs tests/test_binary.py tests/test_lua_plugin.py tests/test_package_plugin.py --build-binary
 
       - name: Upload melampus.exe
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: melampus-windows
           path: dist/melampus.exe
