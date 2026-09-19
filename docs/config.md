@@ -68,6 +68,42 @@ If you switch to a smaller model and see a spike in `unprocessed`, this is the c
 
 ---
 
+## Downloading the model
+
+The flag `--download-model` (`melampus-id --download-model`, no folder
+needed) fetches `[model] repo`, or the repo `--model` names, into the
+HuggingFace cache: `HF_HOME`, the same cache `mlx` loads from. The Lightroom
+plugin's download button (card #408) drives it, so what it prints on stdout is
+a protocol, defined once in `download.py` (`Update`) and stable:
+
+| Line | When |
+|---|---|
+| `progress <bytes_done> <bytes_total>` | One per chunk received (the hub library's 10 MiB), and one before any byte moves so the total is known at once. `bytes_total` is the whole model; `bytes_done` counts what the cache already holds, complete files and the partial one being resumed included, so a re-run of a finished model prints one line with both equal. |
+| `done <path>` | Last line on success: the snapshot folder in the cache. The path is the rest of the line; it may hold spaces. |
+| `cancelled` | Last line when a signal stopped it. |
+
+Nothing else goes to stdout; errors and the hub library's own warnings go to
+stderr. Exit codes: **exit 0** once the model is complete (`done`); **exit 3**
+on a failure, with a message on stderr naming the fix (the repo the hub does not
+have, so check `[model] repo` or `--model`; the network, so check it and re-run);
+**exit 4** when a signal cancelled it (`cancelled`). The signals are SIGINT
+(Ctrl+C), SIGTERM and, on Windows, Ctrl+Break: the download stops within the
+current chunk and leaves the partial file in the cache as the hub's
+`<etag>.incomplete` blob, and the next run **resumes** it, asking the hub for
+the rest by Range from the byte it has. A failed run leaves the same partial
+file, so re-running after a network drop resumes too.
+
+The bytes move over plain HTTP, through the hub library's own file download
+(its Range request, its size check, its per-file lock), never through the Xet
+transfer that stalls on some networks (docs/troubleshooting.md); the command
+sets `HF_HUB_DISABLE_XET=1` for itself. Once every file is in the cache the hub
+library lays out the snapshot, the pointers and `refs/main` exactly as
+`mlx` will look for them. `HF_ENDPOINT` points the command at another hub,
+which is how the tests prove it against a fake on 127.0.0.1 without ever
+fetching real weights.
+
+---
+
 ## `[image]`
 
 | Key | Default | Why |
