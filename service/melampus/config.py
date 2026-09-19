@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 import tomllib
 from pathlib import Path
@@ -318,7 +319,13 @@ def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any
 
 
 def _local_config() -> Path:
-    return _data_root() / "melampus.local.toml"
+    """melampus.local.toml beside the data, unless MELAMPUS_LOCAL_CONFIG names
+    another file, in which case that file is the local layer and the one
+    beside the data is not read. The CLI and the executable each have their
+    own data root, so the variable is how the executable smoke tests hand
+    both one synthetic configuration."""
+    named = os.environ.get("MELAMPUS_LOCAL_CONFIG")
+    return Path(named).expanduser() if named else _data_root() / "melampus.local.toml"
 
 
 def _secrets_from_environment() -> dict[str, Any]:
@@ -327,8 +334,6 @@ def _secrets_from_environment() -> dict[str, Any]:
     Precedence, lowest to highest: packaged defaults, melampus.local.toml
     (git-ignored), explicit --config file, environment variable, keyword override.
     """
-    import os
-
     token = os.environ.get("MELAMPUS_EBIRD_TOKEN")
     secrets: dict[str, Any] = {}
     if token:

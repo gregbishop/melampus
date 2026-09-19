@@ -26,7 +26,11 @@ executable (readme.md § Building the executable) it is two places: `prompts/`
 ships in the bundle and is read from the unpack directory, while the caches
 and `melampus.local.toml` live beside the executable — `dist/.melampus_cache/`
 and `dist/melampus.local.toml` for a fresh build — because the unpack directory
-is deleted at exit.
+is deleted at exit. `MELAMPUS_LOCAL_CONFIG=<file>` names the local file to read
+instead, in a checkout and in the executable alike; the one beside the data is
+then not read. The executable smoke tests use it to hand the CLI and the
+executable one synthetic configuration, so a developer's own settings never
+decide whether the two agree.
 
 ---
 
