@@ -287,6 +287,21 @@ t.test('with every engine available nothing is greyed', function()
 end)
 
 -- ── the subscription CLIs (card #423) ──────────────────────────────────────
+--- The picked engine's line under the picker: the one static_text whose
+--- title is bound to prefs.engine, and what it shows for `engine`.
+local function pickedReasonShown(contents, engine)
+	local found = nil
+	for _, entry in ipairs(viewsOfKind(contents, 'static_text')) do
+		if bindingKey(entry.view.title) == 'engine' then
+			t.isNil(found, 'two lines under the picker are bound to the engine')
+			found = entry.view
+		end
+	end
+	t.isNotNil(found, 'no line under the picker follows the picked engine')
+	t.equals(type(found.title.transform), 'function', 'the line has no transform')
+	return found.title.transform(engine, mock.state.prefs)
+end
+
 t.test('a CLI that is not installed, and one not signed in, are greyed with the reason detection gave', function()
 	local contents = openSettings({ detection = mock.detectionText() })
 	local byValue = {}
@@ -306,7 +321,7 @@ t.test('a CLI that is not installed, and one not signed in, are greyed with the 
 	t.equals(mock.state.openedUrls[#mock.state.openedUrls], CLAUDE_CODE_INSTALL)
 end)
 
-t.test('a CLI that is signed in is offered', function()
+t.test('a CLI that is signed in is offered, and picked, says what every frame bills to', function()
 	local contents = openSettings({ detection = mock.detectionText({
 		['claude-code'] = { available = true, reason = CLAUDE_CODE_SIGNED_IN }, codex = { available = true, reason = CODEX_SIGNED_IN },
 	}) })
@@ -316,6 +331,12 @@ t.test('a CLI that is signed in is offered', function()
 	t.equals(byValue['claude-code'].title, TITLES['claude-code'])
 	t.isTrue(byValue.codex.enabled, 'a signed-in codex should be offered')
 	t.equals(byValue.codex.title, TITLES.codex)
+	t.equals(#titlesMatching(contents, 'bills to'), 0, 'the billing sentence is shown before anything is picked')
+	t.equals(pickedReasonShown(contents, 'claude-code'), CLAUDE_CODE_SIGNED_IN)
+	t.equals(pickedReasonShown(contents, 'codex'), CODEX_SIGNED_IN)
+	t.equals(pickedReasonShown(contents, ''), '', 'letting Melampus choose has nothing to explain')
+	t.equals(pickedReasonShown(contents, 'openai'), 'API key required: set MELAMPUS_OPENAI_KEY (or OPENAI_API_KEY)',
+		'the picked engine\'s reason is what the line shows, whichever engine')
 end)
 
 -- ── the Ollama link ────────────────────────────────────────────────────────
@@ -836,6 +857,7 @@ t.test('with no executable beside the plugin the dialog still opens, nothing gre
 	for _, item in ipairs(picker.items) do
 		t.isTrue(item.enabled, item.value .. ' was greyed with no detection to grey it')
 	end
+	t.equals(pickedReasonShown(contents, 'claude-code'), '', 'without detection the note already says what is missing')
 	t.isTrue(#titlesMatching(contents, PLUGIN) > 0, 'the missing-executable message does not name the plugin folder')
 	-- The file as the message says it, not the bare word: the folder's own path
 	-- holds "melampus" wherever the repository lives, so the word alone is
