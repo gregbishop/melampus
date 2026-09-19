@@ -1086,8 +1086,8 @@ def test_the_model_flags_take_the_engine_from_the_config_file_and_detection_when
     assert main(["--model-status", "--config", str(settings)]) == 0
 
     def machine(mlx: bool, ollama: bool):
-        verdicts = [EngineVerdict("mlx", mlx, ""), EngineVerdict("ollama", ollama, ""),
-                    EngineVerdict("openai", True, ""), EngineVerdict("claude", True, "")]
+        verdicts = [EngineVerdict("mlx", "MLX", mlx, ""), EngineVerdict("ollama", "Ollama", ollama, ""),
+                    EngineVerdict("openai", "OpenAI", True, ""), EngineVerdict("claude", "Claude", True, "")]
         monkeypatch.setattr(melampus.cli, "detect_engines", lambda ollama_at=None: verdicts)
 
     machine(mlx=False, ollama=True)  # Windows, Ollama running
