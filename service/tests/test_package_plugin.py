@@ -125,7 +125,9 @@ def test_main_writes_the_platform_zip_and_prints_its_listing(
     package_script, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys
 ):
     """What the workflow runs: no arguments, the zip lands in dist/ beside the
-    executable and the listing is printed so the run log shows what shipped."""
+    executable and the listing is printed so the run log shows what shipped.
+    The folder packaged is the one PLUGIN names at call time (here the fake,
+    not the checkout), so the listing is exactly the fake folder's files."""
     monkeypatch.setattr(package_script.build_binary, "DIST", tmp_path / "dist")
     monkeypatch.setattr(package_script, "PLUGIN", _fake_plugin(tmp_path))
     monkeypatch.setattr(sys, "platform", "win32")
@@ -135,8 +137,10 @@ def test_main_writes_the_platform_zip_and_prints_its_listing(
     target = tmp_path / "dist" / "Melampus-Windows.zip"
     assert str(target) in out
     with zipfile.ZipFile(target) as archive:
-        assert f"{FOLDER}/melampus.exe" in archive.namelist()
-        assert f"{FOLDER}/melampus" not in archive.namelist()
+        assert archive.namelist() == [
+            f"{FOLDER}/Info.lua", f"{FOLDER}/MelampusInit.lua",
+            f"{FOLDER}/MelampusRules.lua", f"{FOLDER}/melampus.exe",
+        ], "main() packaged a folder other than the one PLUGIN names"
         for name in archive.namelist():
             assert name in out
 
