@@ -15,10 +15,19 @@ local M = {}
 
 M.state = {}
 
---- Single-quote a path for sh, as the plugin does for LrTasks.execute. Every
--- path the mock hands to a shell goes through here: the temp directory comes
--- from TMPDIR, and a space, a quote, a "$" or a backtick in it must arrive as
--- the name it is, not be split, expanded or run.
+--- Single-quote a path for sh. Every path the mock hands to a shell goes
+-- through here: the temp directory comes from TMPDIR, and a space, a quote,
+-- a "$" or a backtick in it must arrive as the name it is, not be split,
+-- expanded or run.
+--
+-- The plugin's own quote() in MelampusAnalyze.lua has the same sh branch and
+-- is not used here on purpose. The mock's shell is always the host's sh, even
+-- while it fakes Windows; the plugin's quote() follows WIN_ENV, which the
+-- last install left set when the next reset's cleanUp runs, so it would
+-- double-quote for sh and "$" would expand again. And the mock stands in for
+-- the SDK beneath the plugin: it is loaded before `import` exists, so no
+-- plugin module can load yet, and its housekeeping must not depend on the
+-- module it exists to exercise.
 local function sh(text)
 	return "'" .. string.gsub(tostring(text), "'", "'\\''") .. "'"
 end
