@@ -478,3 +478,32 @@ def test_docs_name_the_download_command_where_the_model_and_the_protocol_are_des
 
     architecture = (REPO / "docs" / "architecture.md").read_text(encoding="utf-8")
     assert "| `download.py` |" in architecture, "docs/architecture.md's module table lacks download.py"
+
+
+def test_docs_say_the_same_button_and_flags_pull_ollamas_model():
+    """Card #409: docs/config.md § Downloading the model says the three flags
+    act for the picked engine and, for ollama, through which of Ollama's
+    endpoints (the ones the code calls); the `ollama_model` row no longer
+    tells the user to pull by hand; docs/plugin.md's Download row section
+    covers ollama; readme.md § Windows says the model can be pulled from
+    Settings."""
+    from melampus.download import OLLAMA_DELETE, OLLAMA_PULL, OLLAMA_TAGS
+
+    config_doc = CONFIG_DOC.read_text(encoding="utf-8")
+    section = re.search(r"^## Downloading the model\n(.*?)(?:^## |\Z)", config_doc, re.MULTILINE | re.DOTALL).group(1)
+    for promise in ("`--backend ollama`", "`[model] backend`", f"`{OLLAMA_PULL}`", f"`{OLLAMA_TAGS}`",
+                    f"`{OLLAMA_DELETE}`", "`done <model>`", "`ollama_model`", "`ollama_url`", "size unknown"):
+        assert promise in section, f"docs/config.md § Downloading the model does not say {promise}"
+    row = re.search(r"^\| `ollama_model` \|.*$", config_doc, re.MULTILINE).group(0)
+    assert "yours to do" not in row and "until card #409" not in row, "docs/config.md still says to pull by hand"
+    assert "Download" in row, "docs/config.md's ollama_model row does not point at the Download button"
+
+    plugin_doc = (REPO / "docs" / "plugin.md").read_text(encoding="utf-8")
+    prose = re.search(r"^### The Download row\n(.*?)(?:^## |\Z)", plugin_doc, re.MULTILINE | re.DOTALL)
+    assert prose, "docs/plugin.md has no `### The Download row` section"
+    for named in ("ollama", "`--backend`", "pull", "size unknown"):
+        assert named in prose.group(1), f"docs/plugin.md's Download row section does not say {named}"
+
+    readme = README.read_text(encoding="utf-8")
+    windows = re.search(r"^## Windows.*?\n(.*?)^## ", readme, re.MULTILINE | re.DOTALL).group(1)
+    assert "Settings" in windows and "pull" in windows, "readme.md § Windows does not say the model can be pulled from Settings"

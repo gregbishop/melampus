@@ -46,7 +46,7 @@ executable's equivalents are the per-user `cache/` files described above.
 | `backend` | *(the first engine that can run here)* | Which engine answers. The engines are `mlx` (local, Apple Silicon only — the local-first choice), `ollama` (local, through an Ollama server: Windows, Linux, or a Mac that prefers it; `ollama_model` and `ollama_url` below), `openai`, and `claude` (the Anthropic API); `scripted` is the test fake, not an engine (answers nothing, needs no weights; it exists so the shipped executable can be smoke-tested — see readme.md § Building the executable). The Lightroom plugin's `engine` preference passes the same names as `--backend` (docs/plugin.md § The engine); unset, the plugin passes nothing and this setting decides. Left unset here too, the CLI runs detection (card #404) and takes the first engine that can run on this machine, in the order above: `mlx` on Apple Silicon, else `ollama` when a server answers at `ollama_url` (unset, Ollama's documented default `http://127.0.0.1:11434`), else `openai`. Asked for `ollama` with no server answering there, the run is refused before any image is read: the message names the address tried and where to install Ollama, exit 3, the way `mlx` is refused off Apple Silicon. `--detect-engines` (`melampus-id --detect-engines`, no folder needed) prints the same verdicts as JSON, one per engine with a plain-words reason: `needs Apple Silicon`, where to install Ollama, or which key variable a cloud engine needs. The refusal for an engine that cannot run here names the ones that can, from the same detection. CLAUDE.md §3 built the backend seam; making it a setting is what lets the same repo run on a machine with no local runtime at all (Windows). A cloud primary bills **every** frame, not just an escalated tail, so three guards apply: the CLI prints an estimate and asks before spending (`--yes` skips the question for non-interactive callers such as the plugin), `max_images` hard-caps the run regardless, and results go to their own cache file (`identifications-cloud.jsonl`) so a later local pass cannot silently overwrite answers that were paid for. When a cloud backend is selected, MLX-shaped defaults you have not overridden are retuned: `max_edge` 2048, no fallback ladder, `max_tokens` 1200, `routing_max_tokens` 900 — the same treatment escalation applies, for the same reasons. The estimate is priced by `escalation.input_usd_per_mtok` / `output_usd_per_mtok`; set them to your model's rates or the number is confidently wrong. |
 | `repo` | `mlx-community/Qwen3-VL-30B-A3B-Instruct-4bit` | CLAUDE.md §3 requires the model be a setting, not a hardcode. This is the MoE build named in the spec: 18.3 GB with roughly 3B active parameters, so it runs far faster than a dense model of similar quality. 128 GB of unified memory allows going considerably larger — see the table in the README. Used by the `mlx` backend only. |
 | `name` | *(provider default)* | Cloud model name, for `backend = "claude"` or `"openai"`. Unset means the provider's default (`providers.DEFAULT_MODELS`) — vision model names age quickly, so treat that as a starting point. |
-| `ollama_model` | `qwen3-vl:8b-instruct` | The model the `ollama` backend asks, as a tag from [ollama.com/library](https://ollama.com/library); it must take image input. The default is the Instruct build of the same family the `mlx` default uses, 6.1 GB, from [ollama.com/library/qwen3-vl/tags](https://ollama.com/library/qwen3-vl/tags); `qwen3-vl:30b-a3b-instruct` (20 GB) there is the Mac default's twin for a machine that can hold it. Not the library's bare `qwen3-vl` tag: that is the thinking build, which spends the token budget thinking before any JSON appears (the trap `escalation.routing_max_tokens` documents). Pulling the model is yours to do (`ollama pull qwen3-vl:8b-instruct`) until card #409 lands; a model that is not there fails each frame with Ollama's own "not found" message. |
+| `ollama_model` | `qwen3-vl:8b-instruct` | The model the `ollama` backend asks, as a tag from [ollama.com/library](https://ollama.com/library); it must take image input. The default is the Instruct build of the same family the `mlx` default uses, 6.1 GB, from [ollama.com/library/qwen3-vl/tags](https://ollama.com/library/qwen3-vl/tags); `qwen3-vl:30b-a3b-instruct` (20 GB) there is the Mac default's twin for a machine that can hold it. Not the library's bare `qwen3-vl` tag: that is the thinking build, which spends the token budget thinking before any JSON appears (the trap `escalation.routing_max_tokens` documents). The Lightroom plugin's Settings dialog has a Download button for it, which asks Ollama to pull it (§ Downloading the model, card #409), as does `melampus-id --download-model --backend ollama`; `ollama pull qwen3-vl:8b-instruct` does the same by hand. A model that is not there fails each frame with Ollama's own "not found" message. |
 | `ollama_url` | *(unset)* | Where the `ollama` backend's server listens. Unset means Ollama's documented default, `http://127.0.0.1:11434` (Ollama's docs/faq.mdx: "Ollama binds 127.0.0.1 port 11434 by default"), written once as `providers.OLLAMA_URL`; set this for a server on another port or host. One address: it is what detection probes for the default engine and `--detect-engines`, what the not-running refusal names, and what every request goes to. |
 | `base_url` | *(unset)* | OpenAI-compatible endpoint override: OpenRouter, LM Studio, vLLM, a proxy. Turns the `openai` backend into a general escape hatch rather than one vendor's client. |
 | `api_key` | *(unset)* | Cloud key for the primary backend. Never set it in tracked source — prefer `MELAMPUS_ANTHROPIC_KEY` / `MELAMPUS_OPENAI_KEY` (or the provider's own variable), or put it in the git-ignored `melampus.local.toml`. Stored as a `SecretStr` so a repr or traceback cannot leak it. |
@@ -71,10 +71,15 @@ If you switch to a smaller model and see a spike in `unprocessed`, this is the c
 ## Downloading the model
 
 The flag `--download-model` (`melampus-id --download-model`, no folder
-needed) fetches `[model] repo`, or the repo `--model` names, into the
-HuggingFace cache: `HF_HOME`, the same cache `mlx` loads from. The Lightroom
-plugin's download button (card #408) drives it, so what it prints on stdout is
-a protocol, defined once in `download.py` (`Update`) and stable:
+needed) fetches the picked engine's model: for `mlx`, `[model] repo`, or the
+repo `--model` names, into the HuggingFace cache (`HF_HOME`, the same cache
+`mlx` loads from); for `ollama`, it asks the Ollama server to pull
+`[model] ollama_model` (§ The same flags for Ollama below). The engine is
+`--backend` or `[model] backend`, else the first that can run here, as a run
+decides; `openai`, `claude` and `scripted` have no model to fetch and are
+refused with exit 3 naming the two that have. The Lightroom plugin's download
+button (card #408, and card #409 for Ollama) drives it, so what it prints on
+stdout is a protocol, defined once in `download.py` (`Update`) and stable:
 
 | Line | When |
 |---|---|
@@ -111,8 +116,9 @@ writes where the executable looks without deriving the directory itself.
 
 ### `--model-status` and `--remove-model`
 
-Two more flags that need no folder and take `[model] repo` or `--model`, for
-the Settings dialog's Download button (card #408):
+Two more flags that need no folder and act for the same engine (`[model]
+repo` or `--model` for `mlx`; `ollama_model` for `ollama`, below), for the
+Settings dialog's Download button (card #408):
 
 - `--model-status` prints one JSON object and exits 0:
   `{"repo", "installed", "bytes_total", "bytes_done", "path", "cancel_path"}`.
@@ -130,6 +136,46 @@ the Settings dialog's Download button (card #408):
   and the reason on stderr when nothing is installed, or while a download of
   the model is running (it holds the hub library's per-file lock the fetch
   takes): cancel the download first.
+
+### The same flags for Ollama
+
+With `--backend ollama` (what the plugin passes for its Ollama row; or
+`[model] backend = "ollama"`), the same three flags act on the Ollama server
+at `[model] ollama_url` and the model `[model] ollama_model`, through the
+endpoints Ollama's own docs/api.md describes, with the standard library, as
+the backend speaks its chat endpoint (card #409):
+
+- `--download-model` is `/api/pull` (`POST`, § Pull a Model) with the model's
+  name, its stream of JSON objects read line by line and mapped onto the
+  protocol above: each layer line (`pulling <digest>` with `digest`, `total`
+  and `completed`, the layers one after another) becomes
+  `progress <bytes_done> <bytes_total>` summed over every layer seen so far,
+  so the total climbs as layers appear (Ollama gives no whole size before
+  the pull); `success` ends it with **`done <model>`** and exit 0, the model
+  living in Ollama under that name. The other statuses (manifest, verifying,
+  writing, removing) print nothing. An error object in the stream is
+  **exit 3** with Ollama's words on stderr: an unknown model
+  (`pull model manifest: file does not exist`) names the model and
+  `[model] ollama_model`; no server answering is the backend's own
+  not-running message, naming `[model] ollama_url`. A signal or the cancel
+  marker ends it as for `mlx`, **exit 4** and `cancelled`, by closing the
+  stream, which is how Ollama learns to stop; Ollama keeps the layers it has
+  and the next pull resumes them by itself (the docs: "Cancelled pulls are
+  resumed from where they left off"), so the next `progress` line starts
+  from what was kept.
+- `--model-status` asks `/api/tags` (`GET`, § List Local Models) whether the
+  model is held: `installed` true with the listed `size` as `bytes_total` and
+  `bytes_done` and the model's name as `path`; else false with `bytes_total`
+  **null** (Ollama lists sizes for held models only, so the button says
+  "size unknown" until the model is there) and `bytes_done` 0. A name
+  without a tag matches Ollama's `<name>:latest`. With no server answering
+  the model is reported absent, size unknown, exit 0, so Settings opens.
+- `--remove-model` is `/api/delete` (`DELETE`, § Delete a Model) with the model's
+  name: `removed <model>` and exit 0; exit 3 naming the model when Ollama
+  does not hold it, or with the not-running message.
+
+The tests prove all three against a fake Ollama on 127.0.0.1 that speaks
+those endpoints and keeps what a cut-off pull had; no model is ever pulled.
 
 The bytes move over plain HTTP, through the hub library's own file download
 (its Range request, its size check, its per-file lock), never through the Xet
