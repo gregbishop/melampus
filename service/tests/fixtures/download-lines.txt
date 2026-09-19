@@ -1,0 +1,21 @@
+# Sample lines of the download protocol (docs/config.md § Downloading the
+# model), read by service/tests/test_download.py and plugin/tests/test_rules.lua
+# so the Python printer and parser (download.Update) and the Lua parser
+# (Rules.parseDownloadLine) cannot drift. One row per line: the input, a tab,
+# then what both parsers must make of it: `progress <done> <total>`,
+# `done <path>`, `cancelled`, or `rejected` when the line is not an update.
+progress 0 18300000000	progress	0	18300000000
+progress 4096 4096	progress	4096	4096
+done /hf/hub/models--x--y/snapshots/abc	done	/hf/hub/models--x--y/snapshots/abc
+done C:\Users\me\AppData\Local\hf hub\snapshots\abc	done	C:\Users\me\AppData\Local\hf hub\snapshots\abc
+cancelled	cancelled
+	rejected
+progress	rejected
+progress 1	rejected
+progress one two	rejected
+progress 1 2 3	rejected
+progress 1 2 	rejected
+done	rejected
+cancelled now	rejected
+Downloading bytes: 100%	rejected
+engine: mlx	rejected

@@ -179,6 +179,77 @@ function Rules.engineItems(verdicts, problem)
 	return items, note
 end
 
+--- The engine a picker value comes to (card #408): the picked one, or with
+-- the preference unset the first that detection says can run here, in the
+-- owner's order, which is the executable's own default (providers
+-- .default_engine). nil when nothing is picked and there is no detection.
+function Rules.resolvedEngine(engine, verdicts)
+	if engine ~= nil and engine ~= '' then return engine end
+	for _, verdict in ipairs(type(verdicts) == 'table' and verdicts or {}) do
+		if type(verdict) == 'table' and verdict.available == true then return verdict.engine end
+	end
+	return nil
+end
+
+-- ── the model download (card #408) ─────────────────────────────────────────
+-- The executable's --download-model prints one line per update on stdout
+-- (docs/config.md § Downloading the model), which the plugin redirects to a
+-- file and reads back. This parser mirrors download.Update.parse on the
+-- Python side, and both are tested against the same sample lines.
+
+--- One protocol line, or nil for any other line. `progress <done> <total>`
+-- gives { state = 'progress', bytesDone, bytesTotal }; `done <path>` gives
+-- { state = 'done', path } with the path the rest of the line, spaces and
+-- all; `cancelled` alone gives { state = 'cancelled' }.
+function Rules.parseDownloadLine(line)
+	if type(line) ~= 'string' then return nil end
+	line = string.gsub(line, '[\r\n]+$', '')
+	local word, rest = string.match(line, '^([^ ]*) (.*)$')
+	if not word then word, rest = line, '' end
+	if word == 'progress' then
+		local done, total = string.match(rest, '^(%d+) (%d+)$')
+		if done then return { state = 'progress', bytesDone = tonumber(done), bytesTotal = tonumber(total) } end
+	elseif word == 'done' and rest ~= '' then
+		return { state = 'done', path = rest }
+	elseif word == 'cancelled' and rest == '' then
+		return { state = 'cancelled' }
+	end
+	return nil
+end
+
+--- The last update in the text of the progress file, or nil while there is
+-- none: a line still being written does not parse and the one before stands.
+function Rules.latestDownloadUpdate(text)
+	local latest = nil
+	for line in string.gmatch(text or '', '[^\n]+') do
+		latest = Rules.parseDownloadLine(line) or latest
+	end
+	return latest
+end
+
+--- A byte count as the button and the progress line show it.
+function Rules.formatBytes(bytes)
+	if type(bytes) ~= 'number' then return 'size unknown' end
+	if bytes >= 1e9 then return string.format('%.1f GB', bytes / 1e9) end
+	if bytes >= 1e6 then return string.format('%.0f MB', bytes / 1e6) end
+	return string.format('%d bytes', bytes)
+end
+
+--- The Download button's title from the decoded --model-status JSON: the
+-- model's name and its size, or 'size unknown' when the hub could not be
+-- reached (bytes_total null).
+function Rules.downloadTitle(status)
+	return 'Download ' .. tostring(status and status.repo) .. ' (' .. Rules.formatBytes(status and status.bytes_total) .. ')'
+end
+
+--- A progress update as text ('3.1 GB of 18.3 GB') and the portion done,
+-- 0 to 1, for a progress scope.
+function Rules.downloadProgress(update)
+	local done, total = update.bytesDone or 0, update.bytesTotal or 0
+	local portion = total > 0 and done / total or 0
+	return Rules.formatBytes(done) .. ' of ' .. Rules.formatBytes(total), portion
+end
+
 -- Keyword hierarchy uses '>' as its separator, so a species name containing one
 -- would silently create extra levels. Strip anything structural.
 local function sanitise(text)
