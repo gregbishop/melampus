@@ -129,7 +129,8 @@ end
 --- `options.download` plays --download-model: its `lines` land
 --- in the progress file one per tick, `stderr` in the log, and it exits
 --- `code`; `options.removeCode` is --remove-model's exit code; `options
---- .onDialog` plays the user while the dialog is up.
+--- .onDialog` plays the user while the dialog is up; `options.windows`
+--- opens it on a fake Windows Lightroom.
 local function openSettings(options)
 	options = options or {}
 	mock.reset({
@@ -160,7 +161,7 @@ local function openSettings(options)
 		end,
 		onModalDialog = options.onDialog,
 	})
-	mock.install(PLUGIN)
+	mock.install(PLUGIN, { windows = options.windows })
 	for _, name in ipairs({ 'MelampusJson', 'MelampusRules', 'MelampusLog', 'MelampusAnalyze' }) do
 		package.loaded[name] = nil
 	end
@@ -181,6 +182,14 @@ local function viewsOfKind(root, kind)
 	end
 	walk(root, nil)
 	return found
+end
+
+--- The one push_button titled `title` in the tree, or nil.
+local function buttonTitled(contents, title)
+	for _, entry in ipairs(viewsOfKind(contents, 'push_button')) do
+		if entry.view.title == title then return entry.view end
+	end
+	return nil
 end
 
 local function bindingKey(binding)
@@ -897,6 +906,23 @@ t.test('on a fake Windows Lightroom, whose folders exist nowhere on this host, l
 	local Log = loadLog({ windows = true })
 	Log.info('running: melampus.exe --detect-engines')
 	t.equals(Log.path(), 'C:\\Users\\photographer\\AppData\\Local\\Melampus\\logs\\Melampus.log')
+end)
+
+t.test('the dialog names the log at Log.path(), and Show log file reveals it in the folder that holds it, both made first', function()
+	local contents = openSettings({})
+	local Log = require('MelampusLog')
+	t.equals(#titlesMatching(contents, 'Log: ' .. Log.path()), 1, 'the dialog does not name the log at ' .. Log.path())
+	t.isNil(logText(), 'a log exists before anything was logged')
+	buttonTitled(contents, 'Show log file').action()
+	t.equals(mock.state.revealed[1], Log.path(), 'not the log that was revealed')
+	t.equals(import('LrPathUtils').parent(mock.state.revealed[1]), Log.folder())
+	t.isNotNil(logText(), 'the log was not made, so its folder had nothing to show')
+end)
+
+t.test('on Windows, Show log file reveals the log under %LOCALAPPDATA%\\Melampus', function()
+	local contents = openSettings({ windows = true })
+	buttonTitled(contents, 'Show log file').action()
+	t.equals(mock.state.revealed[1], 'C:\\Users\\photographer\\AppData\\Local\\Melampus\\logs\\Melampus.log')
 end)
 
 return t.summary()
