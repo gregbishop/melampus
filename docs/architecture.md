@@ -72,16 +72,22 @@ class VLMBackend(ABC):
     def complete(self, image_path: Path, prompt: str, max_tokens: int) -> Completion: ...
 ```
 
-Two implementations exist. `MLXBackend` runs Qwen3-VL locally. `ScriptedBackend`
-returns canned responses, which is what lets 43 tests cover parsing, validation, retry,
-caching and the downscale ladder in under a second with no weights on disk.
+Five implementations exist, and `[model] backend` picks one (`providers.py`,
+docs/config.md § `[model]`). `MLXBackend` runs Qwen3-VL locally on Apple Silicon.
+`OllamaBackend` runs whatever vision model a local Ollama server holds, over its
+documented chat endpoint with the standard library, which is the local path on
+Windows and Linux. `AnthropicBackend` and `OpenAIBackend` are the cloud path,
+built for the §6.6 escalation tail and reused as a primary on machines with no
+local runtime. `ScriptedBackend` returns canned responses, which is what lets the
+pipeline tests cover parsing, validation, retry, caching and the downscale ladder
+in under a second with no weights on disk. Each is a class here and no change
+anywhere else: the prompts, the JSON extraction, the schema validation and the
+corrective retry live above the seam and are the same whoever answers.
 
-CLAUDE.md anticipates two more: `vllm-mlx` as an alternative runtime, and the optional
-cloud-escalation path in §6.6 where low-confidence cases are re-run against an
-Anthropic-compatible endpoint with the same request shape. Both are a new class here
-and no change anywhere else.
-
-`MLXBackend` loads weights lazily, so `--help` does not pull 18 GB.
+`MLXBackend` loads weights lazily, so `--help` does not pull 18 GB. Whether an
+engine can run on this machine at all is `providers.detect_engines`' question,
+answered before any image is read; an Ollama that is not running is refused
+there with the address tried and where to install it.
 
 ---
 

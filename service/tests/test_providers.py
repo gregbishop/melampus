@@ -8,19 +8,30 @@ retuned for a cloud primary without ever overriding an explicit setting.
 
 from __future__ import annotations
 
+import base64
 import contextlib
+import io
 import json
 import socket
 import sys
 import threading
 import types
+import urllib.error
+import urllib.request
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
 from conftest import PHOTO
+from test_pipeline import ID_OK, ROUTING_OK
 
 from melampus import providers
-from melampus.backend import AnthropicBackend, MLXBackend, OpenAIBackend, ScriptedBackend
+from melampus.backend import (
+    AnthropicBackend,
+    MLXBackend,
+    OllamaBackend,
+    OpenAIBackend,
+    ScriptedBackend,
+)
 from melampus.config import load_config
 
 ALL_KEY_VARIABLES = [name for names in providers.KEY_VARIABLES.values() for name in names]
@@ -150,33 +161,81 @@ def test_cli_rejects_a_name_that_is_not_an_engine(name, photos, tmp_path, capsys
         assert engine in err, f"the usage error does not name {engine!r}:\n{err}"
 
 
-def test_ollama_is_refused_as_not_built_yet_and_names_what_works(no_ambient_keys, no_ambient_ollama):
-    """Card #403: `ollama` is one of the four names and the CLI must accept it,
-    but its backend is card #406's. Until then it is refused the way mlx is
-    refused off Apple Silicon: what is wrong, in plain words, and the backends
-    that do work on this machine. Ollama is local, so nothing about a cloud
-    primary applies to it: no retuned defaults, no cost gate, no cloud cache."""
+def test_ollama_not_running_is_refused_before_any_image_is_read_and_names_the_fix(
+    no_ambient_keys, no_ambient_ollama
+):
+    """Card #406, Done-when 2: given Ollama is not running, when the backend is
+    asked for, then the refusal says so, names the address it tried and where
+    to install Ollama, and names the backends that do work here, through the
+    same BackendUnavailable path every refusal takes (exit 3 from the CLI).
+    The check is the probe card #404 built, run at construction: no image is
+    read first. Ollama is local, so nothing about a cloud primary applies to
+    it: no retuned defaults, no cost gate, no cloud cache."""
     config = _cfg(model={"backend": "ollama"})
     assert not providers.is_cloud_primary(config)
     with pytest.raises(providers.BackendUnavailable) as err:
         providers.build_primary_backend(config)
     message = str(err.value)
-    assert "The Ollama engine is not built yet" in message
-    assert "#406" in message
+    assert "No Ollama server is answering at" in message
+    assert providers.OLLAMA_URL in message
+    assert providers.OLLAMA_INSTALL in message
     for works_here in ("claude", "openai", "scripted"):
         assert works_here in message, f"{works_here!r} is not named as working here:\n{message}"
     assert "--backend" in message
 
 
-def test_cli_backend_ollama_exits_3_with_the_refusal(photos, tmp_path, capsys, no_ambient_keys, no_ambient_ollama):
+def test_ollama_not_running_refusal_names_the_configured_address(monkeypatch):
+    """The address tried is the configured one, so the message and the probe
+    cannot disagree about where Ollama was looked for."""
+    probed: list[str] = []
+
+    def answers(url=None):
+        probed.append(url)
+        return False
+
+    monkeypatch.setattr(providers, "ollama_answers", answers)
+    config = _cfg(model={"backend": "ollama", "ollama_url": "http://127.0.0.1:11435"})
+    with pytest.raises(providers.BackendUnavailable) as err:
+        providers.build_primary_backend(config)
+    assert "http://127.0.0.1:11435" in str(err.value)
+    # Probed for the backend, then again by detection for the "what works"
+    # list: every probe went to the configured address.
+    assert probed and set(probed) == {"http://127.0.0.1:11435"}
+
+
+def test_cli_backend_ollama_exits_3_with_the_not_running_message(
+    photos, tmp_path, capsys, no_ambient_keys, no_ambient_ollama
+):
     from melampus.cli import main
 
     code = main([str(photos), "--backend", "ollama", "--cache", str(tmp_path / "cache.jsonl")])
 
     err = capsys.readouterr().err
     assert code == 3, err
-    assert "The Ollama engine is not built yet" in err
+    assert "No Ollama server is answering at" in err
+    assert providers.OLLAMA_INSTALL in err
     assert "cloud default" not in err, f"ollama is local; nothing was retuned for a cloud:\n{err}"
+
+
+def test_ollama_primary_builds_the_backend_from_the_model_settings(monkeypatch):
+    """Given engine ollama and a model name, the factory builds an OllamaBackend
+    on the configured model, address, temperature and timeout; unset, the
+    address is providers.OLLAMA_URL."""
+    monkeypatch.setattr(providers, "ollama_answers", lambda url=None: True)
+    backend = providers.build_primary_backend(_cfg(model={"backend": "ollama"}))
+    assert isinstance(backend, OllamaBackend)
+    assert backend.name == backend.model == "qwen3-vl:8b-instruct"
+    assert backend.url == providers.OLLAMA_URL
+    assert backend.temperature == 0.0
+    assert backend.timeout == 180.0
+
+    backend = providers.build_primary_backend(_cfg(model={
+        "backend": "ollama", "ollama_model": "qwen3-vl:30b-a3b-instruct",
+        "ollama_url": "http://127.0.0.1:11435/", "temperature": 0.2, "timeout_seconds": 30,
+    }))
+    assert backend.model == "qwen3-vl:30b-a3b-instruct"
+    assert backend.url == "http://127.0.0.1:11435", "a trailing slash must not double up in the endpoint"
+    assert backend.temperature == 0.2 and backend.timeout == 30.0
 
 
 def test_mlx_refusal_does_not_name_ollama_as_working(monkeypatch, no_ambient_ollama):
@@ -301,8 +360,8 @@ def test_cli_backend_mlx_on_windows_names_apple_silicon_and_the_backends_that_wo
 ):
     """Card #400, Done-when 2: given the Windows executable, when the local MLX
     engine is requested, then it says clearly that MLX needs Apple Silicon and
-    names the engines that work here — every backend but mlx and the one that
-    is not built yet (card #403)."""
+    names the engines that work here — every backend but mlx and, with no
+    server answering, ollama (card #404's detection decides)."""
     from melampus.cli import main
 
     monkeypatch.setattr(providers.sys, "platform", "win32")
@@ -315,7 +374,7 @@ def test_cli_backend_mlx_on_windows_names_apple_silicon_and_the_backends_that_wo
     assert "Apple Silicon" in err
     for works_here in ("claude", "openai", "scripted"):
         assert works_here in err, f"{works_here!r} is not named as working here:\n{err}"
-    assert "ollama" not in err, f"an engine that is not built yet is named as working:\n{err}"
+    assert "ollama" not in err, f"an engine with no server answering is named as working:\n{err}"
 
 
 # ---------------------------------------------------------------------------
@@ -325,7 +384,7 @@ def test_cli_backend_mlx_on_windows_names_apple_silicon_and_the_backends_that_wo
 @pytest.fixture()
 def no_ambient_ollama(monkeypatch):
     """A developer's running Ollama must not decide what these tests assert."""
-    monkeypatch.setattr(providers, "ollama_answers", lambda: False)
+    monkeypatch.setattr(providers, "ollama_answers", lambda url=None: False)
 
 
 def _fake_platform(monkeypatch, platform_name: str, machine: str) -> None:
@@ -366,7 +425,7 @@ def test_detection_mlx_needs_apple_silicon_anywhere_else(monkeypatch, no_ambient
 
 def test_detection_ollama_is_available_when_the_server_answers(monkeypatch):
     """Done-when 2: given Ollama answering on localhost, then ollama is available."""
-    monkeypatch.setattr(providers, "ollama_answers", lambda: True)
+    monkeypatch.setattr(providers, "ollama_answers", lambda url=None: True)
     assert _verdict("ollama").available
 
 
@@ -402,7 +461,7 @@ def test_the_refusal_names_what_detection_says_is_available(monkeypatch):
     detection says are available, plus the test fake. Off Apple Silicon with
     Ollama answering, that is ollama, openai, claude, scripted, and not mlx."""
     _fake_platform(monkeypatch, "win32", "AMD64")
-    monkeypatch.setattr(providers, "ollama_answers", lambda: True)
+    monkeypatch.setattr(providers, "ollama_answers", lambda url=None: True)
     assert providers._works_here() == ("ollama", "openai", "claude", "scripted")
     with pytest.raises(providers.BackendUnavailable) as err:
         providers.build_primary_backend(_cfg())
@@ -410,26 +469,48 @@ def test_the_refusal_names_what_detection_says_is_available(monkeypatch):
 
 
 @contextlib.contextmanager
-def _fake_ollama(monkeypatch, *, status: int = 200, delay: float = 0.0):
-    """A server speaking Ollama's version endpoint on 127.0.0.1 at an
-    ephemeral port, with detection pointed at it. `status` is what
-    GET /api/version answers; `delay` holds the answer that long."""
+def _fake_ollama(monkeypatch, *, status: int = 200, delay: float = 0.0, replies: list[str] = ()):
+    """A server speaking Ollama's version and chat endpoints on 127.0.0.1 at
+    an ephemeral port, with detection pointed at it. `status` is what
+    GET /api/version answers; `delay` holds the answer that long. `replies`
+    are the texts POST /api/chat answers with, in order, each wrapped in the
+    final response object docs/api.md § Generate a chat completion shows;
+    every chat request's JSON body is kept on `server.chats`."""
     release = threading.Event()
+    pending = list(replies)
 
-    class Version(BaseHTTPRequestHandler):
+    class Ollama(BaseHTTPRequestHandler):
         def do_GET(self):  # noqa: N802 - http.server's name
             assert self.path == "/api/version", self.path
             if delay:
                 release.wait(delay)
-            self.send_response(status)
+            self._answer(status, {"version": "0.0.0-fake"})
+
+        def do_POST(self):  # noqa: N802 - http.server's name
+            assert self.path == "/api/chat", self.path
+            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            self.server.chats.append(body)
+            if not pending:
+                self._answer(404, {"error": f"model '{body.get('model')}' not found"})
+                return
+            self._answer(200, {
+                "model": body["model"], "created_at": "2026-09-18T00:00:00Z",
+                "message": {"role": "assistant", "content": pending.pop(0)},
+                "done_reason": "stop", "done": True, "total_duration": 1668506709,
+                "prompt_eval_count": 26, "eval_count": 83,
+            })
+
+        def _answer(self, code: int, payload: dict) -> None:
+            self.send_response(code)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
-            self.wfile.write(b'{"version": "0.0.0-fake"}')
+            self.wfile.write(json.dumps(payload).encode("utf-8"))
 
         def log_message(self, *_):
             return None
 
-    server = HTTPServer(("127.0.0.1", 0), Version)
+    server = HTTPServer(("127.0.0.1", 0), Ollama)
+    server.chats = []
     thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
     thread.start()
     monkeypatch.setattr(providers, "OLLAMA_URL", f"http://127.0.0.1:{server.server_port}")
@@ -439,6 +520,124 @@ def _fake_ollama(monkeypatch, *, status: int = 200, delay: float = 0.0):
         release.set()
         server.shutdown()
         server.server_close()
+
+
+def _closed_port() -> int:
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
+def test_ollama_backend_returns_candidates_in_the_same_shape_as_mlx_on_the_fixture(
+    monkeypatch, photos, tmp_path
+):
+    """Card #406, Done-when 1 and 3, at the real boundary: an HTTP server on
+    loopback speaking Ollama's chat endpoint stands in for Ollama, no model
+    and no network beyond 127.0.0.1. The factory builds the backend, the
+    Identifier around it stages the committed fixture and asks the routing
+    prompt then the bird prompt, and the result carries candidates in exactly
+    the shape the same replies take through the mlx-shaped pipeline: same
+    fields, ordered by confidence, attributed to the model name."""
+    from melampus.identify import Identifier
+
+    config = _cfg(model={"backend": "ollama"})
+    with _fake_ollama(monkeypatch, replies=[ROUTING_OK, ID_OK]) as server:
+        backend = providers.build_primary_backend(config)
+        result = Identifier(backend, config).identify(photos / PHOTO)
+    expected = Identifier(
+        ScriptedBackend([ROUTING_OK, ID_OK], name="qwen3-vl:8b-instruct"), config
+    ).identify(photos / PHOTO)
+
+    assert result.status == "ok", result.error
+    assert result.model == "qwen3-vl:8b-instruct"
+    assert result.identification == expected.identification
+    assert result.taxon_routing == expected.taxon_routing
+    assert [c.common_name for c in result.identification.ranked()] == [
+        "Tricolored Heron", "Little Blue Heron"]
+    assert result.identification.top().scientific_name == "Egretta tricolor"
+
+    routing, species = server.chats
+    assert routing["model"] == species["model"] == "qwen3-vl:8b-instruct"
+    assert routing["options"]["num_predict"] == config.model.routing_max_tokens
+    assert species["options"]["num_predict"] == config.model.max_tokens
+    for chat in (routing, species):
+        (message,) = chat["messages"]
+        (image,) = message["images"]
+        assert base64.b64decode(image)[:2] == b"\xff\xd8", "the image is not the staged JPEG's bytes"
+    assert "bird" in species["messages"][0]["content"].lower()
+    assert PHOTO.split(".")[0] not in json.dumps(server.chats), "the filename travelled"
+
+
+def test_ollama_not_running_fires_before_any_image_is_read(monkeypatch, tmp_path, capsys):
+    """Card #406, Done-when 2, at the real boundary: nothing listening on the
+    port, and the folder's one image is a link to nowhere, so opening it
+    would fail loudly. The CLI exits 3 on the not-running message, naming the
+    address tried and the install pointer, and never mentions the file: the
+    check ran before any image was read."""
+    from melampus.cli import main
+
+    port = _closed_port()
+    monkeypatch.setattr(providers, "OLLAMA_URL", f"http://127.0.0.1:{port}")
+    folder = tmp_path / "photos"
+    folder.mkdir()
+    (folder / "nowhere.jpg").symlink_to(tmp_path / "does-not-exist.jpg")
+
+    code = main([str(folder), "--backend", "ollama", "--cache", str(tmp_path / "cache.jsonl")])
+
+    err = capsys.readouterr().err
+    assert code == 3, err
+    assert f"No Ollama server is answering at http://127.0.0.1:{port}" in err
+    assert providers.OLLAMA_INSTALL in err
+    for about_the_file in ("nowhere", "does-not-exist", "No such file", "unreadable"):
+        assert about_the_file not in err, f"the image was touched before the Ollama check:\n{err}"
+
+
+def test_cli_backend_ollama_writes_a_json_result_from_the_configured_address(
+    monkeypatch, photos, tmp_path, capsys
+):
+    """Acceptance for Done-when 1: `melampus-id FOLDER --backend ollama` with
+    the fake server's address as `[model] ollama_url` in a config file, on the
+    committed fixture, runs the whole pipeline and writes a JSON result with
+    the candidates, attributed to the model. The address comes from the
+    config: detection's default is pointed at a closed port to prove it."""
+    from melampus.cli import main
+
+    out = tmp_path / "results.json"
+    settings = tmp_path / "settings.toml"
+    with _fake_ollama(monkeypatch, replies=[ROUTING_OK, ID_OK]):
+        settings.write_text(
+            f'[model]\nollama_url = "{providers.OLLAMA_URL}"\n', encoding="utf-8")
+        monkeypatch.setattr(providers, "OLLAMA_URL", f"http://127.0.0.1:{_closed_port()}")
+        code = main([
+            str(photos), "--backend", "ollama", "--config", str(settings),
+            "--cache", str(tmp_path / "cache.jsonl"), "--json-out", str(out),
+        ])
+
+    err = capsys.readouterr().err
+    assert code == 0, err
+    assert "loading qwen3-vl:8b-instruct" in err, err
+    (result,) = json.loads(out.read_text(encoding="utf-8"))
+    assert result["file"] == PHOTO
+    assert result["status"] == "ok"
+    assert result["model"] == "qwen3-vl:8b-instruct"
+    assert [c["common_name"] for c in result["identification"]["candidates"]] == [
+        "Tricolored Heron", "Little Blue Heron"]
+
+
+def test_cli_detection_probes_the_configured_ollama_address(monkeypatch, tmp_path, capsys, no_ambient_keys):
+    """One source for the address: `[model] ollama_url` is what the default
+    engine and `--detect-engines` probe too, not only the backend."""
+    from melampus.cli import main
+
+    settings = tmp_path / "settings.toml"
+    with _fake_ollama(monkeypatch) as server:
+        settings.write_text(
+            f'[model]\nollama_url = "{providers.OLLAMA_URL}"\n', encoding="utf-8")
+        monkeypatch.setattr(providers, "OLLAMA_URL", f"http://127.0.0.1:{_closed_port()}")
+        assert main(["--detect-engines", "--config", str(settings)]) == 0
+    verdicts = {v["engine"]: v for v in json.loads(capsys.readouterr().out)}
+    assert verdicts["ollama"]["available"] is True
+    assert f"127.0.0.1:{server.server_port}" in verdicts["ollama"]["reason"]
 
 
 def test_ollama_probe_finds_a_server_answering_on_localhost(monkeypatch):
@@ -564,7 +763,7 @@ def test_cli_default_engine_is_the_first_that_can_run_here(
     detection says is available, in the owner's order. Off Apple Silicon with
     Ollama answering, that is ollama; the log line says so and how to choose."""
     _fake_platform(monkeypatch, "win32", "AMD64")
-    monkeypatch.setattr(providers, "ollama_answers", lambda: True)
+    monkeypatch.setattr(providers, "ollama_answers", lambda url=None: True)
 
     engine = _chosen_engine(monkeypatch, [str(photos), "--cache", str(tmp_path / "cache.jsonl")])
 
@@ -589,9 +788,173 @@ def test_cli_detection_never_overrides_a_chosen_engine(
     """`--backend` and `[model] backend` are the user's word; detection only
     fills the blank. Faked so detection would say ollama."""
     _fake_platform(monkeypatch, "win32", "AMD64")
-    monkeypatch.setattr(providers, "ollama_answers", lambda: True)
+    monkeypatch.setattr(providers, "ollama_answers", lambda url=None: True)
     argv = [str(photos), "--cache", str(tmp_path / "cache.jsonl")]
     assert _chosen_engine(monkeypatch, [*argv, "--backend", "mlx"]) == "mlx"
     config = tmp_path / "settings.toml"
     config.write_text('[model]\nbackend = "claude"\n', encoding="utf-8")
     assert _chosen_engine(monkeypatch, [*argv, "--config", str(config)]) == "claude"
+
+
+# ---------------------------------------------------------------------------
+# Card #406: an Ollama backend behind the model seam.
+
+
+def test_ollama_model_and_address_are_settings_in_the_model_section():
+    """The model name and the server address are `[model]` settings, the way
+    `repo` names the mlx model and `name` the cloud one. The model default is
+    `qwen3-vl:8b-instruct` (ollama.com/library/qwen3-vl/tags: 6.1 GB, text and
+    image input, the Instruct build of the family the mlx default uses). The
+    address is unset by default, which means providers.OLLAMA_URL: the one
+    place Ollama's documented default is written (card #404)."""
+    config = _cfg()
+    assert config.model.ollama_model == "qwen3-vl:8b-instruct"
+    assert config.model.ollama_url is None
+    assert providers.DEFAULT_MODELS.get("ollama") is None, "one default, in config"
+
+    config = _cfg(model={"ollama_model": "qwen3-vl:30b-a3b-instruct",
+                         "ollama_url": "http://127.0.0.1:11435"})
+    assert config.model.ollama_model == "qwen3-vl:30b-a3b-instruct"
+    assert config.model.ollama_url == "http://127.0.0.1:11435"
+
+
+def test_ollama_address_setting_round_trips_through_a_config_file(tmp_path):
+    settings = tmp_path / "settings.toml"
+    settings.write_text(
+        '[model]\nbackend = "ollama"\nollama_url = "http://127.0.0.1:11435"\n',
+        encoding="utf-8",
+    )
+    config = load_config(settings, use_local=False)
+    assert config.model.backend == "ollama"
+    assert config.model.ollama_url == "http://127.0.0.1:11435"
+
+
+class _FakeUrlopen:
+    """Stands in for urllib.request.urlopen at the backend's HTTP edge: records
+    every request, then answers with `reply` or raises `error`."""
+
+    def __init__(self, reply: bytes = b"{}", error: Exception | None = None, status: int = 200):
+        self.reply, self.error, self.status = reply, error, status
+        self.requests: list[tuple[urllib.request.Request, float]] = []
+
+    def __call__(self, request, timeout):
+        self.requests.append((request, timeout))
+        if self.error is not None:
+            raise self.error
+        return io.BytesIO(self.reply)
+
+
+OLLAMA_REPLY = json.dumps({
+    "model": "qwen3-vl:8b-instruct",
+    "created_at": "2026-09-18T00:00:00Z",
+    "message": {"role": "assistant", "content": ID_OK},
+    "done_reason": "stop",
+    "done": True,
+    "total_duration": 1668506709,
+    "prompt_eval_count": 26,
+    "eval_count": 83,
+}).encode("utf-8")
+
+
+def _ollama_backend(client: _FakeUrlopen, **kwargs) -> OllamaBackend:
+    return OllamaBackend("qwen3-vl:8b-instruct", "http://127.0.0.1:11435", client=client, **kwargs)
+
+
+def test_ollama_backend_posts_the_chat_request_ollama_documents(tmp_path):
+    """Request building, against Ollama's docs/api.md § Generate a chat
+    completion: POST {url}/api/chat, JSON body with `model`, one user message
+    carrying the prompt as `content` and the image as a base64 string in
+    `images`, `stream` false so one object comes back, and `options` with
+    `num_predict` (docs/modelfile.mdx: the maximum number of tokens to
+    predict) and `temperature`. Only the staged file's bytes travel: no path,
+    no filename."""
+    image = tmp_path / "SECRET_SPECIES_NAME.jpg"
+    image.write_bytes(b"\xff\xd8not really a jpeg\xff\xd9")
+    client = _FakeUrlopen(OLLAMA_REPLY)
+    backend = _ollama_backend(client, temperature=0.0, timeout=42.0)
+
+    backend.complete(image, "what is in this image?", 900)
+
+    ((request, timeout),) = client.requests
+    assert request.full_url == "http://127.0.0.1:11435/api/chat"
+    assert request.get_method() == "POST"
+    assert request.get_header("Content-type") == "application/json"
+    assert timeout == 42.0
+    body = json.loads(request.data)
+    assert body == {
+        "model": "qwen3-vl:8b-instruct",
+        "messages": [{
+            "role": "user",
+            "content": "what is in this image?",
+            "images": [base64.b64encode(image.read_bytes()).decode("ascii")],
+        }],
+        "stream": False,
+        "options": {"num_predict": 900, "temperature": 0.0},
+    }
+    assert "SECRET_SPECIES_NAME" not in request.data.decode("utf-8")
+
+
+def test_ollama_backend_reads_the_reply_into_a_completion(tmp_path):
+    """Reply parsing: the text is `message.content`; the counts are
+    `prompt_eval_count` and `eval_count` (docs/api.md, the final response
+    object). The text is handed to the same JSON extraction and schema
+    validation every backend's text goes through (identify.py); nothing here
+    parses candidates."""
+    image = tmp_path / "image.jpg"
+    image.write_bytes(b"jpeg")
+    backend = _ollama_backend(_FakeUrlopen(OLLAMA_REPLY))
+
+    completion = backend.complete(image, "prompt", 900)
+
+    assert completion.text == ID_OK
+    assert completion.prompt_tokens == 26
+    assert completion.generated_tokens == 83
+    assert completion.refused is False
+    assert completion.seconds >= 0
+    assert backend.name == "qwen3-vl:8b-instruct"
+
+
+def test_ollama_backend_tolerates_a_reply_with_no_message(tmp_path):
+    image = tmp_path / "image.jpg"
+    image.write_bytes(b"jpeg")
+    backend = _ollama_backend(_FakeUrlopen(b'{"done": true}'))
+    assert backend.complete(image, "prompt", 10).text == ""
+
+
+@pytest.mark.parametrize(
+    ("error", "expected", "said"),
+    [
+        (urllib.error.URLError(ConnectionRefusedError(61, "Connection refused")),
+         ConnectionError, "no Ollama server answering at http://127.0.0.1:11435"),
+        (TimeoutError("timed out"), TimeoutError, "did not answer within 42s"),
+        (urllib.error.URLError(socket.timeout("timed out")), TimeoutError, "did not answer within 42s"),
+        (urllib.error.HTTPError("http://127.0.0.1:11435/api/chat", 404, "Not Found", {},
+                                io.BytesIO(b'{"error": "model \'qwen3-vl:8b-instruct\' not found"}')),
+         RuntimeError, "Ollama answered 404: model 'qwen3-vl:8b-instruct' not found"),
+        (urllib.error.HTTPError("http://127.0.0.1:11435/api/chat", 500, "Internal Server Error", {},
+                                io.BytesIO(b"not json")),
+         RuntimeError, "Ollama answered 500: not json"),
+    ],
+    ids=["connection-refused", "timeout", "timeout-wrapped", "404-model-missing", "500-plain"],
+)
+def test_ollama_backend_maps_each_failure_to_a_plain_error(tmp_path, error, expected, said):
+    """Error mapping: connection refused, a timeout (bare, or wrapped in
+    URLError as urllib does), a non-200 (with Ollama's own `error` field when
+    the body carries one), each raised as a plain message naming the address
+    or the status, never a traceback into urllib. identify() turns any of
+    them into an error result on that image and the batch continues."""
+    image = tmp_path / "image.jpg"
+    image.write_bytes(b"jpeg")
+    backend = _ollama_backend(_FakeUrlopen(error=error), timeout=42.0)
+    with pytest.raises(expected) as err:
+        backend.complete(image, "prompt", 10)
+    assert said in str(err.value), str(err.value)
+
+
+def test_ollama_backend_reports_a_malformed_reply(tmp_path):
+    image = tmp_path / "image.jpg"
+    image.write_bytes(b"jpeg")
+    backend = _ollama_backend(_FakeUrlopen(b"<html>proxy error</html>"))
+    with pytest.raises(RuntimeError) as err:
+        backend.complete(image, "prompt", 10)
+    assert "not JSON" in str(err.value)
