@@ -35,14 +35,10 @@ ZIP_NAMES = {"darwin": "Melampus-macOS.zip", "win32": "Melampus-Windows.zip"}
 EXECUTABLE_NAMES = {build_binary.NAME, f"{build_binary.NAME}.exe"}
 
 
-def executable_path() -> Path:
-    return build_binary.executable_path()
-
-
 def zip_path() -> Path:
     """The zip lands in dist/ beside the executable, named for the platform."""
     try:
-        return executable_path().with_name(ZIP_NAMES[sys.platform])
+        return build_binary.executable_path().with_name(ZIP_NAMES[sys.platform])
     except KeyError:
         raise SystemExit(f"no release zip for {sys.platform}: the releases are macOS and Windows")
 
@@ -71,7 +67,7 @@ def package(executable: Path, target: Path, plugin_dir: Path = PLUGIN) -> list[s
 
 
 def main() -> int:
-    executable = executable_path()
+    executable = build_binary.executable_path()
     if not executable.is_file():
         print(
             f"no executable at {executable}: build it first, as readme.md "
