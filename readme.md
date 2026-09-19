@@ -389,6 +389,10 @@ VIRTUAL_ENV=.venv uv sync --project service --locked --extra dev --extra build -
 
 The build is a PyInstaller one-file bundle, which unpacks itself to a temporary
 directory at every launch (a few seconds). `dist/` and `build/` are git-ignored.
+PyInstaller's own cache, which it normally keeps per user and shares between
+every checkout on the machine, goes under `build/pyinstaller-config/` here so two
+checkouts can build at once (set `PYINSTALLER_CONFIG_DIR` yourself to choose
+another; a build that fails on a corrupt cache names the directory to delete).
 Try it without any Python on the path — the scripted backend needs no weights:
 
 ```bash

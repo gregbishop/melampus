@@ -373,6 +373,10 @@ def test_readme_build_blocks_sync_the_sdk_extras():
         f"readme.md's build section must sync {' '.join(BUILD_EXTRAS)}, or the executable "
         f"it builds lacks the SDKs: {without}"
     )
+    # Card #440: the build keeps PyInstaller's cache inside the checkout, and the
+    # section says so, names the switch, and says a corrupt cache is deleted.
+    for phrase in ("PYINSTALLER_CONFIG_DIR", "build/pyinstaller-config", "delete"):
+        assert phrase in section, f"readme.md's build section does not mention {phrase!r}"
 
 
 def _jobs() -> dict[str, str]:
