@@ -633,3 +633,129 @@ def test_cli_reports_absent_then_installed_then_removed_against_the_fake_hub(
     assert removed.returncode == 0, removed.stderr[-3000:]
     assert removed.stdout.startswith("removed ") and not Path(snapshot).exists()
     assert json.loads(_cli(["--model-status", "--model", FAKE_REPO], hub_env).stdout)["installed"] is False
+
+
+# --- the same button for Ollama, through its pull (card #409) -------------
+#
+# Done-when 1: given ollama is picked and the model is absent, when Download
+# is clicked, then the plugin asks Ollama to pull it and shows Ollama's
+# progress. Done-when 2: given the tests, when they run, then a fake Ollama
+# serves the pull progress. One protocol: Ollama's pull stream (its
+# docs/api.md § Pull a Model, newline-delimited JSON objects) is mapped to
+# the same `progress` / `done` / `cancelled` lines the plugin already parses.
+
+FAKE_MODEL = "fake-org/fake-vision:1b"
+
+
+def _stream(*objects: dict) -> list[bytes]:
+    """The pull stream as Ollama writes it: one JSON object per line."""
+    return [json.dumps(o).encode("utf-8") + b"\n" for o in objects]
+
+
+def test_pull_stream_maps_each_layer_line_to_a_progress_line_summing_across_layers():
+    """docs/api.md § Pull a Model: after `pulling manifest`, one object per
+    layer as it downloads with `digest`, `total` and `completed`
+    (`completed` may be missing until any of it is done), layers one after
+    another. The protocol's `progress` is the whole pull: the sum of every
+    layer's completed over the sum of every layer's total seen so far. The
+    statuses around the layers (manifest, verifying, writing, removing) say
+    nothing new and print nothing; `success` is `done <model>`."""
+    from melampus.download import pull_updates
+
+    updates = list(pull_updates(FAKE_MODEL, _stream(
+        {"status": "pulling manifest"},
+        {"status": "pulling aaa", "digest": "sha256:aaa", "total": 100},
+        {"status": "pulling aaa", "digest": "sha256:aaa", "total": 100, "completed": 40},
+        {"status": "pulling aaa", "digest": "sha256:aaa", "total": 100, "completed": 100},
+        {"status": "pulling bbb", "digest": "sha256:bbb", "total": 50, "completed": 10},
+        {"status": "pulling bbb", "digest": "sha256:bbb", "total": 50, "completed": 50},
+        {"status": "verifying sha256 digest"},
+        {"status": "writing manifest"},
+        {"status": "removing any unused layers"},
+        {"status": "success"},
+    )))
+
+    assert updates == [
+        Update.progress(0, 100), Update.progress(40, 100), Update.progress(100, 100),
+        Update.progress(110, 150), Update.progress(150, 150),
+        Update.done(FAKE_MODEL),
+    ]
+
+
+def test_pull_stream_of_a_model_already_there_is_one_complete_line_per_layer_then_done():
+    """A layer Ollama already holds is reported once with completed equal to
+    total (server/download.go: a blob on disk answers with its size for
+    both), so a re-pull of a complete model prints its layers at 100% and
+    `done`, the way a complete MLX model prints one equal `progress` line."""
+    from melampus.download import pull_updates
+
+    updates = list(pull_updates(FAKE_MODEL, _stream(
+        {"status": "pulling manifest"},
+        {"status": "pulling aaa", "digest": "sha256:aaa", "total": 100, "completed": 100},
+        {"status": "pulling bbb", "digest": "sha256:bbb", "total": 50, "completed": 50},
+        {"status": "success"},
+    )))
+
+    assert updates == [Update.progress(100, 100), Update.progress(150, 150), Update.done(FAKE_MODEL)]
+
+
+def test_pull_stream_error_line_for_an_unknown_model_names_the_model_and_the_setting():
+    """An error mid-stream is a JSON object with `error` (server/routes.go
+    streamResponse); an unknown model's is `pull model manifest: file does
+    not exist` (a 404 from the library is os.ErrNotExist). It ends the pull
+    as a failure naming the model and `[model] ollama_model`, with Ollama's
+    own words, and nothing after it is read."""
+    from melampus.download import pull_updates
+
+    lines = _stream(
+        {"status": "pulling manifest"},
+        {"error": "pull model manifest: file does not exist"},
+        {"status": "success"},
+    )
+    seen = []
+    with pytest.raises(DownloadError) as failure:
+        for update in pull_updates(FAKE_MODEL, lines):
+            seen.append(update)
+    message = str(failure.value)
+    assert FAKE_MODEL in message and "[model] ollama_model" in message
+    assert "file does not exist" in message
+    assert seen == []
+
+
+def test_pull_stream_error_line_mid_download_keeps_the_progress_so_far_and_says_to_re_run():
+    """Any other error mid-stream (the library unreachable, say) fails the
+    same way, with Ollama's words and the re-run hint: Ollama keeps the
+    layers it has and the next pull resumes them (docs/api.md § Pull a
+    Model)."""
+    from melampus.download import pull_updates
+
+    seen = []
+    with pytest.raises(DownloadError) as failure:
+        for update in pull_updates(FAKE_MODEL, _stream(
+            {"status": "pulling manifest"},
+            {"status": "pulling aaa", "digest": "sha256:aaa", "total": 100, "completed": 40},
+            {"error": "max retries exceeded: connection reset"},
+        )):
+            seen.append(update)
+    assert seen == [Update.progress(40, 100)]
+    assert "connection reset" in str(failure.value) and "--download-model" in str(failure.value)
+
+
+def test_pull_stream_that_is_not_json_is_a_failure_not_a_traceback():
+    from melampus.download import pull_updates
+
+    with pytest.raises(DownloadError) as failure:
+        list(pull_updates(FAKE_MODEL, [b"<html>proxy error</html>\n"]))
+    assert "not JSON" in str(failure.value)
+
+
+def test_pull_stream_ending_without_success_is_a_failure():
+    """The connection dropped before `success`: not done, and said so."""
+    from melampus.download import pull_updates
+
+    with pytest.raises(DownloadError) as failure:
+        list(pull_updates(FAKE_MODEL, _stream(
+            {"status": "pulling manifest"},
+            {"status": "pulling aaa", "digest": "sha256:aaa", "total": 100, "completed": 40},
+        )))
+    assert "ended" in str(failure.value) and "--download-model" in str(failure.value)
