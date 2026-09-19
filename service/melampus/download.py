@@ -325,15 +325,17 @@ def download_model(
 
 
 def _cached(repo: str, cache: Path):
-    """The hub library's view of `repo` in the cache: its CachedRepoInfo when a
-    snapshot is laid out, else None. A repo with only partial blobs has no
-    snapshots folder, which the scan reports as a warning, not a repo."""
+    """The hub library's scan of the cache and its view of `repo` in it: the
+    CachedRepoInfo when a snapshot is laid out, else None. A repo with only
+    partial blobs has no snapshots folder, which the scan reports as a
+    warning, not a repo."""
     if not cache.is_dir():
-        return None
-    for cached in scan_cache_dir(cache).repos:
+        return None, None
+    info = scan_cache_dir(cache)
+    for cached in info.repos:
         if cached.repo_id == repo and cached.repo_type == "model":
-            return cached
-    return None
+            return info, cached
+    return info, None
 
 
 def _bytes_in_cache(storage: Path) -> int:
@@ -351,12 +353,9 @@ def model_status(repo: str, *, endpoint: str | None = None, cache_dir: Path | No
     endpoint = endpoint or constants.ENDPOINT
     cache = Path(cache_dir or constants.HF_HUB_CACHE)
     storage = cache / repo_folder_name(repo_id=repo, repo_type="model")
-    cached = _cached(repo, cache)
-    installed = cached is not None and any("main" in r.refs for r in cached.revisions)
-    path = None
-    if installed:
-        (main,) = [r for r in cached.revisions if "main" in r.refs]
-        path = str(main.snapshot_path)
+    _, cached = _cached(repo, cache)
+    main = next((r for r in cached.revisions if "main" in r.refs), None) if cached else None
+    installed, path = main is not None, str(main.snapshot_path) if main else None
     try:
         total: int | None = sum(f.size or 0 for f in _files(HfApi(endpoint=endpoint), repo))
     except (RepositoryNotFoundError, httpx.HTTPError, OSError):
@@ -383,10 +382,10 @@ def remove_model(repo: str, *, cache_dir: Path | None = None) -> Path:
     running."""
     cache = Path(cache_dir or constants.HF_HUB_CACHE)
     folder = repo_folder_name(repo_id=repo, repo_type="model")
-    cached = _cached(repo, cache)
+    info, cached = _cached(repo, cache)
     if cached is None:
         raise DownloadError(f"{repo} is not in the cache at {cache}: nothing to remove")
     if _download_running(cache / ".locks" / folder):
         raise DownloadError(f"a download of {repo} is running; cancel it first, then remove")
-    scan_cache_dir(cache).delete_revisions(*(r.commit_hash for r in cached.revisions)).execute()
+    info.delete_revisions(*(r.commit_hash for r in cached.revisions)).execute()
     return cached.repo_path
