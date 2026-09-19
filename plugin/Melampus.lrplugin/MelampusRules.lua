@@ -107,6 +107,12 @@ function Rules.engineArguments(settings)
 		.. '.\n\nSet one of those in Settings, or leave it unset to let Melampus choose.'
 end
 
+--- The engines with a local model to fetch, and so a Download row (card
+-- #408 for mlx, #409 for ollama), in the owner's order. The executable's
+-- --download-model, --model-status and --remove-model act for the engine
+-- passed as --backend; the others have no model to fetch.
+Rules.MODEL_ENGINES = { 'mlx', 'ollama' }
+
 --- What the picker calls each engine. The reason detection gives says the
 -- rest; a title only has to be recognisable.
 Rules.ENGINE_TITLES = {

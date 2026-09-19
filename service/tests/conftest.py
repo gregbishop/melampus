@@ -73,6 +73,33 @@ def pytest_addoption(parser: pytest.Parser) -> None:
     )
 
 
+@pytest.fixture(autouse=True)
+def no_real_hub(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Every test, whatever it exercises, is pointed away from the real
+    Hugging Face hub and the real cache (docs/brief.md § hard rules: no
+    model downloads; docs/plugin.md: weights are fetched only by the owner
+    running a command). A test that reaches the hub by mistake, say a red
+    test against a dispatch not yet written, then fails on a closed
+    loopback port instead of fetching 18 GB into ~/.cache. The environment
+    covers child processes; the constants cover this process, since the
+    hub library reads the environment once at import. The tests that mean
+    to reach a hub pass the fake's endpoint explicitly or through hub_env."""
+    from huggingface_hub import constants
+
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        closed = f"http://127.0.0.1:{probe.getsockname()[1]}"
+    home = tmp_path / "no-real-hub"
+    monkeypatch.setenv("HF_ENDPOINT", closed)
+    monkeypatch.setenv("HF_HOME", str(home))
+    monkeypatch.setattr(constants, "ENDPOINT", closed)
+    # The file URL template bakes the endpoint in at import; hf_hub_url swaps
+    # an explicit endpoint in only where the template starts with ENDPOINT.
+    monkeypatch.setattr(constants, "HUGGINGFACE_CO_URL_TEMPLATE",
+                        closed + "/{repo_id}/resolve/{revision}/{filename}")
+    monkeypatch.setattr(constants, "HF_HUB_CACHE", str(home / "hub"))
+
+
 @pytest.fixture(scope="session")
 def repo() -> Path:
     """The checkout root, for tests that reach outside service/ (fixtures/,
@@ -278,3 +305,171 @@ def hub_env(fake_hub: FakeHub, tmp_path: Path) -> dict[str, str]:
     under tmp_path, so the real cache is never touched and nothing can reach
     the internet (Done-when 3 of card #407)."""
     return {"HF_ENDPOINT": fake_hub.endpoint, "HF_HOME": str(tmp_path / "hf")}
+
+
+# --- the fake Ollama (card #406, #409) -----------------------------------
+#
+# An HTTP server on 127.0.0.1 speaking the endpoints of Ollama's docs/api.md
+# that the service uses: § Version (`GET /api/version`, the probe),
+# § Generate a chat completion (`POST /api/chat`, one response object with
+# `stream` false), and for the Download button (card #409) § Pull a Model
+# (`POST /api/pull`, a stream of JSON objects one per line: `pulling
+# manifest`, then per layer `pulling <digest>` with `digest`, `total` and
+# `completed`, then the verifying, writing and removing statuses, then
+# `success`; an error is an object with `error`, mid-stream once content
+# has started, else the HTTP status with the same object). No model, no
+# weights, no network beyond loopback.
+#
+# `status` is what the version probe answers, `delay` holds that answer,
+# `replies` are the texts the chat answers with in order (a 404 with Ollama's
+# not-found error once they run out); every chat request's JSON body lands on
+# `chats`. `library` is what can be pulled, name -> layer sizes; `models` is
+# what is held, name -> size, filled by a pull, listed by § List Local Models
+# (`GET /api/tags`) and emptied by § Delete a Model (`DELETE /api/delete`,
+# 200, or 404 with the not-found error); `pulls` keeps every pull's body,
+# `deletes` every deletion's name and `requests` every request. `throttle` (bytes per line, seconds
+# between) slows a pull so a cancel can land mid-stream, and a pull the
+# client cut off keeps what each layer had, so the next pull of the same
+# model starts there (docs/api.md § Pull a Model: "Cancelled pulls are
+# resumed from where they left off").
+
+
+class FakeOllama(threading.Thread):
+    def __init__(
+        self, *, status: int = 200, delay: float = 0.0, replies: list[str] = (),
+        library: dict[str, list[int]] | None = None,
+    ) -> None:
+        super().__init__(daemon=True)
+        self.chats: list[dict] = []
+        self.pulls: list[dict] = []
+        self.deletes: list[str] = []
+        self.requests: list[tuple[str, str]] = []
+        self.library = dict(library or {})
+        self.models: dict[str, int] = {}
+        self.partial: dict[tuple[str, str], int] = {}
+        self.throttle: tuple[int, float] | None = None
+        self.release = threading.Event()
+        pending = list(replies)
+        ollama = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):  # noqa: N802 - http.server's name
+                ollama.requests.append(("GET", self.path))
+                if self.path == "/api/tags":
+                    self._answer(200, {"models": ollama.tags()})
+                    return
+                assert self.path == "/api/version", self.path
+                if delay:
+                    ollama.release.wait(delay)
+                self._answer(status, {"version": "0.0.0-fake"})
+
+            def do_DELETE(self):  # noqa: N802 - http.server's name
+                ollama.requests.append(("DELETE", self.path))
+                assert self.path == "/api/delete", self.path
+                body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                name = body.get("model") or ""
+                ollama.deletes.append(name)
+                held = name if name in ollama.models else (name.removesuffix(":latest")
+                                                             if name.endswith(":latest") else None)
+                if held in ollama.models:
+                    del ollama.models[held]
+                    self._answer(200, {})
+                else:
+                    self._answer(404, {"error": f"model '{name}' not found"})
+
+            def do_POST(self):  # noqa: N802 - http.server's name
+                ollama.requests.append(("POST", self.path))
+                body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                if self.path == "/api/pull":
+                    self._pull(body)
+                    return
+                assert self.path == "/api/chat", self.path
+                ollama.chats.append(body)
+                if not pending:
+                    self._answer(404, {"error": f"model '{body.get('model')}' not found"})
+                    return
+                self._answer(200, {
+                    "model": body["model"], "created_at": "2026-09-18T00:00:00Z",
+                    "message": {"role": "assistant", "content": pending.pop(0)},
+                    "done_reason": "stop", "done": True, "total_duration": 1668506709,
+                    "prompt_eval_count": 26, "eval_count": 83,
+                })
+
+            def _pull(self, body: dict) -> None:
+                ollama.pulls.append(body)
+                name = body.get("model") or ""
+                if not name:
+                    self._answer(400, {"error": "invalid model name"})
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "application/x-ndjson")
+                self.end_headers()
+                try:
+                    self._line({"status": "pulling manifest"})
+                    if name not in ollama.library:
+                        self._line({"error": "pull model manifest: file does not exist"})
+                        return
+                    for index, size in enumerate(ollama.library[name]):
+                        digest = "sha256:" + hashlib.sha256(f"{name}:{index}".encode()).hexdigest()
+                        line = {"status": f"pulling {digest[7:19]}", "digest": digest, "total": size}
+                        done = ollama.partial.get((name, digest), 0)
+                        if done == 0 and name not in ollama.models:
+                            self._line(line)
+                        step, pause = ollama.throttle or (size, 0.0)
+                        while done < size:
+                            done = min(done + step, size)
+                            ollama.partial[(name, digest)] = done
+                            self._line({**line, "completed": done})
+                            time.sleep(pause)
+                        if done == size and name in ollama.models:
+                            self._line({**line, "completed": done})
+                    for status_ in ("verifying sha256 digest", "writing manifest", "removing any unused layers"):
+                        self._line({"status": status_})
+                    ollama.models[name] = sum(ollama.library[name])
+                    self._line({"status": "success"})
+                except (BrokenPipeError, ConnectionResetError):
+                    # The client closed the stream: the pull stops with what
+                    # each layer had kept, for the next pull to start from.
+                    self.close_connection = True
+
+            def _line(self, item: dict) -> None:
+                self.wfile.write(json.dumps(item).encode("utf-8") + b"\n")
+                self.wfile.flush()
+
+            def _answer(self, code: int, payload: dict) -> None:
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps(payload).encode("utf-8"))
+
+            def log_message(self, *_):
+                return None
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.server.daemon_threads = True
+        self.server_port = self.server.server_port
+        self.endpoint = f"http://127.0.0.1:{self.server_port}"
+
+    def tags(self) -> list[dict]:
+        """The models held, as § List Local Models lists them: `name` and
+        `model` with the tag (`latest` when the pull named none, § Model
+        names), `size`, `digest`, `modified_at`, `details`."""
+        return [
+            {
+                "name": name if ":" in name else f"{name}:latest",
+                "model": name if ":" in name else f"{name}:latest",
+                "modified_at": "2026-09-18T00:00:00Z", "size": size,
+                "digest": hashlib.sha256(name.encode()).hexdigest(),
+                "details": {"parent_model": "", "format": "gguf", "family": "fake",
+                            "families": ["fake"], "parameter_size": "1B", "quantization_level": "Q4_0"},
+            }
+            for name, size in self.models.items()
+        ]
+
+    def run(self) -> None:
+        self.server.serve_forever(poll_interval=0.05)
+
+    def stop(self) -> None:
+        self.release.set()
+        self.server.shutdown()
+        self.server.server_close()

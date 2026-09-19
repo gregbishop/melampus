@@ -49,14 +49,28 @@ local function defaultPrefs(extra)
 end
 
 local REPO = 'mlx-community/Qwen3-VL-30B-A3B-Instruct-4bit'
+local OLLAMA_MODEL = 'qwen3-vl:8b-instruct'
 local CANCEL_PATH = (os.getenv('TMPDIR') or '/tmp') .. '/melampus-data/cache/download-cancel'
+local OLLAMA_UP = { true, 'Ollama is answering at http://127.0.0.1:11434' }
 
---- The executable's --model-status answer: absent with the size by default.
-local function modelStatus(overrides)
+--- The engines with a model to fetch (card #409), each with the name the
+--- status reports, what the button says while it is absent (Ollama gives no
+--- size for a model it does not hold), and its size once present.
+local MODEL_ENGINES = {
+	{ engine = 'mlx', name = REPO, absentTitle = 'Download ' .. REPO .. ' (18.3 GB)', size = '18300000000' },
+	{ engine = 'ollama', name = OLLAMA_MODEL, absentTitle = 'Download ' .. OLLAMA_MODEL .. ' (size unknown)', size = '6100000000' },
+}
+
+--- The executable's --model-status answer for `engine` (mlx by default):
+--- absent, with the size from the hub for mlx and none for ollama.
+local function modelStatus(overrides, engine)
 	local status = {
 		repo = '"' .. REPO .. '"', installed = 'false', bytes_total = '18300000000',
 		bytes_done = '0', path = 'null', cancel_path = '"' .. CANCEL_PATH .. '"',
 	}
+	if engine == 'ollama' then
+		status.repo, status.bytes_total = '"' .. OLLAMA_MODEL .. '"', 'null'
+	end
 	for key, value in pairs(overrides or {}) do status[key] = value end
 	local parts = {}
 	for _, key in ipairs({ 'repo', 'installed', 'bytes_total', 'bytes_done', 'path', 'cancel_path' }) do
@@ -84,7 +98,8 @@ end
 --- Open the real Settings dialog under the mock. `options.detection` is what
 --- the executable prints for --detect-engines (nil: no executable beside the
 --- plugin); `options.status` what it prints for --model-status (default: the
---- model absent); `options.download` plays --download-model: its `lines` land
+--- model absent), for every engine, or `options.statusFor[engine]` for one;
+--- `options.download` plays --download-model: its `lines` land
 --- in the progress file one per tick, `stderr` in the log, and it exits
 --- `code`; `options.removeCode` is --remove-model's exit code; `options
 --- .onDialog` plays the user while the dialog is up.
@@ -99,7 +114,9 @@ local function openSettings(options)
 			if string.find(command, '--detect-engines', 1, true) and target and options.detection then
 				writeFile(target, options.detection)
 			elseif string.find(command, '--model-status', 1, true) and target then
-				writeFile(target, options.status or modelStatus())
+				local engine = string.match(command, "%-%-backend '(%w+)'")
+				local byEngine = options.statusFor or {}
+				writeFile(target, byEngine[engine] or options.status or modelStatus(nil, engine))
 			elseif string.find(command, '--download-model', 1, true) and target then
 				local download = options.download or { lines = {}, code = 0 }
 				local log = string.match(command, "2>'([^']+)'")
@@ -161,14 +178,25 @@ local function titlesMatching(contents, needle)
 	return out
 end
 
---- The row of the engine group that holds the model's buttons: the one bound
---- to a property table with a `phase`. nil when there is none.
-local function modelRow(contents)
+--- The rows of the engine group that hold a model's buttons: the ones bound
+--- to a property table with a `phase`, each with the table.
+local function modelRows(contents)
+	local rows = {}
 	for _, kind in ipairs({ 'row', 'column' }) do
 		for _, entry in ipairs(viewsOfKind(contents, kind)) do
 			local bound = entry.view.bind_to_object
-			if type(bound) == 'table' and bound.phase ~= nil then return entry.view, bound end
+			if type(bound) == 'table' and bound.phase ~= nil then rows[#rows + 1] = { view = entry.view, model = bound } end
 		end
+	end
+	return rows
+end
+
+--- The model row shown while `engine` (mlx by default) is picked, through
+--- its visible binding, with its property table. nil when there is none.
+local function modelRow(contents, engine)
+	for _, row in ipairs(modelRows(contents)) do
+		local binding = row.view.visible
+		if type(binding) == 'table' and binding.transform(engine or 'mlx') then return row.view, row.model end
 	end
 	return nil
 end
@@ -199,14 +227,34 @@ t.test('detection and the model status each run once, when the dialog opens', fu
 	openSettings({ detection = detection() })
 	t.equals(commandsRun('--detect-engines'), 1, 'the executable should be asked once about the engines')
 	t.equals(commandsRun('--model-status'), 1, 'the executable should be asked once about the model')
+	t.equals(commandsRun("--model-status --backend 'mlx'"), 1, 'the status is asked for the engine')
 	t.equals(#mock.state.executed, 2, 'nothing but detection and the status should run')
 end)
 
-t.test('where mlx cannot run the model is not asked about and there is no download row', function()
+t.test('with Ollama answering too, the status is asked once per engine with a model (card #409)', function()
+	local contents = openSettings({ detection = detection({ ollama = OLLAMA_UP }) })
+	t.equals(commandsRun("--model-status --backend 'mlx'"), 1)
+	t.equals(commandsRun("--model-status --backend 'ollama'"), 1)
+	t.equals(#mock.state.executed, 3, 'nothing but detection and the two statuses should run')
+	t.equals(#modelRows(contents), 2, 'one row per engine with a model')
+end)
+
+t.test('where neither mlx nor ollama can run the model is not asked about and there is no download row', function()
 	local contents = openSettings({ detection = detection({ mlx = { false, 'needs Apple Silicon' } }) })
 	t.equals(commandsRun('--model-status'), 0, 'the model was asked about where it cannot run')
 	t.equals(#mock.state.executed, 1)
-	t.isNil(modelRow(contents), 'a download row with no mlx to use it')
+	t.equals(#modelRows(contents), 0, 'a download row with no engine to use it')
+end)
+
+t.test('on a machine with Ollama and no MLX, only Ollama\'s model is asked about (card #409)', function()
+	local contents = openSettings({ detection = detection({ mlx = { false, 'needs Apple Silicon' }, ollama = OLLAMA_UP }) })
+	t.equals(commandsRun("--model-status --backend 'mlx'"), 0, 'the MLX model was asked about where it cannot run')
+	t.equals(commandsRun("--model-status --backend 'ollama'"), 1)
+	t.equals(#modelRows(contents), 1)
+	local row = modelRow(contents, 'ollama')
+	t.isNotNil(row, 'no row for ollama')
+	t.isTrue(row.visible.transform(''), 'the default on this machine is ollama')
+	t.isFalse(row.visible.transform('mlx'))
 end)
 
 t.test('engines that cannot run here are greyed and their reasons shown', function()
@@ -380,132 +428,148 @@ local function theButton(row, model, prefix, expectShown)
 	return found[1]
 end
 
-t.test('with the model absent the row shows a Download button with the model\'s name and size', function()
-	local contents = openSettings({ detection = detection() })
-	local row, model = modelRow(contents)
-	t.isNotNil(row, 'no download row')
-	t.equals(model.phase, 'absent')
-	local button = theButton(row, model, 'Download ' .. REPO .. ' (18.3 GB)', true)
-	t.equals(type(button.action), 'function', 'the button does nothing')
-	theButton(row, model, 'Installed', false)
-	theButton(row, model, 'Remove', false)
-	theButton(row, model, 'Cancel', false)
-end)
-
-t.test('when the hub could not be reached the button says the size is unknown', function()
-	local contents = openSettings({ detection = detection(), status = modelStatus({ bytes_total = 'null' }) })
-	local row, model = modelRow(contents)
-	theButton(row, model, 'Download ' .. REPO .. ' (size unknown)', true)
-end)
-
-t.test('with the model present the row reads Installed, greyed, and offers Remove', function()
-	local contents = openSettings({ detection = detection(), status = modelStatus({
-		installed = 'true', bytes_done = '18300000000', path = '"/hf/hub/models--x--y/snapshots/abc"' }) })
-	local row, model = modelRow(contents)
-	t.equals(model.phase, 'installed')
-	local installed = theButton(row, model, 'Installed', true)
-	t.isFalse(installed.enabled, 'Installed should be greyed')
-	theButton(row, model, 'Remove', true)
-	theButton(row, model, 'Download ' .. REPO, false)
-end)
-
-t.test('Remove runs --remove-model and the row flips to the Download button', function()
-	local contents = openSettings({ detection = detection(), status = modelStatus({ installed = 'true' }) })
-	local row, model = modelRow(contents)
-	theButton(row, model, 'Remove', true).action()
-	mock.settle()
-	t.equals(commandsRun('--remove-model'), 1, 'Remove did not run the executable')
-	t.equals(model.phase, 'absent')
-	t.equals(#dialogsShown(false), 0, 'a message was shown for a removal that worked')
-end)
-
-t.test('a refused removal shows the message and the model stays Installed', function()
-	local contents = openSettings({ detection = detection(), status = modelStatus({ installed = 'true' }), removeCode = 3 })
-	local row, model = modelRow(contents)
-	theButton(row, model, 'Remove', true).action()
-	mock.settle()
-	t.equals(model.phase, 'installed')
-	t.equals(#dialogsShown(false), 1, 'no message for a refused removal')
-end)
-
-t.test('the row shows when the picked engine is mlx, or the unset preference resolves to it', function()
-	local contents = openSettings({ detection = detection() })
-	local row = modelRow(contents)
-	t.equals(bindingKey(row.visible), 'engine', 'the row is not shown by the engine')
-	t.isTrue(row.visible.transform('mlx'))
-	t.isTrue(row.visible.transform(''), 'the default on this Mac is mlx')
-	for _, engine in ipairs({ 'ollama', 'openai', 'claude' }) do
-		t.isFalse(row.visible.transform(engine), 'the row shows for ' .. engine)
+--- The same row for each engine with a model (card #409): opened with
+--- Ollama answering so both rows exist, each shown for its engine.
+for _, case in ipairs(MODEL_ENGINES) do
+	local engine, NAME = case.engine, case.name
+	local function open(options)
+		options = options or {}
+		options.detection = options.detection or detection({ ollama = OLLAMA_UP })
+		if options.status then
+			options.statusFor = { [engine] = options.status }
+			options.status = nil
+		end
+		return openSettings(options)
 	end
-end)
 
-t.test('clicking Download runs the executable with stdout redirected, the progress follows the file, done flips to Installed', function()
-	local contents = openSettings({ detection = detection(), download = {
-		lines = { 'progress 0 18300000000', 'progress 3100000000 18300000000', 'progress 18300000000 18300000000',
-			'done /hf/hub/models--x--y/snapshots/abc' },
-		code = 0,
-	} })
-	local row, model = modelRow(contents)
-	theButton(row, model, 'Download ' .. REPO, true).action()
-	-- In the mock's temp directory, as the CLI log is.
-	local progress = mock.state.tempDir .. '/melampus-download.progress'
-	local log = mock.state.tempDir .. '/melampus-download.log'
-	t.equals(mock.state.executed[#mock.state.executed],
-		"'" .. EXECUTABLE .. "' --download-model >'" .. progress .. "' 2>'" .. log .. "'")
-	t.equals(model.phase, 'downloading')
-	theButton(row, model, 'Cancel', true)
-	theButton(row, model, 'Download ' .. REPO, false)
-	local text = viewsOfKind(row, 'static_text')
-	local bar = nil
-	for _, entry in ipairs(text) do
-		if bindingKey(entry.view.title) == 'progress' then bar = entry.view end
-	end
-	t.isNotNil(bar, 'no progress text bound to the poller')
-	t.isTrue(shownNow(bar, model), 'the progress is not shown while downloading')
-	mock.tick()
-	mock.tick()
-	t.equals(model.progress, '3.1 GB of 18.3 GB')
-	local scope = mock.state.progressScopes[#mock.state.progressScopes]
-	t.isNotNil(scope, 'no progress scope for Lightroom\'s own bar')
-	t.isTrue(math.abs(scope.portions[#scope.portions] - 3100000000 / 18300000000) < 1e-9)
-	mock.settle()
-	t.equals(model.phase, 'installed')
-	t.isTrue(scope.isDone)
-	t.equals(#dialogsShown(false), 0, 'a message was shown for a download that worked')
-end)
+	t.test(engine .. ': with the model absent the row shows a Download button with the model\'s name and size', function()
+		local contents = open()
+		local row, model = modelRow(contents, engine)
+		t.isNotNil(row, 'no download row')
+		t.equals(model.phase, 'absent')
+		local button = theButton(row, model, case.absentTitle, true)
+		t.equals(type(button.action), 'function', 'the button does nothing')
+		theButton(row, model, 'Installed', false)
+		theButton(row, model, 'Remove', false)
+		theButton(row, model, 'Cancel', false)
+	end)
 
-t.test('Cancel writes the marker at the path the status named', function()
-	os.remove(CANCEL_PATH)
-	local contents = openSettings({ detection = detection(), download = {
-		lines = { 'progress 0 18300000000', 'progress 3100000000 18300000000', 'cancelled' }, code = 4,
-	} })
-	local row, model = modelRow(contents)
-	theButton(row, model, 'Download ' .. REPO, true).action()
-	mock.tick()
-	theButton(row, model, 'Cancel', true).action()
-	local handle = io.open(CANCEL_PATH, 'r')
-	t.isNotNil(handle, 'the marker was not written at ' .. CANCEL_PATH)
-	if handle then handle:close() end
-	mock.settle()
-	t.equals(model.phase, 'absent', 'a cancelled download should offer Download again')
-	t.equals(#dialogsShown(false), 0, 'a cancel is not an error')
-	os.remove(CANCEL_PATH)
-end)
+	t.test(engine .. ': when the size could not be had the button says the size is unknown', function()
+		local contents = open({ status = modelStatus({ bytes_total = 'null' }, engine) })
+		local row, model = modelRow(contents, engine)
+		theButton(row, model, 'Download ' .. NAME .. ' (size unknown)', true)
+	end)
 
-t.test('a failed download shows a message with the tail of the log and offers Download again', function()
-	local contents = openSettings({ detection = detection(), download = {
-		lines = { 'progress 0 18300000000' }, code = 3,
-		stderr = 'could not reach the hub at http://127.0.0.1:1: check the network\n',
-	} })
-	local row, model = modelRow(contents)
-	theButton(row, model, 'Download ' .. REPO, true).action()
-	mock.settle()
-	t.equals(model.phase, 'absent')
-	t.equals(#dialogsShown(false), 1, 'no message for a failed download')
-	t.isNotNil(string.find(dialogsShown(false)[1].body, 'could not reach the hub', 1, true),
-		'the message lacks the log tail: ' .. tostring(dialogsShown(false)[1].body))
-	t.isNotNil(string.find(dialogsShown(false)[1].body, 'exit 3', 1, true))
-end)
+	t.test(engine .. ': with the model present the row reads Installed, greyed, and offers Remove', function()
+		local contents = open({ status = modelStatus({
+			installed = 'true', bytes_total = case.size, bytes_done = case.size, path = '"/somewhere"' }, engine) })
+		local row, model = modelRow(contents, engine)
+		t.equals(model.phase, 'installed')
+		local installed = theButton(row, model, 'Installed', true)
+		t.isFalse(installed.enabled, 'Installed should be greyed')
+		theButton(row, model, 'Remove', true)
+		theButton(row, model, 'Download ' .. NAME, false)
+	end)
+
+	t.test(engine .. ': Remove runs --remove-model for the engine and the row flips to the Download button', function()
+		local contents = open({ status = modelStatus({ installed = 'true' }, engine) })
+		local row, model = modelRow(contents, engine)
+		theButton(row, model, 'Remove', true).action()
+		mock.settle()
+		t.equals(commandsRun("--remove-model --backend '" .. engine .. "'"), 1, 'Remove did not run the executable for ' .. engine)
+		t.equals(commandsRun('--remove-model'), 1)
+		t.equals(model.phase, 'absent')
+		t.equals(#dialogsShown(false), 0, 'a message was shown for a removal that worked')
+	end)
+
+	t.test(engine .. ': a refused removal shows the message and the model stays Installed', function()
+		local contents = open({ status = modelStatus({ installed = 'true' }, engine), removeCode = 3 })
+		local row, model = modelRow(contents, engine)
+		theButton(row, model, 'Remove', true).action()
+		mock.settle()
+		t.equals(model.phase, 'installed')
+		t.equals(#dialogsShown(false), 1, 'no message for a refused removal')
+	end)
+
+	t.test(engine .. ': the row shows when the picked engine is ' .. engine .. ', and for the unset preference only when it resolves to it', function()
+		local contents = open()
+		local row = modelRow(contents, engine)
+		t.equals(bindingKey(row.visible), 'engine', 'the row is not shown by the engine')
+		t.isTrue(row.visible.transform(engine))
+		t.equals(row.visible.transform(''), engine == 'mlx', 'the default on this Mac is mlx')
+		for _, other in ipairs({ 'mlx', 'ollama', 'openai', 'claude' }) do
+			if other ~= engine then t.isFalse(row.visible.transform(other), 'the row shows for ' .. other) end
+		end
+	end)
+
+	t.test(engine .. ': clicking Download runs the executable for the engine with stdout redirected, the progress follows the file, done flips to Installed', function()
+		local contents = open({ download = {
+			lines = { 'progress 0 18300000000', 'progress 3100000000 18300000000', 'progress 18300000000 18300000000',
+				'done ' .. NAME },
+			code = 0,
+		} })
+		local row, model = modelRow(contents, engine)
+		theButton(row, model, 'Download ' .. NAME, true).action()
+		-- In the mock's temp directory, as the CLI log is.
+		local progress = mock.state.tempDir .. '/melampus-download.progress'
+		local log = mock.state.tempDir .. '/melampus-download.log'
+		t.equals(mock.state.executed[#mock.state.executed],
+			"'" .. EXECUTABLE .. "' --download-model --backend '" .. engine .. "' >'" .. progress .. "' 2>'" .. log .. "'")
+		t.equals(model.phase, 'downloading')
+		theButton(row, model, 'Cancel', true)
+		theButton(row, model, 'Download ' .. NAME, false)
+		local text = viewsOfKind(row, 'static_text')
+		local bar = nil
+		for _, entry in ipairs(text) do
+			if bindingKey(entry.view.title) == 'progress' then bar = entry.view end
+		end
+		t.isNotNil(bar, 'no progress text bound to the poller')
+		t.isTrue(shownNow(bar, model), 'the progress is not shown while downloading')
+		mock.tick()
+		mock.tick()
+		t.equals(model.progress, '3.1 GB of 18.3 GB')
+		local scope = mock.state.progressScopes[#mock.state.progressScopes]
+		t.isNotNil(scope, 'no progress scope for Lightroom\'s own bar')
+		t.isTrue(math.abs(scope.portions[#scope.portions] - 3100000000 / 18300000000) < 1e-9)
+		mock.settle()
+		t.equals(model.phase, 'installed')
+		t.isTrue(scope.isDone)
+		t.equals(#dialogsShown(false), 0, 'a message was shown for a download that worked')
+	end)
+
+	t.test(engine .. ': Cancel writes the marker at the path the status named', function()
+		os.remove(CANCEL_PATH)
+		local contents = open({ download = {
+			lines = { 'progress 0 18300000000', 'progress 3100000000 18300000000', 'cancelled' }, code = 4,
+		} })
+		local row, model = modelRow(contents, engine)
+		theButton(row, model, 'Download ' .. NAME, true).action()
+		mock.tick()
+		theButton(row, model, 'Cancel', true).action()
+		local handle = io.open(CANCEL_PATH, 'r')
+		t.isNotNil(handle, 'the marker was not written at ' .. CANCEL_PATH)
+		if handle then handle:close() end
+		mock.settle()
+		t.equals(model.phase, 'absent', 'a cancelled download should offer Download again')
+		t.equals(#dialogsShown(false), 0, 'a cancel is not an error')
+		os.remove(CANCEL_PATH)
+	end)
+
+	t.test(engine .. ': a failed download shows a message with the tail of the log and offers Download again', function()
+		local contents = open({ download = {
+			lines = { 'progress 0 18300000000' }, code = 3,
+			stderr = 'could not reach the hub at http://127.0.0.1:1: check the network\n',
+		} })
+		local row, model = modelRow(contents, engine)
+		theButton(row, model, 'Download ' .. NAME, true).action()
+		mock.settle()
+		t.equals(model.phase, 'absent')
+		t.equals(#dialogsShown(false), 1, 'no message for a failed download')
+		t.isNotNil(string.find(dialogsShown(false)[1].body, 'could not reach the hub', 1, true),
+			'the message lacks the log tail: ' .. tostring(dialogsShown(false)[1].body))
+		t.isNotNil(string.find(dialogsShown(false)[1].body, 'exit 3', 1, true))
+	end)
+end
 
 -- ── no executable ──────────────────────────────────────────────────────────
 t.test('with no executable beside the plugin the dialog still opens, nothing greyed, and says why', function()
@@ -519,7 +583,7 @@ t.test('with no executable beside the plugin the dialog still opens, nothing gre
 	end
 	t.isTrue(#titlesMatching(contents, PLUGIN) > 0, 'the missing-executable message does not name the plugin folder')
 	t.isTrue(#titlesMatching(contents, 'melampus') > 0, 'the missing-executable message does not name the file')
-	t.isNil(modelRow(contents), 'a download row with no executable to download with')
+	t.equals(#modelRows(contents), 0, 'a download row with no executable to download with')
 end)
 
 -- ── the download plumbing (card #408) ──────────────────────────────────────
@@ -551,23 +615,36 @@ local function exists(path)
 	return false
 end
 
-t.test('the download command runs the executable with stdout to the progress file and stderr to the log, on both shells', function()
-	local Analyze = loadAnalyze({ existing = { [EXECUTABLE] = true } })
-	local progress, log = Analyze.downloadFiles()
-	t.equals(Analyze.downloadCommand(),
-		"'" .. EXECUTABLE .. "' --download-model >'" .. progress .. "' 2>'" .. log .. "'")
+t.test('the download command runs the executable for the engine with stdout to the progress file and stderr to the log, on both shells', function()
+	for _, engine in ipairs({ 'mlx', 'ollama' }) do
+		local Analyze = loadAnalyze({ existing = { [EXECUTABLE] = true } })
+		local progress, log = Analyze.downloadFiles()
+		t.equals(Analyze.downloadCommand(engine),
+			"'" .. EXECUTABLE .. "' --download-model --backend '" .. engine .. "' >'" .. progress .. "' 2>'" .. log .. "'")
 
-	local exe = PLUGIN .. '\\melampus.exe'
-	Analyze = loadAnalyze({ windows = true, existing = { [exe] = true } })
-	progress, log = Analyze.downloadFiles()
-	t.equals(Analyze.downloadCommand(),
-		'""' .. exe .. '" --download-model >"' .. progress .. '" 2>"' .. log .. '""')
-	t.isNotNil(string.find(progress, 'AppData\\Local\\Temp\\', 1, true), 'the progress file is not under temp: ' .. progress)
+		local exe = PLUGIN .. '\\melampus.exe'
+		Analyze = loadAnalyze({ windows = true, existing = { [exe] = true } })
+		progress, log = Analyze.downloadFiles()
+		t.equals(Analyze.downloadCommand(engine),
+			'""' .. exe .. '" --download-model --backend "' .. engine .. '" >"' .. progress .. '" 2>"' .. log .. '""')
+		t.isNotNil(string.find(progress, 'AppData\\Local\\Temp\\', 1, true), 'the progress file is not under temp: ' .. progress)
+	end
+end)
+
+t.test('the model commands refuse an engine the plugin does not know, before the shell', function()
+	local Analyze = loadAnalyze({ existing = { [EXECUTABLE] = true } })
+	local command, message = Analyze.downloadCommand('anthropic')
+	t.isNil(command, 'an unknown engine reached the command line')
+	t.isNotNil(string.find(message, 'anthropic', 1, true))
+	local ok, why = Analyze.removeModel('anthropic')
+	t.isFalse(ok)
+	t.isNotNil(string.find(why, 'anthropic', 1, true))
+	t.isNil(mock.state.executed, 'the executable ran for an unknown engine')
 end)
 
 t.test('without the executable the download command is the missing-executable message', function()
 	local Analyze = loadAnalyze()
-	local command, message = Analyze.downloadCommand()
+	local command, message = Analyze.downloadCommand('mlx')
 	t.isNil(command)
 	t.isNotNil(string.find(message, 'melampus', 1, true))
 	t.isNotNil(string.find(message, PLUGIN, 1, true))
@@ -588,7 +665,7 @@ local function startDownload(lines, code, stderr)
 		return code
 	end
 	local seen, finished = {}, nil
-	local handle, err = Analyze.downloadModel(os.getenv('TMPDIR') .. '/melampus-data/cache/download-cancel',
+	local handle, err = Analyze.downloadModel('mlx', os.getenv('TMPDIR') .. '/melampus-data/cache/download-cancel',
 		function(update) seen[#seen + 1] = update end,
 		function(exit, update, tail) finished = { code = exit, update = update, tail = tail } end)
 	t.isNotNil(handle, 'the download did not start: ' .. tostring(err))
