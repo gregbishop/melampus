@@ -219,31 +219,144 @@ local function missingExecutable()
 		.. '\n\nCopy it there from the Melampus download and try again.'
 end
 
---- Ask the executable which engines can run here: `--detect-engines` (card
--- #404) prints a JSON list of { engine, available, reason }. Returns the
--- decoded list, or nil plus a message: the executable is missing, exited
--- non-zero, or printed something other than the list. Runs the executable
--- once per call; the Settings dialog calls it once, when it opens.
-function Analyze.detectEngines()
+--- Run the executable for one JSON answer: `flag` with stdout to `output`
+-- under temp and stderr to the CLI log, decoded. Returns the value, or nil
+-- plus a message: the executable is missing, exited non-zero, or printed
+-- something `accept` does not recognise. `what` names the question for the
+-- messages. Runs the executable once per call.
+local function askJson(flag, output, what, accept)
 	local executable = Analyze.executablePath()
 	if not executable or not LrFileUtils.exists(executable) then
 		return nil, missingExecutable()
 	end
-	local output, cliLog = tempPath('melampus-engines.json'), cliLogPath()
-	local command = shellLine(quote(executable) .. ' --detect-engines >'
-		.. quote(output) .. ' 2>' .. quote(cliLog))
+	local target, cliLog = tempPath(output), cliLogPath()
+	local command = shellLine(quote(executable) .. ' ' .. flag .. ' >'
+		.. quote(target) .. ' 2>' .. quote(cliLog))
 	Log.info('running: ' .. command)
 	local code = LrTasks.execute(command)
 	if code ~= 0 then
-		return nil, 'Melampus could not ask its analysis program which engines can run here '
-			.. '(exit ' .. tostring(code) .. ').\n\nSee the logs:\n' .. Log.path() .. '\n' .. cliLog
+		return nil, 'Melampus could not ask its analysis program ' .. what
+			.. ' (exit ' .. tostring(code) .. ').\n\nSee the logs:\n' .. Log.path() .. '\n' .. cliLog
 	end
-	local verdicts, err = Json.decode(LrFileUtils.readFile(output) or '')
-	if type(verdicts) ~= 'table' or verdicts[1] == nil then
-		return nil, 'Melampus did not understand what its analysis program said about the engines'
-			.. (err and (': ' .. tostring(err)) or '') .. '.\n\nSee the log:\n' .. output
+	local value, err = Json.decode(LrFileUtils.readFile(target) or '')
+	if not accept(value) then
+		return nil, 'Melampus did not understand what its analysis program said about ' .. what
+			.. (err and (': ' .. tostring(err)) or '') .. '.\n\nSee the log:\n' .. target
 	end
-	return verdicts
+	return value
+end
+
+--- Ask the executable which engines can run here: `--detect-engines` (card
+-- #404) prints a JSON list of { engine, available, reason }. The Settings
+-- dialog calls it once, when it opens.
+function Analyze.detectEngines()
+	return askJson('--detect-engines', 'melampus-engines.json', 'which engines can run here',
+		function(verdicts) return type(verdicts) == 'table' and verdicts[1] ~= nil end)
+end
+
+--- Ask the executable about the MLX model: `--model-status` (card #408)
+-- prints one JSON object { repo, installed, bytes_total, bytes_done, path,
+-- cancel_path }; bytes_total is null when the hub could not be reached. The
+-- Settings dialog calls it once, when it opens.
+function Analyze.modelStatus()
+	return askJson('--model-status', 'melampus-model-status.json', 'the model',
+		function(status) return type(status) == 'table' and type(status.repo) == 'string' end)
+end
+
+--- Remove the MLX model from the cache: `--remove-model` (card #408), exit
+-- 0 once it is gone. Returns true, or false plus a message with the CLI
+-- log's tail (a download of it is running, or nothing is installed).
+function Analyze.removeModel()
+	local executable = Analyze.executablePath()
+	if not executable or not LrFileUtils.exists(executable) then
+		return false, missingExecutable()
+	end
+	local cliLog = cliLogPath()
+	local command = shellLine(quote(executable) .. ' --remove-model >' .. quote(cliLog) .. ' 2>&1')
+	Log.info('running: ' .. command)
+	local code = LrTasks.execute(command)
+	if code ~= 0 then
+		return false, 'Melampus could not remove the model (exit ' .. tostring(code) .. ').\n\n'
+			.. Analyze.tail(LrFileUtils.readFile(cliLog))
+	end
+	return true
+end
+
+--- The last lines of a log, for a message.
+function Analyze.tail(text, lines)
+	text = text or ''
+	local kept, count = #text, 0
+	for i = #text, 1, -1 do
+		if string.sub(text, i, i) == '\n' then
+			count = count + 1
+			if count > (lines or 8) then break end
+		end
+		kept = i
+	end
+	return string.sub(text, kept)
+end
+
+-- ── the model download (card #408) ─────────────────────────────────────────
+-- LrTasks.execute blocks and returns only the exit code: it cannot stream
+-- stdout, and the SDK cannot kill the child. So the download's stdout (the
+-- protocol lines, docs/config.md § Downloading the model) is redirected to
+-- a file that a second task reads every second, and Cancel writes the
+-- marker the executable watches, at the path --model-status named.
+
+--- The download's stdout (the protocol lines) and stderr, under temp for
+-- the reasons cliLogPath gives.
+function Analyze.downloadFiles()
+	return tempPath('melampus-download.progress'), tempPath('melampus-download.log')
+end
+
+--- The shell line that downloads the model, or nil plus the missing-
+-- executable message.
+function Analyze.downloadCommand()
+	local executable = Analyze.executablePath()
+	if not executable or not LrFileUtils.exists(executable) then
+		return nil, missingExecutable()
+	end
+	local progress, log = Analyze.downloadFiles()
+	return shellLine(quote(executable) .. ' --download-model >' .. quote(progress) .. ' 2>' .. quote(log))
+end
+
+--- Start the download. One task runs the command; another reads the
+-- progress file every second and hands each update (Rules.parseDownloadLine)
+-- to `onProgress`; when the command exits, `onFinish` gets the exit code
+-- (0 done, 3 failed, 4 cancelled), the last update, and the tail of the
+-- log. `cancelPath` is where --model-status said to write to cancel.
+-- Returns a handle whose cancel() writes it, or nil plus a message.
+function Analyze.downloadModel(cancelPath, onProgress, onFinish)
+	local command, err = Analyze.downloadCommand()
+	if not command then return nil, err end
+	local progressFile, logFile = Analyze.downloadFiles()
+	-- Start clean: the shell truncates the file when the command starts,
+	-- but the poller may read before that, and a previous run's `done`
+	-- must not read as this run's.
+	for _, path in ipairs({ progressFile, logFile }) do
+		local handle = io.open(path, 'w')
+		if handle then handle:close() end
+	end
+	Log.info('running: ' .. command)
+	local code = nil
+	LrTasks.startAsyncTask(function() code = LrTasks.execute(command) end)
+	LrTasks.startAsyncTask(function()
+		while code == nil do
+			LrTasks.sleep(1)
+			local update = Rules.latestDownloadUpdate(LrFileUtils.readFile(progressFile))
+			if update then onProgress(update) end
+		end
+		local update = Rules.latestDownloadUpdate(LrFileUtils.readFile(progressFile))
+		Log.info('download exit ' .. tostring(code) .. ': ' .. tostring(update and update.state))
+		onFinish(code, update, Analyze.tail(LrFileUtils.readFile(logFile)))
+	end)
+	return {
+		cancel = function()
+			LrFileUtils.createAllDirectories(LrPathUtils.parent(cancelPath))
+			local handle = io.open(cancelPath, 'w')
+			if handle then handle:close() else Log.warn('could not write ' .. cancelPath) end
+		end,
+	}
 end
 
 --- Run the identification pipeline over a folder of previews, writing the

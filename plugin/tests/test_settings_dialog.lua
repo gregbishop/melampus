@@ -300,4 +300,134 @@ t.test('with no executable beside the plugin the dialog still opens, nothing gre
 	t.isTrue(#titlesMatching(contents, 'melampus') > 0, 'the missing-executable message does not name the file')
 end)
 
+-- ── the download plumbing (card #408) ──────────────────────────────────────
+-- LrTasks.execute blocks and returns only the exit code, so the download runs
+-- in its own task with stdout redirected to a file, a second task reads that
+-- file every second, and Cancel writes the marker the executable watches.
+-- The mock steps the two tasks: each tick the fake executable writes one
+-- more line and the poller reads what is there.
+
+local function loadAnalyze(options)
+	options = options or {}
+	mock.reset({ existing = options.existing })
+	mock.install(PLUGIN, options)
+	for _, name in ipairs({ 'MelampusJson', 'MelampusRules', 'MelampusLog', 'MelampusAnalyze' }) do
+		package.loaded[name] = nil
+	end
+	return dofile(PLUGIN .. '/MelampusAnalyze.lua')
+end
+
+local function append(path, text)
+	local handle = assert(io.open(path, 'a'))
+	handle:write(text)
+	handle:close()
+end
+
+local function exists(path)
+	local handle = io.open(path, 'r')
+	if handle then handle:close() return true end
+	return false
+end
+
+t.test('the download command runs the executable with stdout to the progress file and stderr to the log, on both shells', function()
+	local Analyze = loadAnalyze({ existing = { [EXECUTABLE] = true } })
+	local progress, log = Analyze.downloadFiles()
+	t.equals(Analyze.downloadCommand(),
+		"'" .. EXECUTABLE .. "' --download-model >'" .. progress .. "' 2>'" .. log .. "'")
+
+	local exe = PLUGIN .. '\\melampus.exe'
+	Analyze = loadAnalyze({ windows = true, existing = { [exe] = true } })
+	progress, log = Analyze.downloadFiles()
+	t.equals(Analyze.downloadCommand(),
+		'""' .. exe .. '" --download-model >"' .. progress .. '" 2>"' .. log .. '""')
+	t.isNotNil(string.find(progress, 'AppData\\Local\\Temp\\', 1, true), 'the progress file is not under temp: ' .. progress)
+end)
+
+t.test('without the executable the download command is the missing-executable message', function()
+	local Analyze = loadAnalyze()
+	local command, message = Analyze.downloadCommand()
+	t.isNil(command)
+	t.isNotNil(string.find(message, 'melampus', 1, true))
+	t.isNotNil(string.find(message, PLUGIN, 1, true))
+end)
+
+--- Start a download under the mock whose fake executable writes `lines` to
+--- the progress file one per tick, `stderr` to the log, and exits `code`.
+local function startDownload(lines, code, stderr)
+	local Analyze = loadAnalyze({ existing = { [EXECUTABLE] = true } })
+	local progressFile, logFile = Analyze.downloadFiles()
+	mock.state.onExecute = function(command)
+		-- One line per tick, each after the poller has had its turn.
+		for _, line in ipairs(lines) do
+			mock.yield()
+			append(progressFile, line .. '\n')
+		end
+		if stderr then append(logFile, stderr) end
+		return code
+	end
+	local seen, finished = {}, nil
+	local handle, err = Analyze.downloadModel(os.getenv('TMPDIR') .. '/melampus-data/cache/download-cancel',
+		function(update) seen[#seen + 1] = update end,
+		function(exit, update, tail) finished = { code = exit, update = update, tail = tail } end)
+	t.isNotNil(handle, 'the download did not start: ' .. tostring(err))
+	return seen, function() return finished end, handle
+end
+
+t.test('the poller reports each progress line as it lands in the file, then the exit with the last line', function()
+	local seen, finished = startDownload({ 'progress 0 100', 'progress 40 100', 'progress 100 100',
+		'done /hf/hub/models--x--y/snapshots/abc' }, 0)
+	t.equals(#mock.state.executed, 1, 'the download command did not run')
+	t.isNotNil(string.find(mock.state.executed[1], '--download-model', 1, true))
+	mock.tick()
+	t.equals(#seen, 1, 'after one tick, one line read')
+	t.equals(seen[1].bytesDone, 0)
+	mock.tick()
+	t.equals(seen[#seen].bytesDone, 40)
+	t.isNil(finished(), 'finished before the executable exited')
+	mock.settle()
+	t.equals(finished().code, 0)
+	t.equals(finished().update.state, 'done')
+	t.equals(finished().update.path, '/hf/hub/models--x--y/snapshots/abc')
+	local counts = {}
+	for _, update in ipairs(seen) do if update.state == 'progress' then counts[#counts + 1] = update.bytesDone end end
+	t.equals(table.concat(counts, ','), '0,40,100')
+	t.equals(#mock.state.tasks, 0, 'tasks left running after the download finished')
+end)
+
+t.test('a download that starts from a previous run\'s file does not read stale lines', function()
+	local Analyze = loadAnalyze({ existing = { [EXECUTABLE] = true } })
+	local progressFile = Analyze.downloadFiles()
+	local handle = assert(io.open(progressFile, 'w'))
+	handle:write('done /previous/run\n')
+	handle:close()
+	local seen, finished = startDownload({ 'progress 0 100' }, 4)
+	mock.settle()
+	t.equals(seen[1].state, 'progress', 'the previous run\'s done line was read')
+	t.equals(finished().code, 4)
+end)
+
+t.test('Cancel writes the marker where the status said, creating its folder', function()
+	local marker = os.getenv('TMPDIR') .. '/melampus-data/cache/download-cancel'
+	os.remove(marker)
+	local seen, finished, handle = startDownload({ 'progress 0 100', 'progress 10 100', 'cancelled' }, 4)
+	mock.tick()
+	handle.cancel()
+	t.isTrue(exists(marker), 'the marker was not written at ' .. marker)
+	mock.settle()
+	t.equals(finished().code, 4)
+	t.equals(finished().update.state, 'cancelled')
+	os.remove(marker)
+end)
+
+t.test('a failed download hands back exit 3 and the tail of the log', function()
+	local Analyze = loadAnalyze({ existing = { [EXECUTABLE] = true } })
+	local _, logFile = Analyze.downloadFiles()
+	os.remove(logFile)
+	local seen, finished = startDownload({ 'progress 0 100' }, 3,
+		'a warning first\ncould not reach the hub at http://127.0.0.1:1: check the network\n')
+	mock.settle()
+	t.equals(finished().code, 3)
+	t.isNotNil(string.find(finished().tail, 'could not reach the hub', 1, true), 'no log tail: ' .. tostring(finished().tail))
+end)
+
 return t.summary()
