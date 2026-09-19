@@ -79,6 +79,7 @@ from melampus.download import (
     ollama_status,
     pull_model,
     remove_model,
+    remove_ollama_model,
 )
 
 
@@ -2638,3 +2639,32 @@ def test_status_with_no_ollama_answering_says_absent_and_never_fails():
 
     assert status == Status(FAKE_MODEL, installed=False, bytes_total=None, bytes_done=0,
                             path=None, cancel_path=str(cancel_marker_path()))
+
+
+def test_remove_deletes_the_pulled_model_from_ollama(fake_ollama: FakeOllama):
+    """Remove: the delete endpoint (docs/api.md § Delete a Model: DELETE
+    /api/delete with the model's name, 200 when gone). The status reads
+    absent again, and the removal is what the fake saw."""
+    _pull(fake_ollama)
+
+    removed = remove_ollama_model(FAKE_MODEL, fake_ollama.endpoint)
+
+    assert removed == FAKE_MODEL
+    assert fake_ollama.deletes == [FAKE_MODEL]
+    assert fake_ollama.models == {}
+    assert _ollama_status(fake_ollama).installed is False
+
+
+def test_remove_of_a_model_ollama_does_not_hold_says_so(fake_ollama: FakeOllama):
+    """404 with Ollama's not-found error (§ Delete a Model): nothing to
+    remove, named."""
+    with pytest.raises(DownloadError) as failure:
+        remove_ollama_model(FAKE_MODEL, fake_ollama.endpoint)
+    assert FAKE_MODEL in str(failure.value) and "nothing to remove" in str(failure.value)
+
+
+def test_remove_with_no_ollama_answering_uses_the_not_running_message():
+    port = closed_port()
+    with pytest.raises(DownloadError) as failure:
+        remove_ollama_model(FAKE_MODEL, f"http://127.0.0.1:{port}")
+    assert f"no Ollama server answering at http://127.0.0.1:{port}" in str(failure.value)

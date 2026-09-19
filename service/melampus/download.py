@@ -963,6 +963,7 @@ def remove_model(repo: str, *, cache_dir: Path | None = None) -> Path:
 
 OLLAMA_PULL = "/api/pull"
 OLLAMA_TAGS = "/api/tags"
+OLLAMA_DELETE = "/api/delete"
 
 
 def _pull_error(model: str, error: object) -> DownloadError:
@@ -1138,3 +1139,18 @@ def ollama_status(model: str, url: str) -> Status:
         return Status(model, False, None, 0, None, str(cancel_marker_path()))
     size = int(entry.get("size") or 0)
     return Status(model, True, size, size, str(entry.get("name") or model), str(cancel_marker_path()))
+
+
+def remove_ollama_model(model: str, url: str) -> str:
+    """Delete `model` from the Ollama at `url` through its delete endpoint
+    (docs/api.md § Delete a Model: DELETE /api/delete with the model's name;
+    200 when gone, 404 when it was not held) and return the name. Raises
+    DownloadError naming the model when nothing is held, the backend's
+    not-running words when no server answers."""
+    try:
+        _ollama_request(url, OLLAMA_DELETE, {"model": model}, method="DELETE")
+    except DownloadError as exc:
+        if "Ollama answered 404" in str(exc):
+            raise DownloadError(f"{model} is not in Ollama at {url}: nothing to remove ({exc})") from exc
+        raise
+    return model

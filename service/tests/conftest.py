@@ -526,8 +526,10 @@ def hub_env(fake_hub: FakeHub, tmp_path: Path) -> dict[str, str]:
 # `replies` are the texts the chat answers with in order (a 404 with Ollama's
 # not-found error once they run out); every chat request's JSON body lands on
 # `chats`. `library` is what can be pulled, name -> layer sizes; `models` is
-# what is held, name -> size, filled by a pull; `pulls` keeps every pull's
-# body and `requests` every request. `throttle` (bytes per line, seconds
+# what is held, name -> size, filled by a pull, listed by § List Local Models
+# (`GET /api/tags`) and emptied by § Delete a Model (`DELETE /api/delete`,
+# 200, or 404 with the not-found error); `pulls` keeps every pull's body,
+# `deletes` every deletion's name and `requests` every request. `throttle` (bytes per line, seconds
 # between) slows a pull so a cancel can land mid-stream, and a pull the
 # client cut off keeps what each layer had, so the next pull of the same
 # model starts there (docs/api.md § Pull a Model: "Cancelled pulls are
@@ -564,6 +566,7 @@ class FakeOllama:
     ) -> None:
         self.chats: list[dict] = []
         self.pulls: list[dict] = []
+        self.deletes: list[str] = []
         self.requests: list[tuple[str, str]] = []
         self.library = dict(library or {})
         self.models: dict[str, int] = {}
@@ -587,6 +590,20 @@ class FakeOllama:
                 if delay:
                     ollama.release.wait(delay)
                 self._answer(status, {"version": "0.0.0-fake"})
+
+            def do_DELETE(self):  # noqa: N802 - http.server's name
+                ollama.requests.append(("DELETE", self.path))
+                assert self.path == "/api/delete", self.path
+                body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                name = body.get("model") or ""
+                ollama.deletes.append(name)
+                held = name if name in ollama.models else (name.removesuffix(":latest")
+                                                             if name.endswith(":latest") else None)
+                if held in ollama.models:
+                    del ollama.models[held]
+                    self._answer(200, {})
+                else:
+                    self._answer(404, {"error": f"model '{name}' not found"})
 
             def do_POST(self):  # noqa: N802 - http.server's name
                 ollama.requests.append(("POST", self.path))
