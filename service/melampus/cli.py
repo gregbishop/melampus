@@ -172,10 +172,14 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="melampus-id", description=__doc__)
     ap.add_argument("folder", type=Path, help="folder of JPEGs")
     ap.add_argument("--config", type=Path, default=None)
+    ap.add_argument("--no-local-config", action="store_true",
+                    help="do not read melampus.local.toml beside the data: --config "
+                         "alone, over the defaults, is the whole configuration")
     ap.add_argument("--model", default=None, help="override model repo")
     ap.add_argument("--backend", choices=BACKEND_CHOICES, default=None,
-                    help="what answers: mlx locally (default), or a cloud provider "
-                         "for machines with no local runtime")
+                    help="what answers: mlx locally (default), a cloud provider "
+                         "for machines with no local runtime, or scripted (a fake "
+                         "that answers nothing; for smoke tests without weights)")
     ap.add_argument("--yes", action="store_true",
                     help="skip the cost confirmation when the primary backend is a "
                          "cloud provider (for non-interactive callers)")
@@ -232,7 +236,7 @@ def main(argv: list[str] | None = None) -> int:
         overrides.setdefault("escalation", {})["provider"] = args.escalate_provider
     if args.escalate_base_url:
         overrides.setdefault("escalation", {})["base_url"] = args.escalate_base_url
-    config = load_config(args.config, **overrides)
+    config = load_config(args.config, use_local=not args.no_local_config, **overrides)
 
     cloud_primary = is_cloud_primary(config)
     if cloud_primary:

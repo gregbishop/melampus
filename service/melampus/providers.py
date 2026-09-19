@@ -32,8 +32,16 @@ DEFAULT_MODELS = {
     "openai": "gpt-5",
 }
 
+#: The fake the unit tests run against, reachable from the CLI so the shipped
+#: executable can be smoke-tested on a machine with no weights (card #399). It
+#: answers nothing useful; it is here to prove the pipeline around it runs.
+SCRIPTED = "scripted"
+
 #: What `[model] backend` may be set to.
-BACKEND_CHOICES = ("mlx", *sorted(KEY_VARIABLES))
+BACKEND_CHOICES = ("mlx", *sorted(KEY_VARIABLES), SCRIPTED)
+
+#: The backends that run on this machine and bill nobody.
+LOCAL_BACKENDS = ("mlx", SCRIPTED)
 
 
 class BackendUnavailable(RuntimeError):
@@ -69,7 +77,7 @@ def resolve_provider_key(provider: str, explicit: SecretStr | None = None) -> st
 
 
 def is_cloud_primary(config: MelampusConfig) -> bool:
-    return (config.model.backend or "mlx").strip().lower() != "mlx"
+    return (config.model.backend or "mlx").strip().lower() not in LOCAL_BACKENDS
 
 
 def build_primary_backend(config: MelampusConfig) -> VLMBackend:
@@ -96,6 +104,11 @@ def build_primary_backend(config: MelampusConfig) -> VLMBackend:
         from .backend import MLXBackend
 
         return MLXBackend(config.model.repo, config.model.temperature)
+
+    if kind == SCRIPTED:
+        from .backend import ScriptedBackend
+
+        return ScriptedBackend([])
 
     provider = normalise_provider(kind)
 
