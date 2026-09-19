@@ -610,7 +610,9 @@ def test_executable_detects_engines_as_json_with_no_python_on_the_path(
     ollama is unavailable with the install pointer; mlx's verdict is
     whether this machine is Apple Silicon; the cloud engines are available
     and name their key variable; with no `claude` or `codex` on the PATH,
-    both CLIs are not installed, with where to get them."""
+    both CLIs are not installed, with where to get them. Every verdict
+    carries the title the plugin's picker shows (card #423), so the dialog
+    holds no title table of its own."""
     from melampus import providers
 
     proc = subprocess.run(
@@ -621,7 +623,11 @@ def test_executable_detects_engines_as_json_with_no_python_on_the_path(
     verdicts = json.loads(proc.stdout)
     assert [v["engine"] for v in verdicts] == [
         "mlx", "ollama", "openai", "claude", "claude-code", "codex"]
+    assert all(set(v) == {"engine", "title", "available", "reason"} for v in verdicts), verdicts
+    assert all(v["title"] for v in verdicts), "a verdict with no title for the picker"
     by_engine = {v["engine"]: v for v in verdicts}
+    assert by_engine["claude-code"]["title"].startswith(providers.CLAUDE_CODE_CLI.title)
+    assert by_engine["codex"]["title"].startswith(providers.CODEX_CLI.title)
     assert by_engine["claude-code"]["available"] is False, "a claude on the empty PATH?"
     assert "not installed" in by_engine["claude-code"]["reason"]
     assert providers.CLAUDE_CODE_INSTALL in by_engine["claude-code"]["reason"]
