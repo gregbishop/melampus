@@ -481,11 +481,19 @@ def test_release_workflow_builds_as_ci_does_and_attaches_a_zip_per_platform():
 def test_readme_lightroom_section_names_the_release_zips_and_keeps_the_from_source_path():
     """Card #402: a user installs from a release download, one zip per
     platform, through Plug-in Manager; readme.md's Lightroom section must name
-    both zips, and keep the copy-from-dist step for a build from source."""
-    readme = README.read_text(encoding="utf-8")
-    section = re.search(r"^## Reviewing in Lightroom\n(.*?)^## ", readme, re.MULTILINE | re.DOTALL)
-    assert section, "readme.md has no ## Reviewing in Lightroom section"
-    missing = [z for z in RELEASE_ZIPS if z not in section.group(1)]
-    assert not missing, f"readme.md's Lightroom section does not name {missing}"
-    assert "cp dist/melampus plugin/Melampus.lrplugin/" in section.group(1), (
-        "readme.md's Lightroom section lost the from-source install")
+    both zips, and keep the copy-from-dist step for a build from source. The
+    section sends the user to docs/plugin.md for the install steps, so that
+    page's ## Install must tell the same story: both zips, and the copy for a
+    build from source, not a bare executable downloaded from a release."""
+    sections = {
+        README: ("Reviewing in Lightroom", README.read_text(encoding="utf-8")),
+        PLUGIN_DOC: ("Install", PLUGIN_DOC.read_text(encoding="utf-8")),
+    }
+    for doc, (heading, text) in sections.items():
+        name = doc.relative_to(REPO).as_posix()
+        section = re.search(rf"^## {heading}\n(.*?)^## ", text, re.MULTILINE | re.DOTALL)
+        assert section, f"{name} has no ## {heading} section"
+        missing = [z for z in RELEASE_ZIPS if z not in section.group(1)]
+        assert not missing, f"{name}'s {heading} section does not name {missing}"
+        assert "cp dist/melampus plugin/Melampus.lrplugin/" in section.group(1), (
+            f"{name}'s {heading} section lost the from-source install")
