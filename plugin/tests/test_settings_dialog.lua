@@ -102,6 +102,16 @@ local function writeFile(path, text, mode)
 	handle:close()
 end
 
+--- What the plugin's log holds: the file the module writes at Log.path(),
+--- under the mock's home; nil while nothing has landed.
+local function logText()
+	local handle = io.open(require('MelampusLog').path(), 'r')
+	if not handle then return nil end
+	local text = handle:read('*a')
+	handle:close()
+	return text
+end
+
 --- The dialogs the mock recorded, the modal ones (the Settings dialog, with
 --- its view tree) when `modal` is true, else the messages shown over it.
 local function dialogsShown(modal)
@@ -119,7 +129,8 @@ end
 --- `options.download` plays --download-model: its `lines` land
 --- in the progress file one per tick, `stderr` in the log, and it exits
 --- `code`; `options.removeCode` is --remove-model's exit code; `options
---- .onDialog` plays the user while the dialog is up.
+--- .onDialog` plays the user while the dialog is up; `options.windows`
+--- opens it on a fake Windows Lightroom.
 local function openSettings(options)
 	options = options or {}
 	mock.reset({
@@ -150,7 +161,7 @@ local function openSettings(options)
 		end,
 		onModalDialog = options.onDialog,
 	})
-	mock.install(PLUGIN)
+	mock.install(PLUGIN, { windows = options.windows })
 	for _, name in ipairs({ 'MelampusJson', 'MelampusRules', 'MelampusLog', 'MelampusAnalyze' }) do
 		package.loaded[name] = nil
 	end
@@ -171,6 +182,14 @@ local function viewsOfKind(root, kind)
 	end
 	walk(root, nil)
 	return found
+end
+
+--- The one push_button titled `title` in the tree, or nil.
+local function buttonTitled(contents, title)
+	for _, entry in ipairs(viewsOfKind(contents, 'push_button')) do
+		if entry.view.title == title then return entry.view end
+	end
+	return nil
 end
 
 local function bindingKey(binding)
@@ -478,9 +497,7 @@ t.test('a typed key is stored through LrPasswords and lands nowhere else', funct
 	for name, text in pairs(pluginFiles()) do
 		t.isNil(string.find(text, TYPED, 1, true), 'the key was written into the plugin folder: ' .. name)
 	end
-	for _, line in ipairs(mock.state.logLines) do
-		t.isNil(string.find(line, TYPED, 1, true), 'the key was logged: ' .. line)
-	end
+	t.isNil(string.find(logText() or '', TYPED, 1, true), 'the key was logged: ' .. tostring(logText()))
 end)
 
 t.test('a stored key is shown back in its field, and an emptied one is forgotten', function()
@@ -689,14 +706,20 @@ end)
 -- The mock steps the two tasks: each tick the fake executable writes one
 -- more line and the poller reads what is there.
 
-local function loadAnalyze(options)
+--- Reset the mock, install it (`options.windows` fakes a Windows Lightroom,
+--- `options.home` names its home folder), and load one plugin file fresh.
+local function loadFresh(name, options)
 	options = options or {}
-	mock.reset({ existing = options.existing })
+	mock.reset({ existing = options.existing, home = options.home })
 	mock.install(PLUGIN, options)
-	for _, name in ipairs({ 'MelampusJson', 'MelampusRules', 'MelampusLog', 'MelampusAnalyze' }) do
-		package.loaded[name] = nil
+	for _, module in ipairs({ 'MelampusJson', 'MelampusRules', 'MelampusLog', 'MelampusAnalyze' }) do
+		package.loaded[module] = nil
 	end
-	return dofile(PLUGIN .. '/MelampusAnalyze.lua')
+	return dofile(PLUGIN .. '/' .. name .. '.lua')
+end
+
+local function loadAnalyze(options)
+	return loadFresh('MelampusAnalyze', options)
 end
 
 local function append(path, text)
@@ -823,6 +846,83 @@ t.test('a failed download hands back exit 3 and the tail of the log', function()
 	mock.settle()
 	t.equals(finished().code, 3)
 	t.isNotNil(string.find(finished().tail, 'could not reach the hub', 1, true), 'no log tail: ' .. tostring(finished().tail))
+end)
+
+-- ── the log (card #442) ────────────────────────────────────────────────────
+-- The log lives under the per-user Melampus data directory, the root the
+-- executable keeps its config and caches under (config._data_root): one
+-- rule on both platforms, exact on both, and the same folder the user is
+-- sent to for everything else of Melampus's.
+
+local function loadLog(options)
+	return loadFresh('MelampusLog', options)
+end
+
+local function homeOfTheFakeLightroom()
+	return import('LrPathUtils').getStandardFilePath('home')
+end
+
+t.test('on macOS the log is <home>/Library/Application Support/Melampus/logs/Melampus.log, the executable\'s root', function()
+	local Log = loadLog()
+	local home = homeOfTheFakeLightroom()
+	t.equals(Log.dataRoot(), home .. '/Library/Application Support/Melampus')
+	t.equals(Log.folder(), home .. '/Library/Application Support/Melampus/logs')
+	t.equals(Log.path(), home .. '/Library/Application Support/Melampus/logs/Melampus.log')
+end)
+
+t.test('on Windows the log is <home>\\AppData\\Local\\Melampus\\logs\\Melampus.log, %LOCALAPPDATA%\\Melampus by default', function()
+	local Log = loadLog({ windows = true })
+	t.equals(homeOfTheFakeLightroom(), 'C:\\Users\\photographer')
+	t.equals(Log.dataRoot(), 'C:\\Users\\photographer\\AppData\\Local\\Melampus')
+	t.equals(Log.folder(), 'C:\\Users\\photographer\\AppData\\Local\\Melampus\\logs')
+	t.equals(Log.path(), 'C:\\Users\\photographer\\AppData\\Local\\Melampus\\logs\\Melampus.log')
+end)
+
+t.test('the mock\'s home is a folder of this run\'s own under its temp directory, never the developer\'s, unless a test names one', function()
+	loadLog()
+	local home = homeOfTheFakeLightroom()
+	t.equals(home, mock.state.tempDir .. '/home')
+	t.isFalse(home == os.getenv('HOME'), 'the fake Lightroom\'s home is the developer\'s')
+	local Log = loadLog({ home = '/Volumes/Elsewhere' })
+	t.equals(Log.path(), '/Volumes/Elsewhere/Library/Application Support/Melampus/logs/Melampus.log')
+end)
+
+t.test('a line written through the module lands in the log at Log.path(), its folder made on the way', function()
+	local Log = loadLog()
+	t.isNil(logText(), 'a log exists before anything was logged')
+	Log.info('running: melampus --detect-engines')
+	Log.warn('careful')
+	Log.error('broken')
+	local text = logText()
+	t.isNotNil(text, 'nothing landed at ' .. Log.path())
+	t.isNotNil(string.find(text, ' INFO running: melampus --detect-engines\n', 1, true), text)
+	t.isNotNil(string.find(text, ' WARN careful\n', 1, true), text)
+	t.isNotNil(string.find(text, ' ERROR broken\n', 1, true), text)
+	local _, lines = string.gsub(text, '\n', '')
+	t.equals(lines, 3, 'one line per message')
+end)
+
+t.test('on a fake Windows Lightroom, whose folders exist nowhere on this host, logging raises nothing', function()
+	local Log = loadLog({ windows = true })
+	Log.info('running: melampus.exe --detect-engines')
+	t.equals(Log.path(), 'C:\\Users\\photographer\\AppData\\Local\\Melampus\\logs\\Melampus.log')
+end)
+
+t.test('the dialog names the log at Log.path(), and Show log file reveals it in the folder that holds it, both made first', function()
+	local contents = openSettings({})
+	local Log = require('MelampusLog')
+	t.equals(#titlesMatching(contents, 'Log: ' .. Log.path()), 1, 'the dialog does not name the log at ' .. Log.path())
+	t.isNil(logText(), 'a log exists before anything was logged')
+	buttonTitled(contents, 'Show log file').action()
+	t.equals(mock.state.revealed[1], Log.path(), 'not the log that was revealed')
+	t.equals(import('LrPathUtils').parent(mock.state.revealed[1]), Log.folder())
+	t.isNotNil(logText(), 'the log was not made, so its folder had nothing to show')
+end)
+
+t.test('on Windows, Show log file reveals the log under %LOCALAPPDATA%\\Melampus', function()
+	local contents = openSettings({ windows = true })
+	buttonTitled(contents, 'Show log file').action()
+	t.equals(mock.state.revealed[1], 'C:\\Users\\photographer\\AppData\\Local\\Melampus\\logs\\Melampus.log')
 end)
 
 return t.summary()

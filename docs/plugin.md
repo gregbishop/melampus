@@ -59,6 +59,19 @@ folder should hold it and what the file is called.
 Results come from exported JPEGs while the catalog holds raws, so matching is by
 basename: `0A1A2475.jpg` finds `0A1A2475.CR3`. Verified 300/300 on this corpus.
 
+Every action writes a line to the plugin's log, `Melampus.log` in the `logs`
+folder of the per-user Melampus data directory the executable keeps its config
+and caches under (card #442): `~/Library/Application Support/Melampus/logs/Melampus.log`
+on macOS, `%LOCALAPPDATA%\Melampus\logs\Melampus.log` on Windows (the plugin
+builds that from the home folder, `<home>\AppData\Local`, since the SDK lets
+no plugin read the variable). The plugin writes the file itself: the SDK's
+`LrLogger` `logfile` target lands wherever Lightroom decides, a folder the SDK
+neither names nor lets a plugin choose, so the path shown could only have been
+a guess. Settings → **Show log file** opens that folder with the log selected,
+making both if nothing has been logged yet. The executable's own output from a
+run goes to `melampus-cli.log` in the OS temp directory; a failed run's message
+names both files.
+
 ---
 
 ## The engine
@@ -240,11 +253,16 @@ skip cleanly when no interpreter is present:
   the Download row from a fake status (absent with the size, size unknown,
   Installed and Remove), the download command with stdout redirected on both
   shells, the progress stepped through the mock's tasks a line at a time,
-  Cancel writing the marker, exit 3's message with the log tail. In
-  `test_lua_plugin.py` the commands the dialog builds also run through `sh`
-  against `dist/melampus` with `HF_ENDPOINT` at the fake hub: the progress
-  file ends in `done`, the status flips to installed, and the marker written
-  where the status said ends a throttled download with `cancelled`.
+  Cancel writing the marker, exit 3's message with the log tail; the log's
+  path on a fake macOS and a fake Windows Lightroom, a line written through
+  the module landing in that file, and the Show log file button revealing it
+  (card #442). In `test_lua_plugin.py` the commands the dialog builds also
+  run through `sh` against `dist/melampus` with `HF_ENDPOINT` at the fake
+  hub: the progress file ends in `done`, the status flips to installed, and
+  the marker written where the status said ends a throttled download with
+  `cancelled`; and the data directory the plugin's Lua derives for the log
+  is held to the one `dist/melampus --model-status` reports, for the same
+  home, so the two rules cannot drift.
 - **8 JSON tests** plus a parse of 1,093 real records.
 - **`luac -p` over every plugin file**, which has already caught a real bug.
 

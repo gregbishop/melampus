@@ -17,7 +17,6 @@ Two ordering constraints, both from §5.3 and both load-bearing:
     not allowed".
 --]]
 
-local LrDialogs = import 'LrDialogs'
 local LrFileUtils = import 'LrFileUtils'
 local LrPasswords = import 'LrPasswords'
 local LrPathUtils = import 'LrPathUtils'
@@ -198,9 +197,9 @@ end
 -- stderr, and a non-interactive caller that discards it has erased the only
 -- record of what a run was going to cost. Lives in the OS temp directory: the
 -- shell does not create directories for a redirect, and temp is the one
--- location guaranteed to exist on both platforms (the plugin-log directory is
--- not — Log.path() is a macOS layout). Outside previewFolder so cleanUp()
--- does not take the evidence with it.
+-- location guaranteed to exist on both platforms before anything ran (the
+-- plugin's own log folder, Log.folder(), is made by its first line). Outside
+-- previewFolder so cleanUp() does not take the evidence with it.
 local function tempPath(name)
 	return LrPathUtils.child(LrPathUtils.getStandardFilePath('temp'), name)
 end

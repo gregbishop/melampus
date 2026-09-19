@@ -349,9 +349,7 @@ LrTasks.startAsyncTask(function()
 				f:row {
 					f:push_button {
 						title = 'Show log file',
-						action = function()
-							import('LrShell').revealInShell(Log.path())
-						end,
+						action = Log.reveal,
 					},
 					f:push_button {
 						title = 'Check results file',
