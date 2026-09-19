@@ -45,6 +45,17 @@ def run_lua(script: Path, env: dict[str, str] | None = None) -> subprocess.Compl
     )
 
 
+def as_the_shell_receives_it(path: Path) -> str:
+    """A path as an argument on the line LrTasks.execute hands to the shell:
+    double-quoted for cmd.exe (a Windows filename cannot hold a double quote),
+    single-quoted for sh with an apostrophe closed, escaped and reopened.
+    Spelled here on its own, so the plugin's quote() is checked, not
+    repeated."""
+    if sys.platform == "win32":
+        return f'"{path}"'
+    return "'" + str(path).replace("'", "'\\''") + "'"
+
+
 def run_as_lightroom_would(command: str, **kwargs) -> subprocess.CompletedProcess:
     """Hand the line to the shell LrTasks.execute hands it to: `cmd.exe /c`
     on Windows, as the C runtime's system() does, and `sh -c` elsewhere.
@@ -117,8 +128,10 @@ def test_the_command_the_plugin_builds_runs_the_executable_beside_it(
     from melampus.plugin_results import PLUGIN_FIELDS
 
     windows = sys.platform == "win32"
-    plugin_dir = tmp_path / "Melampus.lrplugin"
-    plugin_dir.mkdir()
+    # Under a name with an apostrophe, the one character sh's own quoting
+    # cannot hold as it is: the command must close, escape and reopen it.
+    plugin_dir = tmp_path / "O'Brien" / "Melampus.lrplugin"
+    plugin_dir.mkdir(parents=True)
     # Copied, as the user copies it there from the download.
     shutil.copy(built_executable, plugin_dir / built_executable.name)
     # Lightroom's previews folder: the committed frame, from conftest's fixture.
@@ -153,7 +166,7 @@ def test_the_command_the_plugin_builds_runs_the_executable_beside_it(
     })
     assert built.returncode == 0, built.stdout + built.stderr
     command = built.stdout
-    assert str(plugin_dir / built_executable.name) in command, command
+    assert as_the_shell_receives_it(plugin_dir / built_executable.name) in command, command
 
     proc = run_as_lightroom_would(command, env=env, cwd=tmp_path,
                                   capture_output=True, text=True, timeout=600)

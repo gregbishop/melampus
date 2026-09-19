@@ -410,13 +410,20 @@ end
 --- The one line the import runs on macOS: the executable beside the plugin
 --- over the first batch of previews in the mock's temp directory, the
 --- enriched results next to the previews, the CLI's own output kept in temp,
---- every path single-quoted for sh. The whole line, so nothing of a Python
---- checkout (python, .venv, tools/, cd) can be in it, wherever the clone is.
+--- every path single-quoted for sh, an apostrophe in it (a checkout or a
+--- TMPDIR under a name like O'Brien) closed, escaped and reopened, as sh
+--- needs it. The whole line, so nothing of a Python checkout (python, .venv,
+--- tools/, cd) can be in it, wherever the clone is.
 local function macCommand()
 	local temp = mock.state.tempDir
 	local previews = temp .. '/melampus-previews-1'
-	return string.format("'%s' '%s' --profile 'wildlife' --plugin-out '%s/results.json' --yes >'%s/melampus-cli.log' 2>&1",
-		MAC_EXECUTABLE, previews, previews, temp)
+	return table.concat({
+		mock.sh(MAC_EXECUTABLE), mock.sh(previews),
+		'--profile', mock.sh('wildlife'),
+		'--plugin-out', mock.sh(previews .. '/results.json'),
+		'--yes',
+		'>' .. mock.sh(temp .. '/melampus-cli.log') .. ' 2>&1',
+	}, ' ')
 end
 
 --- What Analyze.run says when the executable is not beside the plugin: the

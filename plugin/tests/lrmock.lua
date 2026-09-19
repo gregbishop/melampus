@@ -31,6 +31,9 @@ M.state = {}
 local function sh(text)
 	return "'" .. string.gsub(tostring(text), "'", "'\\''") .. "'"
 end
+-- Exposed so a suite can spell what a sh line must hold, from the same
+-- quoting the mock's own shell traffic uses, and still not from the plugin's.
+M.sh = sh
 
 --- Remove the temp directory this run made, if it made one.
 function M.cleanUp()
