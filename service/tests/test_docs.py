@@ -8,8 +8,10 @@ the recorded plugins; no doc names a file by an uppercase name it does not have;
 docs/brief.md names the pytest command CI actually runs and explains it as
 installing from the lockfile; every doc block that installs the service, and CI, install
 from the lockfile (card #425, Done-when 3 and 2); AGENTS.md points at
-docs/brief.md without restating its values; and AGENTS.md points at the standard
-and names the tracker (card #410, Done-when 3).
+docs/brief.md without restating its values; AGENTS.md points at the standard
+and names the tracker (card #410, Done-when 3); and the Windows job runs the
+plugin tests, so the command built for cmd.exe is run by cmd.exe (card #401,
+Done-when 3).
 
 The checks are deliberately dumb — substring presence of the backticked name — so
 they never argue with prose style, only with absence.
@@ -242,6 +244,15 @@ def test_docs_name_the_build_and_its_smoke_test():
     assert not missing, f"readme.md does not name: {missing}"
 
 
+def _windows_job() -> str:
+    """The text of ci.yml's job on a Windows runner."""
+    workflow = CI_WORKFLOW.read_text(encoding="utf-8")
+    jobs = re.split(r"^  (?=\w[\w-]*:\s*$)", workflow.split("\njobs:\n", 1)[1], flags=re.MULTILINE)
+    windows = [job for job in jobs if re.search(r"runs-on: windows-", job)]
+    assert windows, "ci.yml has no job on a Windows runner"
+    return windows[0]
+
+
 def test_ci_builds_and_smoke_tests_the_windows_executable():
     """Card #400, Done-when 1: given the CI workflow runs on a Windows runner,
     when it finishes, then a melampus.exe exists that starts and analyzes a
@@ -253,11 +264,7 @@ def test_ci_builds_and_smoke_tests_the_windows_executable():
     names every test it ran and its outcome (-v) and the reason for each skip
     (-rs), so the log says which tests ran against dist/melampus.exe rather
     than a count of dots."""
-    workflow = CI_WORKFLOW.read_text(encoding="utf-8")
-    jobs = re.split(r"^  (?=\w[\w-]*:\s*$)", workflow.split("\njobs:\n", 1)[1], flags=re.MULTILINE)
-    windows = [job for job in jobs if re.search(r"runs-on: windows-", job)]
-    assert windows, "ci.yml has no job on a Windows runner"
-    job = windows[0]
+    job = _windows_job()
     pytest_steps = [c for c in _ci_pytest_commands() if c in job]
     assert pytest_steps, "the Windows job runs no pytest step"
     assert all("--build-binary" in c and "tests/test_binary.py" in c for c in pytest_steps), (
@@ -270,6 +277,27 @@ def test_ci_builds_and_smoke_tests_the_windows_executable():
     )
     assert re.search(r"uses: actions/upload-artifact@", job), "the Windows job uploads no artifact"
     assert "dist/melampus.exe" in job, "the Windows job does not upload dist/melampus.exe"
+
+
+def test_ci_runs_the_plugin_command_through_cmd_exe_on_windows():
+    """Card #401, Done-when 3: both invocation paths are covered. The macOS
+    job runs the Lua suites and the command the plugin builds through sh
+    against dist/melampus; the Windows job must run tests/test_lua_plugin.py
+    too, so the command the plugin builds for cmd.exe is run by cmd.exe
+    against dist/melampus.exe, on the one runner that has both. That takes a
+    Lua interpreter on the runner (the suite self-skips without one),
+    installed by a step of the job, and the file on its pytest line."""
+    job = _windows_job()
+    installs_lua = [
+        line for line in job.splitlines()
+        if not line.strip().startswith("#") and "install" in line and re.search(r"\blua\b", line)
+    ]
+    assert installs_lua, "the Windows job installs no Lua interpreter, so the plugin tests skip there"
+    pytest_steps = [c for c in _ci_pytest_commands() if c in job]
+    assert pytest_steps and all("tests/test_lua_plugin.py" in c for c in pytest_steps), (
+        "the Windows job's pytest step must run tests/test_lua_plugin.py, so the "
+        f"command the plugin builds for cmd.exe is run by cmd.exe: {pytest_steps}"
+    )
 
 
 def test_ci_pins_every_pip_install_to_an_exact_version():
