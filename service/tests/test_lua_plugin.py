@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 from conftest import PHOTO
 
+from melampus import providers
 from test_binary import no_python_environment, per_user_config
 
 REPO = Path(__file__).resolve().parents[2]
@@ -117,6 +118,26 @@ def test_import_runs_against_a_mock_lightroom():
 
 def test_json_decoder():
     run_lua_suite(TESTS / "test_json.lua")
+
+
+def test_the_plugin_names_the_engines_the_cli_accepts(tmp_path: Path):
+    """Card #403: the four engine names are spelled once per language, in
+    `Rules.ENGINES` for the plugin and `providers.BACKEND_CHOICES` for the
+    CLI, and this is what binds them: the plugin's list, read through lua, is
+    the CLI's list without the offline test fake, in the same order. A rename
+    on either side fails here rather than as a usage error the user never
+    sees."""
+    script = tmp_path / "engines.lua"
+    script.write_text(
+        "local Rules = require('MelampusRules')\n"
+        "io.write(table.concat(Rules.ENGINES, '\\n'))\n",
+        encoding="utf-8",
+    )
+    proc = run_lua(script)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+    engines = [b for b in providers.BACKEND_CHOICES if b != providers.SCRIPTED]
+    assert proc.stdout.split("\n") == engines
 
 
 def test_every_plugin_file_compiles():

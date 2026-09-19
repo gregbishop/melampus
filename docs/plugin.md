@@ -138,7 +138,7 @@ truncated results file should produce a clear dialog, not a stack trace.
 The Lua tests are driven from pytest so one command covers both languages, and
 skip cleanly when no interpreter is present:
 
-- **31 rules tests** — never-overwrite for ratings, labels and flags; dry-run;
+- **32 rules tests** — never-overwrite for ratings, labels and flags; dry-run;
   idempotency; force; auto-reject staying off; the confidence and burst-agreement
   gates; range-flag routing; abstention; keyword sanitisation; graceful handling
   of sparse records; the engine preference, every value and the default.

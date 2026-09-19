@@ -232,6 +232,13 @@ end)
 -- (mlx today; the first engine that can run here once card #404 detects).
 local ENGINES = { 'mlx', 'ollama', 'openai', 'claude' }
 
+t.test('the engines are exactly the four words, in order', function()
+	t.equals(#Rules.ENGINES, #ENGINES, 'not the four engines')
+	for i, engine in ipairs(ENGINES) do
+		t.equals(Rules.ENGINES[i], engine, 'engine ' .. i)
+	end
+end)
+
 t.test('the default engine is unset, so the CLI picks', function()
 	t.equals(Rules.defaultSettings().engine, '', 'the default must mean "not set"')
 	t.equals(#Rules.engineArguments(settings()), 0, 'no --backend when no engine is set')
