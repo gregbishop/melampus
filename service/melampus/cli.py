@@ -18,6 +18,7 @@ from .images import content_hash
 from .providers import (
     BACKEND_CHOICES,
     CLAUDE_CODE,
+    CODEX,
     COMMAND,
     KEY_VARIABLES,
     OLLAMA,
@@ -350,12 +351,13 @@ def main(argv: list[str] | None = None) -> int:
                     help="do not read melampus.local.toml beside the data: --config "
                          "alone, over the defaults, is the whole configuration")
     ap.add_argument("--model", default=None, help="override model repo")
-    ap.add_argument("--backend", choices=(*BACKEND_CHOICES, COMMAND, CLAUDE_CODE), default=None,
+    ap.add_argument("--backend", choices=(*BACKEND_CHOICES, COMMAND, CLAUDE_CODE, CODEX), default=None,
                     help="which engine answers: mlx locally on Apple Silicon, "
                          "ollama locally through an Ollama server, openai or "
                          "claude for machines with no local runtime, command "
                          "(an installed program named by [model] command), "
-                         "claude-code (Claude Code, signed in to a subscription), or "
+                         "claude-code (Claude Code, signed in to a subscription), "
+                         "codex (Codex CLI, signed in to a ChatGPT plan), or "
                          "scripted (a fake that answers nothing; for smoke tests "
                          "without weights). Default: the first that can run "
                          "here, per --detect-engines")
