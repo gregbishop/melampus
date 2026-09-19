@@ -507,3 +507,90 @@ def hub_env(fake_hub: FakeHub, tmp_path: Path) -> dict[str, str]:
     under tmp_path, so the real cache is never touched and nothing can reach
     the internet (Done-when 3 of card #407)."""
     return {"HF_ENDPOINT": fake_hub.endpoint, "HF_HOME": str(tmp_path / "hf")}
+
+
+# --- the fake Ollama (card #406) ------------------------------------------
+#
+# An HTTP server on 127.0.0.1 speaking the endpoints of Ollama's docs/api.md
+# that the service uses: § Version (`GET /api/version`, the probe) and
+# § Generate a chat completion (`POST /api/chat`, one response object with
+# `stream` false). No model, no weights, no network beyond loopback. `status`
+# is what the version probe answers, `delay` holds that answer, `replies` are
+# the texts the chat answers with in order (a 404 with Ollama's not-found
+# error once they run out); every chat request's JSON body lands on `chats`.
+
+
+def ollama_chat_reply(model: str, text: str) -> dict:
+    """The final response object POST /api/chat answers with when `stream` is
+    false (Ollama's docs/api.md § Generate a chat completion): the text is
+    `message.content`, the counts `prompt_eval_count` and `eval_count`, the
+    other fields as the docs show them. The one shape every fake Ollama
+    answers with: FakeOllama at the HTTP boundary, and test_providers.py's
+    fake at the `urlopen` edge."""
+    return {
+        "model": model,
+        "created_at": "2026-09-18T00:00:00Z",
+        "message": {"role": "assistant", "content": text},
+        "done_reason": "stop",
+        "done": True,
+        "total_duration": 1668506709,
+        "prompt_eval_count": 26,
+        "eval_count": 83,
+    }
+
+
+class FakeOllama:
+    """The fake Ollama's state and its handler; `serve` puts it on loopback.
+    `prefix` mounts the endpoints under a path, the way a reverse proxy
+    does; any other path is Ollama's own 404."""
+
+    def __init__(
+        self, *, status: int = 200, delay: float = 0.0, replies: list[str] = (), prefix: str = ""
+    ) -> None:
+        self.chats: list[dict] = []
+        self.endpoint = ""  # set while `serve` runs
+        self.server_port = 0
+        self.release = threading.Event()
+        pending = list(replies)
+        ollama = self
+
+        class Handler(QuietHandler):
+            def do_GET(self):  # noqa: N802 - http.server's name
+                if self.path != f"{prefix}/api/version":
+                    self._answer(404, {"error": "404 page not found"})
+                    return
+                if delay:
+                    ollama.release.wait(delay)
+                self._answer(status, {"version": "0.0.0-fake"})
+
+            def do_POST(self):  # noqa: N802 - http.server's name
+                body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                if self.path != f"{prefix}/api/chat":
+                    self._answer(404, {"error": "404 page not found"})
+                    return
+                ollama.chats.append(body)
+                if not pending:
+                    self._answer(404, {"error": f"model '{body.get('model')}' not found"})
+                    return
+                self._answer(200, ollama_chat_reply(body["model"], pending.pop(0)))
+
+            def _answer(self, code: int, payload: dict) -> None:
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps(payload).encode("utf-8"))
+
+        self.handler = Handler
+
+    @contextlib.contextmanager
+    def serve(self) -> Iterator[FakeOllama]:
+        """Serve this Ollama on loopback for the block; `endpoint` is its URL.
+        Threaded, as the hub is, so a held probe cannot block the next
+        request; a delayed answer is released when the block ends."""
+        with loopback_server(self.handler, ThreadingHTTPServer) as server:
+            self.server_port = server.server_port
+            self.endpoint = f"http://127.0.0.1:{self.server_port}"
+            try:
+                yield self
+            finally:
+                self.release.set()

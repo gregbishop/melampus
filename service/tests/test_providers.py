@@ -26,11 +26,13 @@ import urllib.request
 import pytest
 from conftest import (
     PHOTO,
+    FakeOllama,
     QuietHandler,
     Silent,
     closed_port,
     fake_platform,
     loopback_server,
+    ollama_chat_reply,
     recording_handler,
 )
 from test_pipeline import ID_OK, ROUTING_OK
@@ -585,70 +587,21 @@ def _timed_probe(monkeypatch, handler: type[QuietHandler]) -> tuple[bool, float]
     return answered, took.seconds
 
 
-def _ollama_chat_reply(model: str, text: str) -> dict:
-    """The final response object POST /api/chat answers with when `stream` is
-    false (Ollama's docs/api.md § Generate a chat completion): the text is
-    `message.content`, the counts `prompt_eval_count` and `eval_count`, the
-    other fields as the docs show them. The one shape every fake Ollama in
-    this file answers with, at the HTTP boundary and at the `urlopen` edge."""
-    return {
-        "model": model,
-        "created_at": "2026-09-18T00:00:00Z",
-        "message": {"role": "assistant", "content": text},
-        "done_reason": "stop",
-        "done": True,
-        "total_duration": 1668506709,
-        "prompt_eval_count": 26,
-        "eval_count": 83,
-    }
-
-
 @contextlib.contextmanager
 def _fake_ollama(
     monkeypatch, *, status: int = 200, delay: float = 0.0, replies: list[str] = (), prefix: str = ""
 ):
-    """A server speaking Ollama's version and chat endpoints, standing in for
-    Ollama. `status` is what GET /api/version answers; `delay` holds the
-    answer that long. `replies` are the texts POST /api/chat answers with, in
-    order, each wrapped in the final response object docs/api.md § Generate a
-    chat completion shows; every chat request's JSON body is kept on
-    `server.chats`. `prefix` mounts both endpoints under a path, the way a
-    reverse proxy does; any other path is Ollama's own 404."""
-    release = threading.Event()
-    pending = list(replies)
-
-    class Ollama(QuietHandler):
-        def do_GET(self):  # noqa: N802 - http.server's name
-            if self.path != f"{prefix}/api/version":
-                self._answer(404, {"error": "404 page not found"})
-                return
-            if delay:
-                release.wait(delay)
-            self._answer(status, {"version": "0.0.0-fake"})
-
-        def do_POST(self):  # noqa: N802 - http.server's name
-            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-            if self.path != f"{prefix}/api/chat":
-                self._answer(404, {"error": "404 page not found"})
-                return
-            self.server.chats.append(body)
-            if not pending:
-                self._answer(404, {"error": f"model '{body.get('model')}' not found"})
-                return
-            self._answer(200, _ollama_chat_reply(body["model"], pending.pop(0)))
-
-        def _answer(self, code: int, payload: dict) -> None:
-            self.send_response(code)
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(json.dumps(payload).encode("utf-8"))
-
-    with _ollama_served_by(monkeypatch, Ollama, prefix) as server:
-        server.chats = []
-        try:
-            yield server
-        finally:
-            release.set()
+    """conftest's FakeOllama (Ollama's version and chat endpoints on
+    127.0.0.1 at an ephemeral port) with detection pointed at it. `status`
+    is what GET /api/version answers; `delay` holds the answer that long.
+    `replies` are the texts POST /api/chat answers with, in order; every
+    chat request's JSON body is kept on `server.chats`. `prefix` mounts both
+    endpoints under a path, the way a reverse proxy does, and is part of
+    the address detection is pointed at; any other path is Ollama's own
+    404."""
+    with FakeOllama(status=status, delay=delay, replies=replies, prefix=prefix).serve() as server:
+        monkeypatch.setattr(providers, "OLLAMA_URL", f"{server.endpoint}{prefix}")
+        yield server
 
 
 def test_ollama_backend_returns_candidates_in_the_same_shape_as_mlx_on_the_fixture(
@@ -1267,7 +1220,7 @@ class _FakeUrlopen:
         return io.BytesIO(self.reply)
 
 
-OLLAMA_REPLY = json.dumps(_ollama_chat_reply("qwen3-vl:8b-instruct", ID_OK)).encode("utf-8")
+OLLAMA_REPLY = json.dumps(ollama_chat_reply("qwen3-vl:8b-instruct", ID_OK)).encode("utf-8")
 
 
 def _ollama_backend(client: _FakeUrlopen, **kwargs) -> OllamaBackend:
