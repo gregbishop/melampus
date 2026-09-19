@@ -1,13 +1,33 @@
 # Melampus
 
-Local AI species identification and photo-quality triage for Adobe Lightroom Classic,
-running entirely on Apple Silicon via MLX. No cloud dependency in the default path, and
-no image ever leaves the machine.
+Species identification and photo-quality triage for Lightroom Classic. For the
+selected photos it names the organism, scores the frame's sharpness on the
+subject, and writes the result into the catalog. macOS and Windows.
 
 > Named for the Greek seer who, after serpents cleaned his ears as he slept, could
 > understand the speech of animals — birds especially. Pronounced *meh-LAM-pus*.
 
-`CLAUDE.md` is the build specification. This README is how to run what exists today.
+Local first, or a cloud API, or a subscription CLI. Six engines, picked in the
+plugin's Settings dialog; the ones this machine cannot run are greyed with the
+reason.
+
+| Engine | Where it runs | What it bills |
+|---|---|---|
+| `mlx` | on this Mac, Apple Silicon | nothing |
+| `ollama` | on this machine, through Ollama; macOS or Windows | nothing |
+| `openai` | OpenAI's API | an API key, per call |
+| `claude` | Anthropic's API | an API key, per call |
+| `claude-code` | Claude Code, installed and signed in | the Claude subscription it is signed in to |
+| `codex` | Codex CLI, installed and signed in | the ChatGPT subscription it is signed in to |
+
+On the two local engines no image leaves the machine. The model is not
+bundled: the Settings dialog downloads it, into the HuggingFace cache for
+`mlx`, or has Ollama pull it for `ollama`. The other four bring their own.
+
+The plugin is a folder with the executable inside it, `melampus` on macOS or
+`melampus.exe` on Windows, from a release zip; a user installs no Python.
+`AGENTS.md` and `docs/brief.md` are the build specification. This README is
+how to run what exists today.
 
 ---
 
@@ -17,9 +37,9 @@ no image ever leaves the machine.
 |---|---|---|
 | **1** | Local VLM species identification | **Working.** Run over a 1,743-frame corpus |
 | **2** | Quality scoring + location/season re-ranking | **Working.** Subject-localised sharpness and GBIF re-ranking both in the pipeline |
-| 3 | HTTP service + frozen binary | Not started. The CLI is the interface today |
-| **4** | Lightroom Classic plugin | **Working.** Analyses and writes to a real catalog |
-| — | Optional cloud escalation for the hard tail (§6.6) | **Working.** Off by default |
+| **3** | One-file executable | **Working.** Built and smoke-tested in CI on macOS and Windows; ships inside the plugin folder; keeps its config and caches in a per-user data directory. There is no HTTP service: the plugin runs the executable. Not yet signed or notarized (card #438) |
+| **4** | Lightroom Classic plugin | **Working.** Analyses with the executable beside it and writes to a real catalog; six engines and the model download in its Settings dialog. On Windows the executable and the plugin's cmd.exe command run in CI; a run inside Lightroom there is card #424 |
+| — | Optional cloud escalation for the hard tail (docs/build-spec.md §6.6) | **Working.** Off by default |
 
 The tests, Python and Lua, need no model weights and no network; one command runs
 them all — see [Tests](#tests).
@@ -33,12 +53,16 @@ the numbers do and don't support.
 
 ## Requirements
 
-- **Apple Silicon Mac** for local inference. MLX is arm64-only. Developed on an
-  M4 Max / 128 GB. (Windows and Linux work too — locally through Ollama, or
-  with cloud inference; see § Windows.)
-- **Python 3.12** — not 3.13+. The `mlx-vlm` dependency stack publishes wheels for
-  3.12; 3.13 runs ahead of parts of it.
-- ~20 GB of disk for the default model.
+- **Lightroom Classic.** Developed against 15.4.1.
+- **An Apple Silicon Mac, or a Windows PC.** MLX is arm64-only, so `mlx` is the
+  Mac's local engine; `ollama` is the local engine on either. Developed on an
+  M4 Max / 128 GB.
+- **Disk for a local model.** ~20 GB for the default `mlx` model, ~6 GB for the
+  default `ollama` one. The cloud and CLI engines need none.
+- **Nothing else, for a user.** The executable ships in the plugin folder
+  (§ Reviewing in Lightroom). Python 3.12 and uv are for building it and
+  running the tests, below — not 3.13+: the `mlx-vlm` dependency stack
+  publishes wheels for 3.12; 3.13 runs ahead of parts of it.
 
 ## Install
 
@@ -236,7 +260,7 @@ same individual. Judging 43 representatives labels the entire corpus in minutes.
 Encounters where the model called different species on different frames of the same
 bird are flagged **unstable** — that is where a human eye is worth the most.
 
-This is also the correction dataset CLAUDE.md §6.4 wants for prompt tuning and
+This is also the correction dataset docs/build-spec.md §6.4 wants for prompt tuning and
 eventual fine-tuning, so the effort compounds.
 
 ---
