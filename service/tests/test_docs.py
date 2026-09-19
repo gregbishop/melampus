@@ -527,7 +527,7 @@ def test_ci_packages_a_zip_per_platform_and_a_tag_releases_both():
     assert not unpinned, f"actions added for the release are not pinned to a SHA with a version comment: {unpinned}"
 
 
-def test_readme_lightroom_section_names_the_release_zips_and_keeps_the_from_source_path():
+def test_install_docs_name_the_release_zips_and_keep_the_from_source_path():
     """Card #402: a user installs from a release download, one zip per
     platform, through Plug-in Manager; readme.md's Lightroom section must name
     both zips, and keep the copy-from-dist step for a build from source. The
