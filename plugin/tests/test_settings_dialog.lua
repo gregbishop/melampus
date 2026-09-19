@@ -102,6 +102,16 @@ local function writeFile(path, text, mode)
 	handle:close()
 end
 
+--- What the plugin's log holds: the file the module writes at Log.path(),
+--- under the mock's home; nil while nothing has landed.
+local function logText()
+	local handle = io.open(require('MelampusLog').path(), 'r')
+	if not handle then return nil end
+	local text = handle:read('*a')
+	handle:close()
+	return text
+end
+
 --- The dialogs the mock recorded, the modal ones (the Settings dialog, with
 --- its view tree) when `modal` is true, else the messages shown over it.
 local function dialogsShown(modal)
@@ -478,9 +488,7 @@ t.test('a typed key is stored through LrPasswords and lands nowhere else', funct
 	for name, text in pairs(pluginFiles()) do
 		t.isNil(string.find(text, TYPED, 1, true), 'the key was written into the plugin folder: ' .. name)
 	end
-	for _, line in ipairs(mock.state.logLines) do
-		t.isNil(string.find(line, TYPED, 1, true), 'the key was logged: ' .. line)
-	end
+	t.isNil(string.find(logText() or '', TYPED, 1, true), 'the key was logged: ' .. tostring(logText()))
 end)
 
 t.test('a stored key is shown back in its field, and an emptied one is forgotten', function()
@@ -868,6 +876,27 @@ t.test('the mock\'s home is a folder of this run\'s own under its temp directory
 	t.isFalse(home == os.getenv('HOME'), 'the fake Lightroom\'s home is the developer\'s')
 	local Log = loadLog({ home = '/elsewhere/home' })
 	t.equals(Log.path(), '/elsewhere/home/Library/Application Support/Melampus/logs/Melampus.log')
+end)
+
+t.test('a line written through the module lands in the log at Log.path(), its folder made on the way', function()
+	local Log = loadLog()
+	t.isNil(logText(), 'a log exists before anything was logged')
+	Log.info('running: melampus --detect-engines')
+	Log.warn('careful')
+	Log.error('broken')
+	local text = logText()
+	t.isNotNil(text, 'nothing landed at ' .. Log.path())
+	t.isNotNil(string.find(text, ' INFO running: melampus --detect-engines\n', 1, true), text)
+	t.isNotNil(string.find(text, ' WARN careful\n', 1, true), text)
+	t.isNotNil(string.find(text, ' ERROR broken\n', 1, true), text)
+	local _, lines = string.gsub(text, '\n', '')
+	t.equals(lines, 3, 'one line per message')
+end)
+
+t.test('on a fake Windows Lightroom, whose folders exist nowhere on this host, logging raises nothing', function()
+	local Log = loadLog({ windows = true })
+	Log.info('running: melampus.exe --detect-engines')
+	t.equals(Log.path(), 'C:\\Users\\photographer\\AppData\\Local\\Melampus\\logs\\Melampus.log')
 end)
 
 return t.summary()
