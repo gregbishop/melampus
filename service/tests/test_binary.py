@@ -427,6 +427,16 @@ def test_no_local_config_makes_the_config_file_the_whole_configuration(
 SYNTHETIC_MODEL = "melampus-tests/synthetic-model"
 
 
+MISSING_MODULE = ("ModuleNotFoundError", "ImportError")
+
+
+def _assert_no_missing_module(tail: str, what: str, signs: tuple[str, ...] = MISSING_MODULE) -> None:
+    """The executable's stderr shows none of `signs`: it did not die on a
+    module the bundle lacks. `what` says what that would have meant."""
+    for missing in signs:
+        assert missing not in tail, f"{what}:\n{tail}"
+
+
 def _request_backend(
     executable: Path, photos: Path, tmp_path: Path, backend: str, *arguments: str,
     env: dict[str, str] | None = None,
@@ -471,8 +481,7 @@ def test_executable_carries_the_service_and_mlx(built_executable: Path, photos: 
     which means mlx, mlx_vlm and transformers all import inside the bundle — and
     stop there. An executable that does not carry MLX dies on an import error first."""
     tail = _look_for_weights(built_executable, photos, tmp_path)
-    for missing in ("ModuleNotFoundError", "ImportError"):
-        assert missing not in tail, f"the executable does not carry MLX:\n{tail}"
+    _assert_no_missing_module(tail, "the executable does not carry MLX")
     assert "LocalEntryNotFoundError" in tail, f"did not get as far as looking for weights:\n{tail}"
     assert SYNTHETIC_MODEL in tail, f"did not look for the model the synthetic config file names:\n{tail}"
 
@@ -508,8 +517,7 @@ def test_executable_refuses_mlx_off_apple_silicon_and_names_what_works(
     assert "Apple Silicon" in tail, tail
     for works_here in ("anthropic", "openai", "scripted"):
         assert works_here in tail, f"{works_here!r} is not named as working here:\n{tail}"
-    for missing in ("ModuleNotFoundError", "ImportError"):
-        assert missing not in tail, f"the refusal came from a missing module, not the CLI:\n{tail}"
+    _assert_no_missing_module(tail, "the refusal came from a missing module, not the CLI")
 
 
 @pytest.mark.parametrize(
@@ -530,9 +538,9 @@ def test_executable_carries_the_cloud_sdks_and_asks_for_the_key(
     proc = _request_backend(built_executable, photos, tmp_path, backend)
     tail = proc.stderr[-3000:]
     assert proc.returncode == 3, f"exit {proc.returncode}:\n{tail}"
-    assert "SDK is not installed" not in tail, f"the executable does not carry the {backend} SDK:\n{tail}"
-    for missing in ("ModuleNotFoundError", "ImportError"):
-        assert missing not in tail, f"the executable does not carry the {backend} SDK:\n{tail}"
+    _assert_no_missing_module(
+        tail, f"the executable does not carry the {backend} SDK", ("SDK is not installed", *MISSING_MODULE)
+    )
     assert needs_a_key in tail, f"did not reach the key check:\n{tail}"
 
 
