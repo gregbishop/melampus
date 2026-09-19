@@ -407,6 +407,7 @@ def remove_model(repo: str, *, cache_dir: Path | None = None) -> Path:
 
 
 OLLAMA_PULL = "/api/pull"
+OLLAMA_TAGS = "/api/tags"
 
 
 def _pull_error(model: str, error: object) -> DownloadError:
@@ -526,3 +527,59 @@ def pull_model(
     finally:
         marker.unlink(missing_ok=True)
     return model
+
+
+def _ollama_request(url: str, path: str, body: dict | None = None, *, method: str = "POST",
+                    timeout: float = 10.0) -> dict:
+    """One JSON answer from the Ollama server at `url`: `body` sent as JSON
+    when given, the reply decoded. Raises DownloadError with the backend's
+    not-running words when nothing answers, Ollama's words for an HTTP
+    error."""
+    request = urllib.request.Request(
+        f"{url.rstrip('/')}{path}",
+        data=json.dumps(body).encode("utf-8") if body is not None else None,
+        headers={"Content-Type": "application/json"} if body is not None else {},
+        method=method,
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            raw = response.read()
+    except urllib.error.HTTPError as exc:
+        raise DownloadError(f"Ollama answered {exc.code}: {OllamaBackend._error_text(exc)}") from exc
+    except urllib.error.URLError as exc:
+        raise DownloadError(ollama_not_running(url, exc.reason)) from exc
+    except (OSError, TimeoutError) as exc:
+        raise DownloadError(ollama_not_running(url, exc)) from exc
+    try:
+        return json.loads(raw or b"{}")
+    except json.JSONDecodeError as exc:
+        raise DownloadError(f"Ollama's reply from {url}{path} was not JSON: {raw[:120]!r}") from exc
+
+
+def _held(model: str, url: str) -> dict | None:
+    """The list entry for `model` in the Ollama at `url` (docs/api.md § List
+    Local Models: GET /api/tags, `models` each with `name` and `size`), or
+    None when it is not held. A name without a tag is `<name>:latest`
+    there (§ Model names: the tag defaults to `latest`)."""
+    names = {model, model if ":" in model else f"{model}:latest"}
+    for entry in _ollama_request(url, OLLAMA_TAGS, method="GET").get("models") or []:
+        if isinstance(entry, dict) and (entry.get("name") in names or entry.get("model") in names):
+            return entry
+    return None
+
+
+def ollama_status(model: str, url: str) -> Status:
+    """Whether the Ollama at `url` holds `model`, from its list endpoint:
+    installed with the size it reports for both totals and the model's
+    name as the path (where it lives: in Ollama, under that name, what
+    `done` printed); else absent with `bytes_total` None, since the docs
+    give sizes for held models only. Never fails: with no server answering
+    the model is reported absent, size unknown, so Settings opens."""
+    try:
+        entry = _held(model, url)
+    except DownloadError:
+        entry = None
+    if entry is None:
+        return Status(model, False, None, 0, None, str(cancel_marker_path()))
+    size = int(entry.get("size") or 0)
+    return Status(model, True, size, size, str(entry.get("name") or model), str(cancel_marker_path()))
