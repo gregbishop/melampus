@@ -17,6 +17,7 @@ from .images import content_hash
 from .providers import (
     BACKEND_CHOICES,
     CLAUDE_CODE,
+    CODEX,
     COMMAND,
     OLLAMA,
     BackendUnavailable,
@@ -329,12 +330,13 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("folder", type=Path, nargs="?", help="folder of JPEGs")
     ap.add_argument("--config", type=Path, default=None)
     ap.add_argument("--model", default=None, help="override model repo")
-    ap.add_argument("--backend", choices=(*BACKEND_CHOICES, COMMAND, CLAUDE_CODE), default=None,
+    ap.add_argument("--backend", choices=(*BACKEND_CHOICES, COMMAND, CLAUDE_CODE, CODEX), default=None,
                     help="which engine answers: mlx locally on Apple Silicon, "
                          "ollama locally through an Ollama server, openai or "
                          "claude for machines with no local runtime, command "
                          "(an installed program named by [model] command), "
-                         "claude-code (Claude Code, signed in to a subscription), or "
+                         "claude-code (Claude Code, signed in to a subscription), "
+                         "codex (Codex CLI, signed in to a ChatGPT plan), or "
                          "scripted (a fake that answers nothing; for smoke tests "
                          "without weights). Default: the first that can run "
                          "here, per --detect-engines")
