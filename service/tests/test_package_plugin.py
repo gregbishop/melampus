@@ -65,10 +65,11 @@ def _mode(info: zipfile.ZipInfo) -> int:
 
 
 def test_zip_holds_the_plugin_folder_its_files_and_the_executable(package_script, tmp_path: Path):
-    """Done-when 1's layout: one top-level Melampus.lrplugin/ holding the
-    plugin's files and the executable at its root, nothing hidden, no stale
-    executable from the checkout, and the executable's mode kept so it is
-    still executable after unpacking."""
+    """Done-when 1's layout, the same on both platforms: one top-level
+    Melampus.lrplugin/ holding the plugin's files and the executable at its
+    root, nothing hidden, no stale executable from the checkout. The mode the
+    zip carries is a POSIX property (a file named melampus has no execute bit
+    on Windows), so it is checked in the unzip test below, not here."""
     plugin = _fake_plugin(tmp_path)
     executable = _fake_executable(tmp_path)
     target = tmp_path / "out" / "Melampus-macOS.zip"
@@ -82,8 +83,6 @@ def test_zip_holds_the_plugin_folder_its_files_and_the_executable(package_script
     with zipfile.ZipFile(target) as archive:
         assert archive.namelist() == listing
         assert archive.read(f"{FOLDER}/melampus") == executable.read_bytes(), "the stale copy was packaged"
-        assert _mode(archive.getinfo(f"{FOLDER}/melampus")) & 0o111 == 0o111
-        assert _mode(archive.getinfo(f"{FOLDER}/Info.lua")) & 0o111 == 0
 
 
 def test_zip_is_named_for_the_platform_and_holds_that_platform_s_executable(
@@ -156,12 +155,17 @@ def _unpack(archive: Path, into: Path) -> None:
 @pytest.mark.skipif(sys.platform == "win32", reason="Windows has no execute bit")
 def test_unzip_restores_the_execute_bit_and_one_plugin_folder(package_script, tmp_path: Path):
     """Given the zip, when unpacked with unzip, then exactly one folder
-    appears, Melampus.lrplugin, and the executable inside it is executable."""
+    appears, Melampus.lrplugin, and the executable inside it is executable:
+    the zip entry carries the executable's mode and no other file's, and
+    unzip restores it."""
     if shutil.which("unzip") is None:
         pytest.skip("unzip not installed")
     plugin = _fake_plugin(tmp_path)
     target = tmp_path / "Melampus-macOS.zip"
     package_script.package(_fake_executable(tmp_path), target, plugin_dir=plugin)
+    with zipfile.ZipFile(target) as archive:
+        assert _mode(archive.getinfo(f"{FOLDER}/melampus")) & 0o111 == 0o111
+        assert _mode(archive.getinfo(f"{FOLDER}/Info.lua")) & 0o111 == 0
 
     unpacked = tmp_path / "unpacked"
     _unpack(target, unpacked)
