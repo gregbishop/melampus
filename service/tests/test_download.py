@@ -207,6 +207,21 @@ def test_download_with_no_host_answering_names_the_network(tmp_path: Path):
     assert f"http://127.0.0.1:{port}" in message and "network" in message
 
 
+def test_a_download_that_names_no_hub_reaches_no_real_one(tmp_path: Path):
+    """conftest's guard: with no endpoint named, the download goes to a
+    closed loopback port, not huggingface.co, and the cache is under
+    tmp_path. A test that misses the fake by mistake fails here instead of
+    fetching weights (docs/brief.md § hard rules)."""
+    from huggingface_hub import constants
+
+    with pytest.raises(DownloadError) as failure:
+        download_model(FAKE_REPO, on_update=lambda update: None, cancel_marker=tmp_path / "download-cancel")
+    message = str(failure.value)
+    assert "http://127.0.0.1:" in message and "huggingface.co" not in message, message
+    assert Path(constants.HF_HUB_CACHE).is_relative_to(tmp_path)
+    assert os.environ["HF_HOME"].startswith(str(tmp_path)) and os.environ["HF_ENDPOINT"].startswith("http://127.0.0.1:")
+
+
 def test_the_hub_library_is_a_dependency_on_every_platform():
     """download.py imports huggingface_hub directly, and on Windows nothing
     else brings it (mlx-vlm is Apple Silicon only), so the executable built
@@ -780,9 +795,11 @@ def fake_ollama() -> FakeOllama:
 
 
 def _pull(ollama: FakeOllama, model: str = FAKE_MODEL, **kwargs) -> list[Update]:
+    """The progress updates of a pull, and, as the CLI prints it, `done
+    <model>` last from what pull_model returns."""
     updates: list[Update] = []
-    pull_model(model, ollama.endpoint, on_update=updates.append, **kwargs)
-    return updates
+    pulled = pull_model(model, ollama.endpoint, on_update=updates.append, **kwargs)
+    return [*updates, Update.done(pulled)]
 
 
 def test_pull_asks_ollama_to_pull_the_model_and_reports_its_progress_then_done(fake_ollama: FakeOllama):
@@ -994,3 +1011,4 @@ def test_remove_with_no_ollama_answering_uses_the_not_running_message():
     with pytest.raises(DownloadError) as failure:
         remove_ollama_model(FAKE_MODEL, f"http://127.0.0.1:{port}")
     assert f"no Ollama server answering at http://127.0.0.1:{port}" in str(failure.value)
+
