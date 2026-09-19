@@ -22,6 +22,10 @@ dependencies = [
     # broken state.
     "numpy>=2",
     "opencv-python-headless>=4.10; sys_platform != 'darwin' or platform_machine != 'arm64'",
+    # download.py fetches the MLX model through the hub library (card #407). On
+    # Apple Silicon mlx-vlm brings it anyway; declared here so the Windows
+    # executable carries --download-model too.
+    "huggingface_hub>=1.26",
 ]
 
 [project.optional-dependencies]

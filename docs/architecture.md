@@ -58,6 +58,7 @@ so the HTTP layer can accept per-request settings without touching the analysis 
 | `report.py` | Raw table, scoring, calibration, name-quality checks |
 | `encounters.py` | Burst clustering by capture time, from the XMP packet, never the pixels |
 | `plugin_results.py` | The enrichment the Lightroom plugin gates on: burst agreement, range flag, encounter, quality and its rank within the burst (`melampus-id --plugin-out`) |
+| `download.py` | The MLX model into the HuggingFace cache, resumed across runs, and the progress protocol the plugin parses (`melampus-id --download-model`, docs/config.md § Downloading the model) |
 
 ---
 

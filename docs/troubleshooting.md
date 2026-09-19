@@ -54,6 +54,10 @@ distinctive: `hf download` reports progress, `.incomplete` blobs appear in the c
 and they stay at exactly 0 bytes indefinitely while plain `curl` against the same URL
 works fine.
 
+`melampus-id --download-model` (readme.md § Install) is not affected: it moves the
+bytes over plain HTTP and sets `HF_HUB_DISABLE_XET=1` for itself. If you download
+with the hub's own tool instead, set it yourself:
+
 ```bash
 HF_HUB_DISABLE_XET=1 .venv/bin/hf download mlx-community/Qwen3-VL-30B-A3B-Instruct-4bit
 ```

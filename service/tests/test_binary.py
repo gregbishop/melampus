@@ -38,8 +38,12 @@ Card #404: `--detect-engines` from the executable prints, as JSON, which of
 the four can run on this machine and why or why not. On a runner nothing
 answers at Ollama's address, and mlx's verdict is this platform's.
 
+Card #407: `--download-model` from the executable fetches the model with
+progress on stdout, from a fake hub on loopback, on every platform's build.
+
 Nothing here downloads a model: the MLX check stops at the point where the
-executable goes looking for weights.
+executable goes looking for weights, and the download test's host is the fake
+in conftest.py, so no real weights are ever fetched.
 """
 
 from __future__ import annotations
@@ -55,7 +59,7 @@ import types
 from pathlib import Path
 
 import pytest
-from conftest import PHOTO
+from conftest import FAKE_FILES, FAKE_REPO, PHOTO, FakeHub
 
 from melampus import config
 from melampus.backend import ScriptedBackend
@@ -668,3 +672,30 @@ def test_executable_detects_engines_as_json_with_no_python_on_the_path(
         assert by_engine[engine]["available"] is True
         assert "API key required" in by_engine[engine]["reason"]
         assert providers.KEY_VARIABLES[engine][0] in by_engine[engine]["reason"]
+
+
+def test_executable_downloads_the_model_from_the_hub_with_no_python_on_the_path(
+    built_executable: Path, fake_hub: FakeHub, hub_env: dict[str, str], tmp_path: Path
+):
+    """Card #407, from the executable alone, on whichever platform built it:
+    the hub library is in the bundle (on Windows only because pyproject names
+    it), the protocol lines come out on stdout, exit 0 with `done <path>`, and
+    the path under HF_HOME holds the fake host's files byte for byte."""
+    from melampus.download import Update
+
+    env = no_python_environment(tmp_path) | hub_env
+    proc = subprocess.run(
+        [str(built_executable), "--download-model", "--model", FAKE_REPO],
+        env=env, capture_output=True, text=True, timeout=600,
+    )
+    tail = proc.stderr[-3000:]
+    _assert_no_missing_module(tail, "the executable does not carry the hub library")
+    assert proc.returncode == 0, f"exit {proc.returncode}:\n{tail}"
+    updates = [Update.parse(line) for line in proc.stdout.splitlines()]
+    total = sum(len(data) for data in FAKE_FILES.values())
+    assert updates[0] == Update.progress(0, total)
+    assert updates[-2] == Update.progress(total, total)
+    assert updates[-1].state == "done"
+    snapshot = Path(updates[-1].path)
+    assert snapshot.is_relative_to(hub_env["HF_HOME"])
+    assert {p.name: p.read_bytes() for p in snapshot.iterdir()} == FAKE_FILES
