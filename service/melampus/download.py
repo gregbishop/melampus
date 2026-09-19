@@ -4,6 +4,10 @@ The progress protocol is the plugin's contract (card #408): one line per update
 on stdout, defined once here in `Update` and documented in docs/config.md
 § Downloading the model. Errors go to stderr, never into the protocol.
 
+The same protocol carries an Ollama pull (card #409): `pull_updates` maps the
+stream of Ollama's pull endpoint onto it, so the plugin's parser, poller and
+row serve both engines with no second protocol.
+
 Why the bytes are fetched here and not by `snapshot_download`: huggingface_hub
 1.26 downloads each file to a process-unique temporary file, from byte zero,
 and deletes it when the run fails, so nothing survives an interrupted run for
@@ -32,7 +36,7 @@ import signal  # noqa: E402
 from contextlib import contextmanager  # noqa: E402
 from dataclasses import asdict, dataclass  # noqa: E402
 from pathlib import Path  # noqa: E402
-from typing import Callable, Iterator  # noqa: E402
+from typing import Callable, Iterable, Iterator  # noqa: E402
 
 import httpx  # noqa: E402
 from filelock import Timeout  # noqa: E402
@@ -389,3 +393,62 @@ def remove_model(repo: str, *, cache_dir: Path | None = None) -> Path:
         raise DownloadError(f"a download of {repo} is running; cancel it first, then remove")
     info.delete_revisions(*(r.commit_hash for r in cached.revisions)).execute()
     return cached.repo_path
+
+
+# --- the same button for Ollama, through its pull (card #409) -------------
+#
+# Ollama holds its own models; the plugin's Download button asks it to pull
+# one, and the stream it answers with (docs/api.md § Pull a Model) is mapped
+# onto the protocol above, line for line, so nothing downstream knows which
+# engine is fetching.
+
+
+def pull_updates(model: str, lines: Iterable[bytes | str]) -> Iterator[Update]:
+    """Ollama's pull stream as protocol updates. `lines` are the response's
+    lines, one JSON object each (docs/api.md § Streaming responses; the
+    server delimits them with newlines).
+
+    The stream (§ Pull a Model): `{"status": "pulling manifest"}`, then one
+    object per layer as it downloads, `{"status": "pulling <digest>",
+    "digest", "total", "completed"}`, where `completed` may be missing until
+    any of the layer is done and the layers come one after another (a layer
+    Ollama already holds is reported once, complete); then the verifying,
+    writing-manifest and removing-unused-layers statuses; then `{"status":
+    "success"}`. Each layer line becomes `progress <sum of completed> <sum
+    of total>` over every layer seen so far; `success` becomes `done
+    <model>`; the other statuses print nothing.
+
+    An error is an object with `error` (server/routes.go streamResponse): it
+    raises DownloadError with Ollama's words, naming the model and
+    `[model] ollama_model` when the library has no such model (`pull model
+    manifest: file does not exist`, its 404), else the re-run hint, since
+    Ollama keeps the layers it has and resumes them. A stream that ends
+    before `success` is a failure too.
+    """
+    layers: dict[str, tuple[int, int]] = {}
+    for raw in lines:
+        text = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else raw
+        if not text.strip():
+            continue
+        try:
+            item = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise DownloadError(f"Ollama's pull reply was not JSON: {text[:120]!r}") from exc
+        if not isinstance(item, dict):
+            raise DownloadError(f"Ollama's pull reply was not JSON: {text[:120]!r}")
+        error = item.get("error")
+        if error:
+            if "file does not exist" in str(error):
+                raise DownloadError(
+                    f"Ollama has no model named {model} ({error}): check [model] ollama_model "
+                    "is a tag from ollama.com/library"
+                )
+            raise DownloadError(f"Ollama could not pull {model}: {error}; {RERUN}")
+        status = str(item.get("status") or "")
+        if status == "success":
+            yield Update.done(model)
+            return
+        if status.startswith("pulling ") and item.get("digest") and "total" in item:
+            layers[str(item["digest"])] = (int(item["total"]), int(item.get("completed") or 0))
+            yield Update.progress(sum(c for _, c in layers.values()), sum(t for t, _ in layers.values()))
+    raise DownloadError(f"Ollama's pull of {model} ended before it reported success; {RERUN}")
