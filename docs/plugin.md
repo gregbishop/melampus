@@ -224,7 +224,7 @@ truncated results file should produce a clear dialog, not a stack trace.
 The Lua tests are driven from pytest so one command covers both languages, and
 skip cleanly when no interpreter is present:
 
-- **46 rules tests** — never-overwrite for ratings, labels and flags; dry-run;
+- **The rules tests** — never-overwrite for ratings, labels and flags; dry-run;
   idempotency; force; auto-reject staying off; the confidence and burst-agreement
   gates; range-flag routing; abstention; keyword sanitisation; graceful handling
   of sparse records; the engine preference, every value and the default; the
@@ -251,7 +251,7 @@ skip cleanly when no interpreter is present:
   `cancelled`; and the data directory the plugin's Lua derives for the log
   is held to the one `dist/melampus --model-status` reports, for the same
   home, so the two rules cannot drift.
-- **8 JSON tests** plus a parse of 1,093 real records.
+- **The JSON parser's tests** plus a parse of 1,093 real records.
 - **`luac -p` over every plugin file**, which has already caught a real bug.
 
 Lightroom itself runs **Lua 5.1**. A local run and the macOS CI job use
