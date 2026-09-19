@@ -79,8 +79,11 @@ needed) fetches the picked engine's model: for `mlx`, `[model] repo`, or the
 repo `--model` names, into the HuggingFace cache (`HF_HOME`, the same cache
 `mlx` loads from); for `ollama`, it asks the Ollama server to pull
 `[model] ollama_model` (§ The same flags for Ollama below). The engine is
-`--backend` or `[model] backend`, else the first that can run here, as a run
-decides; `openai`, `claude` and `scripted` have no model to fetch and are
+`--backend` or `[model] backend`; with neither, `--model` means `mlx` (it
+names a hub repo), else the first engine *with a model* that detection says
+can run here, `mlx` then `ollama`, and `mlx` when neither can (its hub
+download works on every platform), not a run's default, which may be a cloud
+engine; `openai`, `claude` and `scripted` have no model to fetch and are
 refused with exit 3 naming the two that have. The Lightroom plugin's download
 button (card #408, and card #409 for Ollama) drives it, so what it prints on
 stdout is a protocol, defined once in `download.py` (`Update`) and stable:
