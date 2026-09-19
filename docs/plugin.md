@@ -11,20 +11,32 @@ Developed against **Lightroom Classic 15.4.1**.
 
 ## Install
 
-```bash
-# 1. Put the executable in the plugin folder: melampus on macOS, melampus.exe
-#    on Windows (readme.md § Building the executable, or a release download).
-cp dist/melampus plugin/Melampus.lrplugin/
-```
+The plugin folder ships with the executable inside it, `melampus` on macOS or
+`melampus.exe` on Windows. The plugin runs that file, from its own folder, to
+analyse photos it has not seen: identification and the enrichment (burst
+agreement, range flag, encounter, quality) in one run, through `--plugin-out`.
+It never looks for a Python environment; if the file is missing it says which
+folder should hold it and what the file is called.
 
-The plugin runs that file, from its own folder, to analyse photos it has not seen:
-identification and the enrichment (burst agreement, range flag, encounter,
-quality) in one run, through `--plugin-out`. It never looks for a Python
-environment; if the file is missing it says which folder should hold it and what
-the file is called.
+1. Get the folder, one of two ways.
 
-2. In Lightroom: **File → Plug-in Manager… → Add**, and select
-   `plugin/Melampus.lrplugin`. It should report *Installed and running*.
+   **From a release.** Each tagged release on the
+   [Releases page](https://github.com/gregbishop/melampus/releases) carries one
+   zip per platform, `Melampus-macOS.zip` and `Melampus-Windows.zip`, holding
+   the plugin folder with the executable already inside it. Unpack it
+   (double-click, or `unzip Melampus-macOS.zip`) and keep the
+   `Melampus.lrplugin` folder somewhere it can stay.
+
+   **From source.** Build the executable (readme.md § Building the executable)
+   and copy it into the checkout's plugin folder:
+
+   ```bash
+   cp dist/melampus plugin/Melampus.lrplugin/     # dist\melampus.exe on Windows
+   ```
+
+2. In Lightroom: **File → Plug-in Manager… → Add**, and select that folder
+   (`plugin/Melampus.lrplugin` for a build from source). It should report
+   *Installed and running*.
 
 3. **Library → Plug-in Extras → Melampus: Settings…** Leave **Dry Run** on. To
    import results produced elsewhere (`melampus-id … --plugin-out
