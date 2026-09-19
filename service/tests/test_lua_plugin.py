@@ -131,3 +131,43 @@ def test_the_command_the_plugin_builds_runs_the_executable_beside_it(
     expected = set(PLUGIN_FIELDS) - {"burst_agreement"}
     assert expected <= set(rows[0]), f"missing {expected - set(rows[0])}"
     assert 0 < rows[0]["quality"] <= 100, "quality was not scored on the pixels"
+
+
+def test_the_mock_hands_its_temp_paths_to_sh_as_data(tmp_path: Path):
+    """The mock SDK makes, lists and removes its temp directory through sh
+    (`mktemp -d`, `mkdir -p`, `ls`, `rm -rf`), under TMPDIR. TMPDIR comes
+    from the environment, not from the plugin, so whatever it holds must reach
+    sh as one quoted argument: a space, a quote, a `$` and a backtick in it
+    make a directory of that name, a sibling that an unquoted `rm -rf` of the
+    first word would remove stays, and nothing in the name runs."""
+    marker = tmp_path / "marker"
+    base = tmp_path / "a b'c$HOME`touch $MARKER`"
+    base.mkdir()
+    sibling = tmp_path / "a"
+    sibling.mkdir()
+    (sibling / "canary").write_text("", encoding="utf-8")
+
+    script = tmp_path / "temp.lua"
+    script.write_text(
+        "local mock = require('lrmock')\n"
+        "mock.reset()\n"
+        "mock.install('/nowhere/Melampus.lrplugin')\n"
+        "local LrFileUtils, LrPathUtils = import('LrFileUtils'), import('LrPathUtils')\n"
+        "local temp = LrPathUtils.getStandardFilePath('temp')\n"
+        "local work = LrPathUtils.child(temp, 'melampus-previews-1')\n"
+        "LrFileUtils.createAllDirectories(work)\n"
+        "assert(io.open(LrPathUtils.child(work, 'one.jpg'), 'w')):close()\n"
+        "local listed = 0\n"
+        "for _ in LrFileUtils.files(work) do listed = listed + 1 end\n"
+        "assert(listed == 1, 'listed ' .. listed .. ' files in ' .. work)\n"
+        "mock.cleanUp()\n"
+        "io.write(temp)\n",
+        encoding="utf-8",
+    )
+    proc = run_lua(script, env=os.environ | {"TMPDIR": str(base), "MARKER": str(marker)})
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    temp = Path(proc.stdout)
+    assert temp.parent == base, f"the temp directory is not under TMPDIR: {temp}"
+    assert not temp.exists(), f"cleanUp left {temp}"
+    assert (sibling / "canary").exists(), "cleanUp removed a sibling of TMPDIR"
+    assert not marker.exists(), "a backtick in TMPDIR ran through sh"
