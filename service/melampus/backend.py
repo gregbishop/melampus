@@ -775,8 +775,9 @@ class CommandBackend(VLMBackend):
     """An installed command-line program behind the same interface (card
     #420): one run per completion, the reply on stdout. Claude Code and Codex
     CLI bill to a subscription rather than per call, so a command that takes
-    an image and a prompt is vision with no API key; the templates for those
-    two are cards #421 and #422. This class knows no program: `command` is
+    an image and a prompt is vision with no API key; their templates are
+    providers.CLAUDE_CODE_COMMAND and CODEX_COMMAND (cards #421, #422). This
+    class knows no program: `command` is
     the config's argv template, one element per argument, with `{image}` and
     `{prompt}` placeholders replaced wherever they sit. An argv list, never a
     shell: the prompt is one argument however many spaces, quotes or newlines
