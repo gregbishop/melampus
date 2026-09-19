@@ -239,7 +239,7 @@ def _model_command(args: argparse.Namespace, config) -> int:
     naming the two that have."""
     from . import download
 
-    engine = _pick_engine(config)
+    engine = _pick_model_engine(args, config)
     if engine == "mlx":
         repo = config.model.repo
         fetch = lambda on_update: download.download_model(repo, on_update=on_update)  # noqa: E731
@@ -264,6 +264,27 @@ def _model_command(args: argparse.Namespace, config) -> int:
     if args.model_status:
         return _model_status(status)
     return _remove_model(remove)
+
+
+def _pick_model_engine(args: argparse.Namespace, config) -> str:
+    """The engine the model flags act for when nothing named one: not a
+    run's default, which may be a cloud engine with no model to fetch, but
+    the first engine with a model that detection says can run here, else
+    mlx, whose hub download works on every platform (card #407). `--model`
+    names a hub repo, so it means mlx whatever is running."""
+    if "backend" in config.model.model_fields_set:
+        return config.model.backend
+    if args.model:
+        config.model.backend = "mlx"
+    else:
+        available = {v.engine for v in detect_engines(config.model.ollama_url) if v.available}
+        config.model.backend = next((e for e in MODEL_ENGINES if e in available), "mlx")
+    print(
+        f"engine: {config.model.backend} (the first with a model that can run here; "
+        "--backend or [model] backend chooses, --detect-engines explains)",
+        file=sys.stderr,
+    )
+    return config.model.backend
 
 
 def _pick_engine(config) -> str:
@@ -317,7 +338,8 @@ def main(argv: list[str] | None = None) -> int:
                          "and why or why not, then exit; needs no folder")
     ap.add_argument("--download-model", action="store_true",
                     help="fetch the picked engine's model (--backend, [model] backend, "
-                         "else the first that can run here): the MLX model ([model] repo, "
+                         "else mlx when --model names a repo, else the first with a "
+                         "model that can run here): the MLX model ([model] repo, "
                          "or --model) into the Hugging Face cache, or Ollama's "
                          "([model] ollama_model) through its pull; one 'progress "
                          "<bytes done> <bytes total>' line per update on stdout and "
