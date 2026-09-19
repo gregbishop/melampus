@@ -579,3 +579,57 @@ def test_the_marker_the_dialog_writes_cancels_the_download_the_dialog_started(
         blobs = tmp_path / "hf" / "hub" / FAKE_FOLDER / "blobs"
         (partial,) = blobs.glob("*.incomplete")
         assert DOWNLOAD_CHUNK_SIZE <= partial.stat().st_size < len(big), "the partial file was not kept"
+
+
+@needs_sh
+def test_the_download_command_the_dialog_builds_for_ollama_pulls_the_model_and_the_status_flips_to_installed(
+    built_executable: Path, tmp_path: Path
+):
+    """Card #409, Done-when 1 and 2 at the real boundary. The commands the
+    dialog builds for the ollama engine, run through sh against
+    dist/melampus with no python on the path and `[model] ollama_url` in
+    the per-user config pointing at the fake Ollama on loopback:
+    `--model-status --backend ollama` reports the model absent with no
+    size, the download line fills the progress file the poller reads with
+    protocol lines ending in `done <model>`, the fake was asked to pull
+    exactly that model, the status then reports installed with the size
+    the fake lists, and `--remove-model` empties it again. No real model
+    is pulled and nothing leaves loopback."""
+    from conftest import FakeOllama
+    from melampus.download import Update
+    from test_download import FAKE_MODEL
+
+    with FakeOllama(library={FAKE_MODEL: [3000, 1000]}).serve() as ollama:
+        plugin_dir = _plugin_folder_holding(built_executable, tmp_path)
+        env = per_user_config(
+            tmp_path, f'[model]\nollama_url = "{ollama.endpoint}"\nollama_model = "{FAKE_MODEL}"\n')
+        data_dir = per_user_data_dir(Path(env["HOME"]))
+        status_command, download_command, temp = _model_commands_the_dialog_builds(
+            plugin_dir, tmp_path, engine="ollama")
+
+        before = _status_the_dialog_reads(status_command, env, temp)
+        assert before["repo"] == FAKE_MODEL and before["installed"] is False and before["path"] is None
+        assert before["bytes_total"] is None and before["bytes_done"] == 0
+        assert Path(before["cancel_path"]) == data_dir / "cache" / "download-cancel"
+
+        proc = run_as_lightroom_would(download_command, env=env, cwd=tmp_path,
+                                      capture_output=True, text=True, timeout=600)
+        log = (temp / "melampus-download.log").read_text(encoding="utf-8")
+        assert proc.returncode == 0, f"exit {proc.returncode}:\n{log[-3000:]}"
+        lines = (temp / "melampus-download.progress").read_text(encoding="utf-8").splitlines()
+        updates = [Update.parse(line) for line in lines]
+        assert updates[0] == Update.progress(0, 3000) and updates[-2] == Update.progress(4000, 4000)
+        assert updates[-1] == Update.done(FAKE_MODEL)
+        assert [p["model"] for p in ollama.pulls] == [FAKE_MODEL]
+
+        after = _status_the_dialog_reads(status_command, env, temp)
+        assert after["installed"] is True and after["path"] == FAKE_MODEL
+        assert after["bytes_done"] == after["bytes_total"] == 4000
+
+        remove_command = download_command.split(" --download-model ")[0] + " --remove-model --backend 'ollama'"
+        removed = run_as_lightroom_would(remove_command, env=env, cwd=tmp_path,
+                                         capture_output=True, text=True, timeout=600)
+        assert removed.returncode == 0, removed.stderr[-3000:]
+        assert removed.stdout.strip() == f"removed {FAKE_MODEL}" and ollama.deletes == [FAKE_MODEL]
+        assert _status_the_dialog_reads(status_command, env, temp)["installed"] is False
+        assert {path for _, path in ollama.requests} == {"/api/tags", "/api/pull", "/api/delete"}

@@ -75,7 +75,9 @@ Linux, and a Mac that prefers it) the primary backend is one of two things.
 
 **Local, through Ollama.** Install Ollama from [ollama.com/download](https://ollama.com/download),
 pull a vision model (`ollama pull qwen3-vl:8b-instruct`, the default; see
-`ollama_model` in [docs/config.md](docs/config.md) § `[model]`), and the
+`ollama_model` in [docs/config.md](docs/config.md) § `[model]`; the
+Lightroom plugin's Settings dialog has a Download button that asks Ollama to
+pull it for you, docs/plugin.md § The engine), and the
 `ollama` engine talks to it at Ollama's default address, `http://127.0.0.1:11434`
 (`ollama_url` names another). Same prompts, same schema validation, same
 corrective retry as the Mac's MLX path, and like it nothing leaves the
