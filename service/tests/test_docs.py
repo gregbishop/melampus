@@ -17,9 +17,11 @@ readme.md's build section, installs the extras the executable carries (card
 #434, Done-when 1 and 3); CI packages one plugin zip per platform through the
 script on every run and, on a pushed v* tag, its release job attaches both to
 the GitHub release, which the install docs name (card #402); no doc names a
-workflow file that does not exist; and no doc states a test count, because
-the suite grows with every card and CI checks no such number (card #437,
-Done-when 1).
+workflow file that does not exist; no doc states a test count, because the
+suite grows with every card and CI checks no such number (card #437,
+Done-when 1); and readme.md's opening lists exactly the engines providers.py
+offers, with what each bills, and names the build specification (card #491,
+Done-when 1 and 3).
 
 The checks are deliberately dumb — substring presence of the backticked name — so
 they never argue with prose style, only with absence. The one exception runs the
@@ -614,6 +616,40 @@ def test_install_docs_name_the_release_zips_and_keep_the_from_source_path():
         assert not missing, f"{name}'s {heading} section does not name {missing}"
         assert "cp dist/melampus plugin/Melampus.lrplugin/" in section, (
             f"{name}'s {heading} section lost the from-source install")
+
+
+def test_readme_opening_lists_the_engines_providers_offers_and_names_the_spec():
+    """Card #491, Done-when 1 and 3: given readme.md's first screen (everything
+    before its first `## ` heading), when read, then its engine table names
+    exactly the engines a user can pick, in the picker's order: providers'
+    BACKEND_CHOICES without the test fake, then the two subscription CLIs; and
+    each row says what the engine bills, from the same module: nothing for a
+    local engine, an API key for one in KEY_VARIABLES, a subscription for a
+    CLI. `scripted` (the fake) and `command` (the seam, not in the picker) must
+    not appear. The opening also names `AGENTS.md` and `docs/brief.md`, not
+    CLAUDE.md, as the build specification: CLAUDE.md is two includes now."""
+    from melampus import providers
+
+    opening = README.read_text(encoding="utf-8").split("\n## ", 1)[0]
+    rows = re.findall(r"^\| `([\w-]+)` \|(.*)$", opening, re.MULTILINE)
+    listed = [name for name, _ in rows]
+    picker = [*(b for b in providers.BACKEND_CHOICES if b != providers.SCRIPTED),
+              providers.CLAUDE_CODE, providers.CODEX]
+    assert listed == picker, (
+        f"readme.md's opening must list the engines the picker offers, in its order: {picker}, not {listed}"
+    )
+    for name, row in rows:
+        if name in providers.KEY_VARIABLES:
+            expected = "API key"
+        elif name in (providers.CLAUDE_CODE, providers.CODEX):
+            expected = "subscription"
+        else:
+            expected = "nothing"
+        assert expected in row, f"readme.md's row for `{name}` does not say it bills {expected!r}: {row.strip()}"
+    for spec in ("`AGENTS.md`", "`docs/brief.md`"):
+        assert spec in opening, f"readme.md's opening does not name {spec} as the build specification"
+    assert "CLAUDE.md" not in opening, "readme.md's opening still calls CLAUDE.md the build specification"
+
 
 def test_docs_name_engine_detection_where_the_default_and_the_refusal_are_described():
     """Card #404: the backend's default is now the first engine that can run
