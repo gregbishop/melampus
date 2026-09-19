@@ -458,6 +458,14 @@ t.test('on Windows the command names melampus.exe with cmd.exe quoting', functio
 		'the command changes directory, which only a checkout needed:\n' .. command)
 end)
 
+t.test('the analyse offer is worded for both platforms', function()
+	-- Windows is a covered invocation path; a Windows user is not on a Mac.
+	runAnalysis({})
+	local offer = dialogMatching('never been analysed')
+	t.isNotNil(offer, 'no offer to analyse')
+	t.isNil(string.find(offer, '%f[%a]Mac%f[%A]'), 'the offer says Mac:\n' .. offer)
+end)
+
 t.test('a missing executable names the plugin folder and the file it should hold', function()
 	local executed = runAnalysis({})
 	t.equals(#executed, 0, 'ran a command with no executable to run')
