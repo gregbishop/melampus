@@ -407,7 +407,7 @@ def test_ci_runs_the_plugin_command_through_cmd_exe_on_windows():
     )
 
 
-def test_ci_pins_every_pip_install_to_an_exact_version():
+def test_every_workflow_pins_every_pip_install_to_an_exact_version():
     """Security: a tool CI installs with pip outside the lockfile (uv, on the
     Windows runner) is fetched from PyPI at build time and then produces the
     executable that is uploaded as an artifact, so `pip install <name>` with no
