@@ -254,25 +254,41 @@ function Analyze.detectEngines()
 		function(verdicts) return type(verdicts) == 'table' and verdicts[1] ~= nil end)
 end
 
---- Ask the executable about the MLX model: `--model-status` (card #408)
--- prints one JSON object { repo, installed, bytes_total, bytes_done, path,
--- cancel_path }; bytes_total is null when the hub could not be reached. The
--- Settings dialog calls it once, when it opens.
-function Analyze.modelStatus()
-	return askJson('--model-status', 'melampus-model-status.json', 'the model',
+--- The model flags act for an engine (card #409): `flag --backend <engine>`,
+-- the argument a run passes (Rules.engineArguments), so the executable
+-- fetches the MLX model from the hub or asks Ollama to pull its model. nil
+-- plus a message for an engine the plugin does not know, before the shell.
+local function modelFlag(flag, engine)
+	local arguments, err = Rules.engineArguments({ engine = engine })
+	if not arguments then return nil, err end
+	if arguments[1] then flag = flag .. ' ' .. arguments[1] .. ' ' .. quote(arguments[2]) end
+	return flag
+end
+
+--- Ask the executable about `engine`'s model: `--model-status` (card #408,
+-- #409) prints one JSON object { repo, installed, bytes_total, bytes_done,
+-- path, cancel_path }; repo is the model's name, bytes_total null when the
+-- size could not be had (the hub unreachable; a model Ollama does not hold
+-- yet). The Settings dialog calls it once per engine, when it opens.
+function Analyze.modelStatus(engine)
+	local flag, err = modelFlag('--model-status', engine)
+	if not flag then return nil, err end
+	return askJson(flag, 'melampus-model-status.json', 'the model',
 		function(status) return type(status) == 'table' and type(status.repo) == 'string' end)
 end
 
---- Remove the MLX model from the cache: `--remove-model` (card #408), exit
--- 0 once it is gone. Returns true, or false plus a message with the CLI
--- log's tail (a download of it is running, or nothing is installed).
-function Analyze.removeModel()
+--- Remove `engine`'s model: `--remove-model` (card #408, #409), exit 0 once
+-- it is gone. Returns true, or false plus a message with the CLI log's tail
+-- (a download of it is running, nothing is installed, no server answers).
+function Analyze.removeModel(engine)
 	local executable = Analyze.executablePath()
 	if not executable or not LrFileUtils.exists(executable) then
 		return false, missingExecutable()
 	end
+	local flag, err = modelFlag('--remove-model', engine)
+	if not flag then return false, err end
 	local cliLog = cliLogPath()
-	local command = shellLine(quote(executable) .. ' --remove-model >' .. quote(cliLog) .. ' 2>&1')
+	local command = shellLine(quote(executable) .. ' ' .. flag .. ' >' .. quote(cliLog) .. ' 2>&1')
 	Log.info('running: ' .. command)
 	local code = LrTasks.execute(command)
 	if code ~= 0 then
@@ -309,25 +325,28 @@ function Analyze.downloadFiles()
 	return tempPath('melampus-download.progress'), tempPath('melampus-download.log')
 end
 
---- The shell line that downloads the model, or nil plus the missing-
--- executable message.
-function Analyze.downloadCommand()
+--- The shell line that downloads `engine`'s model, or nil plus the
+-- missing-executable message or the unknown-engine message.
+function Analyze.downloadCommand(engine)
 	local executable = Analyze.executablePath()
 	if not executable or not LrFileUtils.exists(executable) then
 		return nil, missingExecutable()
 	end
+	local flag, err = modelFlag('--download-model', engine)
+	if not flag then return nil, err end
 	local progress, log = Analyze.downloadFiles()
-	return shellLine(quote(executable) .. ' --download-model >' .. quote(progress) .. ' 2>' .. quote(log))
+	return shellLine(quote(executable) .. ' ' .. flag .. ' >' .. quote(progress) .. ' 2>' .. quote(log))
 end
 
---- Start the download. One task runs the command; another reads the
--- progress file every second and hands each update (Rules.parseDownloadLine)
--- to `onProgress`; when the command exits, `onFinish` gets the exit code
--- (0 done, 3 failed, 4 cancelled), the last update, and the tail of the
--- log. `cancelPath` is where --model-status said to write to cancel.
--- Returns a handle whose cancel() writes it, or nil plus a message.
-function Analyze.downloadModel(cancelPath, onProgress, onFinish)
-	local command, err = Analyze.downloadCommand()
+--- Start the download of `engine`'s model. One task runs the command;
+-- another reads the progress file every second and hands each update
+-- (Rules.parseDownloadLine) to `onProgress`; when the command exits,
+-- `onFinish` gets the exit code (0 done, 3 failed, 4 cancelled), the last
+-- update, and the tail of the log. `cancelPath` is where --model-status
+-- said to write to cancel. Returns a handle whose cancel() writes it, or
+-- nil plus a message.
+function Analyze.downloadModel(engine, cancelPath, onProgress, onFinish)
+	local command, err = Analyze.downloadCommand(engine)
 	if not command then return nil, err end
 	local progressFile, logFile = Analyze.downloadFiles()
 	-- Start clean: the shell truncates the file when the command starts,

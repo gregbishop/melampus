@@ -436,6 +436,16 @@ t.test('the download button names the model and its size, or says the size is un
 	t.equals(Rules.downloadTitle({ repo = repo }), 'Download ' .. repo .. ' (size unknown)')
 end)
 
+t.test('the engines with a model to download are mlx and ollama, in the owner\'s order (card #409)', function()
+	t.equals(table.concat(Rules.MODEL_ENGINES, ','), 'mlx,ollama')
+	-- The same title for Ollama's model: its name from the status, and its
+	-- size once Ollama holds it; 'size unknown' before, since Ollama's list
+	-- gives sizes for held models only.
+	t.equals(Rules.downloadTitle({ repo = 'qwen3-vl:8b-instruct', bytes_total = 6100000000 }),
+		'Download qwen3-vl:8b-instruct (6.1 GB)')
+	t.equals(Rules.downloadTitle({ repo = 'qwen3-vl:8b-instruct' }), 'Download qwen3-vl:8b-instruct (size unknown)')
+end)
+
 t.test('progress reads as bytes of the total and a portion between 0 and 1', function()
 	local text, portion = Rules.downloadProgress({ state = 'progress', bytesDone = 3100000000, bytesTotal = 18300000000 })
 	t.equals(text, '3.1 GB of 18.3 GB')

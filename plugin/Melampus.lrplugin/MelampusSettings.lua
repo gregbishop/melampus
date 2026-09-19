@@ -82,24 +82,22 @@ LrTasks.startAsyncTask(function()
 			end
 		end
 
-		-- The MLX model (card #408). While it is absent, a button downloads
-		-- it, named with the model and its size; while it downloads, the
-		-- bytes so far (Lightroom's own progress bar carries the portion) and
-		-- Cancel; once present, Installed and Remove. The status is asked
-		-- once, now, and only where mlx can run at all; the row shows when
-		-- the picked engine is mlx, or the unset preference resolves to it.
-		local mlxHere = false
+		-- The model (card #408 for mlx, #409 for ollama). While it is absent, a
+		-- button downloads it, named with the model and its size; while it
+		-- downloads, the bytes so far (Lightroom's own progress bar carries the
+		-- portion) and Cancel; once present, Installed and Remove. One row per
+		-- engine with a model, built the same way from that engine's status,
+		-- asked once, now, and only where detection says the engine can run;
+		-- each row shows while its engine is picked, or the unset preference
+		-- resolves to it. The executable's --download-model, --model-status
+		-- and --remove-model take the engine as --backend and do the right
+		-- thing for it: the hub for mlx, Ollama's own pull for ollama.
+		local available = {}
 		for _, verdict in ipairs(type(verdicts) == 'table' and verdicts or {}) do
-			if type(verdict) == 'table' and verdict.engine == 'mlx' and verdict.available == true then mlxHere = true end
+			if type(verdict) == 'table' and verdict.available == true then available[verdict.engine] = true end
 		end
-		local status, statusProblem
-		if mlxHere then status, statusProblem = Analyze.modelStatus() end
-		if statusProblem then
-			engineViews[#engineViews + 1] = f:static_text {
-				title = statusProblem, height_in_lines = lineCount(statusProblem), text_color = grey,
-			}
-		end
-		if status then
+
+		local function modelRow(engine, status)
 			local model = LrBinding.makePropertyTable(context)
 			model.phase = status.installed == true and 'installed' or 'absent'
 			model.progress = ''
@@ -115,7 +113,7 @@ LrTasks.startAsyncTask(function()
 				local scope = LrProgressScope { title = 'Downloading ' .. tostring(status.repo) }
 				scope:setCancelable(true)
 				model.phase, model.progress = 'downloading', 'Starting…'
-				local handle, err = Analyze.downloadModel(status.cancel_path,
+				local handle, err = Analyze.downloadModel(engine, status.cancel_path,
 					function(update)
 						if update.state == 'progress' then
 							local text, portion = Rules.downloadProgress(update)
@@ -148,15 +146,15 @@ LrTasks.startAsyncTask(function()
 
 			local function removeModel()
 				LrTasks.startAsyncTask(function()
-					local ok, message = Analyze.removeModel()
+					local ok, message = Analyze.removeModel(engine)
 					if ok then model.phase = 'absent' else LrDialogs.message('Melampus', message, 'critical') end
 				end)
 			end
 
-			engineViews[#engineViews + 1] = f:row {
+			return f:row {
 				visible = bind {
 					key = 'engine', object = prefs,
-					transform = function(value) return Rules.resolvedEngine(value, verdicts) == 'mlx' end,
+					transform = function(value) return Rules.resolvedEngine(value, verdicts) == engine end,
 				},
 				bind_to_object = model,
 				f:push_button { title = Rules.downloadTitle(status), visible = inPhase('absent'), action = startDownload },
@@ -168,6 +166,18 @@ LrTasks.startAsyncTask(function()
 					action = function() if download then download.cancel() end end,
 				},
 			}
+		end
+
+		for _, engine in ipairs(Rules.MODEL_ENGINES) do
+			if available[engine] then
+				local status, statusProblem = Analyze.modelStatus(engine)
+				if statusProblem then
+					engineViews[#engineViews + 1] = f:static_text {
+						title = statusProblem, height_in_lines = lineCount(statusProblem), text_color = grey,
+					}
+				end
+				if status then engineViews[#engineViews + 1] = modelRow(engine, status) end
+			end
 		end
 
 		local contents = f:column {

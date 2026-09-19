@@ -100,6 +100,7 @@ def test_import_runs_against_a_mock_lightroom():
     run_lua_suite(TESTS / "test_import_integration.lua")
 
 
+@needs_sh
 def test_settings_dialog_against_a_mock_lightroom(tmp_path: Path):
     """Card #405: executes the real MelampusSettings.lua against the mock SDK.
     The engine picker lists the four engines in order with the ones detection
@@ -110,8 +111,11 @@ def test_settings_dialog_against_a_mock_lightroom(tmp_path: Path):
     Card #408: the download plumbing, stepped through the mock's tasks: the
     command with stdout redirected on both shells, the poller reading the
     progress file, Cancel writing the marker, exit 3 with the log's tail.
+    Card #409: the same row once per engine with a model, mlx and ollama,
+    each shown for its engine and each command carrying it as --backend.
     The files the fake executable writes land under tmp_path (the mock's
-    temp directory is TMPDIR)."""
+    temp directory is TMPDIR), and Cancel's marker folder is made by the
+    mock through sh, so this suite runs where the import suite does."""
     proc = run_lua(TESTS / "test_settings_dialog.lua", env=os.environ | {"TMPDIR": str(tmp_path)})
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "0 failed" in proc.stdout, proc.stdout
@@ -363,21 +367,23 @@ def test_the_mock_hands_its_temp_paths_to_sh_as_data(tmp_path: Path):
     assert not marker.exists(), "a backtick in TMPDIR ran through sh"
 
 
-def _model_commands_the_dialog_builds(plugin_dir: Path, tmp_path: Path) -> tuple[str, str, Path]:
-    """The two shell commands the Settings dialog builds for the model (card
-    #408) under the mock SDK with `_PLUGIN.path` at `plugin_dir` and TMPDIR
-    at `tmp_path`: the `--model-status` line it runs at open, and the
-    `--download-model` line the Download button runs, stdout redirected to
-    the progress file the poller reads; and the mock's temp directory, under
-    tmp_path, where both lines put their files."""
+def _model_commands_the_dialog_builds(
+    plugin_dir: Path, tmp_path: Path, engine: str = "mlx"
+) -> tuple[str, str, Path]:
+    """The two shell commands the Settings dialog builds for `engine`'s model
+    (card #408, #409) under the mock SDK with `_PLUGIN.path` at `plugin_dir`
+    and TMPDIR at `tmp_path`: the `--model-status` line it runs at open, and
+    the `--download-model` line the Download button runs, stdout redirected
+    to the progress file the poller reads, both carrying the engine; and the
+    mock's temp directory, under tmp_path, where both lines put their files."""
     script = tmp_path / "model-commands.lua"
     script.write_text(
         "local mock = require('lrmock')\n"
         "mock.reset()\n"
         "mock.install(os.getenv('MELAMPUS_PLUGIN_DIR'))\n"
         "local Analyze = dofile(os.getenv('MELAMPUS_ANALYZE'))\n"
-        "Analyze.modelStatus()\n"
-        "local command, err = Analyze.downloadCommand()\n"
+        "Analyze.modelStatus(os.getenv('MELAMPUS_ENGINE'))\n"
+        "local command, err = Analyze.downloadCommand(os.getenv('MELAMPUS_ENGINE'))\n"
         "assert(command, err)\n"
         "io.write(mock.state.executed[1] .. '\\n' .. command .. '\\n' .. mock.state.tempDir .. '\\n')\n",
         encoding="utf-8",
@@ -385,11 +391,13 @@ def _model_commands_the_dialog_builds(plugin_dir: Path, tmp_path: Path) -> tuple
     built = run_lua(script, env=os.environ | {
         "MELAMPUS_PLUGIN_DIR": str(plugin_dir),
         "MELAMPUS_ANALYZE": str(PLUGIN / "MelampusAnalyze.lua"),
+        "MELAMPUS_ENGINE": engine,
         "TMPDIR": str(tmp_path),
     })
     assert built.returncode == 0, built.stdout + built.stderr
     status, download, temp = built.stdout.splitlines()
     assert "--model-status" in status and "--download-model" in download
+    assert f"--backend '{engine}'" in status and f"--backend '{engine}'" in download, (status, download)
     return status, download, Path(temp)
 
 
