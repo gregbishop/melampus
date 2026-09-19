@@ -894,8 +894,9 @@ class CommandBackend(VLMBackend):
     `decode`, when given, turns stdout into the reply text first: a CLI
     that wraps its reply in a result object (Claude Code's `--output-format
     json`, card #421) is unwrapped there, and a wrapper that reports a
-    failure raises CommandFailed from it, so the batch stops as it would
-    on a non-zero exit. Without it stdout is the reply as it came.
+    failure raises CommandFailed from it, before the exit code is judged,
+    so a CLI that prints its failure on stdout and exits non-zero is
+    explained in its own words. Without it stdout is the reply as it came.
     """
 
     #: How much of stderr an error message carries: enough to say what went
@@ -1156,15 +1157,19 @@ class CommandBackend(VLMBackend):
                 f"{self.program} did not answer within {self.timeout:g}s; "
                 "raise [model] timeout_seconds if it needs longer"
             )
+        text = stdout
+        if self._decode is not None and text.strip():
+            # First, whatever the exit code: a CLI that prints its failure as
+            # the result on stdout (Claude Code: "Not logged in", exit 1,
+            # nothing on stderr) is explained by the decoder, not by an
+            # empty stderr.
+            text = self._decode(text)
         if process.returncode != 0:
             said = self._stderr_lines(stderr)
             raise CommandFailed(
                 f"{self.program} exited {process.returncode}"
                 + (f": {said}" if said else " with nothing on stderr")
             )
-        text = stdout
-        if self._decode is not None and text.strip():
-            text = self._decode(text)
         if not text.strip():
             said = self._stderr_lines(stderr)
             raise RuntimeError(

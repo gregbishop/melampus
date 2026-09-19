@@ -142,6 +142,27 @@ def package_script() -> ModuleType:
     return _load_tool(PACKAGE_SCRIPT)
 
 
+from melampus import providers
+
+#: The real Claude Code detection, kept for the tests that run it against a
+#: fake `claude` on PATH (test_providers._fake_claude); every other test
+#: gets the stub below.
+REAL_CLAUDE_CODE_VERDICT = providers.claude_code_verdict
+
+
+@pytest.fixture(autouse=True)
+def no_ambient_claude_code(monkeypatch):
+    """A developer's installed Claude Code must not decide what any test
+    asserts, nor be run by one: detection (card #421) reports it not
+    installed without looking. A test that wants Claude Code puts a fake
+    `claude` on PATH and restores REAL_CLAUDE_CODE_VERDICT."""
+    monkeypatch.setattr(
+        providers, "claude_code_verdict",
+        lambda program=None: providers.EngineVerdict(
+            providers.CLAUDE_CODE, False, "Claude Code is not installed (kept out of the tests)"),
+    )
+
+
 @pytest.fixture()
 def photos(tmp_path: Path) -> Path:
     """A folder holding one JPEG, PHOTO: a copy of the committed frame."""

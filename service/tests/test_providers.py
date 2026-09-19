@@ -35,6 +35,7 @@ from pathlib import Path
 import pytest
 from conftest import (
     PHOTO,
+    REAL_CLAUDE_CODE_VERDICT,
     BadStatusLine,
     FakeOllama,
     QuietHandler,
@@ -474,11 +475,14 @@ def _verdict(engine: str) -> providers.EngineVerdict:
     return verdict
 
 
-def test_detection_lists_the_four_engines_in_the_owners_order(no_ambient_keys, no_ambient_ollama):
+def test_detection_lists_the_engines_in_the_owners_order_then_claude_code(
+    no_ambient_keys, no_ambient_ollama
+):
     """The list the dialog (card #405) will show: one verdict per engine, in
-    the order BACKEND_CHOICES names them, never the test fake."""
+    the order BACKEND_CHOICES names them, then claude-code (card #421;
+    the picker learns it in #423), never the test fake."""
     verdicts = providers.detect_engines()
-    assert [v.engine for v in verdicts] == list(ENGINES)
+    assert [v.engine for v in verdicts] == [*ENGINES, providers.CLAUDE_CODE]
     for verdict in verdicts:
         assert isinstance(verdict.available, bool)
         assert verdict.reason, f"{verdict.engine} has no reason"
@@ -1277,7 +1281,7 @@ def test_cli_detect_engines_prints_the_verdicts_as_json_in_order(
     out, err = capsys.readouterr()
     assert code == 0, err
     verdicts = json.loads(out)
-    assert [v["engine"] for v in verdicts] == list(ENGINES)
+    assert [v["engine"] for v in verdicts] == [*ENGINES, providers.CLAUDE_CODE]
     assert all(set(v) == {"engine", "available", "reason"} for v in verdicts)
     by_engine = {v["engine"]: v for v in verdicts}
     assert by_engine["mlx"] == {"engine": "mlx", "available": False, "reason": "needs Apple Silicon"}
@@ -3224,7 +3228,7 @@ a file the prompt names, read by the Read tool, which needs no prompt only
 when `--allowedTools Read` pre-approves it. MODE: "signed-in" answers;
 "not-signed-in" fails the status check and every run the documented way;
 "expired" passes the status check and fails the run, the way a session
-that lapses mid-batch would."""
+that lapses mid-batch would; "hung" never answers the status check."""
 import json
 import os
 import re
@@ -3241,6 +3245,9 @@ with open(LOG, "a", encoding="utf-8") as log:
     log.write(json.dumps({{"argv": argv, "cwd": os.getcwd()}}) + "\\n")
 
 if argv[:2] == ["auth", "status"]:
+    if MODE == "hung":
+        import time
+        time.sleep(30)
     logged_in = MODE != "not-signed-in"
     if "--text" in argv:
         print("Login method: Claude Max account" if logged_in
@@ -3252,11 +3259,6 @@ if argv[:2] == ["auth", "status"]:
             status["subscriptionType"] = "max"
         print(json.dumps(status, indent=2))
     sys.exit(0 if logged_in else 1)
-
-if argv[:1] == ["--sleep"]:
-    import time
-    time.sleep(float(argv[1]))
-    sys.exit(0)
 
 import argparse
 
@@ -3327,6 +3329,9 @@ def _fake_claude(monkeypatch, tmp_path, *, mode: str = "signed-in") -> Path:
     ), encoding="utf-8")
     script.chmod(0o755)
     monkeypatch.setenv("PATH", f"{folder}{os.pathsep}{os.environ.get('PATH', '')}")
+    # conftest's autouse fixture stubs detection out; this test wants the
+    # real one, against the fake.
+    monkeypatch.setattr(providers, "claude_code_verdict", REAL_CLAUDE_CODE_VERDICT)
     assert shutil.which(CLAUDE) == str(script)
     return log
 
@@ -3337,6 +3342,7 @@ def _no_claude(monkeypatch, tmp_path) -> None:
     empty = tmp_path / "empty-bin"
     empty.mkdir(exist_ok=True)
     monkeypatch.setenv("PATH", f"{empty}{os.pathsep}{Path(sys.executable).parent}")
+    monkeypatch.setattr(providers, "claude_code_verdict", REAL_CLAUDE_CODE_VERDICT)
     assert shutil.which(CLAUDE) is None, "a real claude is still on the test PATH"
 
 
@@ -3526,3 +3532,171 @@ def test_claude_code_returns_candidates_in_the_same_shape_as_mlx_on_the_fixture(
         assert argv[:-1] == providers.CLAUDE_CODE_COMMAND[1:-1]
         assert str(photos / PHOTO) not in argv[-1], "the original file's path reached the program"
         assert "melampus-" in argv[-1], "the staged copy's path is not in the prompt"
+
+
+@posix_only
+def test_detection_claude_code_is_available_when_installed_and_signed_in(monkeypatch, tmp_path):
+    """Card #421, Done-when 2: given Claude Code installed and signed in, when
+    detection runs, then claude-code is available and the reason says runs
+    bill to the subscription. The check is the documented, cheap one:
+    `claude auth status` "Exits with code 0 if logged in, 1 if not"
+    (cli-reference), no model call."""
+    log = _fake_claude(monkeypatch, tmp_path)
+    verdict = _verdict("claude-code")
+    assert verdict.available, verdict.reason
+    assert "subscription" in verdict.reason
+    calls = [json.loads(line)["argv"] for line in log.read_text(encoding="utf-8").splitlines()]
+    assert calls == [["auth", "status", "--json"]]
+
+
+@posix_only
+def test_detection_claude_code_not_signed_in_names_the_sign_in_command(monkeypatch, tmp_path):
+    """Done-when 2: installed but not signed in, then unavailable with the
+    reason "not signed in" and the command that signs in."""
+    _fake_claude(monkeypatch, tmp_path, mode="not-signed-in")
+    verdict = _verdict("claude-code")
+    assert not verdict.available
+    assert "not signed in" in verdict.reason and providers.CLAUDE_CODE_SIGN_IN in verdict.reason
+
+
+def test_detection_claude_code_not_installed_points_to_the_install(monkeypatch, tmp_path):
+    """Done-when 2: not installed, then unavailable with the reason "not
+    installed" and where to get it."""
+    _no_claude(monkeypatch, tmp_path)
+    verdict = _verdict("claude-code")
+    assert not verdict.available
+    assert "not installed" in verdict.reason and providers.CLAUDE_CODE_INSTALL in verdict.reason
+
+
+@posix_only
+def test_detection_claude_code_gives_up_when_the_status_check_hangs(monkeypatch, tmp_path):
+    """--detect-engines never hangs: a status check that does not answer
+    within CLAUDE_CODE_PROBE_SECONDS is an unavailable verdict saying so,
+    not a stalled dialog."""
+    _fake_claude(monkeypatch, tmp_path, mode="hung")
+    monkeypatch.setattr(providers, "CLAUDE_CODE_PROBE_SECONDS", 0.5)
+    verdict = _verdict("claude-code")
+    assert not verdict.available
+    assert "did not answer" in verdict.reason
+
+
+def test_claude_code_probe_timeout_is_short():
+    """Short enough that a broken install cannot stall the settings dialog;
+    long enough for a Node CLI's start (measured: 0.1 s)."""
+    assert 1.0 <= providers.CLAUDE_CODE_PROBE_SECONDS <= 15.0
+
+
+@posix_only
+def test_the_refusal_names_claude_code_when_it_is_signed_in(monkeypatch, tmp_path, no_ambient_ollama):
+    """One truth: the backends a refusal names as working here follow
+    detection, so claude-code is named when Claude Code is signed in and
+    not otherwise."""
+    _fake_claude(monkeypatch, tmp_path)
+    assert "claude-code" in providers._works_here(providers.detect_engines())
+    _fake_claude(monkeypatch, tmp_path, mode="not-signed-in")
+    assert "claude-code" not in providers._works_here(providers.detect_engines())
+
+
+@posix_only
+def test_cli_detect_engines_prints_the_claude_code_verdict(monkeypatch, tmp_path, capsys, no_ambient_keys):
+    """--detect-engines carries the fifth verdict after the four, as JSON."""
+    from melampus.cli import main
+
+    _fake_claude(monkeypatch, tmp_path, mode="not-signed-in")
+    assert main(["--detect-engines"]) == 0
+    verdicts = json.loads(capsys.readouterr().out)
+    assert [v["engine"] for v in verdicts] == [*ENGINES, "claude-code"]
+    assert verdicts[-1]["available"] is False
+    assert providers.CLAUDE_CODE_SIGN_IN in verdicts[-1]["reason"]
+
+
+@posix_only
+def test_claude_code_not_signed_in_is_refused_before_any_image_is_read(monkeypatch, tmp_path, capsys):
+    """Card #421, Done-when 2 at analysis time, where detection can tell:
+    Claude Code installed but not signed in, and the folder's one image is
+    a link to nowhere, so opening it would fail loudly. The CLI exits 3 on
+    a refusal that says to run the sign-in command and never mentions the
+    file: the status check ran before any image was read."""
+    from melampus.cli import main
+
+    _fake_claude(monkeypatch, tmp_path, mode="not-signed-in")
+    folder = tmp_path / "photos"
+    folder.mkdir()
+    (folder / "nowhere.jpg").symlink_to(tmp_path / "does-not-exist.jpg")
+
+    code = main([str(folder), "--backend", "claude-code", "--cache", str(tmp_path / "cache.jsonl")])
+
+    err = capsys.readouterr().err
+    assert code == 3, err
+    assert "not signed in" in err and providers.CLAUDE_CODE_SIGN_IN in err
+    for about_the_file in ("nowhere", "does-not-exist", "No such file", "unreadable"):
+        assert about_the_file not in err, f"the image was touched before the sign-in check:\n{err}"
+
+
+def test_claude_code_not_installed_is_refused_before_any_image_is_read(monkeypatch, tmp_path, capsys):
+    """Done-when 2 at analysis time, not installed: exit 3 naming `claude`,
+    where to install it and how to sign in, before any image is read."""
+    from melampus.cli import main
+
+    _no_claude(monkeypatch, tmp_path)
+    folder = tmp_path / "photos"
+    folder.mkdir()
+    (folder / "nowhere.jpg").symlink_to(tmp_path / "does-not-exist.jpg")
+
+    code = main([str(folder), "--backend", "claude-code", "--cache", str(tmp_path / "cache.jsonl")])
+
+    err = capsys.readouterr().err
+    assert code == 3, err
+    assert "not installed" in err and providers.CLAUDE_CODE_INSTALL in err
+    assert providers.CLAUDE_CODE_SIGN_IN in err
+    assert "nowhere" not in err and "does-not-exist" not in err
+
+
+@posix_only
+def test_claude_code_that_lapses_mid_run_stops_the_batch_at_the_first_reply(
+    monkeypatch, photos, tmp_path, capsys
+):
+    """Done-when 2 where detection cannot tell: the status check passed, and
+    the first run answers not-logged-in the documented way (exit 1, the
+    result object with is_error, nothing on stderr). The run stops at exit
+    3 on the same refusal, naming the sign-in command, rather than
+    recording it on every frame; nothing is cached."""
+    from melampus.cli import main
+
+    _fake_claude(monkeypatch, tmp_path, mode="expired")
+    out = tmp_path / "results.json"
+
+    code = main([str(photos), "--backend", "claude-code", "--cache", str(tmp_path / "cache.jsonl"),
+                 "--json-out", str(out)])
+
+    err = capsys.readouterr().err
+    assert code == 3, err
+    assert "not signed in" in err and providers.CLAUDE_CODE_SIGN_IN in err
+    assert not out.exists() and not (tmp_path / "cache.jsonl").exists()
+
+
+@posix_only
+def test_cli_backend_claude_code_writes_a_json_result(monkeypatch, photos, tmp_path, capsys):
+    """Acceptance for Done-when 1: `melampus-id FOLDER --backend claude-code
+    --json-out FILE` with the fake `claude` on PATH, signed in, on the
+    committed fixture, runs the whole pipeline and writes a JSON result
+    with the candidates, attributed to the template, nothing retuned for a
+    cloud and no cost prompt."""
+    from melampus.cli import main
+
+    _fake_claude(monkeypatch, tmp_path)
+    out = tmp_path / "results.json"
+
+    code = main([str(photos), "--backend", "claude-code", "--cache", str(tmp_path / "cache.jsonl"),
+                 "--json-out", str(out)])
+
+    err = capsys.readouterr().err
+    assert code == 0, err
+    assert f"loading {shlex.join(providers.CLAUDE_CODE_COMMAND)}" in err, err
+    assert "cloud default" not in err and "estimate" not in err.lower()
+    (result,) = json.loads(out.read_text(encoding="utf-8"))
+    assert result["file"] == PHOTO
+    assert result["status"] == "ok"
+    assert result["model"] == shlex.join(providers.CLAUDE_CODE_COMMAND)
+    assert [c["common_name"] for c in result["identification"]["candidates"]] == [
+        "Tricolored Heron", "Little Blue Heron"]
