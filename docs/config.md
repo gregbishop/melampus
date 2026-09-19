@@ -90,12 +90,50 @@ Nothing else goes to stdout; errors and the hub library's own warnings go to
 stderr. Exit codes: **exit 0** once the model is complete (`done`); **exit 3**
 on a failure, with a message on stderr naming the fix (the repo the hub does not
 have, so check `[model] repo` or `--model`; the network, so check it and re-run);
-**exit 4** when a signal cancelled it (`cancelled`). The signals are SIGINT
-(Ctrl+C), SIGTERM and, on Windows, Ctrl+Break: the download stops within the
-current chunk and leaves the partial file in the cache as the hub's
-`<etag>.incomplete` blob, and the next run **resumes** it, asking the hub for
-the rest by Range from the byte it has. A failed run leaves the same partial
-file, so re-running after a network drop resumes too.
+**exit 4** when it was cancelled (`cancelled`), by a signal or by the cancel
+marker below. The signals are SIGINT (Ctrl+C), SIGTERM and, on Windows,
+Ctrl+Break: the download stops within the current chunk and leaves the partial
+file in the cache as the hub's `<etag>.incomplete` blob, and the next run
+**resumes** it, asking the hub for the rest by Range from the byte it has. A
+failed run leaves the same partial file, so re-running after a network drop
+resumes too.
+
+### The cancel marker
+
+The Lightroom plugin cannot signal the executable (`LrTasks.execute` blocks,
+returns only the exit code, and the SDK kills nothing), so the download also
+stops when a file named `download-cancel` appears beside the caches, under the
+per-user data directory (`~/Library/Application Support/Melampus/cache/download-cancel`
+on macOS, `%LOCALAPPDATA%\Melampus\cache\download-cancel` on Windows; in a
+checkout `.melampus_cache/download-cancel`). It is looked for before each chunk
+is counted, and its appearance ends the run exactly as a signal does:
+`cancelled`, exit 4, the partial file kept. The command removes a stale marker
+when it starts and the marker when it exits, whatever the outcome. The name is
+`download.CANCEL_MARKER`, the path `download.cancel_marker_path()`, and
+`--model-status` reports it as `cancel_path`, so the plugin's Cancel button
+writes where the executable looks without deriving the directory itself.
+
+### `--model-status` and `--remove-model`
+
+Two more flags that need no folder and take `[model] repo` or `--model`, for
+the Settings dialog's Download button (card #408):
+
+- `--model-status` prints one JSON object and exits 0:
+  `{"repo", "installed", "bytes_total", "bytes_done", "path", "cancel_path"}`.
+  `installed` and `path` (the snapshot folder, or null) come from the hub
+  library's scan of the local cache, without the network; `bytes_done` is
+  every byte the cache holds for the repo, complete files and the partial one
+  alike, which is what the next download starts from; `bytes_total` is the
+  whole model from the hub's file listing, **null when the hub cannot be
+  reached**, and the status never fails for the network being down (the
+  button then says "size unknown"). Example, absent:
+  `{"repo": "mlx-community/Qwen3-VL-30B-A3B-Instruct-4bit", "installed": false, "bytes_total": 18300000000, "bytes_done": 0, "path": null, "cancel_path": "/Users/me/Library/Application Support/Melampus/cache/download-cancel"}`.
+- `--remove-model` deletes the repo from the cache through the hub library's
+  own cache deletion (every revision, so the whole repo folder goes), prints
+  `removed <path>` (that folder) and exits 0. It is refused with **exit 3**
+  and the reason on stderr when nothing is installed, or while a download of
+  the model is running (it holds the hub library's per-file lock the fetch
+  takes): cancel the download first.
 
 The bytes move over plain HTTP, through the hub library's own file download
 (its Range request, its size check, its per-file lock), never through the Xet
