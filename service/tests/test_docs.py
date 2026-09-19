@@ -374,6 +374,28 @@ def test_ci_pins_every_pip_install_to_an_exact_version():
     assert not unpinned, f"a workflow installs from PyPI without an exact version: {unpinned}"
 
 
+def test_every_workflow_pins_every_action_to_a_commit_sha_with_its_version():
+    """Card #439, Done-when 1 and 2: given every `uses:` line in
+    .github/workflows, when read, then it names a full commit SHA with the
+    version as a trailing comment, and a line that names a moving tag instead
+    fails this test. A tag can be moved to different code; a SHA cannot, and
+    the comment is what a reader (and a future bump) sees the SHA as."""
+    uses = [
+        (workflow.name, target)
+        for workflow in sorted(WORKFLOWS.glob("*.yml"))
+        for target in re.findall(r"^\s*-?\s*uses:\s*(.*?)\s*$", workflow.read_text(encoding="utf-8"), re.MULTILINE)
+    ]
+    assert {name for name, _ in uses} >= {CI_WORKFLOW.name, RELEASE_WORKFLOW.name}, (
+        f"a workflow uses no action: {uses}"
+    )
+    unpinned = [
+        f"{name}: {target}"
+        for name, target in uses
+        if not re.fullmatch(r"[^@]+@[0-9a-f]{40}\s+#\s*v\S+", target)
+    ]
+    assert not unpinned, f"a workflow names an action by tag, not a commit SHA with its version: {unpinned}"
+
+
 RELEASE_ZIPS = ("Melampus-macOS.zip", "Melampus-Windows.zip")
 
 
