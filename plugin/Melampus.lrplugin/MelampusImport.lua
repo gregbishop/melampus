@@ -415,7 +415,7 @@ LrTasks.startAsyncTask(function()
 			local minutes = math.max(1, math.floor(unmatched * 7 / 60))
 			local ask = LrDialogs.confirm('Melampus',
 				string.format('%d of the %d selected photos have never been analysed.\n\n'
-					.. 'Melampus can analyse them now on this Mac. Nothing is uploaded '
+					.. 'Melampus can analyse them now on this computer. Nothing is uploaded '
 					.. 'anywhere.\n\nRoughly %d minute%s at about 7 seconds a photo. '
 					.. 'You can cancel part way and keep whatever finished.',
 					unmatched, #photos, minutes, minutes == 1 and '' or 's'),
