@@ -77,8 +77,8 @@ class ModelConfig(_Base):
     #   claude    — the Claude API (Anthropic). Every frame billed: see docs/config.md.
     #   openai    — OpenAI, or anything chat-completions-compatible via base_url.
     #   command   — an installed command-line program (card #420): `command`
-    #               below names it. Selectable here and by --backend; the
-    #               plugin's picker learns it in card #423.
+    #               below names it. Selectable here and by --backend, not
+    #               in the plugin's picker (the two named CLIs below are).
     #   claude-code — Claude Code, the command seam configured for it (card
     #               #421, providers.CLAUDE_CODE_COMMAND); `command` below
     #               overrides the template. Bills to its subscription.
