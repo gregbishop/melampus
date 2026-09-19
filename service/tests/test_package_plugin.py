@@ -93,10 +93,10 @@ def test_zip_is_named_for_the_platform_and_holds_that_platform_s_executable(
     monkeypatch.setattr(package_script.build_binary, "DIST", tmp_path / "dist")
     monkeypatch.setattr(sys, "platform", "darwin")
     assert package_script.zip_path() == tmp_path / "dist" / "Melampus-macOS.zip"
-    assert package_script.executable_path().name == "melampus"
+    assert package_script.build_binary.executable_path().name == "melampus"
     monkeypatch.setattr(sys, "platform", "win32")
     assert package_script.zip_path() == tmp_path / "dist" / "Melampus-Windows.zip"
-    assert package_script.executable_path().name == "melampus.exe"
+    assert package_script.build_binary.executable_path().name == "melampus.exe"
     monkeypatch.setattr(sys, "platform", "linux")
     with pytest.raises(SystemExit, match="no release zip for linux"):
         package_script.zip_path()
