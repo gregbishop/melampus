@@ -410,6 +410,18 @@ t.test('analysing runs the executable beside the plugin, in one command', functi
 		'the command changes directory, which only a checkout needed:\n' .. executed[1])
 end)
 
+t.test('every run exports its previews afresh', function()
+	-- exportPreviews skips a preview that is already on disk. If runs share
+	-- the machine's temp directory, the previews one run leaves are found by
+	-- the next, the mock's requestJpegThumbnail is never called, and the
+	-- outcome depends on what an earlier run (or an earlier suite) left behind.
+	local executable = PLUGIN .. '/melampus'
+	runAnalysis({ [executable] = true })
+	t.equals(mock.state.previewsRequested, 2, 'the first run found previews it did not export')
+	runAnalysis({ [executable] = true })
+	t.equals(mock.state.previewsRequested, 2, "the second run found the first run's previews")
+end)
+
 t.test('with no results file configured, the executable analyses the selection', function()
 	-- docs/plugin.md: leave the results path empty and the plugin analyses. A
 	-- fresh install has no results file, so its first run must reach the offer
