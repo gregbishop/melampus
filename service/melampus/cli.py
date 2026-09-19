@@ -316,20 +316,24 @@ def main(argv: list[str] | None = None) -> int:
                     help="print, as JSON, which engines can run on this machine "
                          "and why or why not, then exit; needs no folder")
     ap.add_argument("--download-model", action="store_true",
-                    help="fetch the MLX model ([model] repo, or --model) into the "
-                         "Hugging Face cache, one 'progress <bytes done> <bytes total>' "
-                         "line per update on stdout and 'done <path>' at the end, "
-                         "then exit; resumes an interrupted download; stops, exit 4, "
-                         "on a signal or when the cancel file --model-status names "
-                         "appears; needs no folder")
+                    help="fetch the picked engine's model (--backend, [model] backend, "
+                         "else the first that can run here): the MLX model ([model] repo, "
+                         "or --model) into the Hugging Face cache, or Ollama's "
+                         "([model] ollama_model) through its pull; one 'progress "
+                         "<bytes done> <bytes total>' line per update on stdout and "
+                         "'done <path>' at the end, then exit; resumes an interrupted "
+                         "download; stops, exit 4, on a signal or when the cancel file "
+                         "--model-status names appears; needs no folder")
     ap.add_argument("--model-status", action="store_true",
-                    help="print, as one JSON object, whether the MLX model ([model] repo, "
-                         "or --model) is in the Hugging Face cache, its size and path, "
-                         "then exit; needs no folder or network")
+                    help="print, as one JSON object, whether the picked engine's model "
+                         "is there (the Hugging Face cache for mlx, the Ollama server "
+                         "for ollama), its size and path, then exit; needs no folder, "
+                         "and never fails for the network")
     ap.add_argument("--remove-model", action="store_true",
-                    help="delete the MLX model ([model] repo, or --model) from the "
-                         "Hugging Face cache and print 'removed <path>', then exit; "
-                         "refused while a download of it is running; needs no folder")
+                    help="delete the picked engine's model (from the Hugging Face cache "
+                         "for mlx, from the Ollama server for ollama) and print "
+                         "'removed <path>', then exit; refused while a download of it "
+                         "is running; needs no folder")
     ap.add_argument("--yes", action="store_true",
                     help="skip the cost confirmation when the primary backend is a "
                          "cloud provider (for non-interactive callers)")
