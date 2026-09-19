@@ -24,20 +24,27 @@ never heard from the client".
 `fake_platform` is the one way the suite fakes the machine `on_apple_silicon`
 reads (sys.platform and platform.machine(), together), whether the caller is
 a providers test or the build plan.
+
+`fake_hub` is the model host the download command (card #407) is proven
+against, from the executable and from the CLI alike, and `hub_env` points a
+child process at it.
 """
 
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import importlib.util
+import json
 import platform
 import shutil
 import socket
 import subprocess
 import sys
 import threading
+import time
 from collections.abc import Iterator
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from pathlib import Path
 from types import ModuleType
 
@@ -180,3 +187,166 @@ def built_executable(request: pytest.FixtureRequest) -> Path:
             f"`.venv/bin/python {BUILD_SCRIPT.relative_to(REPO)}`"
         )
     return EXECUTABLE
+
+
+# --- the fake model host (card #407) ---------------------------------------
+#
+# The model download must never touch the internet in a test (docs/brief.md
+# § hard rules: weights are fetched only by the owner running a command). This
+# is a Hugging Face hub on 127.0.0.1 speaking exactly what huggingface_hub asks
+# of the real one for a model download, read from its source: the tree listing
+# (`GET /api/models/<repo>/tree/<revision>`), and the resolve endpoint's HEAD
+# (ETag, X-Repo-Commit, Content-Length) and GET (bytes, honouring Range with a
+# 206 and Content-Range), plus the repo info `snapshot_download` resolves the
+# commit from (`GET /api/models/<repo>`). Two knobs drive the resume tests: `cut_after` drops
+# the connection once that many bytes of a file have been sent and starts an
+# outage (503 until `outage` is cleared); `throttle` slows the bytes so a cancel
+# can land mid-file. Every request is kept on `requests`.
+
+FAKE_REPO = "fake-org/fake-model"
+FAKE_COMMIT = "0123456789abcdef0123456789abcdef01234567"
+# One file larger than huggingface_hub's 10 MiB download chunk, so a cut leaves
+# a whole chunk on disk to resume from, and a small one.
+FAKE_FILES = {
+    "config.json": b'{"model_type": "fake"}\n',
+    "model.safetensors": bytes(range(256)) * (12 * 4096),  # 12 MiB, deterministic
+}
+
+
+class FakeHub(threading.Thread):
+    def __init__(self, files: dict[str, bytes] = FAKE_FILES, repo: str = FAKE_REPO) -> None:
+        super().__init__(daemon=True)
+        self.files, self.repo = files, repo
+        self.requests: list[tuple[str, str, str | None]] = []
+        self.cut_after: int | None = None
+        self.outage = False
+        self.throttle: tuple[int, float] | None = None  # (bytes per write, seconds between)
+        hub = self
+        etags = {name: hashlib.sha256(data).hexdigest() for name, data in files.items()}
+
+        class Handler(QuietHandler):
+            protocol_version = "HTTP/1.1"
+
+            def _json(self, code: int, payload, headers: dict[str, str] = {}) -> None:
+                body = json.dumps(payload).encode("utf-8")
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                for name, value in headers.items():
+                    self.send_header(name, value)
+                self.end_headers()
+                self.wfile.write(body)
+
+            def _resolve(self) -> str | None:
+                """The file a /<repo>/resolve/<revision>/<file> path names, else None."""
+                prefix = f"/{hub.repo}/resolve/"
+                if not self.path.startswith(prefix):
+                    return None
+                _, _, name = self.path[len(prefix):].partition("/")
+                return name if name in hub.files else None
+
+            def _unknown(self) -> None:
+                self._json(404, {"error": "Repository not found"}, {"X-Error-Code": "RepoNotFound"})
+
+            def do_GET(self):  # noqa: N802 - http.server's name
+                hub.requests.append(("GET", self.path, self.headers.get("Range")))
+                path = self.path.partition("?")[0]
+                if path.startswith("/api/models/"):
+                    if path.startswith(f"/api/models/{hub.repo}/tree/"):
+                        self._json(200, [
+                            {"type": "file", "path": name, "size": len(data),
+                             "oid": hashlib.sha1(data).hexdigest()}
+                            for name, data in hub.files.items()
+                        ])
+                    elif path.removeprefix(f"/api/models/{hub.repo}") in ("", "/revision/main"):
+                        self._json(200, {"id": hub.repo, "sha": FAKE_COMMIT,
+                                         "siblings": [{"rfilename": name} for name in hub.files]})
+                    else:
+                        self._unknown()
+                    return
+                name = self._resolve()
+                if name is None:
+                    self._unknown()
+                    return
+                if hub.outage:
+                    self.send_response(503)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                data = hub.files[name]
+                start = 0
+                if self.headers.get("Range"):
+                    start = int(self.headers["Range"].removeprefix("bytes=").partition("-")[0])
+                    self.send_response(206)
+                    self.send_header("Content-Range", f"bytes {start}-{len(data) - 1}/{len(data)}")
+                else:
+                    self.send_response(200)
+                self.send_header("Content-Length", str(len(data) - start))
+                self.send_header("Accept-Ranges", "bytes")
+                self.end_headers()
+                end = len(data)
+                if hub.cut_after is not None and hub.cut_after < end:
+                    end, hub.cut_after, hub.outage = hub.cut_after, None, True
+                    self.close_connection = True
+                if hub.throttle:
+                    step, pause = hub.throttle
+                    for offset in range(start, end, step):
+                        self.wfile.write(data[offset:min(offset + step, end)])
+                        self.wfile.flush()
+                        time.sleep(pause)
+                else:
+                    self.wfile.write(data[start:end])
+                if self.close_connection:
+                    self.wfile.flush()
+                    self.connection.shutdown(socket.SHUT_RDWR)
+
+            def do_HEAD(self):  # noqa: N802 - http.server's name
+                hub.requests.append(("HEAD", self.path, None))
+                name = self._resolve()
+                if name is None:
+                    self._unknown()
+                    return
+                self.send_response(200)
+                self.send_header("ETag", f'"{etags[name]}"')
+                self.send_header("X-Repo-Commit", FAKE_COMMIT)
+                self.send_header("Content-Length", str(len(hub.files[name])))
+                self.send_header("Accept-Ranges", "bytes")
+                self.end_headers()
+
+        # Threaded: huggingface_hub keeps HTTP/1.1 connections open, and a
+        # single-threaded server would sit on an idle one instead of taking
+        # the next.
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.server.daemon_threads = True
+        self.endpoint = f"http://127.0.0.1:{self.server.server_port}"
+
+    def run(self) -> None:
+        self.server.serve_forever(poll_interval=0.05)
+
+    def stop(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+
+    def gets(self, name: str) -> list[str | None]:
+        """The Range header of every GET for `name`'s bytes, at any revision,
+        in order (None: no Range)."""
+        return [rng for method, path, rng in self.requests
+                if method == "GET" and path.startswith(f"/{self.repo}/resolve/") and path.endswith(f"/{name}")]
+
+
+@pytest.fixture()
+def fake_hub() -> FakeHub:
+    hub = FakeHub()
+    hub.start()
+    try:
+        yield hub
+    finally:
+        hub.stop()
+
+
+@pytest.fixture()
+def hub_env(fake_hub: FakeHub, tmp_path: Path) -> dict[str, str]:
+    """The environment that points huggingface_hub at the fake and at a cache
+    under tmp_path, so the real cache is never touched and nothing can reach
+    the internet (Done-when 3 of card #407)."""
+    return {"HF_ENDPOINT": fake_hub.endpoint, "HF_HOME": str(tmp_path / "hf")}
