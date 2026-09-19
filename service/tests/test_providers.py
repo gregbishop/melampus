@@ -175,6 +175,34 @@ def test_cli_backend_ollama_exits_3_with_the_refusal(photos, tmp_path, capsys, n
     assert "cloud default" not in err, f"ollama is local; nothing was retuned for a cloud:\n{err}"
 
 
+@pytest.mark.parametrize(
+    ("arguments", "backend", "extra"),
+    [(("--backend", "claude"), "claude", "cloud"),
+     (("--backend", "openai"), "openai", "openai"),
+     (("--report-only", "--escalate", "--escalate-provider", "claude"), "claude", "cloud"),
+     (("--report-only", "--escalate", "--escalate-provider", "openai"), "openai", "openai")],
+)
+def test_cli_names_the_backend_whose_sdk_is_missing_and_the_extra_that_ships_it(
+    arguments, backend, extra, photos, tmp_path, capsys, monkeypatch, no_ambient_keys
+):
+    """There is no "claude SDK": the package is anthropic and the extra is
+    cloud. So the install hint says what it is, the SDK for the backend the
+    user asked for, and names the extra that ships it; the primary path and
+    the escalation path say it in one shape. The SDK is made absent the way
+    Python reports an absent module, so this holds with or without it
+    installed here."""
+    from melampus.cli import main
+
+    monkeypatch.setitem(sys.modules, "anthropic" if backend == "claude" else "openai", None)
+    code = main([str(photos), *arguments, "--cache", str(tmp_path / "cache.jsonl")])
+
+    err = capsys.readouterr().err
+    assert code == 3, err
+    assert f"The SDK for the {backend} backend is not installed. Run:" in err, err
+    assert f'"./service[{extra}]"' in err, err
+    assert f"The {backend} SDK" not in err, f"names an SDK that does not exist:\n{err}"
+
+
 def test_mlx_refusal_does_not_name_ollama_as_working(monkeypatch):
     """Off Apple Silicon the mlx refusal lists what works here; an engine that
     is not built yet does not work anywhere, so it stays off that list."""
