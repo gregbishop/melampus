@@ -14,9 +14,10 @@ and names the tracker (card #410, Done-when 3); the Windows job runs the
 plugin tests, so the command built for cmd.exe is run by cmd.exe (card #401,
 Done-when 3); every `uv sync` that builds the executable, in CI and in
 readme.md's build section, installs the extras the executable carries (card
-#434, Done-when 1 and 3); and the release workflow builds with the commands CI
-uses and attaches one zip per platform, which readme.md's Lightroom section
-names (card #402).
+#434, Done-when 1 and 3); CI packages one plugin zip per platform through the
+script on every run and, on a pushed v* tag, its release job attaches both to
+the GitHub release, which the install docs name (card #402); and no doc names
+a workflow file that does not exist.
 
 The checks are deliberately dumb — substring presence of the backticked name — so
 they never argue with prose style, only with absence. The one exception runs the
@@ -42,7 +43,6 @@ INSTALLED_SKILLS = REPO / ".agents" / "skills"
 BRIEF = REPO / "docs" / "brief.md"
 WORKFLOWS = REPO / ".github" / "workflows"
 CI_WORKFLOW = WORKFLOWS / "ci.yml"
-RELEASE_WORKFLOW = WORKFLOWS / "release.yml"
 LUA_PLUGIN_TESTS = REPO / "service" / "tests" / "test_lua_plugin.py"
 PLUGIN_DOC = REPO / "docs" / "plugin.md"
 GITIGNORE = REPO / ".gitignore"
@@ -152,6 +152,19 @@ def test_docs_name_only_the_lowercase_files():
             if "README.md" in line or "CONFIG.md" in line:
                 stale.append(f"{doc.relative_to(REPO)}:{lineno}: {line.strip()}")
     assert not stale, f"docs name uppercase files that do not exist: {stale}"
+
+
+def test_docs_name_only_workflows_that_exist():
+    """Card #402, round 2: the release steps were folded into ci.yml and
+    release.yml removed. A doc that still names a workflow file that is not
+    in .github/workflows is stale."""
+    stale = []
+    for doc in DOCS:
+        for lineno, line in enumerate(doc.read_text(encoding="utf-8").splitlines(), 1):
+            for name in re.findall(r"\.github/workflows/([\w.-]+\.ya?ml)", line):
+                if not (WORKFLOWS / name).is_file():
+                    stale.append(f"{doc.relative_to(REPO)}:{lineno}: {name}")
+    assert not stale, f"docs name workflow files that do not exist: {stale}"
 
 
 def _pytest_commands(workflow: Path) -> list[str]:
@@ -412,8 +425,8 @@ def test_every_workflow_pins_every_pip_install_to_an_exact_version():
     Windows runner) is fetched from PyPI at build time and then produces the
     executable that is uploaded as an artifact, so `pip install <name>` with no
     `==` runs whatever PyPI serves that day. Every pip install in every
-    workflow names an exact version: ci.yml's executable is an artifact,
-    release.yml's is what ships (card #402)."""
+    workflow names an exact version: ci.yml's executable is an artifact on a
+    pull request and, on a v* tag, what ships (card #402)."""
     pip_installs = [
         (workflow.name, arguments)
         for workflow in sorted(WORKFLOWS.glob("*.yml"))
@@ -421,8 +434,8 @@ def test_every_workflow_pins_every_pip_install_to_an_exact_version():
             r"^\s*run:.*\bpip install\b(.*?)\s*$", workflow.read_text(encoding="utf-8"), re.MULTILINE
         )
     ]
-    assert {name for name, _ in pip_installs} >= {CI_WORKFLOW.name, RELEASE_WORKFLOW.name}, (
-        f"a workflow has no pip install step: {pip_installs}"
+    assert CI_WORKFLOW.name in {name for name, _ in pip_installs}, (
+        f"ci.yml has no pip install step: {pip_installs}"
     )
     unpinned = [
         f"{name}: {requirement}"
@@ -436,46 +449,89 @@ def test_every_workflow_pins_every_pip_install_to_an_exact_version():
 RELEASE_ZIPS = ("Melampus-macOS.zip", "Melampus-Windows.zip")
 
 
-def test_release_workflow_builds_as_ci_does_and_attaches_a_zip_per_platform():
-    """Card #402, Done-when 1: given a tag is pushed, when the release workflow
-    runs, then a GitHub release exists with Melampus-macOS.zip and
-    Melampus-Windows.zip attached. The proof is the first tagged run; this
-    gate keeps the workflow honest before it: it triggers on v* tags, its
-    pytest steps are exactly CI's (the same sync and --build-binary on each
-    runner, so what ships is what was tested, and the docs gates above cover
-    both), the Windows job's pytest line names tests/test_package_plugin.py
-    (the macOS job collects it with the whole suite; the Windows job lists
-    its files, and without this one the Windows zip ships from a script no
-    test has run on Windows: not the packaging of melampus.exe, not the
-    listing check, not the executable run from the unpacked folder), the
-    zips come from tools/package_plugin.py (the one place that knows the
-    layout; no second copy in YAML), both zip names are in it, the token
-    gets `contents: write` and no other scope, and every third-party action
-    is pinned to a commit SHA with the version in a trailing comment."""
-    release = RELEASE_WORKFLOW.read_text(encoding="utf-8")
-    assert re.search(r"^on:\n\s+push:\n\s+tags:\s*\[\s*['\"]?v\*", release, re.MULTILINE), (
-        "release.yml does not trigger on pushed v* tags")
-    assert sorted(_pytest_commands(RELEASE_WORKFLOW)) == sorted(_ci_pytest_commands()), (
-        "release.yml's build steps must be exactly ci.yml's pytest commands")
-    windows_steps = [c for c in _pytest_commands(RELEASE_WORKFLOW) if c in _windows_job(RELEASE_WORKFLOW)]
-    assert windows_steps and all("tests/test_package_plugin.py" in c for c in windows_steps), (
-        "release.yml's Windows job must run tests/test_package_plugin.py, so the "
-        f"Windows zip ships from a script tested on Windows: {windows_steps}"
-    )
-    assert "tools/package_plugin.py" in release, "release.yml does not package with tools/package_plugin.py"
-    missing = [z for z in RELEASE_ZIPS if z not in release]
-    assert not missing, f"release.yml does not name {missing}"
-    scopes = re.findall(r"^\s+([\w-]+): (read|write|none)$", release, re.MULTILINE)
-    assert ("contents", "write") in scopes, "release.yml grants no contents: write"
-    other = [f"{scope}: {level}" for scope, level in scopes if scope != "contents"]
-    assert not other, f"release.yml grants more than contents: {other}"
-    unpinned = [
+def _jobs(workflow: Path = CI_WORKFLOW) -> dict[str, str]:
+    """That workflow's jobs, by name, each as its text."""
+    text = workflow.read_text(encoding="utf-8").split("\njobs:\n", 1)[1]
+    parts = re.split(r"^  (?=\w[\w-]*:\s*$)", text, flags=re.MULTILINE)
+    return {part.split(":", 1)[0]: part for part in parts if part.strip()}
+
+
+def _steps(job: str) -> list[str]:
+    """That job's steps, each as its text."""
+    return re.split(r"^      - ", job, flags=re.MULTILINE)[1:]
+
+
+def _unpinned_actions(text: str) -> list[str]:
+    """The `uses:` lines in that text not pinned to a commit SHA with the
+    version in a trailing comment."""
+    return [
         line.strip()
-        for line in release.splitlines()
-        if re.search(r"^\s*-?\s*uses:", line)
-        and not re.search(r"uses: \S+@[0-9a-f]{40}\s+# v\d", line)
+        for line in text.splitlines()
+        if re.search(r"^\s*-?\s*uses:", line) and not re.search(r"uses: \S+@[0-9a-f]{40}\s+# v\d", line)
     ]
-    assert not unpinned, f"release.yml actions not pinned to a SHA with a version comment: {unpinned}"
+
+
+def test_ci_packages_a_zip_per_platform_and_a_tag_releases_both():
+    """Card #402, Done-when 1: given a tag is pushed, when the workflow runs,
+    then a GitHub release exists with Melampus-macOS.zip and
+    Melampus-Windows.zip attached. The proof is the first tagged run; this
+    gate keeps the workflow honest before it, and there is one workflow:
+    ci.yml, extended (rule 2), not copied, so what ships is what was tested
+    by construction and no second file's brew, choco or pytest lines drift.
+    It triggers on v* tags and still on pull requests; every job that builds
+    (--build-binary) also packages through tools/package_plugin.py, the one
+    place that knows the layout (no second copy in YAML), so the command that
+    ships the zips runs on every pull request, not first on the tag; the
+    Windows job's pytest line names tests/test_package_plugin.py, so the
+    Windows zip ships from a script tested on Windows; both zip names are in
+    it; a `release` job needs every packaging job, runs only on a tag, and
+    alone holds `contents: write`, with no scope beyond contents anywhere in
+    the file; and every action this card adds (the zip uploads and the
+    release job's) is pinned to a commit SHA with the version in a trailing
+    comment. ci.yml's earlier `uses:` lines are card #439's."""
+    ci = CI_WORKFLOW.read_text(encoding="utf-8")
+    copies = [w.name for w in WORKFLOWS.glob("*.y*ml") if w != CI_WORKFLOW and "pytest" in w.read_text(encoding="utf-8")]
+    assert not copies, f"a second workflow copies ci.yml's build steps; extend ci.yml instead: {copies}"
+
+    on = re.search(r"^on:\n((?:  .*\n)+)", ci, re.MULTILINE)
+    assert on, "ci.yml has no on: block"
+    assert re.search(r"^  push:\n(?:    .*\n)*?    tags:\s*\[\s*['\"]?v\*", on.group(1), re.MULTILINE), (
+        "ci.yml does not trigger on pushed v* tags")
+    assert re.search(r"^  pull_request:", on.group(1), re.MULTILINE), "ci.yml no longer runs on pull requests"
+
+    jobs = _jobs()
+    building = {name for name, job in jobs.items() if "--build-binary" in job}
+    packaging = {name for name, job in jobs.items() if "tools/package_plugin.py" in job}
+    assert building and packaging == building, (
+        f"every job that builds must package through tools/package_plugin.py: builds {sorted(building)}, "
+        f"packages {sorted(packaging)}")
+    windows_steps = [c for c in _ci_pytest_commands() if c in _windows_job()]
+    assert windows_steps and all("tests/test_package_plugin.py" in c for c in windows_steps), (
+        "the Windows job must run tests/test_package_plugin.py, so the Windows zip "
+        f"ships from a script tested on Windows: {windows_steps}")
+    missing = [z for z in RELEASE_ZIPS if z not in ci]
+    assert not missing, f"ci.yml does not name {missing}"
+
+    release = jobs.get("release")
+    assert release, "ci.yml has no release job"
+    assert re.search(r"^\s+if:\s*github\.ref_type == 'tag'\s*$", release, re.MULTILINE), (
+        "the release job must run only on a tag: if: github.ref_type == 'tag'")
+    needs = re.search(r"^\s+needs:\s*\[(.*?)\]", release, re.MULTILINE)
+    needed = {n.strip() for n in needs.group(1).split(",")} if needs else set()
+    assert packaging <= needed, f"the release job must need every packaging job: needs {sorted(needed)}"
+    assert "gh release create" in release, "the release job does not create the release"
+    scopes = re.findall(r"^\s+([\w-]+): (read|write|none)$", ci, re.MULTILINE)
+    other = [f"{scope}: {level}" for scope, level in scopes if scope != "contents"]
+    assert not other, f"ci.yml grants more than contents: {other}"
+    writes = [line for line in ci.splitlines() if re.search(r"^\s+contents: write$", line)]
+    assert len(writes) == 1 and "contents: write" in release, "contents: write must be granted once, on the release job"
+
+    zip_steps = [
+        step for name in packaging for step in _steps(jobs[name]) if any(z in step for z in RELEASE_ZIPS)
+    ]
+    assert zip_steps, "no step uploads a zip"
+    unpinned = _unpinned_actions(release) + [u for step in zip_steps for u in _unpinned_actions(step)]
+    assert not unpinned, f"actions added for the release are not pinned to a SHA with a version comment: {unpinned}"
 
 
 def test_readme_lightroom_section_names_the_release_zips_and_keeps_the_from_source_path():
