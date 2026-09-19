@@ -95,6 +95,27 @@ def pytest_addoption(parser: pytest.Parser) -> None:
     )
 
 
+@pytest.fixture(autouse=True)
+def no_real_hub(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Every test, whatever it exercises, is pointed away from the real
+    Hugging Face hub and the real cache (docs/brief.md § hard rules: no
+    model downloads; docs/plugin.md: weights are fetched only by the owner
+    running a command). A test that reaches the hub by mistake, say a red
+    test against a dispatch not yet written, then fails on a closed
+    loopback port instead of fetching 18 GB into ~/.cache. The environment
+    covers child processes; the constants cover this process, since the
+    hub library reads the environment once at import. The tests that mean
+    to reach a hub pass the fake's endpoint explicitly or through hub_env."""
+    from huggingface_hub import constants
+
+    closed = f"http://127.0.0.1:{closed_port()}"
+    home = tmp_path / "no-real-hub"
+    monkeypatch.setenv("HF_ENDPOINT", closed)
+    monkeypatch.setenv("HF_HOME", str(home))
+    monkeypatch.setattr(constants, "ENDPOINT", closed)
+    monkeypatch.setattr(constants, "HF_HUB_CACHE", str(home / "hub"))
+
+
 @pytest.fixture(scope="session")
 def repo() -> Path:
     """The checkout root, for tests that reach outside service/ (fixtures/,
