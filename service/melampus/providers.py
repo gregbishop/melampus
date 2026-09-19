@@ -9,6 +9,7 @@ live here and both callers import them.
 
 from __future__ import annotations
 
+import json
 import platform
 import shutil
 import sys
@@ -17,7 +18,7 @@ from dataclasses import dataclass
 
 from pydantic import SecretStr
 
-from .backend import VLMBackend
+from .backend import CommandFailed, VLMBackend
 from .config import MelampusConfig
 
 #: Where each provider's key is looked for, in order, when the config has none.
@@ -72,8 +73,51 @@ OLLAMA_INSTALL = "https://ollama.com/download"
 #: detection about it, so it is not in BACKEND_CHOICES.
 COMMAND = "command"
 
+#: Claude Code as an engine (card #421): the command seam configured for
+#: one program, in the owner's words. Not a class: `claude-code` resolves to
+#: a CommandBackend on CLAUDE_CODE_COMMAND, or on `[model] command` when the
+#: user sets one. Runs bill to the Claude subscription Claude Code is signed
+#: in to, never to an API key here.
+CLAUDE_CODE = "claude-code"
+
+#: The program, as shutil.which looks for it: `claude` on PATH.
+CLAUDE_CODE_PROGRAM = "claude"
+
+#: The one copy of the template. Every flag is from `claude --help` (2.1.277)
+#: and code.claude.com/docs/en/headless: `-p` prints one reply and exits;
+#: `--output-format json` puts the reply in the result object's `result`
+#: field (claude_code_reply unwraps it); `--tools Read` leaves Claude Code
+#: only the tool that reads files, which returns "PNG, JPG, and other image
+#: formats ... as visual content that Claude can see" (tools-reference);
+#: `--allowedTools Read` pre-approves that tool everywhere, so the staged
+#: image in its temporary folder, outside any working directory, is read
+#: without a permission prompt; `--permission-prompts none` denies anything
+#: else that would wait for a person; `--no-session-persistence` writes no
+#: transcript per frame; `--strict-mcp-config` connects no MCP server;
+#: `--setting-sources user` loads no project or local settings from wherever
+#: melampus was launched. The prompt is the positional argument, last: the
+#: staged image's path for the Read tool, then the pipeline's prompt in full.
+#: Not `--bare`: bare mode never reads the subscription login (headless docs:
+#: "bare mode doesn't use your subscription login").
+CLAUDE_CODE_COMMAND = [
+    CLAUDE_CODE_PROGRAM, "-p", "--output-format", "json", "--tools", "Read",
+    "--allowedTools", "Read", "--permission-prompts", "none", "--no-session-persistence",
+    "--strict-mcp-config", "--setting-sources", "user",
+    "The photograph is the file {image}. Read it with the Read tool, then answer this "
+    "about it:\n\n{prompt}",
+]
+
+#: Where to get Claude Code when nothing on PATH is called `claude`.
+CLAUDE_CODE_INSTALL = "https://code.claude.com/docs/en/setup"
+
+#: How to sign in from a shell (`claude auth login --help`: "Sign in to your
+#: Anthropic account"; `--claudeai`, the default, is the subscription). The
+#: CLI's own not-signed-in result says "Please run /login", the interactive
+#: session's command, so the refusal names this one instead.
+CLAUDE_CODE_SIGN_IN = "claude auth login"
+
 #: The backends that run on this machine and bill nobody per call.
-LOCAL_BACKENDS = ("mlx", OLLAMA, COMMAND, SCRIPTED)
+LOCAL_BACKENDS = ("mlx", OLLAMA, COMMAND, CLAUDE_CODE, SCRIPTED)
 
 
 class BackendUnavailable(RuntimeError):
@@ -156,6 +200,35 @@ def detect_engines(ollama_at: str | None = None) -> list[EngineVerdict]:
         EngineVerdict("openai", True, _key_required("openai")),
         EngineVerdict("claude", True, _key_required("claude")),
     ]
+
+
+def claude_code_reply(stdout: str) -> str:
+    """The reply text out of Claude Code's `--output-format json` stdout: the
+    result object's `result` field (headless docs: "the text result in the
+    `result` field"). Measured on 2.1.277 with no credentials: exit 1,
+    nothing on stderr, and on stdout the result object with `is_error` true,
+    `subtype` still "success" and the result "Not logged in · Please run
+    /login", so `is_error` is the field trusted and the not-signed-in case
+    is CommandFailed naming CLAUDE_CODE_SIGN_IN; any other error result is
+    CommandFailed in Claude Code's own words. A stdout that is not the
+    result object (a user's own `[model] command` with `--output-format
+    text`, or a bare reply that happens to be JSON without a `result` key)
+    passes through untouched."""
+    try:
+        reply = json.loads(stdout)
+    except ValueError:
+        return stdout
+    if not isinstance(reply, dict) or "result" not in reply:
+        return stdout
+    result = str(reply.get("result") or "")
+    if reply.get("is_error"):
+        if "not logged in" in result.lower():
+            raise CommandFailed(
+                f"Claude Code is not signed in; run `{CLAUDE_CODE_SIGN_IN}` and try again "
+                f"(it said: {result})"
+            )
+        raise CommandFailed(f"Claude Code reported an error: {result}")
+    return result
 
 
 def _works_here(ollama_at: str | None = None) -> tuple[str, ...]:
@@ -266,6 +339,26 @@ def build_primary_backend(config: MelampusConfig) -> VLMBackend:
 
         return CommandBackend(
             settings.command, executable=executable, timeout=settings.timeout_seconds
+        )
+
+    if kind == CLAUDE_CODE:
+        # The seam configured for Claude Code: the built-in template unless
+        # the user set [model] command, and the reply unwrapped from the
+        # result object. Resolved before any image is read, like `command`.
+        command = list(settings.command or CLAUDE_CODE_COMMAND)
+        executable = shutil.which(command[0])
+        if executable is None:
+            raise _refusal(
+                f"Claude Code is not installed: nothing on PATH is called '{command[0]}'. "
+                f"Install it from {CLAUDE_CODE_INSTALL}, then sign in with "
+                f"`{CLAUDE_CODE_SIGN_IN}`.",
+                works_here=_works_here(settings.ollama_url),
+            )
+        from .backend import CommandBackend
+
+        return CommandBackend(
+            command, executable=executable, timeout=settings.timeout_seconds,
+            decode=claude_code_reply,
         )
 
     if kind == SCRIPTED:

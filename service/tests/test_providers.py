@@ -1322,3 +1322,328 @@ def test_cli_backend_command_writes_a_json_result_from_the_configured_template(
     assert result["model"] == " ".join(command)
     assert [c["common_name"] for c in result["identification"]["candidates"]] == [
         "Tricolored Heron", "Little Blue Heron"]
+
+
+# --- card #421: Claude Code as an engine ------------------------------------
+
+CLAUDE = "claude"
+
+#: The routing reply Claude Code gave on the committed fixture in the one real
+#: proof run (2.1.277, 2026-09-18), as the `result` field carried it: fenced.
+_CLAUDE_RESULT = "```json\n{}\n```"
+
+_FAKE_CLAUDE_SCRIPT = '''#!{python}
+"""Stands in for Claude Code 2.1.277's documented non-interactive interface,
+as `claude --help`, `claude auth status --help` and code.claude.com/docs/en/
+headless describe it: `claude -p [flags] "prompt"` prints one result and
+exits; `--output-format json` wraps it as a JSON object whose `result` is
+the text and whose `is_error` says whether the run failed; a failure inside
+the run, such as missing authentication, is printed as the result on stdout
+with a non-zero exit and nothing on stderr; `claude auth status` exits 0
+when signed in and 1 when not, `--json` carrying `loggedIn`. The image is
+a file the prompt names, read by the Read tool, which needs no prompt only
+when `--allowedTools Read` pre-approves it. MODE: "signed-in" answers;
+"not-signed-in" fails the status check and every run the documented way;
+"expired" passes the status check and fails the run, the way a session
+that lapses mid-batch would."""
+import json
+import os
+import re
+import sys
+
+MODE = {mode!r}
+ROUTING = {routing!r}
+IDENTIFICATION = {identification!r}
+LOG = {log!r}
+NOT_LOGGED_IN = "Not logged in \\u00b7 Please run /login"
+
+argv = sys.argv[1:]
+with open(LOG, "a", encoding="utf-8") as log:
+    log.write(json.dumps({{"argv": argv, "cwd": os.getcwd()}}) + "\\n")
+
+if argv[:2] == ["auth", "status"]:
+    logged_in = MODE != "not-signed-in"
+    if "--text" in argv:
+        print("Login method: Claude Max account" if logged_in
+              else "Not logged in. Run claude auth login to authenticate.")
+    else:
+        status = {{"loggedIn": logged_in, "authMethod": "claude.ai" if logged_in else "none",
+                  "apiProvider": "firstParty"}}
+        if logged_in:
+            status["subscriptionType"] = "max"
+        print(json.dumps(status, indent=2))
+    sys.exit(0 if logged_in else 1)
+
+if argv[:1] == ["--sleep"]:
+    import time
+    time.sleep(float(argv[1]))
+    sys.exit(0)
+
+import argparse
+
+ap = argparse.ArgumentParser(prog="claude")
+ap.add_argument("-p", "--print", action="store_true")
+ap.add_argument("--output-format", choices=["text", "json", "stream-json"], default="text")
+ap.add_argument("--tools", default="default")
+ap.add_argument("--allowedTools", "--allowed-tools", default="")
+ap.add_argument("--permission-prompts", choices=["host", "none"], default="host")
+ap.add_argument("--no-session-persistence", action="store_true")
+ap.add_argument("--strict-mcp-config", action="store_true")
+ap.add_argument("--setting-sources", default="user,project,local")
+ap.add_argument("prompt")
+args = ap.parse_args()
+if not args.print:
+    sys.exit("an interactive session needs a terminal; use -p")
+for source in args.setting_sources.split(","):
+    if source not in ("user", "project", "local"):
+        sys.exit(f"Error processing --setting-sources: Invalid setting source: {{source}}. "
+                 "Valid options are: user, project, local")
+
+
+def result(text, is_error=False):
+    if args.output_format == "json":
+        print(json.dumps({{"type": "result", "subtype": "success", "is_error": is_error,
+                          "result": text, "session_id": "00000000-0000-0000-0000-000000000000",
+                          "num_turns": 1 if is_error else 2, "total_cost_usd": 0.0}}))
+    else:
+        print(text)
+
+
+if MODE != "signed-in":
+    result(NOT_LOGGED_IN, is_error=True)
+    sys.exit(1)
+
+# The Read tool, as the prompt names the file: outside the working directory
+# it prompts unless pre-approved, and with nobody to answer it is denied.
+match = re.search(r"(/\\S+\\.jpe?g)", args.prompt, re.IGNORECASE)
+if match is None:
+    result("I could not find an image path in the prompt.")
+    sys.exit(0)
+image = match.group(1)
+if "Read" not in args.tools.split(","):
+    result("I have no tool that can read files.")
+    sys.exit(0)
+if "Read" not in args.allowedTools.replace(",", " ").split():
+    result("Permission to read " + image + " was denied.")
+    sys.exit(0)
+if not os.path.isfile(image):
+    result("The file " + image + " does not exist.")
+    sys.exit(0)
+answer = ROUTING if "router" in args.prompt else IDENTIFICATION
+result("```json\\n" + answer + "\\n```")
+'''
+
+
+def _fake_claude(monkeypatch, tmp_path, *, mode: str = "signed-in") -> Path:
+    """Write a `claude` that imitates the real CLI's documented interface into
+    a folder put first on PATH, so the real shutil.which finds it ahead of
+    any real Claude Code and the real subprocess runs it, no shell. Returns
+    the log it appends each invocation's argv and cwd to."""
+    folder = tmp_path / "bin"
+    folder.mkdir(exist_ok=True)
+    log = tmp_path / "claude-calls.jsonl"
+    script = folder / CLAUDE
+    script.write_text(_FAKE_CLAUDE_SCRIPT.format(
+        python=sys.executable, mode=mode, routing=ROUTING_OK, identification=ID_OK, log=str(log),
+    ), encoding="utf-8")
+    script.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{folder}{os.pathsep}{os.environ.get('PATH', '')}")
+    assert shutil.which(CLAUDE) == str(script)
+    return log
+
+
+def _no_claude(monkeypatch, tmp_path) -> None:
+    """A PATH on which nothing is called `claude`, keeping the interpreter's
+    own folder so a shebang script elsewhere on it still runs."""
+    empty = tmp_path / "empty-bin"
+    empty.mkdir(exist_ok=True)
+    monkeypatch.setenv("PATH", f"{empty}{os.pathsep}{Path(sys.executable).parent}")
+    assert shutil.which(CLAUDE) is None, "a real claude is still on the test PATH"
+
+
+def test_claude_code_is_an_engine_name_on_the_command_seam():
+    """Card #421: `claude-code` is the engine's name (the owner's words), a
+    named configuration of the command seam and not a new backend: it is
+    local (bills to a subscription, not per call: no cloud retuning, no
+    cost prompt, no cloud cache file), selectable by config and --backend,
+    and not yet a picker choice (the picker learns it in #423), so
+    BACKEND_CHOICES is unchanged."""
+    assert providers.CLAUDE_CODE == "claude-code"
+    assert providers.CLAUDE_CODE in providers.LOCAL_BACKENDS
+    assert providers.BACKEND_CHOICES == (*ENGINES, providers.SCRIPTED)
+    assert not providers.is_cloud_primary(_cfg(model={"backend": "claude-code"}))
+
+
+def test_cli_accepts_backend_claude_code(photos, tmp_path, capsys):
+    from melampus.cli import main
+
+    code = main([str(photos), "--backend", "claude-code", "--report-only",
+                 "--cache", str(tmp_path / "cache.jsonl")])
+
+    assert code == 0, capsys.readouterr().err
+
+
+def test_claude_code_template_is_the_documented_print_mode_invocation():
+    """The built-in template, from `claude --help` (2.1.277) and
+    code.claude.com/docs/en/headless: `-p` runs non-interactively and
+    exits; `--output-format json` puts the reply in the `result` field;
+    `--tools Read` leaves it only the tool that reads files (which returns
+    PNG and JPG "as visual content that Claude can see", tools-reference);
+    `--allowedTools Read` pre-approves that tool everywhere, so the staged
+    image in its temporary folder is read without a prompt;
+    `--permission-prompts none` denies anything else that would wait for a
+    person; `--no-session-persistence` keeps a thousand frames from writing
+    a thousand transcripts; `--strict-mcp-config` connects no MCP server;
+    `--setting-sources user` loads no project or local settings from
+    wherever melampus was launched. The prompt is the last argument, the
+    positional, and carries both placeholders: the image's path for the
+    Read tool to read, then the pipeline's prompt in full. It is a valid
+    `[model] command` by the config's own rule."""
+    template = providers.CLAUDE_CODE_COMMAND
+    assert template[0] == CLAUDE == providers.CLAUDE_CODE_PROGRAM
+    flags = template[1:-1]
+    assert flags == [
+        "-p", "--output-format", "json", "--tools", "Read", "--allowedTools", "Read",
+        "--permission-prompts", "none", "--no-session-persistence", "--strict-mcp-config",
+        "--setting-sources", "user",
+    ]
+    assert "{image}" in template[-1] and "{prompt}" in template[-1]
+    assert template[-1].index("{image}") < template[-1].index("{prompt}")
+    assert "Read" in template[-1], "the prompt must say to read the file with the Read tool"
+    assert _cfg(model={"command": template}).model.command == template
+
+
+@pytest.mark.parametrize(
+    ("stdout", "expected"),
+    [
+        (json.dumps({"type": "result", "subtype": "success", "is_error": False,
+                     "result": _CLAUDE_RESULT.format(ROUTING_OK), "num_turns": 2}),
+         _CLAUDE_RESULT.format(ROUTING_OK)),
+        ("Sure:\n" + ID_OK, "Sure:\n" + ID_OK),
+        ('{"taxon": "bird", "confidence": 0.9, "reasoning": "a heron"}',
+         '{"taxon": "bird", "confidence": 0.9, "reasoning": "a heron"}'),
+    ],
+    ids=["json-result", "text", "bare-reply-json"],
+)
+def test_claude_code_reply_is_the_result_field_of_the_json_output(stdout, expected):
+    """Reply extraction: `--output-format json` wraps the text in a result
+    object (headless docs: "the text result in the `result` field"), and
+    the shared JSON extraction must see only the text, not the wrapper. A
+    stdout that is not that object, as a user's own `[model] command` with
+    `--output-format text` prints, or a bare reply that happens to be JSON
+    without a `result` key, passes through untouched."""
+    assert providers.claude_code_reply(stdout) == expected
+
+
+def test_claude_code_reply_maps_not_logged_in_to_the_sign_in_command():
+    """Measured on 2.1.277 with an empty CLAUDE_CONFIG_DIR: exit 1, nothing on
+    stderr, and on stdout the result object with `is_error` true,
+    `subtype` still "success", and the result "Not logged in · Please run
+    /login". `/login` is the interactive session's command; the refusal
+    names the one that works from a shell, `claude auth login`, as
+    CommandFailed: the engine is broken, not the frame."""
+    stdout = json.dumps({"type": "result", "subtype": "success", "is_error": True,
+                         "result": "Not logged in · Please run /login", "num_turns": 1})
+    with pytest.raises(CommandFailed) as err:
+        providers.claude_code_reply(stdout)
+    message = str(err.value)
+    assert "not signed in" in message and providers.CLAUDE_CODE_SIGN_IN in message
+    assert providers.CLAUDE_CODE_SIGN_IN == "claude auth login"
+
+
+def test_claude_code_reply_surfaces_any_other_error_result():
+    """Any other `is_error` result (a rate limit, a model that is not found)
+    is CommandFailed carrying Claude Code's own words."""
+    stdout = json.dumps({"type": "result", "is_error": True, "result": "API Error: 429 rate limited"})
+    with pytest.raises(CommandFailed) as err:
+        providers.claude_code_reply(stdout)
+    assert "API Error: 429 rate limited" in str(err.value)
+
+
+def test_command_backend_decodes_stdout_before_the_reply_is_read(tmp_path):
+    """The seam's one extension for a CLI that wraps its reply: an optional
+    `decode` on stdout, applied before the empty-reply check, so a wrapper
+    whose text is empty is "printed nothing" and a decoder's CommandFailed
+    stops the batch the way a non-zero exit does."""
+    image = tmp_path / "image.jpg"
+    image.write_bytes(b"jpeg")
+    seen: list[str] = []
+
+    def decode(stdout: str) -> str:
+        seen.append(stdout)
+        return stdout.upper()
+
+    backend = _command_backend(_FakeRun(stdout="reply"), decode=decode)
+    assert backend.complete(image, "prompt", 10).text == "REPLY"
+    assert seen == ["reply"]
+
+    with pytest.raises(RuntimeError, match="printed nothing"):
+        _command_backend(_FakeRun(stdout="wrapper"), decode=lambda _: "  ").complete(image, "p", 10)
+
+    def refuse(stdout: str) -> str:
+        raise CommandFailed("not signed in")
+
+    with pytest.raises(CommandFailed, match="not signed in"):
+        _command_backend(_FakeRun(stdout="wrapper"), decode=refuse).complete(image, "p", 10)
+
+
+@posix_only
+def test_claude_code_primary_builds_the_command_backend_on_the_built_in_template(
+    monkeypatch, tmp_path
+):
+    """Given engine claude-code and Claude Code installed and signed in, the
+    factory builds a CommandBackend on the built-in template, the path
+    shutil.which resolved `claude` to, timeout_seconds, and the reply
+    decoder; `[model] command`, when the user sets one, replaces the
+    template (a different model flag, a full path) and keeps the rest."""
+    _fake_claude(monkeypatch, tmp_path)
+
+    backend = providers.build_primary_backend(
+        _cfg(model={"backend": "claude-code", "timeout_seconds": 30}))
+    assert isinstance(backend, CommandBackend)
+    assert backend.command == providers.CLAUDE_CODE_COMMAND
+    assert backend.executable == shutil.which(CLAUDE)
+    assert backend.timeout == 30.0
+    assert backend.name == " ".join(providers.CLAUDE_CODE_COMMAND)
+
+    own = [CLAUDE, "-p", "--model", "sonnet", "--output-format", "json", "{image} {prompt}"]
+    backend = providers.build_primary_backend(_cfg(model={"backend": "claude-code", "command": own}))
+    assert backend.command == own
+    assert backend.executable == shutil.which(CLAUDE)
+
+
+@posix_only
+def test_claude_code_returns_candidates_in_the_same_shape_as_mlx_on_the_fixture(
+    monkeypatch, photos, tmp_path
+):
+    """Card #421, Done-when 1 and 3, at the real boundary: the fake `claude`
+    on PATH takes the documented print-mode flags, reads the image path out
+    of the prompt the way the Read tool would (refusing when the tool is
+    not allowed or the file is not there), and answers the routing prompt
+    then the bird prompt inside the JSON result object. The factory builds
+    the backend, the Identifier stages the committed fixture, and the
+    candidates equal, field for field, the scripted pipeline's for the same
+    replies."""
+    from melampus.identify import Identifier
+
+    log = _fake_claude(monkeypatch, tmp_path)
+    config = _cfg(model={"backend": "claude-code"})
+    backend = providers.build_primary_backend(config)
+    result = Identifier(backend, config).identify(photos / PHOTO)
+    expected = Identifier(
+        ScriptedBackend([ROUTING_OK, ID_OK], name=" ".join(providers.CLAUDE_CODE_COMMAND)), config
+    ).identify(photos / PHOTO)
+
+    assert result.status == "ok", result.error
+    assert result.model == " ".join(providers.CLAUDE_CODE_COMMAND)
+    assert result.identification == expected.identification
+    assert result.taxon_routing == expected.taxon_routing
+    assert [c.common_name for c in result.identification.ranked()] == [
+        "Tricolored Heron", "Little Blue Heron"]
+    calls = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+    runs = [c["argv"] for c in calls if c["argv"][:1] == ["-p"]]
+    assert len(runs) == 2, calls
+    for argv in runs:
+        assert argv[:-1] == providers.CLAUDE_CODE_COMMAND[1:-1]
+        assert str(photos / PHOTO) not in argv[-1], "the original file's path reached the program"
+        assert "melampus-" in argv[-1], "the staged copy's path is not in the prompt"
