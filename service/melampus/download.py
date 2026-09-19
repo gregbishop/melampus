@@ -27,18 +27,29 @@ import os
 
 os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 
-import signal  # noqa: E402 - after the environment the hub reads at import
+import json  # noqa: E402 - after the environment the hub reads at import
+import signal  # noqa: E402
 from contextlib import contextmanager  # noqa: E402
-from dataclasses import dataclass  # noqa: E402
+from dataclasses import asdict, dataclass  # noqa: E402
 from pathlib import Path  # noqa: E402
 from typing import Callable, Iterator  # noqa: E402
 
 import httpx  # noqa: E402
-from huggingface_hub import HfApi, constants, get_hf_file_metadata, hf_hub_url, snapshot_download  # noqa: E402
+from filelock import Timeout  # noqa: E402
+from huggingface_hub import (  # noqa: E402
+    HfApi,
+    constants,
+    get_hf_file_metadata,
+    hf_hub_url,
+    scan_cache_dir,
+    snapshot_download,
+)
 from huggingface_hub.errors import RepositoryNotFoundError  # noqa: E402
 from huggingface_hub.file_download import http_get, repo_folder_name  # noqa: E402
 from huggingface_hub.hf_api import RepoFile  # noqa: E402
 from huggingface_hub.utils import WeakFileLock, build_hf_headers  # noqa: E402
+
+from .config import _cache  # noqa: E402
 
 PROGRESS = "progress"
 DONE = "done"
@@ -47,6 +58,17 @@ CANCELLED = "cancelled"
 # Exit codes of `melampus-id --download-model`: 0 complete, 3 failed (the
 # message on stderr names the fix), and this one when a signal cancelled it.
 EXIT_CANCELLED = 4
+
+# The file whose appearance cancels a running download (card #408): the
+# Lightroom plugin cannot signal the executable, so it writes this instead.
+# Under the per-user data directory beside the caches; `--model-status`
+# carries the path so the plugin never derives the directory itself.
+CANCEL_MARKER = "download-cancel"
+
+
+def cancel_marker_path() -> Path:
+    return _cache(CANCEL_MARKER)
+
 
 RERUN = "re-run melampus-id --download-model; it resumes where it stopped"
 
@@ -97,6 +119,24 @@ class Update:
         elif word == CANCELLED and not rest:
             return cls.cancelled()
         raise ValueError(f"not a download update: {line!r}")
+
+
+@dataclass(frozen=True)
+class Status:
+    """What `--model-status` prints, one JSON object (card #408): the repo,
+    whether its snapshot is in the cache and where, the bytes the cache holds
+    (complete files and partials alike), the whole model's size from the hub
+    or None when the hub cannot be reached, and where to write to cancel."""
+
+    repo: str
+    installed: bool
+    bytes_total: int | None
+    bytes_done: int
+    path: str | None
+    cancel_path: str
+
+    def json(self) -> str:
+        return json.dumps(asdict(self))
 
 
 class DownloadError(Exception):
@@ -184,6 +224,13 @@ class _Progress:
         return ChunkCounter
 
 
+def _files(api: HfApi, repo: str, revision: str | None = None) -> list[RepoFile]:
+    """Every file of the repo at `revision` (the hub's default when None), from
+    the tree listing: names and sizes."""
+    return [entry for entry in api.list_repo_tree(repo, recursive=True, revision=revision)
+            if isinstance(entry, RepoFile)]
+
+
 def _plan(repo: str, endpoint: str | None, storage: Path) -> tuple[str, list[_Blob]]:
     """The commit `main` points at and every file of the repo at it, as the
     hub describes them: the tree listing for the names, the metadata call for
@@ -191,9 +238,7 @@ def _plan(repo: str, endpoint: str | None, storage: Path) -> tuple[str, list[_Bl
     api = HfApi(endpoint=endpoint)
     commit = api.repo_info(repo).sha
     blobs = []
-    for entry in api.list_repo_tree(repo, recursive=True, revision=commit):
-        if not isinstance(entry, RepoFile):
-            continue
+    for entry in _files(api, repo, commit):
         url = hf_hub_url(repo, entry.path, revision=commit, endpoint=endpoint)
         meta = get_hf_file_metadata(url, endpoint=endpoint)
         if meta.etag is None or meta.size is None:
@@ -262,3 +307,71 @@ def download_model(
         ) from exc
     except (OSError, httpx.HTTPError) as exc:
         raise DownloadError(f"download of {repo} from {endpoint} failed: {exc}; {RERUN}") from exc
+
+
+def _cached(repo: str, cache: Path):
+    """The hub library's view of `repo` in the cache: its CachedRepoInfo when a
+    snapshot is laid out, else None. A repo with only partial blobs has no
+    snapshots folder, which the scan reports as a warning, not a repo."""
+    if not cache.is_dir():
+        return None
+    for cached in scan_cache_dir(cache).repos:
+        if cached.repo_id == repo and cached.repo_type == "model":
+            return cached
+    return None
+
+
+def _bytes_in_cache(storage: Path) -> int:
+    """Every byte of the repo the cache holds: complete blobs and the
+    `.incomplete` partial alike, which is what the next run starts from."""
+    blobs = storage / "blobs"
+    return sum(p.stat().st_size for p in blobs.iterdir() if p.is_file()) if blobs.is_dir() else 0
+
+
+def model_status(repo: str, *, endpoint: str | None = None, cache_dir: Path | None = None) -> Status:
+    """Whether `repo` is in the cache, its size on disk, and its whole size from
+    the hub. The cache is read without the network; the hub is asked once
+    for the file listing and, when it cannot answer, `bytes_total` is None:
+    the status never fails for the network being down."""
+    endpoint = endpoint or constants.ENDPOINT
+    cache = Path(cache_dir or constants.HF_HUB_CACHE)
+    storage = cache / repo_folder_name(repo_id=repo, repo_type="model")
+    cached = _cached(repo, cache)
+    installed = cached is not None and any("main" in r.refs for r in cached.revisions)
+    path = None
+    if installed:
+        (main,) = [r for r in cached.revisions if "main" in r.refs]
+        path = str(main.snapshot_path)
+    try:
+        total: int | None = sum(f.size or 0 for f in _files(HfApi(endpoint=endpoint), repo))
+    except (RepositoryNotFoundError, httpx.HTTPError, OSError):
+        total = None
+    return Status(repo, installed, total, _bytes_in_cache(storage), path, str(cancel_marker_path()))
+
+
+def _download_running(lock_dir: Path) -> bool:
+    """Whether another process is appending to one of the repo's blobs: it
+    holds the per-file lock `_fetch` takes, under the cache's `.locks`."""
+    for lock in lock_dir.glob("*.lock") if lock_dir.is_dir() else ():
+        try:
+            with WeakFileLock(lock, timeout=0.1):
+                pass
+        except Timeout:
+            return True
+    return False
+
+
+def remove_model(repo: str, *, cache_dir: Path | None = None) -> Path:
+    """Delete `repo` from the cache through the hub library's own deletion
+    (every revision, so the whole repo folder goes) and return that folder.
+    Raises DownloadError when nothing is installed or a download of it is
+    running."""
+    cache = Path(cache_dir or constants.HF_HUB_CACHE)
+    folder = repo_folder_name(repo_id=repo, repo_type="model")
+    cached = _cached(repo, cache)
+    if cached is None:
+        raise DownloadError(f"{repo} is not in the cache at {cache}: nothing to remove")
+    if _download_running(cache / ".locks" / folder):
+        raise DownloadError(f"a download of {repo} is running; cancel it first, then remove")
+    scan_cache_dir(cache).delete_revisions(*(r.commit_hash for r in cached.revisions)).execute()
+    return cached.repo_path
