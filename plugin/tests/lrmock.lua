@@ -312,9 +312,13 @@ local function tempDir()
 	if not M.state.tempDir then
 		local base = os.getenv('TMPDIR') or '/tmp'
 		local handle = assert(io.popen('mktemp -d ' .. sh(base .. '/lrmock.XXXXXX')))
-		local path = handle:read('*l')
+		-- mktemp prints the path and one newline. The path is TMPDIR's and may
+		-- hold newlines of its own; read one line and it comes back cut, naming
+		-- TMPDIR's parent, which cleanUp would then remove. Read it whole and
+		-- drop only the newline mktemp added.
+		local path = (string.gsub(handle:read('*a') or '', '\n$', ''))
 		handle:close()
-		assert(path and path ~= '', 'mktemp made no directory under ' .. base)
+		assert(path ~= '', 'mktemp made no directory under ' .. base)
 		M.state.tempDir = path
 	end
 	return M.state.tempDir
