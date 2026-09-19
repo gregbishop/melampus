@@ -830,3 +830,74 @@ def test_pull_refused_before_any_content_carries_ollamas_words(fake_ollama: Fake
     with pytest.raises(DownloadError) as failure:
         _pull(fake_ollama, model="")
     assert "invalid model name" in str(failure.value)
+
+
+# The cooperative cancel, for Ollama: the marker and the signals end the
+# pull the way they end the MLX download, exit 4 and `cancelled` through
+# one path; Ollama keeps the layers it has and the next pull resumes them.
+
+
+def _slow_ollama() -> FakeOllama:
+    ollama = FakeOllama(library={FAKE_MODEL: [40 * 4096 * 256]})  # one 40 MiB layer
+    ollama.throttle = (64 * 1024, 0.002)
+    ollama.start()
+    return ollama
+
+
+def test_pull_stops_when_the_cancel_marker_appears_and_the_next_pull_resumes(tmp_path: Path):
+    """Done-when 1's Cancel: the marker is written once the first megabyte is
+    reported; the pull raises DownloadCancelled (the exception a signal
+    raises, so the entry point prints `cancelled` and exits 4 through one
+    path) with the stream closed and the marker gone. Ollama resumes a
+    cancelled pull by itself (docs/api.md § Pull a Model), so the proof is
+    the second pull: it is asked of the fake, its first line starts at what
+    the first pull had kept, and it completes."""
+    ollama = _slow_ollama()
+    marker = tmp_path / "data" / "download-cancel"
+    size = ollama.library[FAKE_MODEL][0]
+    seen: list[Update] = []
+
+    def cancel_after_a_megabyte(update: Update) -> None:
+        seen.append(update)
+        if update.bytes_done >= 1024 * 1024 and not marker.exists():
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.touch()
+
+    try:
+        with pytest.raises(DownloadCancelled) as cancelled:
+            pull_model(FAKE_MODEL, ollama.endpoint, on_update=cancel_after_a_megabyte, cancel_marker=marker)
+        assert CANCEL_MARKER in str(cancelled.value)
+        assert not marker.exists(), "the marker was not removed on exit"
+        assert 1024 * 1024 <= seen[-1].bytes_done < size, "the pull did not stop"
+        assert FAKE_MODEL not in ollama.models, "the fake finished the pull after the stream closed"
+
+        ollama.throttle = None
+        updates = _pull(ollama, cancel_marker=marker)
+        assert [p["model"] for p in ollama.pulls] == [FAKE_MODEL, FAKE_MODEL], "the second pull was not asked for"
+        assert updates[0].bytes_done >= seen[-1].bytes_done, "the second pull did not start from what was kept"
+        assert updates[-2] == Update.progress(size, size) and updates[-1] == Update.done(FAKE_MODEL)
+        assert ollama.models == {FAKE_MODEL: size}
+    finally:
+        ollama.stop()
+
+
+def test_a_stale_cancel_marker_is_removed_when_a_pull_starts(fake_ollama: FakeOllama, tmp_path: Path):
+    marker = tmp_path / "data" / "download-cancel"
+    marker.parent.mkdir(parents=True)
+    marker.touch()
+
+    updates = _pull(fake_ollama, cancel_marker=marker)
+
+    assert updates[-1] == Update.done(FAKE_MODEL)
+    assert not marker.exists()
+
+
+def test_the_pull_watches_the_documented_marker_by_default(monkeypatch, tmp_path: Path, fake_ollama: FakeOllama):
+    marker = tmp_path / "data" / "download-cancel"
+    monkeypatch.setattr(download, "cancel_marker_path", lambda: marker)
+    marker.parent.mkdir(parents=True)
+    marker.touch()
+
+    _pull(fake_ollama)
+
+    assert not marker.exists(), "the pull did not use the documented marker"
