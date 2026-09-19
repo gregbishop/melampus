@@ -1,8 +1,10 @@
 """Run the Lua plugin test suites from pytest, so one command covers everything.
 
 The plugin's decision logic lives in dependency-free Lua modules precisely so it
-can be tested without Lightroom. Skips cleanly if no interpreter is installed;
-Lightroom itself runs Lua 5.1, so this catches logic errors, not dialect ones.
+can be tested without Lightroom. Skips cleanly if no interpreter is installed.
+Lightroom itself runs Lua 5.1. The macOS job's Lua is whatever brew installs,
+so there this catches logic errors only; the Windows job's is Lua 5.1,
+Lightroom's own, so there it catches dialect errors as well.
 """
 
 from __future__ import annotations
