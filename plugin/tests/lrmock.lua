@@ -152,6 +152,10 @@ function M.reset(options)
 		-- The Windows temp folder a fake Windows Lightroom reports, when a
 		-- test names one; otherwise windowsTemp() decides.
 		windowsTemp = options.windowsTemp,
+		-- The home folder of the Lightroom the mock fakes, when a test names
+		-- one (the boundary test hands it the executable's HOME); else one
+		-- of this run's own, see home().
+		home = options.home,
 		-- How many previews the plugin asked for in this run.
 		previewsRequested = 0,
 		-- The async tasks started and not yet finished, as coroutines: a
@@ -547,6 +551,20 @@ local function windowsTemp()
 	return 'C:\\Users\\photographer\\AppData\\Local\\Temp'
 end
 
+--- The home folder of the fake Lightroom: what a test named in reset, else
+-- a `home` folder of this run's own inside the temp directory, so whatever
+-- the plugin keeps under home (its log) never lands in the developer's. On
+-- a fake Windows Lightroom, as with temp: the real profile's stand-in under
+-- TEMP on a Windows host, elsewhere a Windows path that exists nowhere.
+local function home()
+	if M.state.home then return M.state.home end
+	if WIN_ENV then
+		if HOST_IS_WINDOWS then return windowsTemp() .. '\\lrmock-home' end
+		return 'C:\\Users\\photographer'
+	end
+	return tempDir() .. '/home'
+end
+
 -- Lightroom joins paths with the platform's separator; WIN_ENV picks it.
 namespaces.LrPathUtils = {
 	child = function(dir, name) return dir .. (WIN_ENV and '\\' or '/') .. name end,
@@ -556,7 +574,8 @@ namespaces.LrPathUtils = {
 			if WIN_ENV then return windowsTemp() end
 			return tempDir()
 		end
-		return os.getenv('HOME') or '/tmp'
+		if which == 'home' then return home() end
+		error('mock: getStandardFilePath(' .. tostring(which) .. ') is not modelled', 2)
 	end,
 }
 

@@ -406,6 +406,49 @@ def test_the_engine_preference_reaches_the_executable_through_the_command_the_pl
     assert "invalid choice" not in tail, f"the executable does not accept ollama:\n{tail}"
 
 
+def test_the_log_lands_under_the_data_directory_the_executable_reports(
+    built_executable: Path, tmp_path: Path
+):
+    """Card #442, Done-when 1 at the real boundary. The plugin needs the
+    per-user Melampus data directory before it can run anything (it logs the
+    first command), so MelampusLog.lua derives it in Lua from the SDK's home
+    folder and the platform; the executable derives its own from HOME (or
+    %LOCALAPPDATA%) in config._data_root and reports it through
+    `--model-status` as the parent of `cancel_path`. Given the same home,
+    the two rules name the same directory on this host, so the plugin's log
+    sits beside the executable's config and caches: <root>/logs/Melampus.log.
+    The status is asked for ollama at a closed port, so no server, hub or
+    network is involved; nothing is downloaded."""
+    env = per_user_config(tmp_path, f'[model]\nollama_url = "http://127.0.0.1:{closed_port()}"\n')
+    proc = subprocess.run(
+        [str(built_executable), "--model-status", "--backend", "ollama"],
+        env=env, capture_output=True, text=True, timeout=600,
+    )
+    assert proc.returncode == 0, proc.stderr[-3000:]
+    data_root = Path(json.loads(proc.stdout)["cancel_path"]).parent.parent
+    assert data_root == per_user_data_dir(Path(env["HOME"]))
+
+    script = tmp_path / "log-path.lua"
+    script.write_text(
+        "local mock = require('lrmock')\n"
+        "local Log = mock.loadUnderMock('MelampusLog', { home = os.getenv('MELAMPUS_HOME') },"
+        " os.getenv('MELAMPUS_PLUGIN_DIR'), { windows = os.getenv('MELAMPUS_WINDOWS') == '1' })\n"
+        "io.write(Log.dataRoot() .. '\\n' .. Log.path())\n",
+        encoding="utf-8",
+    )
+    built = run_lua(script, env=os.environ | {
+        "MELAMPUS_HOME": env["HOME"],
+        "MELAMPUS_PLUGIN_DIR": str(PLUGIN),
+        "MELAMPUS_WINDOWS": "1" if WINDOWS else "0",
+        "TMPDIR": str(tmp_path),
+        "TEMP": str(tmp_path),
+    })
+    assert built.returncode == 0, built.stdout + built.stderr
+    lua_root, lua_log = built.stdout.splitlines()
+    assert Path(lua_root) == data_root, f"the plugin's root {lua_root} is not the executable's {data_root}"
+    assert Path(lua_log) == data_root / "logs" / "Melampus.log"
+
+
 def test_the_engines_the_plugin_knows_are_the_executables_in_its_order(
     built_executable: Path, tmp_path: Path
 ):
