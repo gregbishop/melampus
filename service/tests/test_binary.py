@@ -276,7 +276,7 @@ def per_user_config(tmp_path: Path, toml: str) -> dict[str, str]:
     return env
 
 
-def test_frozen_config_and_caches_live_in_theper_user_data_directory(
+def test_frozen_config_and_caches_live_in_the_per_user_data_directory(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, repo: Path
 ):
     """Card #436, Done-when 3. The unpack directory is temporary: a config put
