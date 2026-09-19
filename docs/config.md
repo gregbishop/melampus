@@ -20,7 +20,8 @@ there both resolve under the per-user data directory instead (card #436):
 `~/Library/Application Support/Melampus/` on macOS, `%LOCALAPPDATA%\Melampus\`
 on Windows, `$XDG_DATA_HOME/Melampus/` (or `~/.local/share/Melampus/`) elsewhere,
 with the caches in its `cache/` subfolder (so `<data>/.melampus_cache/occurrence.json`
-below is `…/Melampus/cache/occurrence.json` there). `--config` and `--cache` still
+below is `…/Melampus/cache/occurrence.json` there) and the Lightroom plugin's
+log in its `logs/` subfolder (docs/plugin.md). `--config` and `--cache` still
 name any path explicitly.
 
 ```toml
