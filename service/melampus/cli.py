@@ -185,7 +185,8 @@ def _download_model(repo: str) -> int:
     """--download-model (card #407): fetch the MLX model with progress on
     stdout in the protocol the plugin parses (docs/config.md § Downloading the
     model). Exit 0 once complete, 3 on a failure with the fix on stderr, and
-    EXIT_CANCELLED when a signal stopped it with the partial file kept."""
+    EXIT_CANCELLED when a signal or the cancel marker (card #408) stopped it
+    with the partial file kept: one path for both."""
     from .download import EXIT_CANCELLED, DownloadCancelled, DownloadError, Update, cancel_on_signals, download_model
 
     def emit(update: Update) -> None:
@@ -269,7 +270,9 @@ def main(argv: list[str] | None = None) -> int:
                     help="fetch the MLX model ([model] repo, or --model) into the "
                          "Hugging Face cache, one 'progress <bytes done> <bytes total>' "
                          "line per update on stdout and 'done <path>' at the end, "
-                         "then exit; resumes an interrupted download; needs no folder")
+                         "then exit; resumes an interrupted download; stops, exit 4, "
+                         "on a signal or when the cancel file --model-status names "
+                         "appears; needs no folder")
     ap.add_argument("--model-status", action="store_true",
                     help="print, as one JSON object, whether the MLX model ([model] repo, "
                          "or --model) is in the Hugging Face cache, its size and path, "

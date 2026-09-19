@@ -212,7 +212,8 @@ class DownloadError(Exception):
 
 
 class DownloadCancelled(Exception):
-    """A signal asked the download to stop; partial files are kept for resume."""
+    """A signal, or the cancel marker, asked the download to stop; partial
+    files are kept for resume."""
 
 
 @contextmanager
@@ -279,7 +280,9 @@ class _Progress:
     """The bytes-done counter across files, phrased as the tqdm huggingface_hub's
     `http_get` expects so it needs no tqdm at all: it is constructed per file
     with `initial` and `total`, and `update(n)` is called per chunk written.
-    Every update becomes one protocol line.
+    Every update becomes one protocol line, and between chunks the cancel
+    marker is looked for: its appearance raises DownloadCancelled exactly as
+    a signal does (card #408).
 
     `initial` is what `http_get` keeps of the partial file, already counted
     here from disk: all of it, or none when the host answered the Range
@@ -288,10 +291,15 @@ class _Progress:
     reuses across its retries, never the fresh one of this call, so the
     counter takes back here what `initial` says is gone."""
 
-    def __init__(self, total: int, on_update: Callable[[Update], None]) -> None:
-        self.done, self.total, self.on_update = 0, total, on_update
+    def __init__(self, total: int, on_update: Callable[[Update], None], cancel_marker: Path) -> None:
+        self.done, self.total, self.on_update, self.cancel_marker = 0, total, on_update, cancel_marker
 
     def advance(self, n: int) -> None:
+        # Looked for before the chunk is counted: `http_get` calls update
+        # before it writes the chunk, so raising here loses only the chunk in
+        # hand, and what was reported done is what is on disk.
+        if self.cancel_marker.exists():
+            raise DownloadCancelled(CANCEL_MARKER)
         self.done += n
         self.on_update(Update.progress(self.done, self.total))
 
@@ -518,6 +526,7 @@ def download_model(
     on_update: Callable[[Update], None],
     endpoint: str | None = None,
     cache_dir: Path | None = None,
+    cancel_marker: Path | None = None,
 ) -> Path:
     """Fetch every file of `repo` into the Hugging Face cache (`HF_HOME`, or
     `cache_dir`) from the hub at `HF_ENDPOINT` (or `endpoint`), resuming any
@@ -525,13 +534,17 @@ def download_model(
 
     `on_update` gets one Update per chunk received, the first before any byte
     moves so the total is known at once. Raises DownloadError with the fix in
-    the message; a DownloadCancelled raised from `cancel_on_signals` passes
-    through with the partial file kept. No URL's query string reaches the
-    message or the hub library's warnings: an LFS file's is the CDN's
-    signature for it.
+    the message; a DownloadCancelled raised from `cancel_on_signals`, or here
+    when `cancel_marker` (the documented path by default) appears between
+    chunks, passes through with the partial file kept. A stale marker is
+    removed on start, and the marker on exit, whatever the outcome. No URL's
+    query string reaches the message or the hub library's warnings: an LFS
+    file's is the CDN's signature for it.
     """
     endpoint = endpoint or constants.ENDPOINT
     cache = Path(cache_dir or constants.HF_HUB_CACHE)
+    marker = cancel_marker or cancel_marker_path()
+    marker.unlink(missing_ok=True)
     set_client_factory(lambda: _hub_client(endpoint))
     with _hub_warnings_redacted():
         try:
@@ -546,7 +559,7 @@ def download_model(
             distinct: dict[str, _Blob] = {}
             for blob in blobs:
                 distinct.setdefault(blob.etag, blob)
-            progress = _Progress(sum(b.size for b in distinct.values()), on_update)
+            progress = _Progress(sum(b.size for b in distinct.values()), on_update, marker)
             progress.advance(sum(b.on_disk() for b in distinct.values()))
             # The user's token is for the hub: `_hub_client` keeps it off any
             # request to another origin, an LFS file's bytes from the CDN included.
@@ -583,6 +596,8 @@ def download_model(
             ) from exc
         except (OSError, httpx.HTTPError) as exc:
             raise DownloadError(f"download of {repo} from {endpoint} failed: {exc}; {RERUN}") from exc
+        finally:
+            marker.unlink(missing_ok=True)
 
 
 def _cached(repo: str, cache: Path):
