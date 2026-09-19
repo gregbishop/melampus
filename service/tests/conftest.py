@@ -578,6 +578,9 @@ class FakeOllama:
         class Handler(QuietHandler):
             def do_GET(self):  # noqa: N802 - http.server's name
                 ollama.requests.append(("GET", self.path))
+                if self.path == f"{prefix}/api/tags":
+                    self._answer(200, {"models": ollama.tags()})
+                    return
                 if self.path != f"{prefix}/api/version":
                     self._answer(404, {"error": "404 page not found"})
                     return
@@ -648,6 +651,22 @@ class FakeOllama:
                 self.wfile.write(json.dumps(payload).encode("utf-8"))
 
         self.handler = Handler
+
+    def tags(self) -> list[dict]:
+        """The models held, as § List Local Models lists them: `name` and
+        `model` with the tag (`latest` when the pull named none, § Model
+        names), `size`, `digest`, `modified_at`, `details`."""
+        return [
+            {
+                "name": name if ":" in name else f"{name}:latest",
+                "model": name if ":" in name else f"{name}:latest",
+                "modified_at": "2026-09-18T00:00:00Z", "size": size,
+                "digest": hashlib.sha256(name.encode()).hexdigest(),
+                "details": {"parent_model": "", "format": "gguf", "family": "fake",
+                            "families": ["fake"], "parameter_size": "1B", "quantization_level": "Q4_0"},
+            }
+            for name, size in self.models.items()
+        ]
 
     @contextlib.contextmanager
     def serve(self) -> Iterator[FakeOllama]:

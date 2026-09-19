@@ -76,6 +76,7 @@ from melampus.download import (
     cancel_on_signals,
     download_model,
     model_status,
+    ollama_status,
     pull_model,
     remove_model,
 )
@@ -2583,3 +2584,57 @@ def test_the_pull_watches_the_documented_marker_by_default(monkeypatch, tmp_path
     _pull(fake_ollama)
 
     assert not marker.exists(), "the pull did not use the documented marker"
+
+
+# The model's status and removal in Ollama, for the same Settings row.
+
+
+def _ollama_status(ollama: FakeOllama | None, model: str = FAKE_MODEL, port: int | None = None) -> Status:
+    return ollama_status(model, ollama.endpoint if ollama else f"http://127.0.0.1:{port}")
+
+
+def test_status_of_a_model_ollama_does_not_hold_reports_absent_with_no_size(fake_ollama: FakeOllama):
+    """Present-ness from the list endpoint (docs/api.md § List Local Models:
+    GET /api/tags, `models` each with `name` and `size`). A model not held
+    has no size to give: the docs list sizes for local models only, so
+    bytes_total is null and the button says the size is unknown."""
+    status = _ollama_status(fake_ollama)
+
+    assert status == Status(FAKE_MODEL, installed=False, bytes_total=None, bytes_done=0,
+                            path=None, cancel_path=str(cancel_marker_path()))
+    assert {path for _, path in fake_ollama.requests} == {"/api/tags"}
+
+
+def test_status_of_a_pulled_model_reports_installed_with_its_size_and_name(fake_ollama: FakeOllama):
+    """Installed, with the size the list gives for both totals, and the
+    model's name as the path: it lives in Ollama under that name, which is
+    what `done` printed."""
+    _pull(fake_ollama)
+
+    status = _ollama_status(fake_ollama)
+
+    assert status.installed is True
+    assert status.bytes_total == status.bytes_done == 4000
+    assert status.path == FAKE_MODEL
+
+
+def test_status_matches_a_name_without_a_tag_to_ollamas_latest(fake_ollama: FakeOllama):
+    """docs/api.md § Model names: the tag is optional and defaults to
+    `latest`, and the list names the model with it."""
+    fake_ollama.library["fake-org/plain"] = [10]
+    _pull(fake_ollama, model="fake-org/plain")
+    assert "fake-org/plain:latest" in {m["name"] for m in fake_ollama.tags()}
+
+    assert _ollama_status(fake_ollama, model="fake-org/plain").installed is True
+    assert _ollama_status(fake_ollama, model="fake-org/plain:latest").installed is True
+    assert _ollama_status(fake_ollama, model="fake-org/plain:1b").installed is False
+
+
+def test_status_with_no_ollama_answering_says_absent_and_never_fails():
+    """Settings must open with Ollama down: absent, size unknown, exit 0."""
+    port = closed_port()
+
+    status = _ollama_status(None, port=port)
+
+    assert status == Status(FAKE_MODEL, installed=False, bytes_total=None, bytes_done=0,
+                            path=None, cancel_path=str(cancel_marker_path()))
