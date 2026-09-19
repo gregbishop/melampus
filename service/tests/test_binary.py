@@ -22,6 +22,7 @@ import platform
 import shutil
 import subprocess
 import sys
+import tomllib
 import types
 from pathlib import Path
 
@@ -246,6 +247,25 @@ def test_frozen_user_data_sits_beside_the_executable_not_in_the_bundle(
 SYNTHETIC_LOCAL_CONFIG = "[model]\nmax_tokens = 700\n\n[run]\nmax_retries = 2\n"
 
 
+def _synthetic_config(tmp_path: Path, text: str) -> list[str]:
+    """`text` written as a config file of the test's own, and the arguments
+    that make it a run's whole configuration, for the CLI and the executable
+    alike: --config <file> --no-local-config, so the melampus.local.toml
+    beside the data is not read."""
+    file = tmp_path / "synthetic.toml"
+    file.write_text(text, encoding="utf-8")
+    return ["--config", str(file), "--no-local-config"]
+
+
+def _fingerprint_and_retries(text: str, photos: Path) -> tuple[str, int]:
+    """What a run's JSON carries after reading `text` and nothing else: the
+    fingerprint and retry count of an in-process Identifier on those settings
+    as overrides, with no file read at all."""
+    config = load_config(use_local=False, **tomllib.loads(text))
+    result = Identifier(ScriptedBackend([]), config).identify(photos / PHOTO)
+    return result.run_fingerprint, result.retries
+
+
 def test_no_local_config_makes_the_config_file_the_whole_configuration(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, repo: Path, photos: Path
 ):
@@ -266,39 +286,35 @@ def test_no_local_config_makes_the_config_file_the_whole_configuration(
     # Reaches the fingerprint if read; the synthetic file leaves it alone.
     (executable.parent / "melampus.local.toml").write_text("[image]\nmax_edge = 640\n", encoding="utf-8")
     _frozen(monkeypatch, bundle, executable)
-    synthetic = tmp_path / "synthetic.toml"
-    synthetic.write_text(SYNTHETIC_LOCAL_CONFIG, encoding="utf-8")
     out = tmp_path / "results.json"
     code = main([
         str(photos), "--backend", "scripted", "--cache", str(tmp_path / "cache.jsonl"),
-        "--json-out", str(out), "--config", str(synthetic), "--no-local-config",
+        "--json-out", str(out), *_synthetic_config(tmp_path, SYNTHETIC_LOCAL_CONFIG),
     ])
     assert code == 0
     (result,) = json.loads(out.read_text(encoding="utf-8"))
-    reference = Identifier(ScriptedBackend([]), load_config(synthetic, use_local=False)).identify(photos / PHOTO)
-    assert (result["run_fingerprint"], result["retries"]) == (
-        reference.run_fingerprint, reference.retries
+    assert (result["run_fingerprint"], result["retries"]) == _fingerprint_and_retries(
+        SYNTHETIC_LOCAL_CONFIG, photos
     ), "the run did not read --config alone: melampus.local.toml beside the data was read too"
 
 
 # The model the mlx smoke tests look for: a synthetic repo, named in a
-# synthetic melampus.local.toml, so the lookup depends neither on the default
+# synthetic config file, so the lookup depends neither on the default
 # model being cached nor on a developer's own model.repo.
 SYNTHETIC_MODEL = "melampus-tests/synthetic-model"
 
 
 def _look_for_weights(executable: Path, photos: Path, tmp_path: Path) -> str:
     """Run `executable` with the mlx backend, the HuggingFace cache empty and
-    offline, and a synthetic melampus.local.toml naming SYNTHETIC_MODEL; return
-    the end of its stderr. It must fail: there are no weights and no network."""
-    local = tmp_path / "melampus.local.toml"
-    local.write_text(f'[model]\nrepo = "{SYNTHETIC_MODEL}"\n', encoding="utf-8")
+    offline, and a synthetic config file naming SYNTHETIC_MODEL as its whole
+    configuration; return the end of its stderr. It must fail: there are no
+    weights and no network."""
     env = _no_python_environment(tmp_path)
     env |= {"HF_HUB_OFFLINE": "1", "HF_HOME": str(tmp_path / "hf")}
     proc = subprocess.run(
         [str(executable), str(photos), "--backend", "mlx",
          "--cache", str(tmp_path / "cache.jsonl"),
-         "--config", str(local), "--no-local-config"],
+         *_synthetic_config(tmp_path, f'[model]\nrepo = "{SYNTHETIC_MODEL}"\n')],
         env=env, capture_output=True, text=True, timeout=600,
     )
     assert proc.returncode != 0, "loaded a model with no weights and no network?"
@@ -314,7 +330,7 @@ def test_executable_carries_the_service_and_mlx(built_executable: Path, photos: 
     for missing in ("ModuleNotFoundError", "ImportError"):
         assert missing not in tail, f"the executable does not carry MLX:\n{tail}"
     assert "LocalEntryNotFoundError" in tail, f"did not get as far as looking for weights:\n{tail}"
-    assert SYNTHETIC_MODEL in tail, f"did not look for the model the synthetic melampus.local.toml names:\n{tail}"
+    assert SYNTHETIC_MODEL in tail, f"did not look for the model the synthetic config file names:\n{tail}"
 
 
 def test_the_mlx_smoke_test_ignores_a_local_model_beside_the_executable(
@@ -341,20 +357,18 @@ def test_executable_prints_the_same_json_as_the_cli_with_no_python_on_the_path(
     """Done-when 2. Same folder, same fake backend, same JSON — from the
     executable alone, in an environment where no python exists.
 
-    Both read one synthetic melampus.local.toml, not the checkout's and
-    dist/'s: a developer's own settings would otherwise decide whether the
-    two agree, since they change the fingerprint and the retry count."""
-    local = tmp_path / "melampus.local.toml"
-    local.write_text(SYNTHETIC_LOCAL_CONFIG, encoding="utf-8")
-    isolated = ["--config", str(local), "--no-local-config"]
+    Both read one synthetic config file, not the checkout's and dist/'s
+    melampus.local.toml: a developer's own settings would otherwise decide
+    whether the two agree, since they change the fingerprint and the retry
+    count."""
+    isolated = _synthetic_config(tmp_path, SYNTHETIC_LOCAL_CONFIG)
     expected = _analyze([*VENV_CLI, *isolated], photos, tmp_path / "venv", env=None)
     actual = _analyze(
         [str(built_executable), *isolated], photos, tmp_path / "binary",
         env=_no_python_environment(tmp_path),
     )
-    reference = Identifier(ScriptedBackend([]), load_config(local, use_local=False)).identify(photos / PHOTO)
     assert [r["file"] for r in expected] == [PHOTO], "the CLI did not analyze the photo"
-    assert (expected[0]["run_fingerprint"], expected[0]["retries"]) == (
-        reference.run_fingerprint, reference.retries
-    ), "the CLI did not read the synthetic melampus.local.toml"
+    assert (expected[0]["run_fingerprint"], expected[0]["retries"]) == _fingerprint_and_retries(
+        SYNTHETIC_LOCAL_CONFIG, photos
+    ), "the CLI did not read the synthetic config file"
     assert actual == expected
