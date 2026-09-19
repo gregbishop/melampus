@@ -29,11 +29,8 @@ import pytest
 from conftest import PHOTO
 
 from test_binary import _no_python_environment, _per_user_data_dir
-from test_lua_plugin import run_lua
+from test_lua_plugin import TESTS, run_lua
 
-REPO = Path(__file__).resolve().parents[2]
-PLUGIN = REPO / "plugin" / "Melampus.lrplugin"
-LUA_TESTS = REPO / "plugin" / "tests"
 FOLDER = "Melampus.lrplugin"
 
 
@@ -189,7 +186,7 @@ def test_info_lua_parses_and_names_only_files_in_the_zip(package_script, tmp_pat
     unpacked = tmp_path / "unpacked"
     _unpack(target, unpacked)
 
-    proc = run_lua(LUA_TESTS / "test_info.lua", env=os.environ | {
+    proc = run_lua(TESTS / "test_info.lua", env=os.environ | {
         "MELAMPUS_PLUGIN_DIR": str(unpacked / FOLDER),
         "MELAMPUS_ZIP_LISTING": "\n".join(listing),
     })
