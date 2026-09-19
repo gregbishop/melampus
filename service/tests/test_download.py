@@ -186,6 +186,18 @@ def test_download_with_no_host_answering_names_the_network(tmp_path: Path):
     assert f"http://127.0.0.1:{port}" in message and "network" in message
 
 
+def test_the_hub_library_is_a_dependency_on_every_platform():
+    """download.py imports huggingface_hub directly, and on Windows nothing
+    else brings it (mlx-vlm is Apple Silicon only), so the executable built
+    there carries the command only if service/pyproject.toml names it, for
+    every platform, in the core dependencies the lockfile installs."""
+    import tomllib
+
+    pyproject = tomllib.loads((Path(__file__).resolve().parents[1] / "pyproject.toml").read_text())
+    (declared,) = [d for d in pyproject["project"]["dependencies"] if d.startswith("huggingface_hub")]
+    assert ";" not in declared, f"platform-restricted: {declared}"
+
+
 # --- the command: exit codes and signals (unit) -----------------------------
 
 
