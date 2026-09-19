@@ -498,6 +498,19 @@ def test_the_pip_pinning_gate_reads_yaml_workflows_too(tmp_path, monkeypatch):
         test_every_workflow_pins_every_pip_install_to_an_exact_version()
 
 
+def test_every_workflow_pins_every_action_to_a_commit_sha_with_its_version():
+    """Card #439, Done-when 1 and 2: given every `uses:` line in
+    .github/workflows, when read, then it names a full commit SHA with the
+    version as a trailing comment, and a line that names a moving tag instead
+    fails this test. A tag can be moved to different code; a SHA cannot, and
+    the comment is what a reader (and a future bump) sees the SHA as."""
+    texts = {workflow.name: workflow.read_text(encoding="utf-8") for workflow in _workflows()}
+    using = {name for name, text in texts.items() if re.search(r"^\s*-?\s*uses:", text, re.MULTILINE)}
+    assert CI_WORKFLOW.name in using, f"a workflow uses no action: {sorted(texts)}"
+    unpinned = [f"{name}: {line}" for name, text in texts.items() for line in _unpinned_actions(text)]
+    assert not unpinned, f"a workflow names an action by tag, not a commit SHA with its version: {unpinned}"
+
+
 RELEASE_ZIPS = ("Melampus-macOS.zip", "Melampus-Windows.zip")
 
 
