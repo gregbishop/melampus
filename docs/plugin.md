@@ -64,24 +64,43 @@ basename: `0A1A2475.jpg` finds `0A1A2475.CR3`. Verified 300/300 on this corpus.
 ## The engine
 
 Where inference runs is the user's choice (card #403): a preference named
-`engine`, one of `mlx`, `ollama`, `openai`, `claude`, in the plugin's
-preferences beside `profile`, and since card #405 a picker in Settings under
-**Where identification runs** (readme.md § Reviewing in Lightroom shows it,
-`docs/settings-dialog.png`).
+`engine`, one of `mlx`, `ollama`, `openai`, `claude`, and since card #423
+`claude-code` or `codex`, in the plugin's preferences beside `profile`, and
+since card #405 a picker in Settings under **Where identification runs**
+(readme.md § Reviewing in Lightroom shows it, `docs/settings-dialog.png`).
 
 When the dialog opens it runs the executable beside the plugin once with
-`--detect-engines` (card #404) and shows what it said: the four engines in
-that order after *Let Melampus choose*, the ones that cannot run here greyed
-with their reason under the picker, and when the reason names a web address
-(Ollama's download page), a line that opens it in the browser.
-`Rules.engineItems` turns the executable's JSON into those items, so the
-dialog holds no engine knowledge of its own and the rules tests cover it
-without Lightroom. Without the executable nothing is greyed and the note is
+`--detect-engines` (card #404) and shows what it said: the six engines in
+the executable's order after *Let Melampus choose* (the owner's four, then
+the two subscription CLIs), each titled as its verdict's `title` says (the
+executable is the one place that names an engine; the plugin keeps no title
+table), the ones that cannot run here greyed with their reason under the
+picker, and when the reason names a web address (Ollama's download page,
+Claude Code's or Codex CLI's install page), a line that opens it in the
+browser. Under the picker a line follows the picked engine with what
+detection said about it. `Rules.engineItems` turns the executable's JSON
+into those items, so the dialog holds no engine knowledge of its own and
+the rules tests cover it without Lightroom. Without the executable nothing
+is greyed, the engines' names stand in for their titles, and the note is
 the missing-executable message; the dialog never fails to open.
 
+`claude-code` and `codex` are Claude Code and Codex CLI behind the command
+seam (docs/config.md § Claude Code, § Codex CLI). They need no API key: every
+frame bills to the subscription the CLI is signed in to, so no key field
+shows for either (`Rules.keyVariable` is nil for them, which is what hides
+the row). Detection greys each as *not installed*, with the install page,
+or *installed but not signed in*, with the command that signs in, and when
+signed in offers it; picked, the line under the picker is the verdict's
+own sentence, *signed in (…); every frame bills to that subscription, not
+to an API key*, so the billing is on screen before a run.
+`test_lua_plugin.py` holds `Rules.ENGINES`, the six names the plugin
+accepts, to the executable's `--detect-engines` order, so the picker can
+never offer an engine the run would refuse.
+
 `openai` and `claude` need an API key. Picking one shows a password field for
-it. The key is kept through the SDK's `LrPasswords` (`store` / `retrieve` by
-key string; the OS keychain on macOS), under the name of the variable the
+it, and the line under the picker names the variable the executable reads.
+The key is kept through the SDK's `LrPasswords` (`store` / `retrieve` by key
+string; the OS keychain on macOS), under the name of the variable the
 executable reads, `MELAMPUS_OPENAI_KEY` or `MELAMPUS_ANTHROPIC_KEY`. It is
 never in the preferences, never in `melampus.local.toml` or any other file,
 and never logged. When a run starts, `MelampusAnalyze.lua` sets that variable
@@ -97,8 +116,8 @@ Ollama server answering (card #406), `openai` and `claude` need their key
 (docs/config.md § `[model]`). When it is unset — the default, *Let Melampus
 choose* — the command carries no `--backend` and the executable decides:
 `[model] backend` in `melampus.local.toml`, else the first engine that can
-run on this machine. A value that is not one of the four is refused before
-anything runs, with the four named, so a stale preference never reaches the
+run on this machine. A value that is not one of the six is refused before
+anything runs, with the six named, so a stale preference never reaches the
 shell.
 
 ### The Download row
@@ -204,16 +223,19 @@ truncated results file should produce a clear dialog, not a stack trace.
 The Lua tests are driven from pytest so one command covers both languages, and
 skip cleanly when no interpreter is present:
 
-- **42 rules tests** — never-overwrite for ratings, labels and flags; dry-run;
+- **46 rules tests** — never-overwrite for ratings, labels and flags; dry-run;
   idempotency; force; auto-reject staying off; the confidence and burst-agreement
   gates; range-flag routing; abstention; keyword sanitisation; graceful handling
   of sparse records; the engine preference, every value and the default; the
-  engine picker's items from detection, greyed states, reasons and links; the
-  download protocol's parser against the sample lines the Python test reads,
-  the button's title and the progress text.
+  engine picker's items from detection, titled as the verdicts say, greyed
+  states, reasons and links, the two subscription CLIs not installed, not
+  signed in and signed in, the picked engine's reason; the download
+  protocol's parser against the sample lines the Python test reads, the
+  button's title and the progress text.
 - **The settings dialog against the mock SDK** — the real `MelampusSettings.lua`
   executed: the picker's items and bindings, the greyed states from a fake
-  detection, the Ollama link, the key field visible only for a cloud engine,
+  detection, the Ollama link, the key field visible only for a cloud engine
+  and never for a subscription CLI, the billing line for a signed-in CLI,
   the key landing in `LrPasswords` and nowhere else, the missing executable;
   the Download row from a fake status (absent with the size, size unknown,
   Installed and Remove), the download command with stdout redirected on both
