@@ -10,14 +10,17 @@ running the installer again.
 Checks against the git index rather than the working tree: no tracked symlink
 resolves outside the repository, no tracked file names an absolute home-directory
 path, and service/uv.lock is tracked. One check against the working tree: that
-lockfile is current with service/pyproject.toml. And one against .gitignore: a
-photo corpus folder is ignored wherever it lands in the checkout (card #441).
+lockfile is current with service/pyproject.toml. Card #441 adds the corpus
+gates: .gitignore ignores a photo corpus folder wherever it lands in the
+checkout, no tracked file sits under any other fixtures folder, and every frame
+in service/tests/fixtures/ is small and EXIF-free like the first one.
 """
 
 import subprocess
 from pathlib import Path
 
 import pytest
+from PIL import Image
 
 REPO = Path(__file__).resolve().parents[2]
 # POSIX ERE, for git grep.
@@ -128,3 +131,101 @@ def test_a_corpus_folder_is_ignored_anywhere_in_the_checkout(tmp_path, path):
 def test_the_committed_frame_is_not_ignored(tmp_path):
     verdict = _check_ignore(tmp_path, COMMITTED_FRAME)
     assert verdict.returncode == 1, f"{COMMITTED_FRAME} is ignored: {verdict.stdout}"
+
+
+# Card #441, Done-when 2. service/tests/fixtures/ holds one frame, downscaled
+# and stripped (157 KB, no EXIF; 9351e64). A second frame is committable only
+# on the same terms: under the ceiling and carrying no camera metadata, which
+# the secret scanner does not read. And no tracked file may sit under any other
+# fixtures folder, so a corpus cannot slip in even if the ignore rule is edited.
+FRAME_CEILING = 400 * 1024
+FRAME_SUFFIXES = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".webp"}
+FIXTURES_DIR = "service/tests/fixtures"
+CORPUS_DIRS = {"fixtures", "fixtures_full"}
+
+
+def _frame_problems(path: Path) -> list[str]:
+    problems = []
+    size = path.stat().st_size
+    if size > FRAME_CEILING:
+        problems.append(f"{size} bytes, over the {FRAME_CEILING} byte ceiling")
+    with Image.open(path) as image:
+        if image.getexif() or "exif" in image.info:
+            problems.append("carries EXIF")
+    return problems
+
+
+def _stray_fixture_paths(tracked):
+    """Tracked paths under a fixtures folder other than service/tests/fixtures."""
+    return [
+        path
+        for path in tracked
+        if path
+        and not path.startswith(FIXTURES_DIR + "/")
+        and CORPUS_DIRS.intersection(path.split("/")[:-1])
+    ]
+
+
+def _frame(tmp_path: Path, name: str, **save) -> Path:
+    path = tmp_path / name
+    Image.new("RGB", (8, 8)).save(path, **save)
+    return path
+
+
+def test_the_committed_frame_passes_the_gate():
+    assert _frame_problems(REPO / COMMITTED_FRAME) == []
+
+
+def test_a_frame_over_the_ceiling_is_refused(tmp_path):
+    path = tmp_path / "big.jpg"
+    # Noise does not compress: 1200 x 800 at quality 100 is well over 1 MB.
+    Image.effect_noise((1200, 800), 64).save(path, quality=100)
+    assert any("over the" in problem for problem in _frame_problems(path))
+
+
+def test_a_frame_with_exif_is_refused(tmp_path):
+    exif = Image.Exif()
+    exif[0x010F] = "Camera"  # Make
+    assert _frame_problems(_frame(tmp_path, "tagged.jpg", exif=exif)) == [
+        "carries EXIF"
+    ]
+
+
+def test_a_small_stripped_frame_passes(tmp_path):
+    assert _frame_problems(_frame(tmp_path, "plain.jpg")) == []
+
+
+def test_stray_fixture_paths_are_named():
+    tracked = [
+        COMMITTED_FRAME,
+        "service/tests/fixtures/download-lines.txt",
+        "fixtures_dev_labels.json",
+        "service/fixtures/x.jpg",
+        "plugin/fixtures/x.jpg",
+        "fixtures_full/nested/x.jpg",
+        "fixtures/x.jpg",
+        "",
+    ]
+    assert _stray_fixture_paths(tracked) == [
+        "service/fixtures/x.jpg",
+        "plugin/fixtures/x.jpg",
+        "fixtures_full/nested/x.jpg",
+        "fixtures/x.jpg",
+    ]
+
+
+def test_no_tracked_file_sits_under_another_fixtures_folder():
+    stray = _stray_fixture_paths(_git("ls-files", "-z").stdout.split("\0"))
+    assert not stray, f"a corpus is tracked outside {FIXTURES_DIR}: {stray}"
+
+
+def test_every_committed_frame_is_small_and_exif_free():
+    tracked = _git("ls-files", "-z", "--", FIXTURES_DIR).stdout.split("\0")
+    frames = [p for p in tracked if Path(p).suffix.lower() in FRAME_SUFFIXES]
+    assert COMMITTED_FRAME in frames, "the smoke test's frame is not tracked"
+    refused = {p: _frame_problems(REPO / p) for p in frames}
+    refused = {p: problems for p, problems in refused.items() if problems}
+    assert not refused, (
+        "a committed frame is not small and stripped like the first one: "
+        f"{refused}"
+    )
