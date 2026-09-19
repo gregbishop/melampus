@@ -15,10 +15,18 @@ local M = {}
 
 M.state = {}
 
+--- Single-quote a path for sh, as the plugin does for LrTasks.execute. Every
+-- path the mock hands to a shell goes through here: the temp directory comes
+-- from TMPDIR, and a space, a quote, a "$" or a backtick in it must arrive as
+-- the name it is, not be split, expanded or run.
+local function sh(text)
+	return "'" .. string.gsub(tostring(text), "'", "'\\''") .. "'"
+end
+
 --- Remove the temp directory this run made, if it made one.
 function M.cleanUp()
 	if M.state.tempDir then
-		os.execute('rm -rf ' .. M.state.tempDir)
+		os.execute('rm -rf ' .. sh(M.state.tempDir))
 		M.state.tempDir = nil
 	end
 end
@@ -248,9 +256,9 @@ namespaces.LrFileUtils = {
 		if handle then handle:close(); return 'file' end
 		return false
 	end,
-	createAllDirectories = function(path) os.execute('mkdir -p ' .. path) return true end,
+	createAllDirectories = function(path) os.execute('mkdir -p ' .. sh(path)) return true end,
 	files = function(folder)
-		local handle = io.popen('ls -1 ' .. folder .. ' 2>/dev/null')
+		local handle = io.popen('ls -1 ' .. sh(folder) .. ' 2>/dev/null')
 		local names = {}
 		if handle then
 			for line in handle:lines() do names[#names + 1] = folder .. '/' .. line end
@@ -289,7 +297,7 @@ namespaces.LrFileUtils = {
 local function tempDir()
 	if not M.state.tempDir then
 		local base = os.getenv('TMPDIR') or '/tmp'
-		local handle = assert(io.popen('mktemp -d "' .. base .. '/lrmock.XXXXXX"'))
+		local handle = assert(io.popen('mktemp -d ' .. sh(base .. '/lrmock.XXXXXX')))
 		local path = handle:read('*l')
 		handle:close()
 		assert(path and path ~= '', 'mktemp made no directory under ' .. base)
