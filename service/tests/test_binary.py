@@ -10,14 +10,22 @@ this smoke test are part of it — `.venv/bin/python -m pytest -q --build-binary
 (the option lives in conftest.py; without it these tests use an existing
 build, or skip and say how to get one).
 
+Card #400 adds Windows, where MLX does not exist. Done-when 1: given the CI
+workflow runs on a Windows runner, when it finishes, then a melampus.exe
+exists that starts and analyzes a fixture image with the scripted backend.
+Done-when 2: given melampus.exe, when the local MLX engine is requested, then
+it says clearly that MLX needs Apple Silicon and names the engines that work
+here. The build plan is checked on faked platforms everywhere; the executable
+itself is checked on whichever platform is running the tests.
+
 Nothing here downloads a model: the MLX check stops at the point where the
 executable goes looking for weights.
 """
 
 from __future__ import annotations
 
-import importlib.util
 import json
+import os
 import platform
 import shutil
 import subprocess
@@ -32,6 +40,7 @@ from conftest import PHOTO
 from melampus.backend import ScriptedBackend
 from melampus.config import load_config
 from melampus.identify import Identifier
+from melampus.providers import on_apple_silicon
 
 CONFTEST = Path(__file__).with_name("conftest.py")
 # What `.venv/bin/melampus-id` runs, spelled so it works from any interpreter
@@ -44,7 +53,21 @@ def _no_python_environment(tmp_path: Path) -> dict[str, str]:
     empty = tmp_path / "empty-bin"
     empty.mkdir()
     (tmp_path / "home").mkdir()
-    return {"PATH": str(empty), "HOME": str(tmp_path / "home")}
+    env = {"PATH": str(empty), "HOME": str(tmp_path / "home")}
+    if sys.platform == "win32":
+        # A Windows process needs the system root to load system DLLs, and the
+        # one-file executable unpacks itself into the temp directory. Neither
+        # gives a python back.
+        (tmp_path / "tmp").mkdir()
+        env |= {
+            "SYSTEMROOT": os.environ["SYSTEMROOT"],
+            "USERPROFILE": env["HOME"],
+            "TEMP": str(tmp_path / "tmp"),
+            "TMP": str(tmp_path / "tmp"),
+        }
+    for name in ("python", "python3", "uv"):
+        assert shutil.which(name, path=env["PATH"]) is None, f"{name} is on the test PATH"
+    return env
 
 
 def _analyze(command: list[str], photos: Path, workdir: Path, *, env: dict | None) -> list:
@@ -73,14 +96,6 @@ def test_repo_root_is_the_bundle_when_frozen(monkeypatch: pytest.MonkeyPatch, tm
     assert config._repo_root() == repo
 
 
-def _build_script(repo: Path) -> types.ModuleType:
-    """tools/build_binary.py imported as a module: tools/ is not a package."""
-    spec = importlib.util.spec_from_file_location("build_binary", repo / "tools" / "build_binary.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
 def _fake_pyinstaller(monkeypatch: pytest.MonkeyPatch, run) -> None:
     """A PyInstaller whose `__main__.run` is `run`, whether or not the real one
     is installed."""
@@ -92,21 +107,15 @@ def _fake_pyinstaller(monkeypatch: pytest.MonkeyPatch, run) -> None:
 
 
 @pytest.fixture()
-def build(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, repo: Path) -> types.ModuleType:
-    """The build script, writing under tmp_path instead of the checkout's
-    dist/ and build/, on a machine that counts as Apple Silicon."""
-    script = _build_script(repo)
-    monkeypatch.setattr(script, "DIST", tmp_path / "dist")
-    monkeypatch.setattr(script, "WORK", tmp_path / "build" / "pyinstaller")
+def build(build_script: types.ModuleType, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> types.ModuleType:
+    """The build script (conftest loads it once), writing under tmp_path
+    instead of the checkout's dist/ and build/, on a machine that counts as
+    Apple Silicon."""
+    monkeypatch.setattr(build_script, "DIST", tmp_path / "dist")
+    monkeypatch.setattr(build_script, "WORK", tmp_path / "build" / "pyinstaller")
     monkeypatch.setattr(sys, "platform", "darwin")
     monkeypatch.setattr(platform, "machine", lambda: "arm64")
-    return script
-
-
-def test_build_refuses_anything_but_apple_silicon(build, monkeypatch: pytest.MonkeyPatch, capsys):
-    monkeypatch.setattr(platform, "machine", lambda: "x86_64")
-    assert build.main() == 2
-    assert "Apple Silicon" in capsys.readouterr().err
+    return build_script
 
 
 def test_build_says_pyinstaller_is_missing_and_where_the_install_is_documented(
@@ -129,7 +138,8 @@ def test_build_bundles_the_service_the_prompts_and_the_mlx_runtime(
     """Done-when 1's ingredients, as the arguments handed to PyInstaller: one
     file, the service on the path, prompts/ at the bundle's top level, all of
     mlx (its native library and Metal shaders sit beside the module) and every
-    submodule of the packages that import model code by name at run time."""
+    submodule of the packages that import model code by name at run time —
+    written to dist/melampus, no suffix."""
     calls: list[list[str]] = []
 
     def run(arguments: list[str]) -> None:
@@ -139,6 +149,7 @@ def test_build_bundles_the_service_the_prompts_and_the_mlx_runtime(
 
     _fake_pyinstaller(monkeypatch, run)
     assert build.main() == 0
+    assert build.executable_path() == build.DIST / "melampus"
     (arguments,) = calls
     pairs = set(zip(arguments, arguments[1:]))
     assert "--onefile" in arguments
@@ -158,14 +169,23 @@ def test_build_fails_when_pyinstaller_writes_nothing(build, monkeypatch: pytest.
     assert "does not exist" in capsys.readouterr().err
 
 
+# Shaped like the real script: conftest.py imports it for executable_path()
+# and runs it as a program for the build.
 FAKE_BUILD_SCRIPT = """\
 import sys
 from pathlib import Path
 
-dist = Path(__file__).resolve().parents[1] / "dist"
-dist.mkdir(exist_ok=True)
-(dist / "melampus").write_text("built by tools/build_binary.py", encoding="utf-8")
-raise SystemExit(int(sys.argv[1]) if len(sys.argv) > 1 else 0)
+DIST = Path(__file__).resolve().parents[1] / "dist"
+
+
+def executable_path():
+    return DIST / "melampus"
+
+
+if __name__ == "__main__":
+    DIST.mkdir(exist_ok=True)
+    executable_path().write_text("built by tools/build_binary.py", encoding="utf-8")
+    raise SystemExit(int(sys.argv[1]) if len(sys.argv) > 1 else 0)
 """
 
 SMOKE_TEST = """\
@@ -241,6 +261,23 @@ def test_frozen_user_data_sits_beside_the_executable_not_in_the_bundle(
     assert config.run.profile == "sport", "melampus.local.toml beside the executable was not read"
 
 
+def test_build_plan_on_windows_names_the_exe_and_leaves_mlx_out(
+    build_script: types.ModuleType, monkeypatch: pytest.MonkeyPatch, repo: Path
+):
+    """Card #400: the same build script, run on a Windows runner, must write
+    dist/melampus.exe and not ask PyInstaller to collect mlx (there is no such
+    package there, and PyInstaller refuses to collect a package it cannot
+    find)."""
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(platform, "machine", lambda: "AMD64")
+    assert build_script.executable_path() == repo / "dist" / "melampus.exe"
+    arguments = build_script.pyinstaller_arguments(Path("entry.py"))
+    assert "--collect-all" not in arguments
+    assert not any(a.startswith("mlx") for a in arguments), arguments
+    assert "--collect-submodules" not in arguments
+    assert ("--add-data", f"{repo / 'prompts'}:prompts") in set(zip(arguments, arguments[1:]))
+
+
 # Settings that reach the JSON — max_tokens through run_fingerprint, max_retries
 # through retries — at values that are not the defaults, so a comparison also
 # shows the process read this file and not its own melampus.local.toml.
@@ -304,28 +341,34 @@ def test_no_local_config_makes_the_config_file_the_whole_configuration(
 SYNTHETIC_MODEL = "melampus-tests/synthetic-model"
 
 
-def _look_for_weights(executable: Path, photos: Path, tmp_path: Path) -> str:
-    """Run `executable` with the mlx backend, the HuggingFace cache empty and
-    offline, and a synthetic config file naming SYNTHETIC_MODEL as its whole
-    configuration; return the end of its stderr. It must fail: there are no
-    weights and no network."""
+def _request_mlx(executable: Path, photos: Path, tmp_path: Path) -> subprocess.CompletedProcess[str]:
+    """Ask the executable for the mlx backend, with the HuggingFace cache empty
+    and offline, and a synthetic config file naming SYNTHETIC_MODEL as its
+    whole configuration."""
     env = _no_python_environment(tmp_path)
     env |= {"HF_HUB_OFFLINE": "1", "HF_HOME": str(tmp_path / "hf")}
-    proc = subprocess.run(
+    return subprocess.run(
         [str(executable), str(photos), "--backend", "mlx",
          "--cache", str(tmp_path / "cache.jsonl"),
          *_synthetic_config(tmp_path, f'[model]\nrepo = "{SYNTHETIC_MODEL}"\n')],
         env=env, capture_output=True, text=True, timeout=600,
     )
+
+
+def _look_for_weights(executable: Path, photos: Path, tmp_path: Path) -> str:
+    """Run `executable` with the mlx backend as _request_mlx does and return
+    the end of its stderr. It must fail: there are no weights and no network."""
+    proc = _request_mlx(executable, photos, tmp_path)
     assert proc.returncode != 0, "loaded a model with no weights and no network?"
     return proc.stderr[-3000:]
 
 
+@pytest.mark.skipif(not on_apple_silicon(), reason="MLX exists only on Apple Silicon")
 def test_executable_carries_the_service_and_mlx(built_executable: Path, photos: Path, tmp_path: Path):
-    """Done-when 1. Asked for the mlx backend with the HuggingFace cache empty
-    and offline, the executable must get as far as looking for weights — which
-    means mlx, mlx_vlm and transformers all import inside the bundle — and stop
-    there. An executable that does not carry MLX dies on an import error first."""
+    """Done-when 1 (#399). Asked for the mlx backend with the HuggingFace cache
+    empty and offline, the executable must get as far as looking for weights —
+    which means mlx, mlx_vlm and transformers all import inside the bundle — and
+    stop there. An executable that does not carry MLX dies on an import error first."""
     tail = _look_for_weights(built_executable, photos, tmp_path)
     for missing in ("ModuleNotFoundError", "ImportError"):
         assert missing not in tail, f"the executable does not carry MLX:\n{tail}"
@@ -333,6 +376,7 @@ def test_executable_carries_the_service_and_mlx(built_executable: Path, photos: 
     assert SYNTHETIC_MODEL in tail, f"did not look for the model the synthetic config file names:\n{tail}"
 
 
+@pytest.mark.skipif(not on_apple_silicon(), reason="MLX exists only on Apple Silicon")
 def test_the_mlx_smoke_test_ignores_a_local_model_beside_the_executable(
     built_executable: Path, photos: Path, tmp_path: Path
 ):
@@ -351,10 +395,28 @@ def test_the_mlx_smoke_test_ignores_a_local_model_beside_the_executable(
     assert "LocalEntryNotFoundError" in tail, f"did not get as far as looking for weights:\n{tail}"
 
 
+@pytest.mark.skipif(on_apple_silicon(), reason="this machine can run MLX")
+def test_executable_refuses_mlx_off_apple_silicon_and_names_what_works(
+    built_executable: Path, photos: Path, tmp_path: Path
+):
+    """Done-when 2 (#400). The Windows executable asked for mlx says MLX needs
+    Apple Silicon and names the backends that do work here, instead of dying on
+    a missing module."""
+    proc = _request_mlx(built_executable, photos, tmp_path)
+    tail = proc.stderr[-3000:]
+    assert proc.returncode != 0, "ran the mlx backend with no MLX?"
+    assert "Apple Silicon" in tail, tail
+    for works_here in ("anthropic", "openai", "scripted"):
+        assert works_here in tail, f"{works_here!r} is not named as working here:\n{tail}"
+    for missing in ("ModuleNotFoundError", "ImportError"):
+        assert missing not in tail, f"the refusal came from a missing module, not the CLI:\n{tail}"
+
+
 def test_executable_prints_the_same_json_as_the_cli_with_no_python_on_the_path(
     built_executable: Path, photos: Path, tmp_path: Path
 ):
-    """Done-when 2. Same folder, same fake backend, same JSON — from the
+    """Done-when 2 (#399) and Done-when 1 (#400), on whichever platform built
+    the executable. Same folder, same fake backend, same JSON — from the
     executable alone, in an environment where no python exists.
 
     Both read one synthetic config file, not the checkout's and dist/'s

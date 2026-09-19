@@ -9,7 +9,6 @@ retuned for a cloud primary without ever overriding an explicit setting.
 from __future__ import annotations
 
 import json
-import platform
 import sys
 import types
 
@@ -46,10 +45,7 @@ def stub_sdks(monkeypatch):
     monkeypatch.setitem(sys.modules, "openai", types.ModuleType("openai"))
 
 
-@pytest.mark.skipif(
-    sys.platform != "darwin" or platform.machine() != "arm64",
-    reason="the mlx default only constructs on Apple Silicon",
-)
+@pytest.mark.skipif(not providers.on_apple_silicon(), reason="the mlx default only constructs on Apple Silicon")
 def test_default_backend_is_local_mlx():
     config = _cfg()
     assert config.model.backend == "mlx"
@@ -193,3 +189,23 @@ def test_cli_backend_scripted_writes_a_result_without_weights(photos, tmp_path, 
     assert [r["file"] for r in results] == [PHOTO]
     assert results[0]["model"] == "scripted"
     assert results[0]["status"] == "unprocessed"
+
+
+def test_cli_backend_mlx_on_windows_names_apple_silicon_and_the_backends_that_work(
+    photos, tmp_path, capsys, monkeypatch
+):
+    """Card #400, Done-when 2: given the Windows executable, when the local MLX
+    engine is requested, then it says clearly that MLX needs Apple Silicon and
+    names the engines that work here."""
+    from melampus.cli import main
+
+    monkeypatch.setattr(providers.sys, "platform", "win32")
+    monkeypatch.setattr(providers.platform, "machine", lambda: "AMD64")
+
+    code = main([str(photos), "--backend", "mlx", "--cache", str(tmp_path / "cache.jsonl")])
+
+    err = capsys.readouterr().err
+    assert code != 0
+    assert "Apple Silicon" in err
+    for works_here in ("anthropic", "openai", "scripted"):
+        assert works_here in err, f"{works_here!r} is not named as working here:\n{err}"

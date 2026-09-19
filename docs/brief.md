@@ -20,14 +20,20 @@ every session.
 ## stack contract
 
 - stack: python
-- build: `.venv/bin/python tools/build_binary.py` — from the repo root, on Apple
-  Silicon; writes `dist/melampus`, the one-file executable (needs the `build`
-  extra, see readme.md § Building the executable)
+- build: `.venv/bin/python tools/build_binary.py` — from the repo root; writes
+  `dist/melampus`, the one-file executable, with MLX on Apple Silicon and
+  without it elsewhere (`dist/melampus.exe` on Windows, cloud engines only;
+  needs the `build` extra, see readme.md § Building the executable)
 - test: `.venv/bin/python -m pytest` — from the repo root, locally; add
   `--build-binary` to build the executable first and smoke-test it
 - test in CI: `uv sync --locked --extra dev --extra build && uv run pytest -q --build-binary`
-  — from `service/`, in `.github/workflows/ci.yml`; this is the run that gates
-  merges, so it builds the executable and smoke-tests it on every run
+  — from `service/`, in `.github/workflows/ci.yml`, on macOS; this is the run
+  that gates merges, so it builds the executable and smoke-tests it on every run
+- build in CI: `uv sync --locked --extra dev --extra build && uv run pytest -v -rs tests/test_binary.py --build-binary`
+  — from `service/`, in the same workflow's `build-windows` job on a Windows
+  runner; builds `melampus.exe` the way the test command does, runs the
+  executable's smoke tests against it and uploads it as the `melampus-windows`
+  artifact
 - lint: none adopted
 - run: the service half, per `docs/architecture.md`
 
