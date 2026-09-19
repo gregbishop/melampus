@@ -27,6 +27,19 @@ def _venv_python() -> str:
     return ".venv\\Scripts\\python.exe" if sys.platform == "win32" else ".venv/bin/python"
 
 
+def _sdk_missing(backend: str) -> int:
+    """The install hint for a cloud backend whose SDK is not here: which
+    backend, and the extra that ships its SDK. Exit 3, for both the primary
+    backend and the escalation provider."""
+    extra = "openai" if backend == "openai" else "cloud"
+    print(
+        f"The SDK for the {backend} backend is not installed. Run:\n"
+        f'  uv pip install --python {_venv_python()} "./service[{extra}]"',
+        file=sys.stderr,
+    )
+    return 3
+
+
 def _humanise(seconds: float) -> str:
     if seconds < 90:
         return f"{seconds:.0f}s"
@@ -74,13 +87,7 @@ def _run_escalation(paths, local_cache: ResultCache, config, *,
         try:
             identifier = build_cloud_identifier(config)
         except ImportError:
-            extra = "openai" if config.escalation.provider == "openai" else "cloud"
-            print(
-                f"The SDK for the {config.escalation.provider} backend is not installed. Run:\n"
-                f'  uv pip install --python {_venv_python()} "./service[{extra}]"',
-                file=sys.stderr,
-            )
-            return 3
+            return _sdk_missing(config.escalation.provider)
         except ValueError as exc:
             print(str(exc), file=sys.stderr)
             return 3
@@ -289,13 +296,7 @@ def main(argv: list[str] | None = None) -> int:
         try:
             backend = build_primary_backend(config)
         except ImportError:
-            extra = "openai" if config.model.backend == "openai" else "cloud"
-            print(
-                f"The SDK for the {config.model.backend} backend is not installed. Run:\n"
-                f'  uv pip install --python {_venv_python()} "./service[{extra}]"',
-                file=sys.stderr,
-            )
-            return 3
+            return _sdk_missing(config.model.backend)
         except (BackendUnavailable, ValueError) as exc:
             print(str(exc), file=sys.stderr)
             return 3
