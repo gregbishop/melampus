@@ -19,9 +19,11 @@ Two ordering constraints, both from §5.3 and both load-bearing:
 
 local LrDialogs = import 'LrDialogs'
 local LrFileUtils = import 'LrFileUtils'
+local LrPasswords = import 'LrPasswords'
 local LrPathUtils = import 'LrPathUtils'
 local LrTasks = import 'LrTasks'
 
+local Json = require 'MelampusJson'
 local Log = require 'MelampusLog'
 local Rules = require 'MelampusRules'
 
@@ -181,6 +183,16 @@ local function windowsPathRefusal(folder, previewFolder, resultsPath, cliLog)
 	return nil
 end
 
+--- A variable set in the child's environment, ahead of the command. LrTasks
+-- .execute takes one string and nothing else, so the shell sets it: `VAR=
+-- 'value' command` for sh, `set "VAR=value" && command` for cmd.exe. That
+-- string is the child's command line for the run's duration, which is why
+-- the caller logs the line with the value replaced, never this one.
+local function environmentPrefix(name, value)
+	if WIN_ENV then return 'set "' .. name .. '=' .. value .. '" && ' end
+	return name .. '=' .. quote(value) .. ' '
+end
+
 --- Where the CLI's own output goes. Not the null device: the cloud-primary
 -- cost estimate (and any refusal, e.g. the model.max_images ceiling) prints to
 -- stderr, and a non-interactive caller that discards it has erased the only
@@ -189,8 +201,49 @@ end
 -- location guaranteed to exist on both platforms (the plugin-log directory is
 -- not — Log.path() is a macOS layout). Outside previewFolder so cleanUp()
 -- does not take the evidence with it.
+local function tempPath(name)
+	return LrPathUtils.child(LrPathUtils.getStandardFilePath('temp'), name)
+end
+
 local function cliLogPath()
-	return LrPathUtils.child(LrPathUtils.getStandardFilePath('temp'), 'melampus-cli.log')
+	return tempPath('melampus-cli.log')
+end
+
+--- The one message for an executable that is not beside the plugin: which
+-- folder should hold it and what the file is called, and nothing about how
+-- it might be built.
+local function missingExecutable()
+	return 'Melampus could not find its analysis program.\n\n'
+		.. 'The plugin folder should contain a file named '
+		.. Analyze.executableName() .. ':\n' .. tostring(pluginDir())
+		.. '\n\nCopy it there from the Melampus download and try again.'
+end
+
+--- Ask the executable which engines can run here: `--detect-engines` (card
+-- #404) prints a JSON list of { engine, available, reason }. Returns the
+-- decoded list, or nil plus a message: the executable is missing, exited
+-- non-zero, or printed something other than the list. Runs the executable
+-- once per call; the Settings dialog calls it once, when it opens.
+function Analyze.detectEngines()
+	local executable = Analyze.executablePath()
+	if not executable or not LrFileUtils.exists(executable) then
+		return nil, missingExecutable()
+	end
+	local output, cliLog = tempPath('melampus-engines.json'), cliLogPath()
+	local command = shellLine(quote(executable) .. ' --detect-engines >'
+		.. quote(output) .. ' 2>' .. quote(cliLog))
+	Log.info('running: ' .. command)
+	local code = LrTasks.execute(command)
+	if code ~= 0 then
+		return nil, 'Melampus could not ask its analysis program which engines can run here '
+			.. '(exit ' .. tostring(code) .. ').\n\nSee the logs:\n' .. Log.path() .. '\n' .. cliLog
+	end
+	local verdicts, err = Json.decode(LrFileUtils.readFile(output) or '')
+	if type(verdicts) ~= 'table' or verdicts[1] == nil then
+		return nil, 'Melampus did not understand what its analysis program said about the engines'
+			.. (err and (': ' .. tostring(err)) or '') .. '.\n\nSee the log:\n' .. output
+	end
+	return verdicts
 end
 
 --- Run the identification pipeline over a folder of previews, writing the
@@ -202,10 +255,7 @@ function Analyze.run(previewFolder, resultsPath, profile, engine)
 	local folder = pluginDir()
 	local executable = Analyze.executablePath()
 	if not executable or not LrFileUtils.exists(executable) then
-		return false, 'Melampus could not find its analysis program.\n\n'
-			.. 'The plugin folder should contain a file named '
-			.. Analyze.executableName() .. ':\n' .. tostring(folder)
-			.. '\n\nCopy it there from the Melampus download and try again.'
+		return false, missingExecutable()
 	end
 
 	local engineArguments, engineError = Rules.engineArguments({ engine = engine })
@@ -232,8 +282,21 @@ function Analyze.run(previewFolder, resultsPath, profile, engine)
 	parts[#parts + 1] = '--plugin-out ' .. quote(resultsPath)
 	parts[#parts + 1] = '--yes'
 	parts[#parts + 1] = '>' .. quote(cliLog) .. ' 2>&1'
-	local command = shellLine(table.concat(parts, ' '))
-	Log.info('running: ' .. command)
+	local line = table.concat(parts, ' ')
+
+	-- A cloud engine's key (card #405): stored by the Settings dialog through
+	-- LrPasswords, handed to the executable in the variable it reads, and
+	-- only for the engine the user picked. It is never an argument and never
+	-- logged; the log carries the line with the key blanked.
+	local logged = line
+	local variable = Rules.keyVariable(engine)
+	local key = variable and LrPasswords.retrieve(variable)
+	if key and key ~= '' then
+		line = environmentPrefix(variable, key) .. line
+		logged = environmentPrefix(variable, '') .. logged
+	end
+	local command = shellLine(line)
+	Log.info('running: ' .. shellLine(logged))
 	local code = LrTasks.execute(command)
 	if code ~= 0 then
 		return false, 'Identification failed (exit ' .. tostring(code)

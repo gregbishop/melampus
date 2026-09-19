@@ -1,19 +1,84 @@
 --[[ Settings. Everything beyond the four menu items lives here (§5.4.2):
      the results file, the safety switches, the gates, and maintenance. ]]
+local LrBinding = import 'LrBinding'
 local LrDialogs = import 'LrDialogs'
 local LrFunctionContext = import 'LrFunctionContext'
+local LrHttp = import 'LrHttp'
+local LrPasswords = import 'LrPasswords'
 local LrPrefs = import 'LrPrefs'
 local LrTasks = import 'LrTasks'
 local LrView = import 'LrView'
 
+local Analyze = require 'MelampusAnalyze'
 local Log = require 'MelampusLog'
 local Rules = require 'MelampusRules'
+
+-- Lightroom's Lua 5.1 has unpack; the local interpreter the tests use has
+-- table.unpack.
+local unpack = unpack or table.unpack
+
+local function lineCount(text)
+	local _, newlines = string.gsub(text, '\n', '')
+	return newlines + 1
+end
 
 LrTasks.startAsyncTask(function()
 	LrFunctionContext.callWithContext('melampusSettings', function(context)
 		local prefs = LrPrefs.prefsForPlugin()
 		local f = LrView.osFactory()
 		local bind = LrView.bind
+		local grey = import('LrColor')(0.4, 0.4, 0.4)
+
+		-- Which engines can run here is the executable's verdict (card #404),
+		-- asked once, now, as the dialog opens. Without the executable nothing
+		-- is greyed and the note says what is missing.
+		local engineItems, engineNote = Rules.engineItems(Analyze.detectEngines())
+
+		-- The picker, the reasons for whatever is greyed, and a link for each
+		-- greyed engine whose reason names where to get it.
+		local engineViews = {
+			f:popup_menu { value = bind 'engine', items = engineItems },
+		}
+		if engineNote ~= '' then
+			engineViews[#engineViews + 1] = f:static_text {
+				title = engineNote, height_in_lines = lineCount(engineNote), text_color = grey,
+			}
+		end
+		for _, item in ipairs(engineItems) do
+			if not item.enabled and item.link then
+				local link = item.link
+				engineViews[#engineViews + 1] = f:static_text {
+					title = link,
+					text_color = import('LrColor')(0.1, 0.3, 0.8),
+					mouse_down = function() LrHttp.openUrlInBrowser(link) end,
+				}
+			end
+		end
+
+		-- A cloud engine's API key. It lives in LrPasswords (the OS keychain on
+		-- macOS), never in the preferences, so the fields bind to their own
+		-- table: read from the store as the dialog opens, written back when it
+		-- closes. Each field shows only while its engine is picked.
+		local keys, keysAtOpen = LrBinding.makePropertyTable(context), {}
+		for _, engine in ipairs(Rules.ENGINES) do
+			local variable = Rules.keyVariable(engine)
+			if variable then
+				keys[variable] = LrPasswords.retrieve(variable) or ''
+				keysAtOpen[variable] = keys[variable]
+				engineViews[#engineViews + 1] = f:row {
+					visible = bind {
+						key = 'engine', object = prefs,
+						transform = function(value) return value == engine end,
+					},
+					f:static_text { title = 'API key:' },
+					f:password_field {
+						bind_to_object = keys, value = bind(variable),
+						width_in_chars = 42, immediate = true,
+						tooltip = 'Kept in your keychain, not in a file',
+					},
+				}
+			end
+		end
 
 		local contents = f:column {
 			bind_to_object = prefs,
@@ -44,6 +109,12 @@ LrTasks.startAsyncTask(function()
 						end,
 					},
 				},
+			},
+
+			f:group_box {
+				title = 'Where identification runs',
+				fill_horizontal = 1,
+				unpack(engineViews),
 			},
 
 			f:group_box {
@@ -277,5 +348,13 @@ LrTasks.startAsyncTask(function()
 			actionVerb = 'Done',
 			cancelVerb = '< exclude >',
 		}
+
+		-- The dialog has no Cancel, so what the fields hold is what the user
+		-- wants kept: a changed field is stored, an emptied one forgets the
+		-- key, an untouched one leaves the store alone.
+		for variable, before in pairs(keysAtOpen) do
+			local after = keys[variable] or ''
+			if after ~= before then LrPasswords.store(variable, after) end
+		end
 	end)
 end)
