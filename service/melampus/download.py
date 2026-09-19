@@ -144,7 +144,8 @@ class DownloadError(Exception):
 
 
 class DownloadCancelled(Exception):
-    """A signal asked the download to stop; partial files are kept for resume."""
+    """A signal, or the cancel marker, asked the download to stop; partial
+    files are kept for resume."""
 
 
 @contextmanager
@@ -196,12 +197,19 @@ class _Progress:
     `http_get` expects so it needs no tqdm at all: it is constructed per file
     with `initial` and `total` (already accounted for here), `update(n)` is
     called per chunk written, and a negative `update` takes back a resume the
-    server ignored. Every update becomes one protocol line."""
+    server ignored. Every update becomes one protocol line, and between
+    chunks the cancel marker is looked for: its appearance raises
+    DownloadCancelled exactly as a signal does (card #408)."""
 
-    def __init__(self, total: int, on_update: Callable[[Update], None]) -> None:
-        self.done, self.total, self.on_update = 0, total, on_update
+    def __init__(self, total: int, on_update: Callable[[Update], None], cancel_marker: Path) -> None:
+        self.done, self.total, self.on_update, self.cancel_marker = 0, total, on_update, cancel_marker
 
     def advance(self, n: int) -> None:
+        # Looked for before the chunk is counted: `http_get` calls update
+        # before it writes the chunk, so raising here loses only the chunk in
+        # hand, and what was reported done is what is on disk.
+        if self.cancel_marker.exists():
+            raise DownloadCancelled(CANCEL_MARKER)
         self.done += n
         self.on_update(Update.progress(self.done, self.total))
 
@@ -270,6 +278,7 @@ def download_model(
     on_update: Callable[[Update], None],
     endpoint: str | None = None,
     cache_dir: Path | None = None,
+    cancel_marker: Path | None = None,
 ) -> Path:
     """Fetch every file of `repo` into the Hugging Face cache (`HF_HOME`, or
     `cache_dir`) from the hub at `HF_ENDPOINT` (or `endpoint`), resuming any
@@ -277,15 +286,19 @@ def download_model(
 
     `on_update` gets one Update per chunk received, the first before any byte
     moves so the total is known at once. Raises DownloadError with the fix in
-    the message; a DownloadCancelled raised from `cancel_on_signals` passes
-    through with the partial file kept.
+    the message; a DownloadCancelled raised from `cancel_on_signals`, or here
+    when `cancel_marker` (the documented path by default) appears between
+    chunks, passes through with the partial file kept. A stale marker is
+    removed on start, and the marker on exit, whatever the outcome.
     """
     endpoint = endpoint or constants.ENDPOINT
     cache = Path(cache_dir or constants.HF_HUB_CACHE)
     folder = repo_folder_name(repo_id=repo, repo_type="model")
+    marker = cancel_marker or cancel_marker_path()
+    marker.unlink(missing_ok=True)
     try:
         commit, blobs = _plan(repo, endpoint, cache / folder)
-        progress = _Progress(sum(b.size for b in blobs), on_update)
+        progress = _Progress(sum(b.size for b in blobs), on_update, marker)
         progress.advance(sum(b.on_disk() for b in blobs))
         headers = build_hf_headers()
         for blob in blobs:
@@ -307,6 +320,8 @@ def download_model(
         ) from exc
     except (OSError, httpx.HTTPError) as exc:
         raise DownloadError(f"download of {repo} from {endpoint} failed: {exc}; {RERUN}") from exc
+    finally:
+        marker.unlink(missing_ok=True)
 
 
 def _cached(repo: str, cache: Path):
