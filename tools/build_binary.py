@@ -18,6 +18,7 @@ runs this and then the smoke tests: `.venv/bin/python -m pytest -q --build-binar
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -27,6 +28,15 @@ REPO = Path(__file__).resolve().parents[1]
 DIST = REPO / "dist"
 WORK = REPO / "build" / "pyinstaller"
 NAME = "melampus"
+# PyInstaller's switch for where it keeps its cache (bincache*/index.dat). By
+# default that is one directory per user, `~/Library/Application Support/
+# pyinstaller` on macOS, `%LOCALAPPDATA%\pyinstaller` on Windows, `~/.cache/
+# pyinstaller` elsewhere (PyInstaller/configure.py, and the manual's "Supporting
+# Multiple Operating Systems": "by default it uses a subdirectory of your home
+# directory as its cache location"), shared by every checkout on the machine;
+# two builds at once left index.dat half-written and the next build died
+# reading it (card #440).
+CONFIG_DIR_VARIABLE = "PYINSTALLER_CONFIG_DIR"
 
 # Packages PyInstaller's static analysis cannot see the whole of: mlx loads its
 # native library and Metal shaders from files beside the module; mlx_vlm, mlx_lm
@@ -41,6 +51,12 @@ COLLECT_SUBMODULES = ("mlx_vlm", "mlx_lm", "transformers")
 def executable_path() -> Path:
     """Where PyInstaller puts the one-file build for this platform."""
     return DIST / (f"{NAME}.exe" if sys.platform == "win32" else NAME)
+
+
+def config_dir(checkout: Path) -> Path:
+    """Where this checkout's build keeps PyInstaller's cache: beside the work
+    tree, under the git-ignored build/, so no two checkouts share one."""
+    return checkout / "build" / "pyinstaller-config"
 
 
 def pyinstaller_arguments(entry: Path) -> list[str]:
@@ -80,6 +96,9 @@ def main() -> int:
     entry = WORK / f"{NAME}_entry.py"
     entry.write_text("from melampus.cli import main\n\nraise SystemExit(main())\n", encoding="utf-8")
 
+    # Set already, the caller's choice stands: CI, or a user who wants one
+    # cache for every checkout, may point every build at the same directory.
+    os.environ.setdefault(CONFIG_DIR_VARIABLE, str(config_dir(REPO)))
     PyInstaller.__main__.run(pyinstaller_arguments(entry))
 
     built = executable_path()
