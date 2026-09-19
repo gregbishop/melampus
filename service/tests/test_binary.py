@@ -710,7 +710,9 @@ def test_executable_detects_engines_as_json_with_no_python_on_the_path(
     come from `providers.CLI_ENGINES`, as
     test_executable_refuses_a_cli_engine_that_is_not_installed's cases do,
     so a third CLI is not silently unchecked here (review round 9, C2;
-    rounds 4 and 8, C2)."""
+    rounds 4 and 8, C2). Every verdict carries the title the
+    plugin's picker shows (card #423), so the dialog holds no title table of
+    its own."""
     proc = subprocess.run(
         [str(built_executable), "--detect-engines"],
         env=no_python_environment(tmp_path), capture_output=True, text=True, timeout=600,
@@ -719,9 +721,12 @@ def test_executable_detects_engines_as_json_with_no_python_on_the_path(
     verdicts = json.loads(proc.stdout)
     assert [v["engine"] for v in verdicts] == [
         "mlx", "ollama", "openai", "claude", "claude-code", "codex"]
+    assert all(set(v) == {"engine", "title", "available", "reason"} for v in verdicts), verdicts
+    assert all(v["title"] for v in verdicts), "a verdict with no title for the picker"
     by_engine = {v["engine"]: v for v in verdicts}
     for cli in providers.CLI_ENGINES:
         verdict = by_engine[cli.engine]
+        assert verdict["title"].startswith(cli.title), verdict["title"]
         assert verdict["available"] is False, f"a {cli.program} on the empty PATH?"
         assert "not installed" in verdict["reason"], verdict["reason"]
         assert cli.install in verdict["reason"], verdict["reason"]

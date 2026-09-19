@@ -3531,8 +3531,8 @@ def _machine(mlx: bool, ollama: bool) -> list:
     run, the cloud engines always able to."""
     from melampus.providers import EngineVerdict
 
-    return [EngineVerdict("mlx", mlx, ""), EngineVerdict("ollama", ollama, ""),
-            EngineVerdict("openai", True, ""), EngineVerdict("claude", True, "")]
+    return [EngineVerdict("mlx", "MLX", mlx, ""), EngineVerdict("ollama", "Ollama", ollama, ""),
+            EngineVerdict("openai", "OpenAI", True, ""), EngineVerdict("claude", "Claude", True, "")]
 
 
 FIRST_WITH_A_MODEL = "(the first with a model that can run here"
