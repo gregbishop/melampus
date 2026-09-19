@@ -47,16 +47,27 @@ function M.runThroughTheShell(command)
 end
 
 --- What `melampus --detect-engines` says on a Mac with no Ollama running,
--- decoded: one verdict per engine, in the order the executable prints them.
--- `overrides[engine]` replaces fields of that engine's verdict. The one
--- canned answer every suite starts from, so a reason is spelled once.
+-- no Claude Code installed and a Codex CLI that is not signed in, decoded:
+-- one verdict per engine, in the order the executable prints them, each
+-- with the title the picker shows (card #423). `overrides[engine]` replaces
+-- fields of that engine's verdict. The one canned answer every suite starts
+-- from, so a title and a reason are spelled once; `M.canned[engine]` is the
+-- same answer by engine.
 function M.detectionVerdicts(overrides)
 	local list = {
-		{ engine = 'mlx', available = true, reason = 'runs locally on this Apple Silicon Mac' },
-		{ engine = 'ollama', available = false,
+		{ engine = 'mlx', title = 'MLX — local, Apple Silicon', available = true,
+			reason = 'runs locally on this Apple Silicon Mac' },
+		{ engine = 'ollama', title = 'Ollama — local', available = false,
 			reason = 'no Ollama server at http://127.0.0.1:11434; install it from https://ollama.com/download' },
-		{ engine = 'openai', available = true, reason = 'API key required: set MELAMPUS_OPENAI_KEY (or OPENAI_API_KEY)' },
-		{ engine = 'claude', available = true, reason = 'API key required: set MELAMPUS_ANTHROPIC_KEY (or ANTHROPIC_API_KEY)' },
+		{ engine = 'openai', title = 'OpenAI — cloud, needs an API key', available = true,
+			reason = 'API key required: set MELAMPUS_OPENAI_KEY (or OPENAI_API_KEY)' },
+		{ engine = 'claude', title = 'Claude — cloud, needs an API key', available = true,
+			reason = 'API key required: set MELAMPUS_ANTHROPIC_KEY (or ANTHROPIC_API_KEY)' },
+		{ engine = 'claude-code', title = 'Claude Code — subscription, no API key', available = false,
+			reason = "Claude Code is not installed: nothing on PATH is called 'claude'; "
+				.. 'install it from https://code.claude.com/docs/en/setup, then sign in with `claude auth login`' },
+		{ engine = 'codex', title = 'Codex CLI — subscription, no API key', available = false,
+			reason = 'Codex CLI is installed but not signed in; run `codex login`' },
 	}
 	for _, v in ipairs(list) do
 		local o = overrides and overrides[v.engine]
@@ -65,6 +76,9 @@ function M.detectionVerdicts(overrides)
 	return list
 end
 
+M.canned = {}
+for _, v in ipairs(M.detectionVerdicts()) do M.canned[v.engine] = v end
+
 --- The same answer as the JSON text the executable prints.
 function M.detectionText(overrides)
 	local function quoted(text)
@@ -72,8 +86,8 @@ function M.detectionText(overrides)
 	end
 	local parts = {}
 	for _, v in ipairs(M.detectionVerdicts(overrides)) do
-		parts[#parts + 1] = string.format('{"engine": %s, "available": %s, "reason": %s}',
-			quoted(v.engine), tostring(v.available), quoted(v.reason))
+		parts[#parts + 1] = string.format('{"engine": %s, "title": %s, "available": %s, "reason": %s}',
+			quoted(v.engine), quoted(v.title), tostring(v.available), quoted(v.reason))
 	end
 	return '[' .. table.concat(parts, ', ') .. ']'
 end
