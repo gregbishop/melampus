@@ -318,10 +318,14 @@ def test_plugin_out_and_the_thin_tool_write_the_same_bytes_on_the_corpus(
 
 def test_the_tool_is_a_thin_caller_of_the_service_module():
     """Done-when 4: tools/make_plugin_results.py no longer carries its own
-    enrichment; it parses arguments and calls melampus.plugin_results. The
-    Lightroom plugin still invokes it until card #401 rewires the plugin, so
-    it stays, and stays thin."""
+    enrichment; it parses arguments and calls melampus.plugin_results, for a
+    --json-out file already on disk. Since card #401 the Lightroom plugin runs
+    `melampus --plugin-out` from the executable beside it and never names the
+    tool, so the tool's own docstring cannot still say the plugin invokes it,
+    or that the card is pending."""
     source = TOOL.read_text(encoding="utf-8")
     assert "from melampus.plugin_results import" in source
     for own_logic in ("most_common", "quality_rank", "burst_agreement"):
         assert own_logic not in source, f"the tool still computes {own_logic!r} itself"
+    for stale in ("plugin still invokes", "#401"):
+        assert stale not in source, f"the tool's docstring still says {stale!r}"
