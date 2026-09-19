@@ -189,6 +189,21 @@ def test_frames_without_a_result_and_results_without_a_frame_are_left_out(tmp_pa
         "the raw record travels with its enrichment")
 
 
+def test_a_frame_that_cannot_be_read_is_logged_and_the_rest_are_still_enriched(tmp_path: Path):
+    """A frame that vanished, or cannot be opened, after it was selected must not
+    abort the enrichment: run_batch never aborts a batch over one bad file, and
+    the pass that follows it must not either. The bad frame is named in the log
+    and left out; every other frame still reaches the rows."""
+    frames = burst(tmp_path) + [tmp_path / "vanished.jpg"]
+    records = [record(f"{n}.jpg", HERON) for n in "abcd"] + [record("vanished.jpg", HERON)]
+    logged: list[str] = []
+
+    rows = enrich(frames, records, load_config(use_local=False), score=None, log=logged.append).rows
+
+    assert [r["file"] for r in rows] == ["a.jpg", "b.jpg", "c.jpg", "d.jpg"]
+    assert len(logged) == 1 and "vanished.jpg" in logged[0] and "unreadable" in logged[0]
+
+
 def test_write_plugin_results_is_the_old_tools_json_shape(tmp_path: Path):
     out = tmp_path / "plugin_results.json"
     write_plugin_results(out, [{"file": "a.jpg", "encounter": 0}])
@@ -276,6 +291,29 @@ def test_plugin_out_skips_range_checks_without_a_default_location_and_says_so(
     assert offline_gbif == []
     assert json.loads(out.read_text(encoding="utf-8"))[0]["range_flag"] is False
     assert "no default location" in capsys.readouterr().err
+
+
+def test_plugin_out_still_writes_the_readable_frames_when_one_vanished_during_the_run(
+    photos: Path, tmp_path: Path, capsys
+):
+    """Per-file failure isolation holds through the whole run. A frame that was
+    listed but is gone by the time it is read (here a dangling link) is logged
+    by run_batch and skipped; --plugin-out must then still write the other
+    frames instead of raising on the one that vanished."""
+    (photos / "vanished.jpg").symlink_to(tmp_path / "never-here.jpg")
+    config = _config_file(tmp_path, with_location=False)
+    out = tmp_path / "plugin_results.json"
+
+    code = cli.main([str(photos), "--config", str(config), "--backend", "scripted",
+                     "--plugin-out", str(out)])
+
+    err = capsys.readouterr().err
+    assert code == 0, err
+    assert "vanished.jpg: unreadable" in err, err
+    rows = json.loads(out.read_text(encoding="utf-8"))
+    assert [r["file"] for r in rows] == [PHOTO], "the readable frame did not reach the output"
+    assert set(PLUGIN_FIELDS) - {"burst_agreement"} <= set(rows[0]), (
+        "the scripted backend abstains, so agreement is absent; everything else is enriched")
 
 
 @pytest.mark.skipif(not CORPUS.is_dir(), reason="corpus fixtures not present")

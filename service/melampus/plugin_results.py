@@ -20,6 +20,7 @@ executable did not carry (card #436). It is now the `--plugin-out` half of
 from __future__ import annotations
 
 import json
+import sys
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -159,6 +160,7 @@ def enrich(
     lookup: tuple[GBIFClient, Location] | None = None,
     score: Scorer | None = analyze_quality,
     on_progress: Callable[[int, int], None] | None = None,
+    log: Callable[[str], None] = lambda msg: print(msg, file=sys.stderr),
 ) -> Enrichment:
     """Add the plugin's fields to every record that has a frame in `frames`.
 
@@ -166,9 +168,21 @@ def enrich(
     `file`). `lookup` is the GBIF client and place from `occurrence.range_lookup`,
     or None to skip range checks. `score` is the quality scorer, or None to skip
     quality. Rows come back in encounter order, each carrying its raw record.
+
+    A frame that cannot be read — gone since it was listed, or unreadable — is
+    logged and left out, as `run_batch` does: one bad file never aborts the pass.
     """
     by_file = {r["file"]: r for r in records}
-    encounters = cluster(sorted(frames), gap_seconds)
+    readable: list[Path] = []
+    for frame in sorted(frames):
+        try:
+            with frame.open("rb"):
+                pass
+        except OSError as exc:
+            log(f"{frame.name}: unreadable ({exc}); left out of the enrichment")
+            continue
+        readable.append(frame)
+    encounters = cluster(readable, gap_seconds)
     client, location = lookup if lookup is not None else (None, None)
 
     quality_scores: dict[str, float] = {}
