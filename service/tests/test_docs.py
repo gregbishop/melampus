@@ -339,12 +339,12 @@ def test_readme_build_blocks_sync_the_sdk_extras():
     )
 
 
-def _windows_job() -> str:
-    """The text of ci.yml's job on a Windows runner."""
-    workflow = CI_WORKFLOW.read_text(encoding="utf-8")
-    jobs = re.split(r"^  (?=\w[\w-]*:\s*$)", workflow.split("\njobs:\n", 1)[1], flags=re.MULTILINE)
+def _windows_job(workflow: Path = CI_WORKFLOW) -> str:
+    """The text of that workflow's job on a Windows runner."""
+    text = workflow.read_text(encoding="utf-8")
+    jobs = re.split(r"^  (?=\w[\w-]*:\s*$)", text.split("\njobs:\n", 1)[1], flags=re.MULTILINE)
     windows = [job for job in jobs if re.search(r"runs-on: windows-", job)]
-    assert windows, "ci.yml has no job on a Windows runner"
+    assert windows, f"{workflow.name} has no job on a Windows runner"
     return windows[0]
 
 
@@ -443,15 +443,25 @@ def test_release_workflow_builds_as_ci_does_and_attaches_a_zip_per_platform():
     gate keeps the workflow honest before it: it triggers on v* tags, its
     pytest steps are exactly CI's (the same sync and --build-binary on each
     runner, so what ships is what was tested, and the docs gates above cover
-    both), the zips come from tools/package_plugin.py (the one place that
-    knows the layout; no second copy in YAML), both zip names are in it, the
-    token gets `contents: write` and no other scope, and every third-party
-    action is pinned to a commit SHA with the version in a trailing comment."""
+    both), the Windows job's pytest line names tests/test_package_plugin.py
+    (the macOS job collects it with the whole suite; the Windows job lists
+    its files, and without this one the Windows zip ships from a script no
+    test has run on Windows: not the packaging of melampus.exe, not the
+    listing check, not the executable run from the unpacked folder), the
+    zips come from tools/package_plugin.py (the one place that knows the
+    layout; no second copy in YAML), both zip names are in it, the token
+    gets `contents: write` and no other scope, and every third-party action
+    is pinned to a commit SHA with the version in a trailing comment."""
     release = RELEASE_WORKFLOW.read_text(encoding="utf-8")
     assert re.search(r"^on:\n\s+push:\n\s+tags:\s*\[\s*['\"]?v\*", release, re.MULTILINE), (
         "release.yml does not trigger on pushed v* tags")
     assert sorted(_pytest_commands(RELEASE_WORKFLOW)) == sorted(_ci_pytest_commands()), (
         "release.yml's build steps must be exactly ci.yml's pytest commands")
+    windows_steps = [c for c in _pytest_commands(RELEASE_WORKFLOW) if c in _windows_job(RELEASE_WORKFLOW)]
+    assert windows_steps and all("tests/test_package_plugin.py" in c for c in windows_steps), (
+        "release.yml's Windows job must run tests/test_package_plugin.py, so the "
+        f"Windows zip ships from a script tested on Windows: {windows_steps}"
+    )
     assert "tools/package_plugin.py" in release, "release.yml does not package with tools/package_plugin.py"
     missing = [z for z in RELEASE_ZIPS if z not in release]
     assert not missing, f"release.yml does not name {missing}"
