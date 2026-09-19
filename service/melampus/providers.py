@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import platform
 import sys
+import urllib.request
+from dataclasses import dataclass
 
 from pydantic import SecretStr
 
@@ -47,9 +49,21 @@ SCRIPTED = "scripted"
 OLLAMA = "ollama"
 
 #: The engines the user chooses between, in the owner's order, then the fake.
-#: Card #404's detection will try them in this order for a default: the first
-#: that can run on this machine. Until it lands, no `--backend` means mlx.
+#: `detect_engines` tries them in this order for a default (card #404): the
+#: first that can run on this machine.
 BACKEND_CHOICES = ("mlx", OLLAMA, "openai", "claude", SCRIPTED)
+
+#: Where the local Ollama server listens. Ollama's docs/faq.mdx: "Ollama binds
+#: 127.0.0.1 port 11434 by default." One constant, so card #406 can make it a
+#: config value.
+OLLAMA_URL = "http://127.0.0.1:11434"
+
+#: How long the probe waits for the local server. Loopback answers in
+#: milliseconds or not at all; a second is a firewall's silence, not Ollama's.
+OLLAMA_PROBE_SECONDS = 1.0
+
+#: Where to get Ollama when nothing answers at OLLAMA_URL.
+OLLAMA_INSTALL = "https://ollama.com/download"
 
 #: The backends that run on this machine and bill nobody.
 LOCAL_BACKENDS = ("mlx", OLLAMA, SCRIPTED)
@@ -77,13 +91,68 @@ def _refusal(reason: str, *, works_here: tuple[str, ...]) -> BackendUnavailable:
     )
 
 
+def ollama_answers() -> bool:
+    """Whether an Ollama server answers at OLLAMA_URL: GET /api/version
+    (Ollama's docs/api.md § Version) within OLLAMA_PROBE_SECONDS, status 200.
+    Connection refused, a timeout, a non-200: unavailable. Never raises; a
+    probe reports."""
+    try:
+        with urllib.request.urlopen(
+            f"{OLLAMA_URL}/api/version", timeout=OLLAMA_PROBE_SECONDS
+        ) as response:
+            return response.status == 200
+    except Exception:  # noqa: BLE001 - every failure means the same thing: not here
+        return False
+
+
+@dataclass(frozen=True, slots=True)
+class EngineVerdict:
+    """Whether one engine can run on this machine, and why or why not, in the
+    words a user sees: the reason is what makes an unavailable engine a
+    greyed-out choice rather than a mystery (card #404)."""
+
+    engine: str
+    available: bool
+    reason: str
+
+
+def _key_required(engine: str) -> str:
+    specific, generic = KEY_VARIABLES[engine]
+    return f"API key required: set {specific} (or {generic})"
+
+
+def detect_engines() -> list[EngineVerdict]:
+    """One verdict per engine, in the owner's order (BACKEND_CHOICES without the
+    test fake). This is the one place that knows whether an engine can run
+    here: the refusals' "what works" list and the CLI's default both come from
+    it, so they cannot disagree with what the dialog (card #405) shows."""
+    apple_silicon = on_apple_silicon()
+    ollama = ollama_answers()
+    return [
+        EngineVerdict(
+            "mlx", apple_silicon,
+            "runs locally on this Apple Silicon Mac" if apple_silicon else "needs Apple Silicon",
+        ),
+        EngineVerdict(
+            OLLAMA, ollama,
+            f"Ollama is answering at {OLLAMA_URL}" if ollama
+            else f"no Ollama server at {OLLAMA_URL}; install it from {OLLAMA_INSTALL}",
+        ),
+        EngineVerdict("openai", True, _key_required("openai")),
+        EngineVerdict("claude", True, _key_required("claude")),
+    ]
+
+
 def _works_here() -> tuple[str, ...]:
-    """The backends this machine can run: mlx only on Apple Silicon, and never
-    an engine that is not built yet."""
-    return tuple(
-        b for b in BACKEND_CHOICES
-        if b != OLLAMA and (b != "mlx" or on_apple_silicon())
-    )
+    """The backends this machine can run, as detection says, plus the fake."""
+    return (*(v.engine for v in detect_engines() if v.available), SCRIPTED)
+
+
+def default_engine() -> str:
+    """What runs when nothing names an engine: the first detection says is
+    available, in the owner's order. Were none available, mlx, whose refusal
+    already says what to do."""
+    return next((v.engine for v in detect_engines() if v.available), "mlx")
 
 
 def normalise_provider(provider: str | None) -> str:
