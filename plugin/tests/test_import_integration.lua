@@ -45,7 +45,8 @@ local function writeResults(path, records)
 	handle:close()
 end
 
-local RESULTS = os.tmpname() .. '.json'
+-- os.tmpname() creates the file; the suite writes it and removes it at the end.
+local RESULTS = os.tmpname()
 
 --- Drop the plugin's modules so the next load runs them fresh under the mock.
 local function unloadPlugin()
@@ -482,4 +483,5 @@ t.test('a missing executable on Windows names melampus.exe and the plugin folder
 end)
 
 os.remove(RESULTS)
+mock.cleanUp()
 return t.summary()

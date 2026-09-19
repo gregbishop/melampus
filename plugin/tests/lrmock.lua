@@ -15,8 +15,17 @@ local M = {}
 
 M.state = {}
 
+--- Remove the temp directory this run made, if it made one.
+function M.cleanUp()
+	if M.state.tempDir then
+		os.execute('rm -rf ' .. M.state.tempDir)
+		M.state.tempDir = nil
+	end
+end
+
 function M.reset(options)
 	options = options or {}
+	M.cleanUp()
 	M.state = {
 		photos = {},
 		keywords = {},        -- id -> { name, parent, children }
@@ -272,6 +281,20 @@ namespaces.LrFileUtils = {
 	end,
 }
 
+--- A temp directory of this run's own, made on first use and removed by the
+-- next reset or by M.cleanUp (as the suite does with its results file). The
+-- machine's temp directory would hand one run the previews an earlier run
+-- left, and keep them.
+local function tempDir()
+	if not M.state.tempDir then
+		local path = os.tmpname()
+		os.remove(path)
+		os.execute('mkdir -p ' .. path)
+		M.state.tempDir = path
+	end
+	return M.state.tempDir
+end
+
 -- Lightroom joins paths with the platform's separator; WIN_ENV picks it.
 namespaces.LrPathUtils = {
 	child = function(dir, name) return dir .. (WIN_ENV and '\\' or '/') .. name end,
@@ -279,7 +302,7 @@ namespaces.LrPathUtils = {
 	getStandardFilePath = function(which)
 		if which == 'temp' then
 			if WIN_ENV then return 'C:\\Users\\photographer\\AppData\\Local\\Temp' end
-			return os.getenv('TMPDIR') or '/tmp'
+			return tempDir()
 		end
 		return os.getenv('HOME') or '/tmp'
 	end,
