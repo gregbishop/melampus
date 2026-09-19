@@ -365,6 +365,89 @@ def test_cli_cancelled_by_a_signal_keeps_the_partial_file_and_the_next_run_resum
         hub.stop()
 
 
+# --- the cooperative cancel: a marker file (card #408) ----------------------
+#
+# The Lightroom plugin cannot signal the executable (LrTasks.execute returns
+# only the exit code), so a download also stops when the cancel marker
+# appears, checked between chunks, and ends exactly as the signal path does:
+# `cancelled`, exit 4, the partial file kept for the next run to resume.
+
+
+def _slow_hub() -> FakeHub:
+    big = bytes(range(256)) * (40 * 4096)
+    hub = FakeHub(files={"config.json": FAKE_FILES["config.json"], "model.safetensors": big})
+    hub.throttle = (64 * 1024, 0.002)
+    hub.start()
+    return hub
+
+
+def test_download_stops_when_the_cancel_marker_appears_and_the_next_run_resumes(tmp_path: Path):
+    """Done-when 2 (#408) at the library: the marker is written once the first
+    chunk is on disk; the download raises DownloadCancelled (the same
+    exception a signal raises, so the entry point prints `cancelled` and
+    exits 4 through one path), the chunk stays in the cache, the marker is
+    gone on exit, and the re-run asks the host for the rest by Range."""
+    hub = _slow_hub()
+    marker = tmp_path / "data" / "download-cancel"
+    big = hub.files["model.safetensors"]
+    seen: list[Update] = []
+
+    def cancel_after_a_chunk(update: Update) -> None:
+        seen.append(update)
+        if update.bytes_done >= CHUNK and not marker.exists():
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.touch()
+
+    try:
+        with pytest.raises(DownloadCancelled) as cancelled:
+            download_model(FAKE_REPO, endpoint=hub.endpoint, cache_dir=tmp_path / "hub",
+                           on_update=cancel_after_a_chunk, cancel_marker=marker)
+        assert CANCEL_MARKER in str(cancelled.value)
+        assert not marker.exists(), "the marker was not removed on exit"
+        (partial,) = _incomplete(tmp_path / "hub")
+        kept = partial.stat().st_size
+        assert CHUNK <= kept < len(big), "the partial file was not kept"
+        assert partial.read_bytes() == big[:kept]
+        assert seen[-1].bytes_done < len(big) + len(FAKE_FILES["config.json"]), "the download did not stop"
+
+        hub.throttle = None
+        hub.requests.clear()
+        path, updates = _fetch(hub, tmp_path / "hub")
+        assert hub.gets("model.safetensors") == [f"bytes={kept}-"], "the rest was not asked for by Range"
+        assert _snapshot_files(path)["model.safetensors"] == big
+        assert not _incomplete(tmp_path / "hub")
+    finally:
+        hub.stop()
+
+
+def test_a_stale_cancel_marker_is_removed_when_a_download_starts(fake_hub: FakeHub, tmp_path: Path):
+    """A marker left by an earlier click must not cancel the next download
+    before it begins: it is removed on start, and the run completes."""
+    marker = tmp_path / "data" / "download-cancel"
+    marker.parent.mkdir(parents=True)
+    marker.touch()
+
+    path = download_model(FAKE_REPO, endpoint=fake_hub.endpoint, cache_dir=tmp_path / "hub",
+                          on_update=lambda update: None, cancel_marker=marker)
+
+    assert _snapshot_files(path) == FAKE_FILES
+    assert not marker.exists()
+
+
+def test_the_download_watches_the_documented_marker_by_default(monkeypatch, tmp_path: Path, fake_hub: FakeHub):
+    """`--download-model` passes no marker: the download watches the path
+    `--model-status` reports (the one docs/config.md documents), which is
+    what the plugin writes to."""
+    marker = tmp_path / "data" / "download-cancel"
+    monkeypatch.setattr(download, "cancel_marker_path", lambda: marker)
+    marker.parent.mkdir(parents=True)
+    marker.touch()
+
+    _fetch(fake_hub, tmp_path / "hub")
+
+    assert not marker.exists(), "the download did not use the documented marker"
+
+
 # --- the model's status and removal, for the Settings button (card #408) ---
 #
 # Done-when 1 and 3 of card #408: the dialog must know, without downloading,
