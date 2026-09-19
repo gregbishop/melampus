@@ -122,10 +122,11 @@ def test_the_command_the_plugin_builds_runs_the_executable_beside_it(
     proc = subprocess.run(command, shell=True, env=env, cwd=tmp_path,
                           capture_output=True, text=True, timeout=600)
 
-    log = tmp_path / "melampus-cli.log"
+    # The mock keeps its temp directory under TMPDIR, so the CLI log is here.
+    log = next(tmp_path.rglob("melampus-cli.log"), None)
     assert proc.returncode == 0, (
         f"exit {proc.returncode}: {proc.stderr[-2000:]}\n"
-        f"{log.read_text(encoding='utf-8')[-3000:] if log.is_file() else 'no CLI log'}")
+        f"{log.read_text(encoding='utf-8')[-3000:] if log else 'no CLI log'}")
     rows = json.loads(results.read_text(encoding="utf-8"))
     assert [r["file"] for r in rows] == [PHOTO]
     # The scripted fake answers nothing, so the row has no identification and
