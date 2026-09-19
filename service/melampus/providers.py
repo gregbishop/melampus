@@ -15,6 +15,7 @@ import shutil
 import subprocess
 import sys
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from pydantic import SecretStr
@@ -127,8 +128,63 @@ CLAUDE_CODE_STATUS = ("auth", "status", "--json")
 #: --detect-engines must never hang the settings dialog.
 CLAUDE_CODE_PROBE_SECONDS = 10.0
 
+#: Codex CLI as an engine (card #422): the second CLI behind the same seam,
+#: for when Claude is at its limit or the owner prefers it. `codex` resolves
+#: to a CommandBackend on CODEX_COMMAND, or on `[model] command` when the
+#: user sets one. Runs bill to the ChatGPT plan Codex is signed in to.
+CODEX = "codex"
+
+#: The program, as shutil.which looks for it: `codex` on PATH.
+CODEX_PROGRAM = "codex"
+
+#: The one copy of the template. Every flag is from `codex exec --help`
+#: (0.154.0) and developers.openai.com/codex (non-interactive-mode,
+#: developer-commands, image-inputs): `exec` runs "non-interactively";
+#: `--image {image}` attaches the staged JPEG ("Attach images to the first
+#: message"; "PNG and JPEG" accepted), first, because the flag is variadic
+#: (`-i, --image <FILE>...`) and takes a prompt right after it for a second
+#: file (measured); `--json` makes stdout a JSONL stream, the reply the
+#: agent_message's text and a failure the turn.failed's message
+#: (codex_reply reads both); `--ephemeral` writes no session per frame;
+#: `--skip-git-repo-check` runs from wherever melampus was launched;
+#: `--ignore-user-config` loads no ~/.codex/config.toml ("Authentication
+#: still uses CODEX_HOME"), so no MCP server starts per frame and the run is
+#: the same on every machine; `--sandbox read-only` and `-c
+#: approval_policy="never"` (the documented approval_policy value; exec
+#: 0.154.0 rejects --ask-for-approval, measured) let the run proceed with
+#: nobody to approve and nothing writable; `-c project_doc_max_bytes=0`
+#: ("Maximum bytes read from AGENTS.md") keeps the launch directory's
+#: instructions out of the prompt; `--color never` keeps ANSI out of the
+#: stderr the error messages quote. The prompt is the positional argument,
+#: last: the pipeline's prompt in full; the image needs no mention, it is
+#: attached.
+CODEX_COMMAND = [
+    CODEX_PROGRAM, "exec", "--image", "{image}", "--json", "--ephemeral",
+    "--skip-git-repo-check", "--ignore-user-config", "--sandbox", "read-only",
+    "-c", 'approval_policy="never"', "-c", "project_doc_max_bytes=0", "--color", "never",
+    "{prompt}",
+]
+
+#: Where to get Codex CLI when nothing on PATH is called `codex`.
+CODEX_INSTALL = "https://developers.openai.com/codex/cli"
+
+#: How to sign in from a shell (`codex login --help`: "Manage login"; with
+#: no flags "Codex opens a browser for the ChatGPT OAuth flow", the plan).
+CODEX_SIGN_IN = "codex login"
+
+#: The documented, cheap sign-in check (developer-commands: "Print the
+#: active authentication mode and exit with 0 when logged in"; measured on
+#: 0.154.0: exit 0 and "Logged in using ChatGPT" on stderr, or exit 1 and
+#: "Not logged in"): no model call, so detection spends nothing. It does
+#: not know the plan's usage limit; only a run does (codex_reply).
+CODEX_STATUS = ("login", "status")
+
+#: How long the status check may take. A native binary answers it in
+#: milliseconds (measured: 0.01 s); ten seconds is a broken install.
+CODEX_PROBE_SECONDS = 10.0
+
 #: The backends that run on this machine and bill nobody per call.
-LOCAL_BACKENDS = ("mlx", OLLAMA, COMMAND, CLAUDE_CODE, SCRIPTED)
+LOCAL_BACKENDS = ("mlx", OLLAMA, COMMAND, CLAUDE_CODE, CODEX, SCRIPTED)
 
 
 class BackendUnavailable(RuntimeError):
@@ -189,58 +245,107 @@ def _key_required(engine: str) -> str:
     return f"API key required: set {specific} (or {generic})"
 
 
-def claude_code_verdict(program: str | None = None) -> EngineVerdict:
-    """Whether Claude Code can be the engine here (card #421): `program`
-    (CLAUDE_CODE_PROGRAM unless a template names another) must be on PATH,
-    and its status check must say signed in. Never raises; a verdict
-    reports. The reasons are the words the user sees: not installed with
-    where to get it, not signed in with the command that signs in, a check
-    that did not answer, or available and billing to the subscription."""
-    program = program or CLAUDE_CODE_PROGRAM
-    executable = shutil.which(program)
-    if executable is None:
-        return EngineVerdict(
-            CLAUDE_CODE, False,
-            f"Claude Code is not installed: nothing on PATH is called '{program}'; "
-            f"install it from {CLAUDE_CODE_INSTALL}, then sign in with `{CLAUDE_CODE_SIGN_IN}`",
-        )
-    try:
-        status = subprocess.run(
-            [executable, *CLAUDE_CODE_STATUS],
-            capture_output=True, text=True, encoding="utf-8", errors="replace",
-            stdin=subprocess.DEVNULL, timeout=CLAUDE_CODE_PROBE_SECONDS,
-        )
-    except subprocess.TimeoutExpired:
-        return EngineVerdict(
-            CLAUDE_CODE, False,
-            f"`{program} {' '.join(CLAUDE_CODE_STATUS)}` did not answer within "
-            f"{CLAUDE_CODE_PROBE_SECONDS:g}s",
-        )
-    except OSError as exc:
-        return EngineVerdict(CLAUDE_CODE, False, f"'{program}' could not be run: {exc}")
-    if status.returncode != 0:
-        return EngineVerdict(
-            CLAUDE_CODE, False,
-            f"Claude Code is installed but not signed in; run `{CLAUDE_CODE_SIGN_IN}`",
-        )
+@dataclass(frozen=True, slots=True)
+class CliEngine:
+    """A subscription CLI behind the command seam, in the owner's words: the
+    engine's name, the program shutil.which looks for, where to get it, how
+    to sign in, the documented cheap status check, the built-in template,
+    the decoder that turns its stdout into the reply, and how its status
+    output names the account. What differs between Claude Code and Codex
+    is data here; the verdict and the factory are one function each."""
+
+    engine: str
+    title: str
+    program: str
+    install: str
+    sign_in: str
+    status: tuple[str, ...]
+    command: list[str]
+    decode: Callable[[str], str]
+    #: The account kind out of a passed status check's output, or "".
+    account: Callable[[subprocess.CompletedProcess], str]
+
+
+def _claude_code_account(status: subprocess.CompletedProcess) -> str:
+    """`claude auth status --json`: authMethod and subscriptionType."""
     try:
         account = json.loads(status.stdout)
     except ValueError:
         account = {}
-    signed_in_as = ", ".join(
+    return ", ".join(
         str(account[key]) for key in ("authMethod", "subscriptionType")
         if isinstance(account, dict) and account.get(key)
     )
+
+
+def _cli_verdict(cli: CliEngine, program: str | None, probe_seconds: float) -> EngineVerdict:
+    """Whether a subscription CLI can be the engine here: `program` (the
+    CLI's own unless a template names another) must be on PATH, and its
+    status check must say signed in within `probe_seconds`. Never raises; a
+    verdict reports. The reasons are the words the user sees: not installed
+    with where to get it, not signed in with the command that signs in, a
+    check that did not answer, or available and billing to the subscription."""
+    program = program or cli.program
+    executable = shutil.which(program)
+    if executable is None:
+        return EngineVerdict(
+            cli.engine, False,
+            f"{cli.title} is not installed: nothing on PATH is called '{program}'; "
+            f"install it from {cli.install}, then sign in with `{cli.sign_in}`",
+        )
+    try:
+        status = subprocess.run(
+            [executable, *cli.status],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            stdin=subprocess.DEVNULL, timeout=probe_seconds,
+        )
+    except subprocess.TimeoutExpired:
+        return EngineVerdict(
+            cli.engine, False,
+            f"`{program} {' '.join(cli.status)}` did not answer within {probe_seconds:g}s",
+        )
+    except OSError as exc:
+        return EngineVerdict(cli.engine, False, f"'{program}' could not be run: {exc}")
+    if status.returncode != 0:
+        return EngineVerdict(
+            cli.engine, False,
+            f"{cli.title} is installed but not signed in; run `{cli.sign_in}`",
+        )
+    signed_in_as = cli.account(status)
     return EngineVerdict(
-        CLAUDE_CODE, True,
-        "Claude Code is signed in" + (f" ({signed_in_as})" if signed_in_as else "")
+        cli.engine, True,
+        f"{cli.title} is signed in" + (f" ({signed_in_as})" if signed_in_as else "")
         + "; every frame bills to that subscription, not to an API key",
     )
 
 
+def claude_code_verdict(program: str | None = None) -> EngineVerdict:
+    """Whether Claude Code can be the engine here (card #421): `claude` on
+    PATH and `claude auth status` saying signed in, under
+    CLAUDE_CODE_PROBE_SECONDS. Never raises; a verdict reports."""
+    return _cli_verdict(CLAUDE_CODE_CLI, program, CLAUDE_CODE_PROBE_SECONDS)
+
+
+def _codex_account(status: subprocess.CompletedProcess) -> str:
+    """`codex login status`: "Logged in using ChatGPT" on stderr (measured
+    on 0.154.0); the words after "using" are the account kind."""
+    _, using, kind = (status.stderr or "").strip().partition("Logged in using ")
+    return kind.splitlines()[0].strip() if using else ""
+
+
+def codex_verdict(program: str | None = None) -> EngineVerdict:
+    """Whether Codex CLI can be the engine here (card #422): `codex` on PATH
+    and `codex login status` saying signed in, under CODEX_PROBE_SECONDS.
+    Never raises; a verdict reports. Whether the plan is at its usage limit
+    is not knowable here without a model call; the first run says, and the
+    batch stops on it naming the reset time (codex_reply)."""
+    return _cli_verdict(CODEX_CLI, program, CODEX_PROBE_SECONDS)
+
+
 def detect_engines(ollama_at: str | None = None) -> list[EngineVerdict]:
     """One verdict per engine, in the owner's order (BACKEND_CHOICES without the
-    test fake), then claude-code (card #421; the picker learns it in #423).
+    test fake), then claude-code and codex (cards #421, #422; the picker
+    learns them in #423).
     This is the one place that knows whether an engine can run here: the
     refusals' "what works" list and the CLI's default both come from it, so
     they cannot disagree with what the dialog (card #405) shows. `ollama_at`
@@ -261,6 +366,7 @@ def detect_engines(ollama_at: str | None = None) -> list[EngineVerdict]:
         EngineVerdict("openai", True, _key_required("openai")),
         EngineVerdict("claude", True, _key_required("claude")),
         claude_code_verdict(),
+        codex_verdict(),
     ]
 
 
@@ -291,6 +397,92 @@ def claude_code_reply(stdout: str) -> str:
             )
         raise CommandFailed(f"Claude Code reported an error: {result}")
     return result
+
+
+#: Claude Code, as the one verdict and the one factory branch see it.
+CLAUDE_CODE_CLI = CliEngine(
+    CLAUDE_CODE, "Claude Code", CLAUDE_CODE_PROGRAM, CLAUDE_CODE_INSTALL, CLAUDE_CODE_SIGN_IN,
+    CLAUDE_CODE_STATUS, CLAUDE_CODE_COMMAND, claude_code_reply, _claude_code_account,
+)
+
+
+def codex_reply(stdout: str) -> str:
+    """The reply text out of Codex CLI's `--json` stdout: the JSONL stream's
+    last `item.completed` agent_message (docs: the sample stream; `-o`
+    writes "the final message"). A `turn.failed` is the engine refusing,
+    not the frame: measured on 0.154.0, a plan at its usage limit fails the
+    turn with "You've hit your usage limit ... try again at <time>", and no
+    credentials fail it with "401 Unauthorized", both exit 1 with the
+    stream on stdout; each is CommandFailed in the user's terms (the reset
+    time as the CLI said it; the sign-in command) plus Codex's own words,
+    and any other failure is CommandFailed in Codex's words alone. `error`
+    events before a completed turn are the CLI's own retries, not
+    failures. A stdout that is not an event stream (a user's own `[model]
+    command` without `--json`, or a bare reply that happens to be JSON
+    without a `type`) passes through untouched."""
+    events = []
+    for line in stdout.splitlines():
+        if not line.strip():
+            continue
+        try:
+            event = json.loads(line)
+        except ValueError:
+            return stdout
+        if not isinstance(event, dict) or "type" not in event:
+            return stdout
+        events.append(event)
+    if not events:
+        return stdout
+    reply = ""
+    for event in events:
+        if event["type"] == "turn.failed":
+            _codex_refuse(str((event.get("error") or {}).get("message") or "the turn failed"))
+        item = event.get("item") or {}
+        if event["type"] == "item.completed" and item.get("type") == "agent_message":
+            reply = str(item.get("text") or "")
+    return reply
+
+
+def _codex_refuse(message: str) -> None:
+    lowered = message.lower()
+    if "usage limit" in lowered:
+        _, _, when = message.partition("try again at ")
+        raise CommandFailed(
+            "Codex CLI is at its usage limit"
+            + (f", until {when.strip().rstrip('.')}" if when.strip() else "")
+            + f"; wait for it to reset or switch engines (it said: {message})"
+        )
+    if "401" in message or "unauthorized" in lowered:
+        raise CommandFailed(
+            f"Codex CLI is not signed in; run `{CODEX_SIGN_IN}` and try again "
+            f"(it said: {message})"
+        )
+    raise CommandFailed(f"Codex CLI reported an error: {message}")
+
+
+#: Codex CLI, as the one verdict and the one factory branch see it.
+CODEX_CLI = CliEngine(
+    CODEX, "Codex CLI", CODEX_PROGRAM, CODEX_INSTALL, CODEX_SIGN_IN,
+    CODEX_STATUS, CODEX_COMMAND, codex_reply, _codex_account,
+)
+
+
+def _cli_backend(cli: CliEngine, settings, verdict: Callable[[str], EngineVerdict]) -> VLMBackend:
+    """The seam configured for one subscription CLI: the built-in template
+    unless the user set [model] command, and the reply decoded from the
+    CLI's stdout. `verdict` is asked before any image is read, like the
+    `command` engine's shutil.which: a CLI that is not installed or not
+    signed in is refused once, up front, with the fix."""
+    command = list(settings.command or cli.command)
+    said = verdict(command[0])
+    if not said.available:
+        raise _refusal(f"{said.reason}.", works_here=_works_here(settings.ollama_url))
+    from .backend import CommandBackend
+
+    return CommandBackend(
+        command, executable=shutil.which(command[0]), timeout=settings.timeout_seconds,
+        decode=cli.decode,
+    )
 
 
 def _works_here(ollama_at: str | None = None) -> tuple[str, ...]:
@@ -404,19 +596,10 @@ def build_primary_backend(config: MelampusConfig) -> VLMBackend:
         )
 
     if kind == CLAUDE_CODE:
-        # The seam configured for Claude Code: the built-in template unless
-        # the user set [model] command, and the reply unwrapped from the
-        # result object. Resolved before any image is read, like `command`.
-        command = list(settings.command or CLAUDE_CODE_COMMAND)
-        verdict = claude_code_verdict(command[0])
-        if not verdict.available:
-            raise _refusal(f"{verdict.reason}.", works_here=_works_here(settings.ollama_url))
-        from .backend import CommandBackend
+        return _cli_backend(CLAUDE_CODE_CLI, settings, claude_code_verdict)
 
-        return CommandBackend(
-            command, executable=shutil.which(command[0]), timeout=settings.timeout_seconds,
-            decode=claude_code_reply,
-        )
+    if kind == CODEX:
+        return _cli_backend(CODEX_CLI, settings, codex_verdict)
 
     if kind == SCRIPTED:
         from .backend import ScriptedBackend

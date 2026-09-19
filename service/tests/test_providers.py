@@ -23,7 +23,7 @@ from pathlib import Path
 import urllib.request
 
 import pytest
-from conftest import PHOTO, REAL_CLAUDE_CODE_VERDICT, FakeOllama
+from conftest import PHOTO, REAL_CLAUDE_CODE_VERDICT, REAL_CODEX_VERDICT, FakeOllama
 from test_pipeline import ID_OK, ROUTING_OK
 
 from melampus import providers
@@ -401,14 +401,14 @@ def _verdict(engine: str) -> providers.EngineVerdict:
     return verdict
 
 
-def test_detection_lists_the_engines_in_the_owners_order_then_claude_code(
+def test_detection_lists_the_engines_in_the_owners_order_then_the_subscription_clis(
     no_ambient_keys, no_ambient_ollama
 ):
     """The list the dialog (card #405) will show: one verdict per engine, in
-    the order BACKEND_CHOICES names them, then claude-code (card #421;
-    the picker learns it in #423), never the test fake."""
+    the order BACKEND_CHOICES names them, then claude-code and codex (cards
+    #421, #422; the picker learns them in #423), never the test fake."""
     verdicts = providers.detect_engines()
-    assert [v.engine for v in verdicts] == [*ENGINES, providers.CLAUDE_CODE]
+    assert [v.engine for v in verdicts] == [*ENGINES, providers.CLAUDE_CODE, providers.CODEX]
     for verdict in verdicts:
         assert isinstance(verdict.available, bool)
         assert verdict.reason, f"{verdict.engine} has no reason"
@@ -678,7 +678,7 @@ def test_cli_detect_engines_prints_the_verdicts_as_json_in_order(
     out, err = capsys.readouterr()
     assert code == 0, err
     verdicts = json.loads(out)
-    assert [v["engine"] for v in verdicts] == [*ENGINES, providers.CLAUDE_CODE]
+    assert [v["engine"] for v in verdicts] == [*ENGINES, providers.CLAUDE_CODE, providers.CODEX]
     assert all(set(v) == {"engine", "available", "reason"} for v in verdicts)
     by_engine = {v["engine"]: v for v in verdicts}
     assert by_engine["mlx"] == {"engine": "mlx", "available": False, "reason": "needs Apple Silicon"}
@@ -1725,9 +1725,9 @@ def test_cli_detect_engines_prints_the_claude_code_verdict(monkeypatch, tmp_path
     _fake_claude(monkeypatch, tmp_path, mode="not-signed-in")
     assert main(["--detect-engines"]) == 0
     verdicts = json.loads(capsys.readouterr().out)
-    assert [v["engine"] for v in verdicts] == [*ENGINES, "claude-code"]
-    assert verdicts[-1]["available"] is False
-    assert providers.CLAUDE_CODE_SIGN_IN in verdicts[-1]["reason"]
+    assert [v["engine"] for v in verdicts] == [*ENGINES, "claude-code", "codex"]
+    assert verdicts[-2]["available"] is False
+    assert providers.CLAUDE_CODE_SIGN_IN in verdicts[-2]["reason"]
 
 
 @posix_only
@@ -1818,5 +1818,569 @@ def test_cli_backend_claude_code_writes_a_json_result(monkeypatch, photos, tmp_p
     assert result["file"] == PHOTO
     assert result["status"] == "ok"
     assert result["model"] == " ".join(providers.CLAUDE_CODE_COMMAND)
+    assert [c["common_name"] for c in result["identification"]["candidates"]] == [
+        "Tricolored Heron", "Little Blue Heron"]
+
+
+# --- card #422: Codex CLI as an engine --------------------------------------
+
+CODEX = "codex"
+
+#: The usage-limit reply the real Codex CLI 0.154.0 gave on the one exec
+#: attempt (2026-09-18, the owner's plan at its limit), verbatim.
+_CODEX_USAGE_LIMIT = (
+    "You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to "
+    "purchase more credits or try again at Sep 19th, 2026 7:46 AM."
+)
+
+#: The not-signed-in failure measured with an empty CODEX_HOME: every
+#: attempt is refused with a 401 and the turn fails on it, exit 1.
+_CODEX_UNAUTHORIZED = (
+    "unexpected status 401 Unauthorized: Missing bearer or basic authentication in "
+    "header, url: https://api.openai.com/v1/responses, cf-ray: a3d4aafb6870e669-DEN, "
+    "request id: req_8d75516fb1544d9e8b56bb59d3f4fa67"
+)
+
+
+def _codex_events(*events: dict) -> str:
+    """A `--json` stdout: one event per line, as the docs' sample stream."""
+    return "".join(json.dumps(event) + "\n" for event in events)
+
+
+def _codex_answer(text: str) -> str:
+    """The documented success stream around one agent message."""
+    return _codex_events(
+        {"type": "thread.started", "thread_id": "01a0b730-6b11-7720-9573-672388e3cc7e"},
+        {"type": "turn.started"},
+        {"type": "item.completed", "item": {"id": "item_0", "type": "agent_message", "text": text}},
+        {"type": "turn.completed", "usage": {"input_tokens": 1620, "cached_input_tokens": 0,
+                                             "output_tokens": 61, "reasoning_output_tokens": 0}},
+    )
+
+
+def _codex_failure(message: str) -> str:
+    """The measured failure stream: an error event, then the turn fails on it."""
+    return _codex_events(
+        {"type": "thread.started", "thread_id": "01a0b730-6b11-7720-9573-672388e3cc7e"},
+        {"type": "turn.started"},
+        {"type": "error", "message": message},
+        {"type": "turn.failed", "error": {"message": message}},
+    )
+
+
+_FAKE_CODEX_SCRIPT = '''#!{python}
+"""Stands in for Codex CLI 0.154.0's documented non-interactive interface,
+as `codex exec --help`, `codex login status --help` and the docs
+(developers.openai.com/codex: non-interactive-mode, developer-commands,
+image-inputs) describe it, and as measured on 2026-09-18: `codex exec
+[OPTIONS] [PROMPT]` runs once; `-i/--image <FILE>...` attaches the image to
+the prompt (variadic: a prompt right after it is taken for a second file,
+so a flag must come between); `--json` makes stdout a JSONL stream whose
+`item.completed` agent_message carries the reply and whose `turn.failed`
+carries a failure's message; without `--json` only the final message is
+on stdout; a run that cannot proceed exits 1 with the failure in the
+stream and progress on stderr; `codex login status` exits 0 when signed
+in ("Logged in using ChatGPT" on stderr) and 1 when not ("Not logged in").
+MODE: "signed-in" answers; "not-signed-in" fails the status check and
+every run the measured way (401); "usage-limit" passes the status check
+and fails every run with the measured usage-limit reply; "hung" never
+answers the status check."""
+import json
+import os
+import sys
+
+MODE = {mode!r}
+ROUTING = {routing!r}
+IDENTIFICATION = {identification!r}
+LOG = {log!r}
+USAGE_LIMIT = {usage_limit!r}
+UNAUTHORIZED = {unauthorized!r}
+
+argv = sys.argv[1:]
+with open(LOG, "a", encoding="utf-8") as log:
+    log.write(json.dumps({{"argv": argv, "cwd": os.getcwd()}}) + "\\n")
+
+if argv[:2] == ["login", "status"]:
+    if MODE == "hung":
+        import time
+        time.sleep(30)
+    if MODE == "not-signed-in":
+        print("Not logged in", file=sys.stderr)
+        sys.exit(1)
+    print("Logged in using ChatGPT", file=sys.stderr)
+    sys.exit(0)
+
+if argv[:1] != ["exec"]:
+    sys.exit("the fake codex knows `exec` and `login status` only")
+
+import argparse
+
+ap = argparse.ArgumentParser(prog="codex exec")
+ap.add_argument("-i", "--image", nargs="+", action="extend", default=[])
+ap.add_argument("--json", action="store_true")
+ap.add_argument("--ephemeral", action="store_true")
+ap.add_argument("--skip-git-repo-check", action="store_true")
+ap.add_argument("--ignore-user-config", action="store_true")
+ap.add_argument("-s", "--sandbox", choices=["read-only", "workspace-write", "danger-full-access"])
+ap.add_argument("-c", "--config", action="append", default=[])
+ap.add_argument("--color", choices=["always", "never", "auto"], default="auto")
+ap.add_argument("-o", "--output-last-message")
+ap.add_argument("-m", "--model")
+ap.add_argument("prompt", nargs="?")
+args = ap.parse_args(argv[1:])
+if args.prompt is None:
+    print("Reading prompt from stdin...", file=sys.stderr)
+    print("No prompt provided via stdin.", file=sys.stderr)
+    sys.exit(1)
+print("Reading additional input from stdin...", file=sys.stderr)
+
+
+def event(**fields):
+    if args.json:
+        print(json.dumps(fields))
+
+
+def fail(message):
+    event(type="thread.started", thread_id="01a0b730-6b11-7720-9573-672388e3cc7e")
+    event(type="turn.started")
+    event(type="error", message=message)
+    event(type="turn.failed", error={{"message": message}})
+    if not args.json:
+        print("ERROR: " + message, file=sys.stderr)
+    sys.exit(1)
+
+
+if MODE == "not-signed-in":
+    fail(UNAUTHORIZED)
+if MODE == "usage-limit":
+    fail(USAGE_LIMIT)
+for image in args.image:
+    if not os.path.isfile(image):
+        fail("image not found: " + image)
+answer = "```json\\n" + (ROUTING if "router" in args.prompt else IDENTIFICATION) + "\\n```"
+event(type="thread.started", thread_id="01a0b730-6b11-7720-9573-672388e3cc7e")
+event(type="turn.started")
+event(type="item.completed", item={{"id": "item_0", "type": "agent_message", "text": answer}})
+event(type="turn.completed", usage={{"input_tokens": 1620, "cached_input_tokens": 0,
+                                    "output_tokens": 61, "reasoning_output_tokens": 0}})
+if not args.json:
+    print(answer)
+if args.output_last_message:
+    with open(args.output_last_message, "w", encoding="utf-8") as last:
+        last.write(answer)
+'''
+
+
+def _fake_codex(monkeypatch, tmp_path, *, mode: str = "signed-in") -> Path:
+    """Write a `codex` that imitates the real CLI's documented interface into
+    a folder put first on PATH, so the real shutil.which finds it ahead of
+    any real Codex and the real subprocess runs it, no shell. Returns the
+    log it appends each invocation's argv and cwd to."""
+    folder = tmp_path / "bin"
+    folder.mkdir(exist_ok=True)
+    log = tmp_path / "codex-calls.jsonl"
+    script = folder / CODEX
+    script.write_text(_FAKE_CODEX_SCRIPT.format(
+        python=sys.executable, mode=mode, routing=ROUTING_OK, identification=ID_OK, log=str(log),
+        usage_limit=_CODEX_USAGE_LIMIT, unauthorized=_CODEX_UNAUTHORIZED,
+    ), encoding="utf-8")
+    script.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{folder}{os.pathsep}{os.environ.get('PATH', '')}")
+    # conftest's autouse fixture stubs detection out; this test wants the
+    # real one, against the fake.
+    monkeypatch.setattr(providers, "codex_verdict", REAL_CODEX_VERDICT)
+    assert shutil.which(CODEX) == str(script)
+    return log
+
+
+def _no_codex(monkeypatch, tmp_path) -> None:
+    """A PATH on which nothing is called `codex`, keeping the interpreter's
+    own folder so a shebang script elsewhere on it still runs."""
+    empty = tmp_path / "empty-bin"
+    empty.mkdir(exist_ok=True)
+    monkeypatch.setenv("PATH", f"{empty}{os.pathsep}{Path(sys.executable).parent}")
+    monkeypatch.setattr(providers, "codex_verdict", REAL_CODEX_VERDICT)
+    assert shutil.which(CODEX) is None, "a real codex is still on the test PATH"
+
+
+def test_codex_is_an_engine_name_on_the_command_seam():
+    """Card #422: `codex` is the engine's name (the owner's words), a named
+    configuration of the command seam and not a new backend: it is local
+    (bills to a subscription, not per call: no cloud retuning, no cost
+    prompt, no cloud cache file), selectable by config and --backend, and
+    not yet a picker choice (the picker learns it in #423), so
+    BACKEND_CHOICES is unchanged."""
+    assert providers.CODEX == "codex"
+    assert providers.CODEX in providers.LOCAL_BACKENDS
+    assert providers.BACKEND_CHOICES == (*ENGINES, providers.SCRIPTED)
+    assert not providers.is_cloud_primary(_cfg(model={"backend": "codex"}))
+
+
+def test_cli_accepts_backend_codex(photos, tmp_path, capsys):
+    from melampus.cli import main
+
+    code = main([str(photos), "--backend", "codex", "--report-only",
+                 "--cache", str(tmp_path / "cache.jsonl")])
+
+    assert code == 0, capsys.readouterr().err
+
+
+def test_codex_template_is_the_documented_exec_invocation():
+    """The built-in template, from `codex exec --help` (0.154.0) and
+    developers.openai.com/codex (non-interactive-mode, developer-commands,
+    image-inputs): `exec` runs non-interactively; `--image {image}` attaches
+    the staged JPEG to the prompt ("Attach images to the first message";
+    PNG and JPEG accepted), and sits first because the flag is variadic, so
+    the prompt must not follow it directly; `--json` makes stdout a JSONL
+    stream whose agent_message is the reply and whose turn.failed is a
+    failure in the CLI's own words (codex_reply reads both); `--ephemeral`
+    writes no session per frame; `--skip-git-repo-check` runs from wherever
+    melampus was launched; `--ignore-user-config` loads no
+    ~/.codex/config.toml (no MCP server per frame; auth still read);
+    `--sandbox read-only` and `-c approval_policy="never"` let the run
+    proceed with nobody to approve and nothing writable (exec 0.154.0 has
+    no --ask-for-approval flag, measured; the config key is the documented
+    equivalent); `-c project_doc_max_bytes=0` keeps the launch directory's
+    AGENTS.md out of the prompt; `--color never` keeps ANSI out of stderr.
+    The prompt is the positional argument, last, the pipeline's prompt in
+    full. It is a valid `[model] command` by the config's own rule."""
+    template = providers.CODEX_COMMAND
+    assert template[0] == CODEX == providers.CODEX_PROGRAM
+    assert template[1:4] == ["exec", "--image", "{image}"]
+    assert template[4].startswith("--"), "a flag must follow the variadic --image"
+    assert template[4:-1] == [
+        "--json", "--ephemeral", "--skip-git-repo-check", "--ignore-user-config",
+        "--sandbox", "read-only", "-c", 'approval_policy="never"',
+        "-c", "project_doc_max_bytes=0", "--color", "never",
+    ]
+    assert template[-1] == "{prompt}"
+    assert "--ask-for-approval" not in template, "codex exec 0.154.0 rejects it"
+    assert _cfg(model={"command": template}).model.command == template
+
+
+@pytest.mark.parametrize(
+    ("stdout", "expected"),
+    [
+        (_codex_answer("```json\n" + ROUTING_OK + "\n```"), "```json\n" + ROUTING_OK + "\n```"),
+        (_codex_events(
+            {"type": "thread.started", "thread_id": "x"},
+            {"type": "turn.started"},
+            {"type": "item.completed", "item": {"id": "item_0", "type": "reasoning",
+                                                 "text": "Looking at the image."}},
+            {"type": "item.completed", "item": {"id": "item_1", "type": "agent_message",
+                                                 "text": "Let me look."}},
+            {"type": "item.completed", "item": {"id": "item_2", "type": "agent_message",
+                                                 "text": ID_OK}},
+            {"type": "turn.completed", "usage": {}},
+        ), ID_OK),
+        ("Sure:\n" + ID_OK, "Sure:\n" + ID_OK),
+        ('{"taxon": "bird", "confidence": 0.9, "reasoning": "a heron"}',
+         '{"taxon": "bird", "confidence": 0.9, "reasoning": "a heron"}'),
+    ],
+    ids=["jsonl-agent-message", "last-of-several", "text", "bare-reply-json"],
+)
+def test_codex_reply_is_the_agent_message_of_the_jsonl_stream(stdout, expected):
+    """Reply extraction: `--json` makes stdout a JSONL stream (docs: "every
+    event Codex emits"), and the shared JSON extraction must see only the
+    final agent message's text, not the events. Several agent messages: the
+    last is the reply (the docs' -o writes "the final message"). A stdout
+    that is not an event stream, as a user's own `[model] command` without
+    `--json` prints, or a bare reply that happens to be JSON without a
+    `type`, passes through untouched."""
+    assert providers.codex_reply(stdout) == expected
+
+
+def test_codex_reply_maps_the_usage_limit_to_a_refusal_naming_the_reset_time():
+    """Measured on 0.154.0 with the owner's plan at its limit: exit 1, the
+    stream's `error` and `turn.failed` both carrying "You've hit your usage
+    limit ... try again at Sep 19th, 2026 7:46 AM." That is the engine
+    refusing, not the frame: CommandFailed naming the limit and, as the CLI
+    said it, when it resets, so the batch stops at the first reply."""
+    with pytest.raises(CommandFailed) as err:
+        providers.codex_reply(_codex_failure(_CODEX_USAGE_LIMIT))
+    message = str(err.value)
+    assert "usage limit" in message
+    assert "Sep 19th, 2026 7:46 AM" in message
+    assert _CODEX_USAGE_LIMIT in message
+
+
+def test_codex_reply_maps_unauthorized_to_the_sign_in_command():
+    """Measured on 0.154.0 with an empty CODEX_HOME (no credentials): every
+    attempt is refused 401 Unauthorized and the turn fails on it, exit 1.
+    The refusal names the command that signs in, `codex login`."""
+    with pytest.raises(CommandFailed) as err:
+        providers.codex_reply(_codex_failure(_CODEX_UNAUTHORIZED))
+    message = str(err.value)
+    assert "not signed in" in message and providers.CODEX_SIGN_IN in message
+    assert providers.CODEX_SIGN_IN == "codex login"
+
+
+def test_codex_reply_surfaces_any_other_failed_turn():
+    """Any other turn.failed (a model that is not found, a network that is
+    down) is CommandFailed carrying Codex's own words; transient `error`
+    events before a completed turn are not failures."""
+    with pytest.raises(CommandFailed) as err:
+        providers.codex_reply(_codex_failure("model not found: gpt-0"))
+    assert "model not found: gpt-0" in str(err.value)
+
+    recovered = _codex_events(
+        {"type": "thread.started", "thread_id": "x"},
+        {"type": "turn.started"},
+        {"type": "error", "message": "Reconnecting... 1/5 (stream disconnected)"},
+        {"type": "item.completed", "item": {"id": "item_0", "type": "agent_message", "text": "ok"}},
+        {"type": "turn.completed", "usage": {}},
+    )
+    assert providers.codex_reply(recovered) == "ok"
+
+
+def test_codex_reply_with_no_agent_message_is_an_empty_reply():
+    """A stream that completes without an agent message is "printed
+    nothing" for the seam (recorded on the frame, the batch goes on), not
+    a crash on a missing key."""
+    stream = _codex_events(
+        {"type": "thread.started", "thread_id": "x"},
+        {"type": "turn.started"},
+        {"type": "turn.completed", "usage": {}},
+    )
+    assert providers.codex_reply(stream).strip() == ""
+
+
+@posix_only
+def test_codex_primary_builds_the_command_backend_on_the_built_in_template(monkeypatch, tmp_path):
+    """Given engine codex and Codex installed and signed in, the factory
+    builds a CommandBackend on the built-in template, the path shutil.which
+    resolved `codex` to, timeout_seconds, and the reply decoder;
+    `[model] command`, when the user sets one, replaces the template (a
+    model flag, say) and keeps the rest."""
+    _fake_codex(monkeypatch, tmp_path)
+
+    backend = providers.build_primary_backend(_cfg(model={"backend": "codex", "timeout_seconds": 30}))
+    assert isinstance(backend, CommandBackend)
+    assert backend.command == providers.CODEX_COMMAND
+    assert backend.executable == shutil.which(CODEX)
+    assert backend.timeout == 30.0
+    assert backend.name == " ".join(providers.CODEX_COMMAND)
+
+    own = [CODEX, "exec", "-m", "gpt-5", "--image", "{image}", "--json", "{prompt}"]
+    backend = providers.build_primary_backend(_cfg(model={"backend": "codex", "command": own}))
+    assert backend.command == own
+    assert backend.executable == shutil.which(CODEX)
+
+
+@posix_only
+def test_codex_returns_candidates_in_the_same_shape_as_mlx_on_the_fixture(
+    monkeypatch, photos, tmp_path
+):
+    """Card #422, Done-when 1 and 3, at the real boundary: the fake `codex`
+    on PATH takes the documented exec flags, checks the attached image is a
+    file, and answers the routing prompt then the bird prompt as the
+    agent_message of the JSONL stream. The factory builds the backend, the
+    Identifier stages the committed fixture, and the candidates equal, field
+    for field, the scripted pipeline's for the same replies."""
+    from melampus.identify import Identifier
+
+    log = _fake_codex(monkeypatch, tmp_path)
+    config = _cfg(model={"backend": "codex"})
+    backend = providers.build_primary_backend(config)
+    result = Identifier(backend, config).identify(photos / PHOTO)
+    expected = Identifier(
+        ScriptedBackend([ROUTING_OK, ID_OK], name=" ".join(providers.CODEX_COMMAND)), config
+    ).identify(photos / PHOTO)
+
+    assert result.status == "ok", result.error
+    assert result.model == " ".join(providers.CODEX_COMMAND)
+    assert result.identification == expected.identification
+    assert result.taxon_routing == expected.taxon_routing
+    assert [c.common_name for c in result.identification.ranked()] == [
+        "Tricolored Heron", "Little Blue Heron"]
+    calls = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+    runs = [c["argv"] for c in calls if c["argv"][:1] == ["exec"]]
+    assert len(runs) == 2, calls
+    for argv in runs:
+        assert argv[:2] == ["exec", "--image"]
+        assert argv[3:-1] == providers.CODEX_COMMAND[4:-1]
+        image, prompt = argv[2], argv[-1]
+        assert image != str(photos / PHOTO), "the original file's path reached the program"
+        assert "melampus-" in image and image.endswith("image.jpg"), "not the staged copy"
+        assert str(photos / PHOTO) not in prompt and "melampus-" not in prompt
+
+
+@posix_only
+def test_detection_codex_is_available_when_installed_and_signed_in(monkeypatch, tmp_path):
+    """Card #422, Done-when 2: given Codex installed and signed in, when
+    detection runs, then codex is available and the reason says runs bill
+    to the subscription, naming the account kind the status check printed.
+    The check is the documented, cheap one: `codex login status` "exit with
+    0 when logged in" (developer-commands), no model call."""
+    log = _fake_codex(monkeypatch, tmp_path)
+    verdict = _verdict("codex")
+    assert verdict.available, verdict.reason
+    assert "subscription" in verdict.reason and "ChatGPT" in verdict.reason
+    calls = [json.loads(line)["argv"] for line in log.read_text(encoding="utf-8").splitlines()]
+    assert calls == [["login", "status"]]
+
+
+@posix_only
+def test_detection_codex_at_its_usage_limit_is_still_signed_in(monkeypatch, tmp_path):
+    """Done-when 2, the limit: `codex login status` does not know the plan's
+    usage limit (measured: it says only "Logged in using ChatGPT"; `codex
+    doctor` reports nothing on it either), and detection spends no model
+    call to find out, so the verdict is signed in; the first run's refusal
+    names the limit and the reset time (the test below)."""
+    log = _fake_codex(monkeypatch, tmp_path, mode="usage-limit")
+    verdict = _verdict("codex")
+    assert verdict.available, verdict.reason
+    calls = [json.loads(line)["argv"] for line in log.read_text(encoding="utf-8").splitlines()]
+    assert calls == [["login", "status"]], "detection spent a run to learn the limit"
+
+
+@posix_only
+def test_detection_codex_not_signed_in_names_the_sign_in_command(monkeypatch, tmp_path):
+    """Done-when 2: installed but not signed in (`codex login status` exit 1,
+    "Not logged in", measured), then unavailable with the reason "not
+    signed in" and the command that signs in."""
+    _fake_codex(monkeypatch, tmp_path, mode="not-signed-in")
+    verdict = _verdict("codex")
+    assert not verdict.available
+    assert "not signed in" in verdict.reason and providers.CODEX_SIGN_IN in verdict.reason
+
+
+def test_detection_codex_not_installed_points_to_the_install(monkeypatch, tmp_path):
+    """Done-when 2: not installed, then unavailable with the reason "not
+    installed" and where to get it."""
+    _no_codex(monkeypatch, tmp_path)
+    verdict = _verdict("codex")
+    assert not verdict.available
+    assert "not installed" in verdict.reason and providers.CODEX_INSTALL in verdict.reason
+
+
+@posix_only
+def test_detection_codex_gives_up_when_the_status_check_hangs(monkeypatch, tmp_path):
+    """--detect-engines never hangs: a status check that does not answer
+    within CODEX_PROBE_SECONDS is an unavailable verdict saying so."""
+    _fake_codex(monkeypatch, tmp_path, mode="hung")
+    monkeypatch.setattr(providers, "CODEX_PROBE_SECONDS", 0.5)
+    verdict = _verdict("codex")
+    assert not verdict.available
+    assert "did not answer" in verdict.reason
+
+
+def test_codex_probe_timeout_is_short():
+    """Short enough that a broken install cannot stall the settings dialog;
+    long enough for the binary's start (measured: 0.01 s)."""
+    assert 1.0 <= providers.CODEX_PROBE_SECONDS <= 15.0
+
+
+@posix_only
+def test_the_refusal_names_codex_when_it_is_signed_in(monkeypatch, tmp_path, no_ambient_ollama):
+    """One truth: the backends a refusal names as working here follow
+    detection, so codex is named when Codex is signed in and not otherwise."""
+    _fake_codex(monkeypatch, tmp_path)
+    assert "codex" in providers._works_here()
+    _fake_codex(monkeypatch, tmp_path, mode="not-signed-in")
+    assert "codex" not in providers._works_here()
+
+
+@posix_only
+def test_cli_detect_engines_prints_the_codex_verdict(monkeypatch, tmp_path, capsys, no_ambient_keys):
+    """--detect-engines carries the sixth verdict after claude-code's, as JSON."""
+    from melampus.cli import main
+
+    _fake_codex(monkeypatch, tmp_path, mode="not-signed-in")
+    assert main(["--detect-engines"]) == 0
+    verdicts = json.loads(capsys.readouterr().out)
+    assert [v["engine"] for v in verdicts] == [*ENGINES, "claude-code", "codex"]
+    assert verdicts[-1]["available"] is False
+    assert providers.CODEX_SIGN_IN in verdicts[-1]["reason"]
+
+
+@posix_only
+def test_codex_not_signed_in_is_refused_before_any_image_is_read(monkeypatch, tmp_path, capsys):
+    """Card #422, Done-when 2 at analysis time, where detection can tell:
+    Codex installed but not signed in, and the folder's one image is a
+    link to nowhere, so opening it would fail loudly. The CLI exits 3 on a
+    refusal that says to run the sign-in command and never mentions the
+    file: the status check ran before any image was read."""
+    from melampus.cli import main
+
+    _fake_codex(monkeypatch, tmp_path, mode="not-signed-in")
+    folder = tmp_path / "photos"
+    folder.mkdir()
+    (folder / "nowhere.jpg").symlink_to(tmp_path / "does-not-exist.jpg")
+
+    code = main([str(folder), "--backend", "codex", "--cache", str(tmp_path / "cache.jsonl")])
+
+    err = capsys.readouterr().err
+    assert code == 3, err
+    assert "not signed in" in err and providers.CODEX_SIGN_IN in err
+    for about_the_file in ("nowhere", "does-not-exist", "No such file", "unreadable"):
+        assert about_the_file not in err, f"the image was touched before the sign-in check:\n{err}"
+
+
+def test_codex_not_installed_is_refused_before_any_image_is_read(monkeypatch, tmp_path, capsys):
+    """Done-when 2 at analysis time, not installed: exit 3 naming `codex`,
+    where to install it and how to sign in, before any image is read."""
+    from melampus.cli import main
+
+    _no_codex(monkeypatch, tmp_path)
+    folder = tmp_path / "photos"
+    folder.mkdir()
+    (folder / "nowhere.jpg").symlink_to(tmp_path / "does-not-exist.jpg")
+
+    code = main([str(folder), "--backend", "codex", "--cache", str(tmp_path / "cache.jsonl")])
+
+    err = capsys.readouterr().err
+    assert code == 3, err
+    assert "not installed" in err and providers.CODEX_INSTALL in err
+    assert providers.CODEX_SIGN_IN in err
+    assert "nowhere" not in err and "does-not-exist" not in err
+
+
+@posix_only
+def test_codex_at_its_usage_limit_stops_the_batch_at_the_first_reply(
+    monkeypatch, photos, tmp_path, capsys
+):
+    """Done-when 2, the limit, where only a run can tell: the status check
+    passed, and the first run fails the turn with the measured usage-limit
+    message (exit 1, the stream on stdout). The run stops at exit 3 on a
+    refusal naming the limit and, as the CLI said it, when it resets,
+    rather than recording it on every frame; nothing is cached."""
+    from melampus.cli import main
+
+    _fake_codex(monkeypatch, tmp_path, mode="usage-limit")
+    out = tmp_path / "results.json"
+
+    code = main([str(photos), "--backend", "codex", "--cache", str(tmp_path / "cache.jsonl"),
+                 "--json-out", str(out)])
+
+    err = capsys.readouterr().err
+    assert code == 3, err
+    assert "usage limit" in err and "Sep 19th, 2026 7:46 AM" in err
+    assert not out.exists() and not (tmp_path / "cache.jsonl").exists()
+
+
+@posix_only
+def test_cli_backend_codex_writes_a_json_result(monkeypatch, photos, tmp_path, capsys):
+    """Acceptance for Done-when 1: `melampus-id FOLDER --backend codex
+    --json-out FILE` with the fake `codex` on PATH, signed in, on the
+    committed fixture, runs the whole pipeline and writes a JSON result
+    with the candidates, attributed to the template, nothing retuned for a
+    cloud and no cost prompt."""
+    from melampus.cli import main
+
+    _fake_codex(monkeypatch, tmp_path)
+    out = tmp_path / "results.json"
+
+    code = main([str(photos), "--backend", "codex", "--cache", str(tmp_path / "cache.jsonl"),
+                 "--json-out", str(out)])
+
+    err = capsys.readouterr().err
+    assert code == 0, err
+    assert f"loading {' '.join(providers.CODEX_COMMAND)}" in err, err
+    assert "cloud default" not in err and "estimate" not in err.lower()
+    (result,) = json.loads(out.read_text(encoding="utf-8"))
+    assert result["file"] == PHOTO
+    assert result["status"] == "ok"
+    assert result["model"] == " ".join(providers.CODEX_COMMAND)
     assert [c["common_name"] for c in result["identification"]["candidates"]] == [
         "Tricolored Heron", "Little Blue Heron"]

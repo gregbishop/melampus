@@ -121,22 +121,29 @@ def package_script() -> ModuleType:
 
 from melampus import providers
 
-#: The real Claude Code detection, kept for the tests that run it against a
-#: fake `claude` on PATH (test_providers._fake_claude); every other test
-#: gets the stub below.
+#: The real Claude Code and Codex detection, kept for the tests that run
+#: them against a fake `claude` or `codex` on PATH (test_providers'
+#: _fake_claude and _fake_codex); every other test gets the stubs below.
 REAL_CLAUDE_CODE_VERDICT = providers.claude_code_verdict
+REAL_CODEX_VERDICT = providers.codex_verdict
 
 
 @pytest.fixture(autouse=True)
-def no_ambient_claude_code(monkeypatch):
-    """A developer's installed Claude Code must not decide what any test
-    asserts, nor be run by one: detection (card #421) reports it not
-    installed without looking. A test that wants Claude Code puts a fake
-    `claude` on PATH and restores REAL_CLAUDE_CODE_VERDICT."""
+def no_ambient_subscription_cli(monkeypatch):
+    """A developer's installed Claude Code or Codex must not decide what any
+    test asserts, nor be run by one: detection (cards #421, #422) reports
+    them not installed without looking. A test that wants one puts a fake
+    `claude` or `codex` on PATH and restores REAL_CLAUDE_CODE_VERDICT or
+    REAL_CODEX_VERDICT."""
     monkeypatch.setattr(
         providers, "claude_code_verdict",
         lambda program=None: providers.EngineVerdict(
             providers.CLAUDE_CODE, False, "Claude Code is not installed (kept out of the tests)"),
+    )
+    monkeypatch.setattr(
+        providers, "codex_verdict",
+        lambda program=None: providers.EngineVerdict(
+            providers.CODEX, False, "Codex CLI is not installed (kept out of the tests)"),
     )
 
 

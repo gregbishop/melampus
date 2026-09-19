@@ -82,6 +82,9 @@ class ModelConfig(_Base):
     #   claude-code — Claude Code, the command seam configured for it (card
     #               #421, providers.CLAUDE_CODE_COMMAND); `command` below
     #               overrides the template. Bills to its subscription.
+    #   codex     — Codex CLI, the same seam configured for it (card #422,
+    #               providers.CODEX_COMMAND); `command` below overrides the
+    #               template. Bills to the ChatGPT plan it is signed in to.
     # Left unset, the CLI replaces this value with the first engine detection
     # says can run here (providers.default_engine, card #404); `model_fields_set`
     # is how it tells "unset" from "set to mlx".
@@ -105,8 +108,8 @@ class ModelConfig(_Base):
     # with `{image}` and `{prompt}` placeholders: an argv list, never a shell
     # string, so a prompt with spaces, quotes or newlines is one argument and
     # nothing is quoted. Its stdout is the reply; `timeout_seconds` bounds it.
-    # Empty by default: no program is assumed installed. For `claude-code` it
-    # is optional and replaces the built-in template; Codex's is card #422.
+    # Empty by default: no program is assumed installed. For `claude-code`
+    # and `codex` it is optional and replaces the built-in template.
     command: list[str] = Field(default_factory=list)
     # OpenAI-compatible endpoint override: OpenRouter, LM Studio, vLLM, a proxy, …
     base_url: str | None = None
