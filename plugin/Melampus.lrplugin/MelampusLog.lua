@@ -9,6 +9,7 @@
      a target name or a table of functions, never a path), so the path the
      Settings dialog showed was a guess, and wrong on Windows. ]]
 local LrFileUtils = import 'LrFileUtils'
+local LrPathUtils = import 'LrPathUtils'
 
 local Log = {}
 
@@ -55,7 +56,6 @@ end
 -- needs this before it can run anything, since it logs the first command,
 -- so it cannot ask the executable the way it asks for cancel_path.
 function Log.dataRoot()
-	local LrPathUtils = import 'LrPathUtils'
 	local home = LrPathUtils.getStandardFilePath('home')
 	local base
 	if WIN_ENV then
@@ -68,14 +68,14 @@ end
 
 --- The folder that holds the log: <data root>/logs.
 function Log.folder()
-	return import('LrPathUtils').child(Log.dataRoot(), 'logs')
+	return LrPathUtils.child(Log.dataRoot(), 'logs')
 end
 
 --- Where the log file lives, for showing the user and for every message
 -- that names it: <data root>/logs/Melampus.log, the one rule on both
 -- platforms (card #442).
 function Log.path()
-	return import('LrPathUtils').child(Log.folder(), 'Melampus.log')
+	return LrPathUtils.child(Log.folder(), 'Melampus.log')
 end
 
 --- Show the log where it is: the file, selected in the folder that holds it
