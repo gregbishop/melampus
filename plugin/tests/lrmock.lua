@@ -37,6 +37,8 @@ function M.reset(options)
 		-- Paths LrFileUtils.exists reports as present without touching the
 		-- disk: the executable beside the plugin, on either platform.
 		existing = options.existing or {},
+		-- How many previews the plugin asked for in this run.
+		previewsRequested = 0,
 	}
 end
 
@@ -102,6 +104,7 @@ function Photo:getPropertyForPlugin(_, field) return self._plugin[field] end
 -- the mock answers at once with bytes that are not a JPEG, which is enough for
 -- the export loop to write a file and count it.
 function Photo:requestJpegThumbnail(width, height, callback)
+	M.state.previewsRequested = M.state.previewsRequested + 1
 	callback('mock-preview-bytes', nil)
 	return {}
 end
