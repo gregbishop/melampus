@@ -21,7 +21,8 @@ no image ever leaves the machine.
 | **4** | Lightroom Classic plugin | **Working.** Analyses and writes to a real catalog |
 | — | Optional cloud escalation for the hard tail (§6.6) | **Working.** Off by default |
 
-182 tests: 126 Python, 56 Lua. None need model weights or a network.
+The tests, Python and Lua, need no model weights and no network; one command runs
+them all — see [Tests](#tests).
 
 Stage 1 exists to answer one question before anything else gets built: *can a local
 VLM identify species well enough to be worth wiring into a catalog?* The current
@@ -355,10 +356,12 @@ Editing a prompt changes the cache fingerprint, so the next run genuinely re-run
 .venv/bin/python -m pytest -q
 ```
 
-182 tests (126 Python, 56 Lua), no model weights required — everything runs against a scripted backend, so
-parsing, validation, retry, caching, the downscale ladder and the no-leak guarantee are
-all verifiable in under a second. The plugin's Lua suites run from the same command,
-skipping cleanly if no Lua interpreter is installed.
+No model weights and no network are needed — everything runs against a scripted
+backend, so parsing, validation, retry, caching, the downscale ladder and the no-leak
+guarantee are all verifiable in seconds. There are three kinds of tests: unit,
+integration against real local boundaries, and acceptance from each card's Done-when.
+The plugin's Lua suites run from the same command, skipping cleanly if no Lua
+interpreter is installed.
 
 The executable's smoke tests (`service/tests/test_binary.py`) run against
 `dist/melampus` when it exists and skip when it does not. To build it first and
