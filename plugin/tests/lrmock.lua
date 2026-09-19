@@ -155,6 +155,8 @@ function M.reset(options)
 		-- The Windows temp folder a fake Windows Lightroom reports, when a
 		-- test names one; otherwise windowsTemp() decides.
 		windowsTemp = options.windowsTemp,
+		-- The paths LrShell was asked to reveal.
+		revealed = {},
 		-- The home folder of the Lightroom the mock fakes, when a test names
 		-- one (the boundary test hands it the executable's HOME); else one
 		-- of this run's own, see home().
@@ -621,7 +623,9 @@ namespaces.LrFunctionContext = {
 }
 
 namespaces.LrColor = function() return {} end
-namespaces.LrShell = { revealInShell = function() end }
+namespaces.LrShell = {
+	revealInShell = function(path) M.state.revealed[#M.state.revealed + 1] = path end,
+}
 --- The view factory hands back each spec as given, tagged with the kind of
 -- view asked for (static_text, group_box, ...), so a dialog's text can be
 -- read from the tree the plugin built: children are the array part,

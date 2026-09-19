@@ -78,4 +78,15 @@ function Log.path()
 	return import('LrPathUtils').child(Log.folder(), 'Melampus.log')
 end
 
+--- Show the log where it is: the file, selected in the folder that holds it
+-- (LrShell reveals a file in its folder on both platforms). Made first,
+-- with its folder, when nothing has been logged yet, so there is always
+-- something to reveal; a folder that does not exist was what the old
+-- button opened on Windows.
+function Log.reveal()
+	local handle = open()
+	if handle then handle:close() end
+	import('LrShell').revealInShell(Log.path())
+end
+
 return Log
