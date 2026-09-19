@@ -15,28 +15,34 @@ write the same bytes; the comparison against the untouched tool was made out
 of tree, at review, against the base branch's tools/make_plugin_results.py.
 
 Unit tests run over stub frames carrying only an XMP packet and a fake quality
-scorer; the integration tests run the real CLI over real pixels with the GBIF
-client faked at the network edge, as test_occurrence.py does.
+scorer. The integration tests run the real CLI over real pixels: most with the
+GBIF client's answers canned at the network edge, as test_occurrence.py does,
+and one with the unmodified client speaking HTTP to a loopback server that
+answers GBIF's occurrence-search JSON, which is the occurrence boundary itself.
 """
 
 from __future__ import annotations
 
 import importlib.util
 import json
+import threading
+import urllib.parse
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 import pytest
-from conftest import PHOTO
+from conftest import FIXTURE, PHOTO
+from PIL import Image
 
-from melampus import cli
+from melampus import cli, occurrence
 from melampus.cache import ResultCache
 from melampus.config import load_config
 from melampus.images import content_hash
-from melampus.occurrence import GBIFClient
+from melampus.occurrence import GBIFClient, OccurrenceCache
 from melampus.plugin_results import PLUGIN_FIELDS, enrich, write_plugin_results
 from melampus.schema import ImageResult
 
-from test_encounters import stub_frame
+from test_encounters import stub_frame, xmp_packet
 from test_occurrence import FLORIDA, FakeClient
 
 REPO = Path(__file__).resolve().parents[2]
@@ -247,6 +253,56 @@ def offline_gbif(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, int | None]
     return calls
 
 
+class _GBIFOccurrenceSearch(BaseHTTPRequestHandler):
+    """GBIF's /v1/occurrence/search, as far as the client reads it: the count for
+    the species in the query, in the JSON shape the real API answers with."""
+
+    def do_GET(self) -> None:  # noqa: N802 - http.server's name
+        url = urllib.parse.urlsplit(self.path)
+        params = dict(urllib.parse.parse_qsl(url.query))
+        self.server.requests.append((url.path, params, self.headers.get("User-Agent")))
+        body = json.dumps({
+            "offset": 0, "limit": 0, "endOfRecords": True,
+            "count": COUNTS.get(params.get("scientificName"), 0), "results": [], "facets": [],
+        }).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *_args) -> None:
+        """Keep the request log out of pytest's output."""
+
+
+@pytest.fixture()
+def gbif_server(monkeypatch: pytest.MonkeyPatch):
+    """A fake speaking the real protocol: GBIF's occurrence search on loopback,
+    on an ephemeral port, with the unmodified GBIFClient pointed at it. Yields
+    the server; `requests` holds every (path, query, user agent) it answered."""
+    server = HTTPServer(("127.0.0.1", 0), _GBIFOccurrenceSearch)
+    server.requests = []
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    monkeypatch.setattr(
+        occurrence, "GBIF_SEARCH", f"http://127.0.0.1:{server.server_port}/v1/occurrence/search")
+    try:
+        yield server
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def dated_frame(folder: Path, name: str, when: str | None) -> Path:
+    """The committed frame's pixels, re-saved with a Lightroom-style capture date
+    (or none), so a CLI run clusters, scores and looks up something real."""
+    path = folder / name
+    with Image.open(FIXTURE) as image:
+        image.save(path, xmp=xmp_packet(when)) if when else image.save(path)
+    return path
+
+
 def _load_tool():
     spec = importlib.util.spec_from_file_location("make_plugin_results", TOOL)
     module = importlib.util.module_from_spec(spec)
@@ -275,6 +331,47 @@ def test_plugin_out_writes_every_field_the_plugin_reads(photos: Path, tmp_path: 
     assert 0 < row["quality"] <= 100
     assert offline_gbif == [("Cuculus micropterus", None)], "a frame with no capture date has no month"
     assert f"wrote {out}" in capsys.readouterr().err
+
+
+def test_plugin_out_asks_gbif_for_the_place_and_month_and_keeps_the_answer(
+    tmp_path: Path, gbif_server, capsys
+):
+    """Done-when 1 across the real occurrence boundary. Three frames of one June
+    encounter and one undated frame go through `melampus-id --plugin-out` with
+    the unmodified GBIFClient speaking HTTP to a loopback GBIF. One request per
+    encounter carries the configured location and the encounter's month, the
+    count it answers decides the range flag, and the answer is persisted in the
+    occurrence cache, so a second run asks nothing."""
+    folder = tmp_path / "photos"
+    folder.mkdir()
+    frames = [dated_frame(folder, "a.jpg", "2025-06-01T08:00:00"),
+              dated_frame(folder, "b.jpg", "2025-06-01T08:00:05"),
+              dated_frame(folder, "c.jpg", "2025-06-01T08:00:10"),
+              dated_frame(folder, "d.jpg", None)]
+    config = _config_file(tmp_path)
+    seed(tmp_path / "identifications.jsonl", frames,
+         {"a.jpg": CUCKOO, "b.jpg": CUCKOO, "c.jpg": CUCKOO, "d.jpg": HERON})
+    out = tmp_path / "plugin_results.json"
+    run = [str(folder), "--config", str(config), "--report-only", "--plugin-out", str(out)]
+
+    assert cli.main(run) == 0, capsys.readouterr().err
+
+    florida = {"geoDistance": "26.45,-82.11,50km", "limit": "0"}
+    assert gbif_server.requests == [
+        ("/v1/occurrence/search", {"scientificName": "Cuculus micropterus", "month": "6"} | florida,
+         occurrence.USER_AGENT),
+        ("/v1/occurrence/search", {"scientificName": "Egretta tricolor"} | florida,
+         occurrence.USER_AGENT),
+    ], "one lookup per encounter, at the configured place, in the month it was shot"
+    rows = {r["file"]: r for r in json.loads(out.read_text(encoding="utf-8"))}
+    assert [rows[f]["range_flag"] for f in ("a.jpg", "b.jpg", "c.jpg", "d.jpg")] == [True, True, True, False]
+    assert all(0 < rows[f]["quality"] <= 100 for f in rows), "the pixels were scored"
+    cache = OccurrenceCache(tmp_path / "occurrence.json")
+    assert cache.get(OccurrenceCache.key("Cuculus micropterus", FLORIDA, 6)) == 0
+    assert cache.get(OccurrenceCache.key("Egretta tricolor", FLORIDA, None)) == 3060
+
+    assert cli.main(run) == 0, capsys.readouterr().err
+    assert len(gbif_server.requests) == 2, "the second run should have answered from the cache"
 
 
 def test_plugin_out_skips_range_checks_without_a_default_location_and_says_so(

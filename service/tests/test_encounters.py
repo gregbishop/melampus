@@ -14,15 +14,18 @@ from pathlib import Path
 from melampus.encounters import Encounter, capture_time, cluster
 
 
+def xmp_packet(when: str) -> bytes:
+    """The one line of XMP the clusterer reads, as Lightroom writes it."""
+    return (
+        b'<x:xmpmeta xmlns:x="adobe:ns:meta/">'
+        + f'<rdf:Description xmp:CreateDate="{when}"/>'.encode()
+        + b"</x:xmpmeta>"
+    )
+
+
 def stub_frame(folder: Path, name: str, when: str | None) -> Path:
     folder.mkdir(parents=True, exist_ok=True)
-    packet = b""
-    if when is not None:
-        packet = (
-            b'<x:xmpmeta xmlns:x="adobe:ns:meta/">'
-            + f'<rdf:Description xmp:CreateDate="{when}"/>'.encode()
-            + b"</x:xmpmeta>"
-        )
+    packet = b"" if when is None else xmp_packet(when)
     path = folder / name
     path.write_bytes(b"\xff\xd8\xff\xe1" + packet)
     return path
