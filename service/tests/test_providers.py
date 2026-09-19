@@ -190,8 +190,8 @@ def test_engine_round_trips_through_the_local_config(monkeypatch, tmp_path):
     the same way the plugin's executable reads its config (card #436)."""
     local = tmp_path / "melampus.local.toml"
     local.write_text('[model]\nbackend = "claude"\n', encoding="utf-8")
-    monkeypatch.setattr(providers.MelampusConfig.__module__ and __import__("melampus.config").config,
-                        "_local_config", lambda: local)
+    from melampus import config as config_module
+    monkeypatch.setattr(config_module, "_local_config", lambda: local)
 
     assert load_config().model.backend == "claude"
     assert load_config(use_local=False).model.backend == "mlx"
