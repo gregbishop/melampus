@@ -12,7 +12,9 @@ from the lockfile (card #425, Done-when 3 and 2); AGENTS.md points at
 docs/brief.md without restating its values; AGENTS.md points at the standard
 and names the tracker (card #410, Done-when 3); and the Windows job runs the
 plugin tests, so the command built for cmd.exe is run by cmd.exe (card #401,
-Done-when 3).
+Done-when 3); and every `uv sync` that builds the executable, in CI and in
+readme.md's build section, installs the extras the executable carries (card
+#434, Done-when 1 and 3).
 
 The checks are deliberately dumb — substring presence of the backticked name — so
 they never argue with prose style, only with absence. The one exception runs the
@@ -305,9 +307,14 @@ def test_docs_name_the_build_and_its_smoke_test():
         if command not in readme
     ]
     assert not missing, f"readme.md does not name: {missing}"
-    # Card #434: the executable carries the cloud SDKs, and PyInstaller bundles
-    # what the build venv has, so every `uv sync` in the build section (the macOS
-    # block and the Windows one) names the build, cloud and openai extras.
+
+
+def test_readme_build_blocks_sync_the_sdk_extras():
+    """Card #434: the executable carries the cloud SDKs, and PyInstaller bundles
+    what the build venv has, so every `uv sync` in readme.md's build section
+    (the macOS block and the Windows one) names the build, cloud and openai
+    extras."""
+    readme = README.read_text(encoding="utf-8")
     section = re.search(r"^## Building the executable\n(.*?)^## ", readme, re.MULTILINE | re.DOTALL)
     assert section, "readme.md has no ## Building the executable section"
     syncs = [c for c in _fenced_commands(section.group(1)) if re.search(r"\buv sync\b", c)]
