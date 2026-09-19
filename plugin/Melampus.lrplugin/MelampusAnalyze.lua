@@ -17,7 +17,6 @@ Two ordering constraints, both from §5.3 and both load-bearing:
     not allowed".
 --]]
 
-local LrDialogs = import 'LrDialogs'
 local LrFileUtils = import 'LrFileUtils'
 local LrPasswords = import 'LrPasswords'
 local LrPathUtils = import 'LrPathUtils'
