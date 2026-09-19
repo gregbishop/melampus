@@ -447,6 +447,19 @@ def test_every_workflow_pins_every_pip_install_to_an_exact_version():
     assert not unpinned, f"a workflow installs from PyPI without an exact version: {unpinned}"
 
 
+def test_the_pip_pinning_gate_reads_yaml_workflows_too(tmp_path, monkeypatch):
+    """Round 3, finding 2: GitHub runs `.yaml` workflows as well as `.yml`,
+    and the gate above promises every workflow, so an `x.yaml` whose pip
+    install names no `==` must fail it rather than slip past a glob that
+    spells only `.yml`. The folder is a stand-in read at call time; ci.yml is
+    in it, pinned, so the only thing wrong is the .yaml file."""
+    (tmp_path / "ci.yml").write_text("        run: pip install uv==0.8.0\n", encoding="utf-8")
+    (tmp_path / "x.yaml").write_text("        run: pip install uv\n", encoding="utf-8")
+    monkeypatch.setitem(globals(), "WORKFLOWS", tmp_path)
+    with pytest.raises(AssertionError, match=r"x\.yaml: uv"):
+        test_every_workflow_pins_every_pip_install_to_an_exact_version()
+
+
 RELEASE_ZIPS = ("Melampus-macOS.zip", "Melampus-Windows.zip")
 
 
