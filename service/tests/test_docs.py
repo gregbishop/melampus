@@ -45,6 +45,15 @@ DOCS = [README, AGENTS_MD, *sorted((REPO / "docs").glob("*.md"))]
 
 
 LOCKFILE_FLAGS = ("--locked", "--frozen")
+# What a `uv sync` that builds the executable must install: PyInstaller (the
+# `build` extra) and the SDKs the executable carries (card #434). PyInstaller
+# bundles what the build venv has, so a sync missing one ships without it.
+BUILD_EXTRAS = ("--extra build", "--extra cloud", "--extra openai")
+
+
+def _lacking_build_extras(commands: list[str]) -> list[str]:
+    """The commands among `commands` that do not name every build extra."""
+    return [c for c in commands if any(extra not in c for extra in BUILD_EXTRAS)]
 
 
 def _installs_from_the_lockfile(command: str, flags: tuple[str, ...] = LOCKFILE_FLAGS) -> bool:
@@ -223,13 +232,11 @@ def test_ci_builds_and_smoke_tests_the_executable():
     whose `--backend anthropic` prints an install hint that means nothing
     inside a binary (the smoke test in test_binary.py proves the SDKs import;
     this gate keeps the extras in the command that builds)."""
-    extras = ("--extra build", "--extra cloud", "--extra openai")
-    not_building = [
-        c for c in _ci_pytest_commands()
-        if "--build-binary" not in c or any(extra not in c for extra in extras)
-    ]
+    commands = _ci_pytest_commands()
+    lacking_extras = _lacking_build_extras(commands)
+    not_building = [c for c in commands if "--build-binary" not in c or c in lacking_extras]
     assert not not_building, (
-        f"CI's pytest step must install {' '.join(extras)} and run `pytest --build-binary`: "
+        f"CI's pytest step must install {' '.join(BUILD_EXTRAS)} and run `pytest --build-binary`: "
         f"{not_building}"
     )
 
@@ -305,10 +312,9 @@ def test_docs_name_the_build_and_its_smoke_test():
     assert section, "readme.md has no ## Building the executable section"
     syncs = [c for c in _fenced_commands(section.group(1)) if re.search(r"\buv sync\b", c)]
     assert syncs, "readme.md's build section has no uv sync command"
-    extras = ("--extra build", "--extra cloud", "--extra openai")
-    without = [c for c in syncs if any(extra not in c for extra in extras)]
+    without = _lacking_build_extras(syncs)
     assert not without, (
-        f"readme.md's build section must sync {' '.join(extras)}, or the executable "
+        f"readme.md's build section must sync {' '.join(BUILD_EXTRAS)}, or the executable "
         f"it builds lacks the SDKs: {without}"
     )
 
