@@ -85,7 +85,12 @@ from its stdout: a subscription CLI such as Claude Code or Codex is vision with
 no API key. The seam knows no program; `claude-code` is a name for it with
 Claude Code's template built in (`providers.CLAUDE_CODE_COMMAND`, card #421,
 docs/config.md § Claude Code) and its reply unwrapped from the print mode's
-JSON result object by an optional `decode` on stdout; Codex's is card #422. `ScriptedBackend` returns canned responses, which is what lets the
+JSON result object by an optional `decode` on stdout, and `codex` is the
+same with Codex CLI's (`providers.CODEX_COMMAND`, card #422, docs/config.md
+§ Codex CLI), the reply read out of the exec mode's JSONL stream. What
+differs between the two is data (`providers.CliEngine`: program, install
+page, sign-in command, status check, template, decoder); the verdict and the
+factory branch are one function each. `ScriptedBackend` returns canned responses, which is what lets the
 pipeline tests cover parsing, validation, retry, caching and the downscale ladder
 in under a second with no weights on disk. Each is a class here and no change
 anywhere else: the prompts, the JSON extraction, the schema validation and the
@@ -96,11 +101,14 @@ engine can run on this machine at all is `providers.detect_engines`' question,
 answered before any image is read; an Ollama that is not running is refused
 there with the address tried and where to install it, a command that
 `shutil.which` cannot find is refused the same way, naming it, and Claude Code
-is refused as not installed or, by its own `claude auth status`, as not
-signed in. The one failure
+and Codex CLI are refused as not installed or, by their own `claude auth
+status` and `codex login status`, as not signed in. The one failure
 that stops a batch rather than being recorded on the frame is a command exiting
 non-zero (`CommandFailed`): that is a broken engine, not a bad file, and every
-frame would fail the same way.
+frame would fail the same way. A CLI's decoder raises the same before the
+exit code is judged, so a plan at its usage limit (Codex fails the turn on
+stdout, naming the reset time) or a lapsed sign-in is explained in the CLI's
+own words rather than as "exited 1".
 
 ---
 
