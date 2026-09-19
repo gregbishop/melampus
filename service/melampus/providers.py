@@ -56,6 +56,18 @@ OLLAMA = "ollama"
 #: first that can run on this machine.
 BACKEND_CHOICES = ("mlx", OLLAMA, "openai", "claude", SCRIPTED)
 
+#: What the plugin's picker calls the four engines (card #423): the one
+#: copy, carried on each verdict so the dialog holds no title table of its
+#: own. The reason detection gives says the rest; a title only has to be
+#: recognisable. The subscription CLIs' titles are composed from
+#: CliEngine.title in _cli_verdict.
+ENGINE_TITLES = {
+    "mlx": "MLX — local, Apple Silicon",
+    OLLAMA: "Ollama — local",
+    "openai": "OpenAI — cloud, needs an API key",
+    "claude": "Claude — cloud, needs an API key",
+}
+
 #: Where the local Ollama server listens. Ollama's docs/faq.mdx: "Ollama binds
 #: 127.0.0.1 port 11434 by default." One constant: the default of the
 #: `[model] ollama_url` setting (card #406), which is unset until a user
@@ -71,8 +83,9 @@ OLLAMA_INSTALL = "https://ollama.com/download"
 
 #: An installed command-line program driven per frame (card #420): a
 #: subscription CLI is vision with no API key. Selected by `[model] backend`
-#: or --backend, not offered by the plugin's picker until card #423 teaches
-#: detection about it, so it is not in BACKEND_CHOICES.
+#: or --backend; detection knows no program to check for, so the plugin's
+#: picker does not offer it (the two named CLIs below it does, card #423)
+#: and it is not in BACKEND_CHOICES.
 COMMAND = "command"
 
 #: Claude Code as an engine (card #421): the command seam configured for
@@ -233,9 +246,11 @@ def ollama_answers(url: str | None = None) -> bool:
 class EngineVerdict:
     """Whether one engine can run on this machine, and why or why not, in the
     words a user sees: the reason is what makes an unavailable engine a
-    greyed-out choice rather than a mystery (card #404)."""
+    greyed-out choice rather than a mystery (card #404), and the title is
+    what the picker calls it (card #423)."""
 
     engine: str
+    title: str
     available: bool
     reason: str
 
@@ -286,10 +301,11 @@ def _cli_verdict(cli: CliEngine, program: str | None, probe_seconds: float) -> E
     with where to get it, not signed in with the command that signs in, a
     check that did not answer, or available and billing to the subscription."""
     program = program or cli.program
+    title = f"{cli.title} — subscription, no API key"
     executable = shutil.which(program)
     if executable is None:
         return EngineVerdict(
-            cli.engine, False,
+            cli.engine, title, False,
             f"{cli.title} is not installed: nothing on PATH is called '{program}'; "
             f"install it from {cli.install}, then sign in with `{cli.sign_in}`",
         )
@@ -301,19 +317,19 @@ def _cli_verdict(cli: CliEngine, program: str | None, probe_seconds: float) -> E
         )
     except subprocess.TimeoutExpired:
         return EngineVerdict(
-            cli.engine, False,
+            cli.engine, title, False,
             f"`{program} {' '.join(cli.status)}` did not answer within {probe_seconds:g}s",
         )
     except OSError as exc:
-        return EngineVerdict(cli.engine, False, f"'{program}' could not be run: {exc}")
+        return EngineVerdict(cli.engine, title, False, f"'{program}' could not be run: {exc}")
     if status.returncode != 0:
         return EngineVerdict(
-            cli.engine, False,
+            cli.engine, title, False,
             f"{cli.title} is installed but not signed in; run `{cli.sign_in}`",
         )
     signed_in_as = cli.account(status)
     return EngineVerdict(
-        cli.engine, True,
+        cli.engine, title, True,
         f"{cli.title} is signed in" + (f" ({signed_in_as})" if signed_in_as else "")
         + "; every frame bills to that subscription, not to an API key",
     )
@@ -344,8 +360,8 @@ def codex_verdict(program: str | None = None) -> EngineVerdict:
 
 def detect_engines(ollama_at: str | None = None) -> list[EngineVerdict]:
     """One verdict per engine, in the owner's order (BACKEND_CHOICES without the
-    test fake), then claude-code and codex (cards #421, #422; the picker
-    learns them in #423).
+    test fake), then claude-code and codex (cards #421, #422): the plugin's
+    picker is built from this list, in this order (card #423).
     This is the one place that knows whether an engine can run here: the
     refusals' "what works" list and the CLI's default both come from it, so
     they cannot disagree with what the dialog (card #405) shows. `ollama_at`
@@ -355,16 +371,16 @@ def detect_engines(ollama_at: str | None = None) -> list[EngineVerdict]:
     ollama = ollama_answers(url)
     return [
         EngineVerdict(
-            "mlx", apple_silicon,
+            "mlx", ENGINE_TITLES["mlx"], apple_silicon,
             "runs locally on this Apple Silicon Mac" if apple_silicon else "needs Apple Silicon",
         ),
         EngineVerdict(
-            OLLAMA, ollama,
+            OLLAMA, ENGINE_TITLES[OLLAMA], ollama,
             f"Ollama is answering at {url}" if ollama
             else f"no Ollama server at {url}; install it from {OLLAMA_INSTALL}",
         ),
-        EngineVerdict("openai", True, _key_required("openai")),
-        EngineVerdict("claude", True, _key_required("claude")),
+        EngineVerdict("openai", ENGINE_TITLES["openai"], True, _key_required("openai")),
+        EngineVerdict("claude", ENGINE_TITLES["claude"], True, _key_required("claude")),
         claude_code_verdict(),
         codex_verdict(),
     ]

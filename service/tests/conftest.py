@@ -138,12 +138,14 @@ def no_ambient_subscription_cli(monkeypatch):
     monkeypatch.setattr(
         providers, "claude_code_verdict",
         lambda program=None: providers.EngineVerdict(
-            providers.CLAUDE_CODE, False, "Claude Code is not installed (kept out of the tests)"),
+            providers.CLAUDE_CODE, providers.CLAUDE_CODE_CLI.title, False,
+            "Claude Code is not installed (kept out of the tests)"),
     )
     monkeypatch.setattr(
         providers, "codex_verdict",
         lambda program=None: providers.EngineVerdict(
-            providers.CODEX, False, "Codex CLI is not installed (kept out of the tests)"),
+            providers.CODEX, providers.CODEX_CLI.title, False,
+            "Codex CLI is not installed (kept out of the tests)"),
     )
 
 
