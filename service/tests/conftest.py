@@ -325,6 +325,9 @@ class FakeOllama(threading.Thread):
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self):  # noqa: N802 - http.server's name
                 ollama.requests.append(("GET", self.path))
+                if self.path == "/api/tags":
+                    self._answer(200, {"models": ollama.tags()})
+                    return
                 assert self.path == "/api/version", self.path
                 if delay:
                     ollama.release.wait(delay)
@@ -402,6 +405,22 @@ class FakeOllama(threading.Thread):
         self.server.daemon_threads = True
         self.server_port = self.server.server_port
         self.endpoint = f"http://127.0.0.1:{self.server_port}"
+
+    def tags(self) -> list[dict]:
+        """The models held, as § List Local Models lists them: `name` and
+        `model` with the tag (`latest` when the pull named none, § Model
+        names), `size`, `digest`, `modified_at`, `details`."""
+        return [
+            {
+                "name": name if ":" in name else f"{name}:latest",
+                "model": name if ":" in name else f"{name}:latest",
+                "modified_at": "2026-09-18T00:00:00Z", "size": size,
+                "digest": hashlib.sha256(name.encode()).hexdigest(),
+                "details": {"parent_model": "", "format": "gguf", "family": "fake",
+                            "families": ["fake"], "parameter_size": "1B", "quantization_level": "Q4_0"},
+            }
+            for name, size in self.models.items()
+        ]
 
     def run(self) -> None:
         self.server.serve_forever(poll_interval=0.05)
