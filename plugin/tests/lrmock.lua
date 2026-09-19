@@ -60,8 +60,10 @@ function M.reset(options)
 		-- failure this project actually hit: a write that raises nothing and lands
 		-- nothing, so a counter next to the call reports success that never happened.
 		dropWrites = options.dropWrites or {},
-		-- Paths LrFileUtils.exists reports as present without touching the
-		-- disk: the executable beside the plugin, on either platform.
+		-- Paths LrFileUtils.exists answers for without touching the disk:
+		-- true is present, false is absent. The executable beside the
+		-- plugin, on either platform; false so a test that wants it missing
+		-- holds after the readme's install step has put the real one there.
 		existing = options.existing or {},
 		-- How many previews the plugin asked for in this run.
 		previewsRequested = 0,
@@ -265,7 +267,9 @@ namespaces.LrDialogs = {
 
 namespaces.LrFileUtils = {
 	exists = function(path)
-		if M.state.existing[path] then return 'file' end
+		if M.state.existing[path] ~= nil then
+			return M.state.existing[path] and 'file' or false
+		end
 		local handle = io.open(path, 'r')
 		if handle then handle:close(); return 'file' end
 		return false

@@ -504,7 +504,11 @@ t.test('the "%" refusal names the path that has it, and the fix for that path', 
 end)
 
 t.test('a missing executable names the plugin folder and the file it should hold', function()
-	local executed = runAnalysis({})
+	-- Absent by name, not by omission: the readme's install step puts the
+	-- real executable beside this plugin, and a mock that then looked at the
+	-- disk would find it and run it, so the test must hold on an installed
+	-- checkout as on a bare one.
+	local executed = runAnalysis({ [MAC_EXECUTABLE] = false })
 	t.equals(#executed, 0, 'ran a command with no executable to run')
 	local message = dialogMatching(PLUGIN)
 	t.isNotNil(message, 'no dialog names the plugin folder ' .. PLUGIN)
