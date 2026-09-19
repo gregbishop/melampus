@@ -65,6 +65,21 @@ def run_lua_suite(script: Path, env: dict[str, str] | None = None) -> subprocess
     return proc
 
 
+def assert_scripted_results(results: Path) -> None:
+    """Assert the enriched results the executable writes on the committed
+    fixture under the scripted backend: one row, for PHOTO. The scripted fake
+    answers nothing, so the row has no identification and therefore no
+    burst_agreement (that is agreement between calls); every other enrichment
+    field is scored from the pixels and the capture times."""
+    from melampus.plugin_results import PLUGIN_FIELDS
+
+    rows = json.loads(results.read_text(encoding="utf-8"))
+    assert [r["file"] for r in rows] == [PHOTO]
+    expected = set(PLUGIN_FIELDS) - {"burst_agreement"}
+    assert expected <= set(rows[0]), f"missing {expected - set(rows[0])}"
+    assert 0 < rows[0]["quality"] <= 100, "quality was not scored on the pixels"
+
+
 def run_as_lightroom_would(command: str, **kwargs) -> subprocess.CompletedProcess:
     """Hand the line to the shell LrTasks.execute hands it to: `cmd.exe /c`
     on Windows, as the C runtime's system() does, and `sh -c` elsewhere.
@@ -128,8 +143,6 @@ def test_the_command_the_plugin_builds_runs_the_executable_beside_it(
     selects any backend for the plugin: `[model] backend` in
     melampus.local.toml under the per-user data directory. The enriched
     results the plugin reads must land where the command said."""
-    from melampus.plugin_results import PLUGIN_FIELDS
-
     windows = sys.platform == "win32"
     # Under a name with an apostrophe, the one character sh's own quoting
     # cannot hold as it is: the command must close, escape and reopen it.
@@ -179,14 +192,7 @@ def test_the_command_the_plugin_builds_runs_the_executable_beside_it(
     assert proc.returncode == 0, (
         f"exit {proc.returncode}: {proc.stderr[-2000:]}\n"
         f"{log.read_text(encoding='utf-8')[-3000:] if log else 'no CLI log'}")
-    rows = json.loads(results.read_text(encoding="utf-8"))
-    assert [r["file"] for r in rows] == [PHOTO]
-    # The scripted fake answers nothing, so the row has no identification and
-    # therefore no burst_agreement (that is agreement between calls); every
-    # other enrichment field is scored from the pixels and the capture times.
-    expected = set(PLUGIN_FIELDS) - {"burst_agreement"}
-    assert expected <= set(rows[0]), f"missing {expected - set(rows[0])}"
-    assert 0 < rows[0]["quality"] <= 100, "quality was not scored on the pixels"
+    assert_scripted_results(results)
 
 
 @needs_sh

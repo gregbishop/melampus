@@ -16,7 +16,6 @@ names, and every module those files require, is in the zip listing
 
 from __future__ import annotations
 
-import json
 import os
 import shutil
 import stat
@@ -26,10 +25,9 @@ import zipfile
 from pathlib import Path
 
 import pytest
-from conftest import PHOTO
 
 from test_binary import no_python_environment, per_user_data_dir
-from test_lua_plugin import TESTS, run_lua_suite
+from test_lua_plugin import TESTS, assert_scripted_results, run_lua_suite
 
 FOLDER = "Melampus.lrplugin"
 
@@ -205,8 +203,6 @@ def test_packaged_executable_runs_from_the_unpacked_plugin_folder(
     python on the path, and writes the enriched results. It writes nothing
     into the plugin folder: its cache lands under the per-user data directory,
     so the unpacked folder still lists exactly what the zip did."""
-    from melampus.plugin_results import PLUGIN_FIELDS
-
     target = tmp_path / package_script.zip_path().name
     listing = package_script.package(built_executable, target)
     print("zip listing:", *listing, sep="\n  ")
@@ -225,11 +221,7 @@ def test_packaged_executable_runs_from_the_unpacked_plugin_folder(
     )
 
     assert proc.returncode == 0, proc.stderr[-3000:]
-    rows = json.loads(out.read_text(encoding="utf-8"))
-    assert [r["file"] for r in rows] == [PHOTO]
-    expected = set(PLUGIN_FIELDS) - {"burst_agreement"}
-    assert expected <= set(rows[0]), f"missing {expected - set(rows[0])}"
-    assert 0 < rows[0]["quality"] <= 100, "quality was not scored on the pixels"
+    assert_scripted_results(out)
     assert (data_dir / "cache").is_dir(), "the cache did not land under the per-user data directory"
     assert sorted(f"{FOLDER}/{p.relative_to(plugin).as_posix()}" for p in plugin.rglob("*") if p.is_file()) == listing, (
         "the executable wrote into the plugin folder")
