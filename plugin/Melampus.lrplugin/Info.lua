@@ -1,10 +1,11 @@
 --[[
 Melampus — plugin manifest and custom metadata schema.
 
-Review-only build. It reads identification results produced by the Python side
-from a JSON file on disk and writes them into the catalog, so you review inside
-Lightroom's own grid and loupe rather than a separate window. There is no HTTP
-service and no bundled binary yet; those arrive with Stage 3.
+It analyses the selected photos with the executable that sits in this folder
+(melampus on macOS, melampus.exe on Windows) and writes the identifications
+into the catalog, so you review inside Lightroom's own grid and loupe rather
+than a separate window. It can also read results from a JSON file produced
+elsewhere. There is no HTTP service.
 
 Menu surface is deliberately four items (CLAUDE.md §5.4.2). Everything else —
 force reprocess, clearing state, diagnostics — lives inside Settings.
