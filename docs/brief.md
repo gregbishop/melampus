@@ -38,7 +38,10 @@ every session.
   job installs (Lua 5.1, Lightroom's own) so the command the plugin builds for
   cmd.exe is run by cmd.exe against `melampus.exe`, runs the packaging tests
   so the Windows zip ships from a script tested on Windows (card #402), and
-  uploads it as the `melampus-windows` artifact
+  uploads it as the `melampus-windows` artifact; both jobs then package the
+  plugin zip through `tools/package_plugin.py`, and on a pushed `v*` tag the
+  same workflow's `release` job attaches `Melampus-macOS.zip` and
+  `Melampus-Windows.zip` to the GitHub release (card #402)
 - lint: none adopted
 - run: the service half, per `docs/architecture.md`
 
