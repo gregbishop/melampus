@@ -7,7 +7,7 @@ the `standard` and `python` plugins. Its working rules come first.
 The install outputs (`.claude/settings.json`, `.agents/skills`, `.codex/agents`,
 the secret pre-commit hook) are machine-local and not tracked. A fresh clone
 regenerates them from the repo root with
-`node ~/on-purpose/bin/install.mjs standard python`; `.agents/on-purpose.json`
+`node ~/homelab/on-purpose/bin/install.mjs standard python`; `.agents/on-purpose.json`
 records that plugin choice.
 
 tracker: nextcloud-deck board=Melampus

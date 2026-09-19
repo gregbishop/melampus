@@ -4,17 +4,21 @@ Each test here makes one promise a doc carries mechanical, so the doc cannot
 silently fall behind the code or the repo again (as happened when [occurrence] and
 [quality] shipped undocumented). The promises: docs/config.md names every
 implemented setting; AGENTS.md, and not .gitignore, names the install command for
-the recorded plugins; no doc names a file by an uppercase name it does not have;
+the recorded plugins, and the installer it names runs on this machine; no doc names
+a file by an uppercase name it does not have;
 docs/brief.md names the pytest command CI actually runs; AGENTS.md points at
 docs/brief.md without restating its values; and AGENTS.md points at the standard
 and names the tracker (card #410, Done-when 3).
 
 The checks are deliberately dumb — substring presence of the backticked name — so
-they never argue with prose style, only with absence.
+they never argue with prose style, only with absence. The one exception runs the
+named installer, because a path that only read well was itself the drift.
 """
 
 import json
+import os
 import re
+import subprocess
 from pathlib import Path
 
 from melampus.config import MelampusConfig
@@ -49,13 +53,33 @@ def test_agents_md_names_the_install_command_and_gitignore_does_not_restate_it()
     are machine-local and untracked; a fresh clone must be told how to regenerate
     them, with the same plugins .agents/on-purpose.json records. AGENTS.md is the
     one place that says so: .gitignore, which lists those outputs, points there
-    rather than restating the command, so a plugin added later moves one file."""
+    rather than restating the command, so a plugin added later moves one file.
+
+    The installer the command names must be the one on this machine: a command
+    that merely reads well left a fresh clone without the plugins and the secret
+    hook. Run with no plugins, the installer prints its usage and exits 2 before
+    it touches git or the repo, so that run is the check. CI has no on-purpose
+    checkout (it is machine-local, like fixtures/), so only the run is left out
+    there; the rest of the test still gates."""
     plugins = json.loads(PLUGIN_CHOICE.read_text(encoding="utf-8"))["plugins"]
-    command = f"node ~/on-purpose/bin/install.mjs {' '.join(plugins)}"
-    assert f"`{command}`" in AGENTS_MD.read_text(encoding="utf-8"), (
-        f"AGENTS.md must tell a fresh clone to run `{command}` "
-        "(the plugins recorded in .agents/on-purpose.json)"
+    commands = re.findall(r"`node (\S+/install\.mjs) ([^`]*)`", AGENTS_MD.read_text(encoding="utf-8"))
+    assert commands, (
+        "AGENTS.md must tell a fresh clone to run `node <on-purpose checkout>/bin/install.mjs "
+        f"{' '.join(plugins)}` (the plugins recorded in .agents/on-purpose.json)"
     )
+    [(installer, named_plugins)] = commands
+    assert named_plugins.split() == plugins, (
+        f"AGENTS.md's install command names {named_plugins.split()}, "
+        f".agents/on-purpose.json records {plugins}"
+    )
+    if not os.environ.get("CI"):
+        path = Path(installer).expanduser()
+        assert path.is_file(), f"AGENTS.md names {installer}, which does not exist on this machine"
+        run = subprocess.run(["node", str(path)], cwd=REPO, capture_output=True, text=True)
+        assert run.returncode == 2 and "usage: install.mjs" in run.stderr, (
+            f"`node {installer}` is not the on-purpose installer: "
+            f"exit {run.returncode}, stderr {run.stderr.strip()!r}"
+        )
     gitignore = GITIGNORE.read_text(encoding="utf-8")
     assert "install.mjs" not in gitignore, (
         ".gitignore restates the install command that AGENTS.md is gated for; "
