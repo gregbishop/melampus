@@ -468,14 +468,14 @@ def _verdict(engine: str) -> providers.EngineVerdict:
     return verdict
 
 
-def test_detection_lists_the_engines_in_the_owners_order_then_claude_code(
+def test_detection_lists_the_engines_in_the_owners_order_then_the_subscription_clis(
     no_ambient_keys, no_ambient_ollama
 ):
     """The list the dialog (card #405) will show: one verdict per engine, in
-    the order BACKEND_CHOICES names them, then claude-code (card #421;
-    the picker learns it in #423), never the test fake."""
+    the order BACKEND_CHOICES names them, then claude-code and codex (cards
+    #421, #422; the picker learns them in #423), never the test fake."""
     verdicts = providers.detect_engines()
-    assert [v.engine for v in verdicts] == [*ENGINES, providers.CLAUDE_CODE]
+    assert [v.engine for v in verdicts] == [*ENGINES, providers.CLAUDE_CODE, providers.CODEX]
     for verdict in verdicts:
         assert isinstance(verdict.available, bool)
         assert verdict.reason, f"{verdict.engine} has no reason"
@@ -1060,7 +1060,7 @@ def test_cli_detect_engines_prints_the_verdicts_as_json_in_order(
     out, err = capsys.readouterr()
     assert code == 0, err
     verdicts = json.loads(out)
-    assert [v["engine"] for v in verdicts] == [*ENGINES, providers.CLAUDE_CODE]
+    assert [v["engine"] for v in verdicts] == [*ENGINES, providers.CLAUDE_CODE, providers.CODEX]
     assert all(set(v) == {"engine", "available", "reason"} for v in verdicts)
     by_engine = {v["engine"]: v for v in verdicts}
     assert by_engine["mlx"] == {"engine": "mlx", "available": False, "reason": "needs Apple Silicon"}
@@ -2442,9 +2442,9 @@ def test_cli_detect_engines_prints_the_claude_code_verdict(monkeypatch, tmp_path
     _fake_claude(monkeypatch, tmp_path, mode="not-signed-in")
     assert main(["--detect-engines"]) == 0
     verdicts = json.loads(capsys.readouterr().out)
-    assert [v["engine"] for v in verdicts] == [*ENGINES, "claude-code"]
-    assert verdicts[-1]["available"] is False
-    assert providers.CLAUDE_CODE_SIGN_IN in verdicts[-1]["reason"]
+    assert [v["engine"] for v in verdicts] == [*ENGINES, "claude-code", "codex"]
+    assert verdicts[-2]["available"] is False
+    assert providers.CLAUDE_CODE_SIGN_IN in verdicts[-2]["reason"]
 
 
 @posix_only
@@ -2920,3 +2920,184 @@ def test_codex_returns_candidates_in_the_same_shape_as_mlx_on_the_fixture(
         assert image != str(photos / PHOTO), "the original file's path reached the program"
         assert "melampus-" in image and image.endswith("image.jpg"), "not the staged copy"
         assert str(photos / PHOTO) not in prompt and "melampus-" not in prompt
+
+
+@posix_only
+def test_detection_codex_is_available_when_installed_and_signed_in(monkeypatch, tmp_path):
+    """Card #422, Done-when 2: given Codex installed and signed in, when
+    detection runs, then codex is available and the reason says runs bill
+    to the subscription, naming the account kind the status check printed.
+    The check is the documented, cheap one: `codex login status` "exit with
+    0 when logged in" (developer-commands), no model call."""
+    log = _fake_codex(monkeypatch, tmp_path)
+    verdict = _verdict("codex")
+    assert verdict.available, verdict.reason
+    assert "subscription" in verdict.reason and "ChatGPT" in verdict.reason
+    calls = [json.loads(line)["argv"] for line in log.read_text(encoding="utf-8").splitlines()]
+    assert calls == [["login", "status"]]
+
+
+@posix_only
+def test_detection_codex_at_its_usage_limit_is_still_signed_in(monkeypatch, tmp_path):
+    """Done-when 2, the limit: `codex login status` does not know the plan's
+    usage limit (measured: it says only "Logged in using ChatGPT"; `codex
+    doctor` reports nothing on it either), and detection spends no model
+    call to find out, so the verdict is signed in; the first run's refusal
+    names the limit and the reset time (the test below)."""
+    log = _fake_codex(monkeypatch, tmp_path, mode="usage-limit")
+    verdict = _verdict("codex")
+    assert verdict.available, verdict.reason
+    calls = [json.loads(line)["argv"] for line in log.read_text(encoding="utf-8").splitlines()]
+    assert calls == [["login", "status"]], "detection spent a run to learn the limit"
+
+
+@posix_only
+def test_detection_codex_not_signed_in_names_the_sign_in_command(monkeypatch, tmp_path):
+    """Done-when 2: installed but not signed in (`codex login status` exit 1,
+    "Not logged in", measured), then unavailable with the reason "not
+    signed in" and the command that signs in."""
+    _fake_codex(monkeypatch, tmp_path, mode="not-signed-in")
+    verdict = _verdict("codex")
+    assert not verdict.available
+    assert "not signed in" in verdict.reason and providers.CODEX_SIGN_IN in verdict.reason
+
+
+def test_detection_codex_not_installed_points_to_the_install(monkeypatch, tmp_path):
+    """Done-when 2: not installed, then unavailable with the reason "not
+    installed" and where to get it."""
+    _no_codex(monkeypatch, tmp_path)
+    verdict = _verdict("codex")
+    assert not verdict.available
+    assert "not installed" in verdict.reason and providers.CODEX_INSTALL in verdict.reason
+
+
+@posix_only
+def test_detection_codex_gives_up_when_the_status_check_hangs(monkeypatch, tmp_path):
+    """--detect-engines never hangs: a status check that does not answer
+    within CODEX_PROBE_SECONDS is an unavailable verdict saying so."""
+    _fake_codex(monkeypatch, tmp_path, mode="hung")
+    monkeypatch.setattr(providers, "CODEX_PROBE_SECONDS", 0.5)
+    verdict = _verdict("codex")
+    assert not verdict.available
+    assert "did not answer" in verdict.reason
+
+
+def test_codex_probe_timeout_is_short():
+    """Short enough that a broken install cannot stall the settings dialog;
+    long enough for the binary's start (measured: 0.01 s)."""
+    assert 1.0 <= providers.CODEX_PROBE_SECONDS <= 15.0
+
+
+@posix_only
+def test_the_refusal_names_codex_when_it_is_signed_in(monkeypatch, tmp_path, no_ambient_ollama):
+    """One truth: the backends a refusal names as working here follow
+    detection, so codex is named when Codex is signed in and not otherwise."""
+    _fake_codex(monkeypatch, tmp_path)
+    assert "codex" in providers._works_here(providers.detect_engines())
+    _fake_codex(monkeypatch, tmp_path, mode="not-signed-in")
+    assert "codex" not in providers._works_here(providers.detect_engines())
+
+
+@posix_only
+def test_cli_detect_engines_prints_the_codex_verdict(monkeypatch, tmp_path, capsys, no_ambient_keys):
+    """--detect-engines carries the sixth verdict after claude-code's, as JSON."""
+    from melampus.cli import main
+
+    _fake_codex(monkeypatch, tmp_path, mode="not-signed-in")
+    assert main(["--detect-engines"]) == 0
+    verdicts = json.loads(capsys.readouterr().out)
+    assert [v["engine"] for v in verdicts] == [*ENGINES, "claude-code", "codex"]
+    assert verdicts[-1]["available"] is False
+    assert providers.CODEX_SIGN_IN in verdicts[-1]["reason"]
+
+
+@posix_only
+def test_codex_not_signed_in_is_refused_before_any_image_is_read(monkeypatch, tmp_path, capsys):
+    """Card #422, Done-when 2 at analysis time, where detection can tell:
+    Codex installed but not signed in, and the folder's one image is a
+    link to nowhere, so opening it would fail loudly. The CLI exits 3 on a
+    refusal that says to run the sign-in command and never mentions the
+    file: the status check ran before any image was read."""
+    from melampus.cli import main
+
+    _fake_codex(monkeypatch, tmp_path, mode="not-signed-in")
+    folder = tmp_path / "photos"
+    folder.mkdir()
+    (folder / "nowhere.jpg").symlink_to(tmp_path / "does-not-exist.jpg")
+
+    code = main([str(folder), "--backend", "codex", "--cache", str(tmp_path / "cache.jsonl")])
+
+    err = capsys.readouterr().err
+    assert code == 3, err
+    assert "not signed in" in err and providers.CODEX_SIGN_IN in err
+    for about_the_file in ("nowhere", "does-not-exist", "No such file", "unreadable"):
+        assert about_the_file not in err, f"the image was touched before the sign-in check:\n{err}"
+
+
+def test_codex_not_installed_is_refused_before_any_image_is_read(monkeypatch, tmp_path, capsys):
+    """Done-when 2 at analysis time, not installed: exit 3 naming `codex`,
+    where to install it and how to sign in, before any image is read."""
+    from melampus.cli import main
+
+    _no_codex(monkeypatch, tmp_path)
+    folder = tmp_path / "photos"
+    folder.mkdir()
+    (folder / "nowhere.jpg").symlink_to(tmp_path / "does-not-exist.jpg")
+
+    code = main([str(folder), "--backend", "codex", "--cache", str(tmp_path / "cache.jsonl")])
+
+    err = capsys.readouterr().err
+    assert code == 3, err
+    assert "not installed" in err and providers.CODEX_INSTALL in err
+    assert providers.CODEX_SIGN_IN in err
+    assert "nowhere" not in err and "does-not-exist" not in err
+
+
+@posix_only
+def test_codex_at_its_usage_limit_stops_the_batch_at_the_first_reply(
+    monkeypatch, photos, tmp_path, capsys
+):
+    """Done-when 2, the limit, where only a run can tell: the status check
+    passed, and the first run fails the turn with the measured usage-limit
+    message (exit 1, the stream on stdout). The run stops at exit 3 on a
+    refusal naming the limit and, as the CLI said it, when it resets,
+    rather than recording it on every frame; nothing is cached."""
+    from melampus.cli import main
+
+    _fake_codex(monkeypatch, tmp_path, mode="usage-limit")
+    out = tmp_path / "results.json"
+
+    code = main([str(photos), "--backend", "codex", "--cache", str(tmp_path / "cache.jsonl"),
+                 "--json-out", str(out)])
+
+    err = capsys.readouterr().err
+    assert code == 3, err
+    assert "usage limit" in err and "Sep 19th, 2026 7:46 AM" in err
+    assert not out.exists() and not (tmp_path / "cache.jsonl").exists()
+
+
+@posix_only
+def test_cli_backend_codex_writes_a_json_result(monkeypatch, photos, tmp_path, capsys):
+    """Acceptance for Done-when 1: `melampus-id FOLDER --backend codex
+    --json-out FILE` with the fake `codex` on PATH, signed in, on the
+    committed fixture, runs the whole pipeline and writes a JSON result
+    with the candidates, attributed to the template, nothing retuned for a
+    cloud and no cost prompt."""
+    from melampus.cli import main
+
+    _fake_codex(monkeypatch, tmp_path)
+    out = tmp_path / "results.json"
+
+    code = main([str(photos), "--backend", "codex", "--cache", str(tmp_path / "cache.jsonl"),
+                 "--json-out", str(out)])
+
+    err = capsys.readouterr().err
+    assert code == 0, err
+    assert f"loading {' '.join(providers.CODEX_COMMAND)}" in err, err
+    assert "cloud default" not in err and "estimate" not in err.lower()
+    (result,) = json.loads(out.read_text(encoding="utf-8"))
+    assert result["file"] == PHOTO
+    assert result["status"] == "ok"
+    assert result["model"] == " ".join(providers.CODEX_COMMAND)
+    assert [c["common_name"] for c in result["identification"]["candidates"]] == [
+        "Tricolored Heron", "Little Blue Heron"]

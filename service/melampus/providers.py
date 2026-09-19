@@ -381,7 +381,8 @@ def codex_verdict(program: str | None = None) -> EngineVerdict:
 
 def detect_engines(ollama_at: str | None = None) -> list[EngineVerdict]:
     """One verdict per engine, in the owner's order (BACKEND_CHOICES without the
-    test fake), then claude-code (card #421; the picker learns it in #423).
+    test fake), then claude-code and codex (cards #421, #422; the picker
+    learns them in #423).
     This is the one place that knows whether an engine can run here: the
     refusals' "what works" list and the CLI's default both come from it, so
     they cannot disagree with what the dialog (card #405) shows. `ollama_at`
@@ -402,6 +403,7 @@ def detect_engines(ollama_at: str | None = None) -> list[EngineVerdict]:
         EngineVerdict("openai", True, _key_required("openai")),
         EngineVerdict("claude", True, _key_required("claude")),
         claude_code_verdict(),
+        codex_verdict(),
     ]
 
 
