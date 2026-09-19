@@ -12,6 +12,7 @@ from .identify import Identifier
 from .images import content_hash
 from .providers import (
     BACKEND_CHOICES,
+    KEY_VARIABLES,
     BackendUnavailable,
     apply_cloud_primary_defaults,
     build_primary_backend,
@@ -240,7 +241,7 @@ def main(argv: list[str] | None = None) -> int:
     cloud.add_argument("--escalate-max", type=int, default=None,
                        help="ceiling on how many frames one run may bill for")
     cloud.add_argument("--escalate-model", default=None, help="override the cloud model")
-    cloud.add_argument("--escalate-provider", choices=("claude", "openai"), default=None,
+    cloud.add_argument("--escalate-provider", choices=tuple(KEY_VARIABLES), default=None,
                        help="which cloud to ask (default: claude)")
     cloud.add_argument("--escalate-yes", action="store_true",
                        help="skip the cost confirmation (for non-interactive callers)")
