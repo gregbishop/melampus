@@ -15,6 +15,7 @@ import shutil
 import signal
 import subprocess
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
@@ -377,126 +378,229 @@ def claude_code_status(command: list[str]) -> list[str]:
     return [*carried, *CLAUDE_CODE_STATUS]
 
 
-def claude_code_verdict(command: list[str] | None = None) -> EngineVerdict:
-    """Whether Claude Code can be the engine here (card #421): the program
-    `command` (CLAUDE_CODE_COMMAND unless the user set a template) names
-    must be on PATH, and its status check, under that template's own
-    settings flags (claude_code_status), must say signed in to the
-    subscription. Never raises; a verdict reports. The reasons are the
-    words the user sees: not installed with where to get it, not signed in
-    with the check as run and the command that signs in, signed in but
-    not to the subscription with the check as run, what to remove and the
-    sign-in (CLAUDE_CODE_SUBSCRIPTION says why), a check that did not
-    answer or failed some other way (in the CLI's own words), or available
-    and billing to the subscription. A template carrying CLAUDE_CODE_BARE
-    is told to remove it in place of the sign-in, which cannot help it, in
-    every verdict that would name the sign-in, the not-installed one
-    included (review round 7, 1)."""
-    command = command or CLAUDE_CODE_COMMAND
+@dataclass(frozen=True, slots=True)
+class Credential:
+    """What a passed status check says the CLI is signed in with, as
+    `CliEngine.account` reads it: `kind` is the account kind in the words
+    `CliEngine.subscriptions` and `bills_per_call` use ("" when the check
+    names nothing the reader can place); `signed_in_as` what the available
+    verdict shows, the kind and, when named, the plan; `said` what the
+    check said about the credential, safe to quote in a refusal ("" quotes
+    nothing); `fix` what to remove before signing in, when known."""
+
+    kind: str
+    signed_in_as: str = ""
+    said: str = ""
+    fix: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class CliEngine:
+    """A subscription CLI behind the command seam, in the owner's words: the
+    engine's name, the program shutil.which looks for, where to get it, how
+    to sign in, the documented cheap status check, the built-in template,
+    the decoder that turns its stdout into the reply, and how its status
+    check is derived from a template and read: which of its words are "not
+    signed in", and what credential a passed check reports. What differs
+    between Claude Code and Codex is data here; the verdict and the
+    factory are one function each."""
+
+    engine: str
+    title: str
+    program: str
+    install: str
+    sign_in: str
+    status: tuple[str, ...]
+    command: list[str]
+    decode: Callable[[str], str]
+    #: The check's argv after the executable, for the template that will
+    #: run: `status` behind whatever of the template decides the credential
+    #: (claude_code_status carries Claude Code's settings flags).
+    status_check: Callable[[list[str]], list[str]]
+    #: Whether a failed check says not signed in, in the CLI's own words;
+    #: a failure that does not is reported as what ran and what it said.
+    signed_out: Callable[[subprocess.CompletedProcess], bool]
+    #: The credential a passed check reports.
+    account: Callable[[subprocess.CompletedProcess], Credential]
+    #: The subscription this engine runs on, for the refusal's sentence.
+    subscription: str
+    #: The account kinds that bill to that subscription, as `account` names
+    #: them. The guard fails closed: a passed check naming any other kind,
+    #: or one `account` reads nothing from, is refused, and the words it
+    #: could not place are not quoted (a status line is an unversioned
+    #: CLI's prose; a wording melampus has not measured may carry key
+    #: material, and an account it cannot place may bill per call).
+    subscriptions: tuple[str, ...]
+    #: The account kinds that bill per call rather than to a subscription,
+    #: as `account` names them; signed in with one, the refusal says so.
+    bills_per_call: tuple[str, ...] = ()
+    #: Where the billing precedence is documented, for the refusal.
+    billing_docs: str = ""
+    #: The flag under which no sign-in can help (Claude Code's `--bare`), and
+    #: what a verdict says to do instead of naming the sign-in when the
+    #: check carries it.
+    bare: str = ""
+    bare_fix: str = ""
+
+
+def _claude_code_status_object(status: subprocess.CompletedProcess) -> dict:
+    """The status object `claude auth status --json` printed, or {}."""
+    try:
+        account = json.loads(status.stdout)
+    except ValueError:
+        return {}
+    return account if isinstance(account, dict) else {}
+
+
+def _claude_code_signed_out(status: subprocess.CompletedProcess) -> bool:
+    """Not signed in is what the status object says: `loggedIn` false."""
+    return _claude_code_status_object(status).get("loggedIn") is False
+
+
+def _claude_code_account(status: subprocess.CompletedProcess) -> Credential:
+    """The credential `claude auth status --json` reports: authMethod, set
+    aside for a key when apiKeySource names one (CLAUDE_CODE_SUBSCRIPTION
+    says why that is not the subscription), with the fix
+    CLAUDE_CODE_CREDENTIAL_FIX knows for it."""
+    account = _claude_code_status_object(status)
+    method = str(account.get("authMethod") or "")
+    key_source = str(account.get("apiKeySource") or "")
+    return Credential(
+        kind="" if key_source else method,
+        signed_in_as=", ".join(
+            str(account[key]) for key in ("authMethod", "subscriptionType") if account.get(key)
+        ),
+        said=", ".join(
+            f"{key} {account[key]}" for key in ("authMethod", "apiKeySource") if account.get(key)
+        ),
+        fix=(
+            CLAUDE_CODE_CREDENTIAL_FIX.get(key_source) or CLAUDE_CODE_CREDENTIAL_FIX.get(method)
+            or "remove that credential from the environment melampus runs from"
+        ),
+    )
+
+
+def _cli_verdict(cli: CliEngine, command: list[str] | None, probe_seconds: float) -> EngineVerdict:
+    """Whether a subscription CLI can be the engine here: the program
+    `command` (`cli.command` unless the user set a template) names must be
+    on PATH, and its status check, derived from that template
+    (`cli.status_check`), must say signed in within `probe_seconds`, to an
+    account that bills to the subscription (`cli.subscriptions`). Never
+    raises; a verdict reports. The reasons are the words the user sees:
+    not installed with where to get it, not signed in with the check as
+    run and the command that signs in, signed in but not to the
+    subscription with the check as run, what to remove and the sign-in, a
+    check that did not answer or failed some other way (in the CLI's own
+    words), or available and billing to the subscription. A template
+    carrying `cli.bare` is told to remove it in place of the sign-in,
+    which cannot help it, in every verdict that would name the sign-in,
+    the not-installed one included (review round 7, 1)."""
+    command = command or cli.command
     program = command[0]
-    check = claude_code_status(command)
-    next_step = CLAUDE_CODE_BARE_FIX if CLAUDE_CODE_BARE in check else f"sign in with `{CLAUDE_CODE_SIGN_IN}`"
+    check = cli.status_check(command)
+    next_step = cli.bare_fix if cli.bare and cli.bare in check else f"sign in with `{cli.sign_in}`"
     executable = shutil.which(program)
     if executable is None:
         return EngineVerdict(
-            CLAUDE_CODE, False,
-            f"Claude Code is not installed: nothing on PATH is called '{program}'; "
-            f"install it from {CLAUDE_CODE_INSTALL}, then {next_step}",
+            cli.engine, False,
+            f"{cli.title} is not installed: nothing on PATH is called '{program}'; "
+            f"install it from {cli.install}, then {next_step}",
         )
     try:
         status = subprocess.run(
             [executable, *check],
             capture_output=True, text=True, encoding="utf-8", errors="replace",
-            stdin=subprocess.DEVNULL, timeout=CLAUDE_CODE_PROBE_SECONDS,
+            stdin=subprocess.DEVNULL, timeout=probe_seconds,
         )
     except subprocess.TimeoutExpired:
         return EngineVerdict(
-            CLAUDE_CODE, False,
-            f"`{program} {' '.join(check)}` did not answer within "
-            f"{CLAUDE_CODE_PROBE_SECONDS:g}s",
+            cli.engine, False,
+            f"`{program} {' '.join(check)}` did not answer within {probe_seconds:g}s",
         )
     except OSError as exc:
-        return EngineVerdict(CLAUDE_CODE, False, f"'{program}' could not be run: {exc}")
-    try:
-        account = json.loads(status.stdout)
-    except ValueError:
-        account = {}
-    if not isinstance(account, dict):
-        account = {}
+        return EngineVerdict(cli.engine, False, f"'{program}' could not be run: {exc}")
     if status.returncode != 0:
-        # Not signed in is what the status object says (`loggedIn` false) or,
-        # without one, the documented exit alone: "Exits with code 0 if
-        # logged in, 1 if not" (cli-reference), nothing on stderr. Any other
-        # failure (an older CLI with no `auth` subcommand, a usage error, a
+        # Not signed in is what the CLI says (`cli.signed_out`) or, without
+        # a word, the documented exit alone: "Exits with code 0 if logged
+        # in, 1 if not" (cli-reference), nothing on stderr. Any other
+        # failure (an older CLI with no status subcommand, a usage error, a
         # crash) is reported in the CLI's own words, since signing in would
         # not help.
         said = stderr_lines(status.stderr)
-        if account.get("loggedIn") is False or (status.returncode == 1 and not said):
+        if cli.signed_out(status) or (status.returncode == 1 and not said):
             return EngineVerdict(
-                CLAUDE_CODE, False,
-                f"Claude Code is installed but not signed in: `{program} {' '.join(check)}` "
+                cli.engine, False,
+                f"{cli.title} is installed but not signed in: `{program} {' '.join(check)}` "
                 f"says so; {next_step}",
             )
         return EngineVerdict(
-            CLAUDE_CODE, False,
+            cli.engine, False,
             f"`{program} {' '.join(check)}` exited {status.returncode}"
             + (f": {said}" if said else " with nothing on stderr"),
         )
-    method = str(account.get("authMethod") or "")
-    key_source = str(account.get("apiKeySource") or "")
-    if method != CLAUDE_CODE_SUBSCRIPTION or key_source:
-        said = ", ".join(
-            f"{key} {account[key]}" for key in ("authMethod", "apiKeySource") if account.get(key)
-        ) or "nothing about the account"
-        fix = (
-            CLAUDE_CODE_CREDENTIAL_FIX.get(key_source) or CLAUDE_CODE_CREDENTIAL_FIX.get(method)
-            or "remove that credential from the environment melampus runs from"
+    credential = cli.account(status)
+    if credential.kind not in cli.subscriptions:
+        said = credential.said or (
+            f"{credential.kind}, which bills per call" if credential.kind in cli.bills_per_call
+            else "nothing about the account this engine can place, and one it cannot place may bill per call"
         )
         return EngineVerdict(
-            CLAUDE_CODE, False,
-            f"Claude Code is signed in, but not to a Claude subscription: `{program} "
+            cli.engine, False,
+            f"{cli.title} is signed in, but not to {cli.subscription}: `{program} "
             f"{' '.join(check)}` says {said}, and every frame would bill that "
-            f"credential instead ({CLAUDE_CODE_AUTH_DOCS}); {fix}, then {next_step}",
+            f"credential instead{f' ({cli.billing_docs})' if cli.billing_docs else ''}; "
+            f"{f'{credential.fix}, then ' if credential.fix else ''}{next_step}",
         )
-    signed_in_as = ", ".join(
-        str(account[key]) for key in ("authMethod", "subscriptionType") if account.get(key)
-    )
     return EngineVerdict(
-        CLAUDE_CODE, True,
-        "Claude Code is signed in" + (f" ({signed_in_as})" if signed_in_as else "")
+        cli.engine, True,
+        f"{cli.title} is signed in"
+        + (f" ({credential.signed_in_as})" if credential.signed_in_as else "")
         + "; every frame bills to that subscription, not to an API key",
         executable=executable,
     )
 
 
-def claude_code_command(settings: ModelConfig) -> list[str] | None:
-    """The template a claude-code run would ask and run: `[model] command`
-    when the engine is claude-code and a command is set, else None for the
-    built-in CLAUDE_CODE_COMMAND. Read here, once, by the factory and by
-    --detect-engines, so the verdict the dialog shows is the verdict the run
-    gets (Done-when 2), as the ollama address is: the program it names is
-    the one asked, under the settings flags it carries (Codex round 2, C1).
-    """
-    if (settings.backend or "").strip().lower() == CLAUDE_CODE and settings.command:
-        return list(settings.command)
-    return None
+def claude_code_verdict(command: list[str] | None = None) -> EngineVerdict:
+    """Whether Claude Code can be the engine here (card #421): the program
+    `command` (CLAUDE_CODE_COMMAND unless the user set a template) names on
+    PATH, and its status check, under that template's own settings flags
+    (claude_code_status), saying signed in to the subscription
+    (CLAUDE_CODE_SUBSCRIPTION says why "signed in" alone is not enough),
+    within CLAUDE_CODE_PROBE_SECONDS. Never raises; a verdict reports."""
+    return _cli_verdict(CLAUDE_CODE_CLI, command, CLAUDE_CODE_PROBE_SECONDS)
+
+
+def cli_commands(settings: ModelConfig) -> dict[str, list[str]]:
+    """The template a subscription CLI's run would ask and run, by engine:
+    `[model] command` when the engine is that CLI's and a command is set,
+    else nothing, for the CLI's built-in template. Read here, once, by the
+    factory and by --detect-engines, so the verdict the dialog shows is
+    the verdict the run gets (Done-when 2), as the ollama address is: the
+    program it names is the one asked, under the settings flags it carries
+    (Codex round 2, C1)."""
+    engine = (settings.backend or "").strip().lower()
+    return {
+        cli.engine: list(settings.command)
+        for cli in CLI_ENGINES if engine == cli.engine and settings.command
+    }
 
 
 def detect_engines(
-    ollama_at: str | None = None, claude_code_command: list[str] | None = None
+    ollama_at: str | None = None, commands: dict[str, list[str]] | None = None
 ) -> list[EngineVerdict]:
     """One verdict per engine, in the owner's order (BACKEND_CHOICES without the
     test fake), then claude-code (card #421; the picker learns it in #423).
     This is the one place that knows whether an engine can run here: the
     refusals' "what works" list and the CLI's default both come from it, so
     they cannot disagree with what the dialog (card #405) shows. `ollama_at`
-    is the configured address, if any (`[model] ollama_url`);
-    `claude_code_command` the configured template, if any (a `[model]
-    command` under claude-code, read by `claude_code_command(settings)`),
-    else the built-in CLAUDE_CODE_COMMAND."""
+    is the configured address, if any (`[model] ollama_url`); `commands`
+    the configured template for a CLI engine, if any (a `[model] command`
+    under that engine, read by `cli_commands(settings)`, by engine), else
+    the CLI's built-in template."""
     apple_silicon = on_apple_silicon()
     url = ollama_url(ollama_at)
     ollama = ollama_answers(url)
+    commands = commands or {}
     return [
         EngineVerdict(
             "mlx", apple_silicon,
@@ -509,7 +613,7 @@ def detect_engines(
         ),
         EngineVerdict("openai", True, _key_required("openai")),
         EngineVerdict("claude", True, _key_required("claude")),
-        claude_code_verdict(claude_code_command),
+        claude_code_verdict(commands.get(CLAUDE_CODE)),
     ]
 
 
@@ -540,6 +644,45 @@ def claude_code_reply(stdout: str) -> str:
             )
         raise CommandFailed(f"Claude Code reported an error: {result}")
     return result
+
+
+#: Claude Code, as the one verdict and the one factory branch see it.
+CLAUDE_CODE_CLI = CliEngine(
+    CLAUDE_CODE, "Claude Code", CLAUDE_CODE_PROGRAM, CLAUDE_CODE_INSTALL, CLAUDE_CODE_SIGN_IN,
+    CLAUDE_CODE_STATUS, CLAUDE_CODE_COMMAND, claude_code_reply,
+    status_check=claude_code_status, signed_out=_claude_code_signed_out,
+    account=_claude_code_account, subscription="a Claude subscription",
+    subscriptions=(CLAUDE_CODE_SUBSCRIPTION,), billing_docs=CLAUDE_CODE_AUTH_DOCS,
+    bare=CLAUDE_CODE_BARE, bare_fix=CLAUDE_CODE_BARE_FIX,
+)
+
+#: The subscription CLIs, in the owner's order: the verdicts after the
+#: four engines, and the templates cli_commands reads.
+CLI_ENGINES = (CLAUDE_CODE_CLI,)
+
+
+def _cli_backend(cli: CliEngine, settings: ModelConfig) -> VLMBackend:
+    """The seam configured for one subscription CLI: the built-in template
+    unless the user set [model] command, and the reply decoded from the
+    CLI's stdout. Resolved before any image is read, like `command`, and
+    as `ollama` does it: one detection, on the template's program, whose
+    verdict for this CLI is the refusal's sentence and whose list is its
+    "what works", so the CLI is asked its status once, under the
+    template's own settings flags, refused or built, and what runs is the
+    executable that verdict resolved. The template is read once, by the
+    reader --detect-engines uses."""
+    commands = cli_commands(settings)
+    command = commands.get(cli.engine) or list(cli.command)
+    verdicts = detect_engines(settings.ollama_url, commands)
+    verdict = next(v for v in verdicts if v.engine == cli.engine)
+    if not verdict.available:
+        raise _refusal(f"{verdict.reason}.", works_here=_works_here(verdicts))
+    from .backend import CommandBackend
+
+    return CommandBackend(
+        command, executable=verdict.executable, timeout=settings.timeout_seconds,
+        decode=cli.decode,
+    )
 
 
 def _works_here(verdicts: list[EngineVerdict]) -> tuple[str, ...]:
@@ -694,26 +837,7 @@ def build_primary_backend(config: MelampusConfig) -> VLMBackend:
         )
 
     if kind == CLAUDE_CODE:
-        # The seam configured for Claude Code: the built-in template unless
-        # the user set [model] command, and the reply unwrapped from the
-        # result object. Resolved before any image is read, like `command`,
-        # and as `ollama` does it: one detection, on the template's program,
-        # whose claude-code verdict is the refusal's sentence and whose list
-        # is its "what works", so Claude Code is asked its status once,
-        # under the template's own settings flags, refused or built, and
-        # what runs is the executable that verdict resolved. The template
-        # is read once, by the reader --detect-engines uses.
-        command = claude_code_command(settings) or list(CLAUDE_CODE_COMMAND)
-        verdicts = detect_engines(settings.ollama_url, command)
-        verdict = next(v for v in verdicts if v.engine == CLAUDE_CODE)
-        if not verdict.available:
-            raise _refusal(f"{verdict.reason}.", works_here=_works_here(verdicts))
-        from .backend import CommandBackend
-
-        return CommandBackend(
-            command, executable=verdict.executable, timeout=settings.timeout_seconds,
-            decode=claude_code_reply,
-        )
+        return _cli_backend(CLAUDE_CODE_CLI, settings)
 
     if kind == SCRIPTED:
         from .backend import ScriptedBackend
