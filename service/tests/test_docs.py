@@ -347,11 +347,16 @@ def test_readme_build_blocks_sync_the_sdk_extras():
     )
 
 
+def _jobs(workflow: Path = CI_WORKFLOW) -> dict[str, str]:
+    """That workflow's jobs, by name, each as its text."""
+    text = workflow.read_text(encoding="utf-8").split("\njobs:\n", 1)[1]
+    parts = re.split(r"^  (?=\w[\w-]*:\s*$)", text, flags=re.MULTILINE)
+    return {part.split(":", 1)[0]: part for part in parts if part.strip()}
+
+
 def _windows_job(workflow: Path = CI_WORKFLOW) -> str:
     """The text of that workflow's job on a Windows runner."""
-    text = workflow.read_text(encoding="utf-8")
-    jobs = re.split(r"^  (?=\w[\w-]*:\s*$)", text.split("\njobs:\n", 1)[1], flags=re.MULTILINE)
-    windows = [job for job in jobs if re.search(r"runs-on: windows-", job)]
+    windows = [job for job in _jobs(workflow).values() if re.search(r"runs-on: windows-", job)]
     assert windows, f"{workflow.name} has no job on a Windows runner"
     return windows[0]
 
@@ -442,13 +447,6 @@ def test_every_workflow_pins_every_pip_install_to_an_exact_version():
 
 
 RELEASE_ZIPS = ("Melampus-macOS.zip", "Melampus-Windows.zip")
-
-
-def _jobs(workflow: Path = CI_WORKFLOW) -> dict[str, str]:
-    """That workflow's jobs, by name, each as its text."""
-    text = workflow.read_text(encoding="utf-8").split("\njobs:\n", 1)[1]
-    parts = re.split(r"^  (?=\w[\w-]*:\s*$)", text, flags=re.MULTILINE)
-    return {part.split(":", 1)[0]: part for part in parts if part.strip()}
 
 
 def _steps(job: str) -> list[str]:
