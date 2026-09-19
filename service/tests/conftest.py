@@ -113,6 +113,10 @@ def no_real_hub(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("HF_ENDPOINT", closed)
     monkeypatch.setenv("HF_HOME", str(home))
     monkeypatch.setattr(constants, "ENDPOINT", closed)
+    # The file URL template bakes the endpoint in at import; hf_hub_url swaps
+    # an explicit endpoint in only where the template starts with ENDPOINT.
+    monkeypatch.setattr(constants, "HUGGINGFACE_CO_URL_TEMPLATE",
+                        closed + "/{repo_id}/resolve/{revision}/{filename}")
     monkeypatch.setattr(constants, "HF_HUB_CACHE", str(home / "hub"))
 
 
