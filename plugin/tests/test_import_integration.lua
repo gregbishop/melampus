@@ -466,6 +466,29 @@ t.test('the analyse offer is worded for both platforms', function()
 	t.isNil(string.find(offer, '%f[%a]Mac%f[%A]'), 'the offer says Mac:\n' .. offer)
 end)
 
+t.test('the "%" refusal names the path that has it, and the fix for that path', function()
+	-- cmd.exe rewrites %NAME% even inside quotes; the plugin refuses rather
+	-- than run against a path the user never named. Moving the plugin is the
+	-- fix only when the "%" is in the plugin folder.
+	mock.reset({ existing = { [WIN_PLUGIN .. '\\melampus.exe'] = true } })
+	mock.install(WIN_PLUGIN, { windows = true })
+	local Analyze = loadAnalyze()
+	local previews = 'C:\\Users\\photo%grapher\\AppData\\Local\\Temp\\melampus-previews-1'
+	local ok, message = Analyze.run(previews, previews .. '\\results.json', 'wildlife')
+	t.isFalse(ok, 'ran with a "%" in the previews path')
+	t.isNotNil(string.find(message, previews, 1, true),
+		'the message does not name the previews path:\n' .. message)
+	t.isNil(string.find(message, 'Move the plugin', 1, true),
+		'moving the plugin would not fix the previews path:\n' .. message)
+
+	local results = 'D:\\out%put\\results.json'
+	ok, message = Analyze.run(WIN_PREVIEWS, results, 'wildlife')
+	t.isFalse(ok, 'ran with a "%" in the results path')
+	t.isNotNil(string.find(message, results, 1, true),
+		'the message does not name the results path:\n' .. message)
+	t.isNil(mock.state.executed, 'ran a command through a path with "%"')
+end)
+
 t.test('a missing executable names the plugin folder and the file it should hold', function()
 	local executed = runAnalysis({})
 	t.equals(#executed, 0, 'ran a command with no executable to run')
