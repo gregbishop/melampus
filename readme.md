@@ -340,8 +340,7 @@ The executable keeps its results and reads its local config beside itself:
 `dist/.melampus_cache/` and `dist/melampus.local.toml`, the same layout as the
 checkout, so a run's identifications survive the unpack directory being
 deleted at exit. `--cache` and `--config` override both, as they do for the CLI,
-and `MELAMPUS_LOCAL_CONFIG=<file>` names the local file to read instead of the
-one beside the executable (docs/config.md).
+and `--no-local-config` leaves the local file unread (docs/config.md).
 
 ---
 

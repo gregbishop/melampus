@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import importlib.util
 import json
-import os
 import platform
 import shutil
 import subprocess
@@ -228,7 +227,6 @@ def test_frozen_user_data_sits_beside_the_executable_not_in_the_bundle(
     written there is thrown away and a melampus.local.toml there is never read.
     User data lives beside the executable, as it lives beside the code in a
     checkout."""
-    monkeypatch.delenv("MELAMPUS_LOCAL_CONFIG", raising=False)
     tmp_path = tmp_path.resolve()
     bundle, executable = tmp_path / "unpack", tmp_path / "dist" / "melampus"
     executable.parent.mkdir()
@@ -242,28 +240,45 @@ def test_frozen_user_data_sits_beside_the_executable_not_in_the_bundle(
     assert config.run.profile == "sport", "melampus.local.toml beside the executable was not read"
 
 
-def test_melampus_local_config_names_the_local_file_in_a_checkout_and_in_the_executable(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+# Settings that reach the JSON — max_tokens through run_fingerprint, max_retries
+# through retries — at values that are not the defaults, so a comparison also
+# shows the process read this file and not its own melampus.local.toml.
+SYNTHETIC_LOCAL_CONFIG = "[model]\nmax_tokens = 700\n\n[run]\nmax_retries = 2\n"
+
+
+def test_no_local_config_makes_the_config_file_the_whole_configuration(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, repo: Path, photos: Path
 ):
     """The CLI reads the checkout's melampus.local.toml and the executable
     reads dist/'s, so a smoke test that compares the two would otherwise be
-    comparing a developer's settings with the defaults. With
-    MELAMPUS_LOCAL_CONFIG set, both read the file it names and neither reads
-    its own."""
-    tmp_path = tmp_path.resolve()
-    named = tmp_path / "synthetic.toml"
-    named.write_text('[run]\nprofile = "sport"\n', encoding="utf-8")
-    monkeypatch.setenv("MELAMPUS_LOCAL_CONFIG", str(named))
-    assert load_config().run.profile == "sport", "the checkout did not read the named file"
+    comparing a developer's settings with the defaults. `--config <file>
+    --no-local-config` makes that file the whole configuration: it is read,
+    and the melampus.local.toml beside the data is not. Run frozen, so the
+    data root is a dist/ of this test's own; prompts/ sits in the bundle as
+    the build lays it out."""
+    from melampus.cli import main
 
+    tmp_path = tmp_path.resolve()
     bundle, executable = tmp_path / "unpack", tmp_path / "dist" / "melampus"
+    bundle.mkdir()
+    (bundle / "prompts").symlink_to(repo / "prompts")
     executable.parent.mkdir()
-    (executable.parent / "melampus.local.toml").write_text("[run]\nmax_retries = 5\n", encoding="utf-8")
+    # Reaches the fingerprint if read; the synthetic file leaves it alone.
+    (executable.parent / "melampus.local.toml").write_text("[image]\nmax_edge = 640\n", encoding="utf-8")
     _frozen(monkeypatch, bundle, executable)
-    config = load_config()
-    assert config.run.profile == "sport", "the executable did not read the named file"
-    assert config.run.max_retries == 1, "the executable read melampus.local.toml beside itself as well"
-    assert load_config(use_local=False).run.profile == "wildlife", "use_local=False must still skip it"
+    synthetic = tmp_path / "synthetic.toml"
+    synthetic.write_text(SYNTHETIC_LOCAL_CONFIG, encoding="utf-8")
+    out = tmp_path / "results.json"
+    code = main([
+        str(photos), "--backend", "scripted", "--cache", str(tmp_path / "cache.jsonl"),
+        "--json-out", str(out), "--config", str(synthetic), "--no-local-config",
+    ])
+    assert code == 0
+    (result,) = json.loads(out.read_text(encoding="utf-8"))
+    reference = Identifier(ScriptedBackend([]), load_config(synthetic, use_local=False)).identify(photos / PHOTO)
+    assert (result["run_fingerprint"], result["retries"]) == (
+        reference.run_fingerprint, reference.retries
+    ), "the run did not read --config alone: melampus.local.toml beside the data was read too"
 
 
 # The model the mlx smoke tests look for: a synthetic repo, named in a
@@ -279,10 +294,11 @@ def _look_for_weights(executable: Path, photos: Path, tmp_path: Path) -> str:
     local = tmp_path / "melampus.local.toml"
     local.write_text(f'[model]\nrepo = "{SYNTHETIC_MODEL}"\n', encoding="utf-8")
     env = _no_python_environment(tmp_path)
-    env |= {"HF_HUB_OFFLINE": "1", "HF_HOME": str(tmp_path / "hf"), "MELAMPUS_LOCAL_CONFIG": str(local)}
+    env |= {"HF_HUB_OFFLINE": "1", "HF_HOME": str(tmp_path / "hf")}
     proc = subprocess.run(
         [str(executable), str(photos), "--backend", "mlx",
-         "--cache", str(tmp_path / "cache.jsonl")],
+         "--cache", str(tmp_path / "cache.jsonl"),
+         "--config", str(local), "--no-local-config"],
         env=env, capture_output=True, text=True, timeout=600,
     )
     assert proc.returncode != 0, "loaded a model with no weights and no network?"
@@ -319,12 +335,6 @@ def test_the_mlx_smoke_test_ignores_a_local_model_beside_the_executable(
     assert "LocalEntryNotFoundError" in tail, f"did not get as far as looking for weights:\n{tail}"
 
 
-# Settings that reach the JSON — max_tokens through run_fingerprint, max_retries
-# through retries — at values that are not the defaults, so the comparison also
-# shows both processes read this file and not their own.
-SYNTHETIC_LOCAL_CONFIG = "[model]\nmax_tokens = 700\n\n[run]\nmax_retries = 2\n"
-
-
 def test_executable_prints_the_same_json_as_the_cli_with_no_python_on_the_path(
     built_executable: Path, photos: Path, tmp_path: Path
 ):
@@ -336,11 +346,11 @@ def test_executable_prints_the_same_json_as_the_cli_with_no_python_on_the_path(
     two agree, since they change the fingerprint and the retry count."""
     local = tmp_path / "melampus.local.toml"
     local.write_text(SYNTHETIC_LOCAL_CONFIG, encoding="utf-8")
-    isolated = {"MELAMPUS_LOCAL_CONFIG": str(local)}
-    expected = _analyze(VENV_CLI, photos, tmp_path / "venv", env=os.environ | isolated)
+    isolated = ["--config", str(local), "--no-local-config"]
+    expected = _analyze([*VENV_CLI, *isolated], photos, tmp_path / "venv", env=None)
     actual = _analyze(
-        [str(built_executable)], photos, tmp_path / "binary",
-        env=_no_python_environment(tmp_path) | isolated,
+        [str(built_executable), *isolated], photos, tmp_path / "binary",
+        env=_no_python_environment(tmp_path),
     )
     reference = Identifier(ScriptedBackend([]), load_config(local, use_local=False)).identify(photos / PHOTO)
     assert [r["file"] for r in expected] == [PHOTO], "the CLI did not analyze the photo"

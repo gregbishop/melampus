@@ -4,9 +4,13 @@ Every setting, with the reasoning behind its default. Config is data, never code
 nothing in the Python hardcodes a model name, threshold or weight.
 
 Settings load from an optional TOML file passed with `--config`, layered over the
-built-in defaults. A user file need only contain the keys it changes. Programmatic
-callers can also pass overrides directly to `load_config(...)`, which is how the HTTP
-service in Stage 3 will accept per-request configuration.
+built-in defaults and the git-ignored `melampus.local.toml`. A user file need only
+contain the keys it changes. `--no-local-config` leaves `melampus.local.toml`
+unread, so `--config` alone, over the defaults, is the whole configuration: the
+executable smoke tests use it to hand the CLI and the executable one synthetic
+file, so a developer's own settings never decide whether the two agree.
+Programmatic callers can also pass overrides directly to `load_config(...)`, which
+is how the HTTP service in Stage 3 will accept per-request configuration.
 
 ```bash
 melampus-id fixtures/ --config my-settings.toml
@@ -26,11 +30,7 @@ executable (readme.md § Building the executable) it is two places: `prompts/`
 ships in the bundle and is read from the unpack directory, while the caches
 and `melampus.local.toml` live beside the executable — `dist/.melampus_cache/`
 and `dist/melampus.local.toml` for a fresh build — because the unpack directory
-is deleted at exit. `MELAMPUS_LOCAL_CONFIG=<file>` names the local file to read
-instead, in a checkout and in the executable alike; the one beside the data is
-then not read. The executable smoke tests use it to hand the CLI and the
-executable one synthetic configuration, so a developer's own settings never
-decide whether the two agree.
+is deleted at exit.
 
 ---
 
