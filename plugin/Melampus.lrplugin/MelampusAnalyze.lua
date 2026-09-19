@@ -230,7 +230,8 @@ function Analyze.run(previewFolder, resultsPath, profile, engine)
 		parts[#parts + 1] = '--backend'
 		parts[#parts + 1] = quote(chosen)
 	end
-	parts[#parts + 1] = '--plugin-out ' .. quote(resultsPath)
+	parts[#parts + 1] = '--plugin-out'
+	parts[#parts + 1] = quote(resultsPath)
 	parts[#parts + 1] = '--yes'
 	parts[#parts + 1] = '>' .. quote(cliLog) .. ' 2>&1'
 	local command = shellLine(table.concat(parts, ' '))
