@@ -23,6 +23,7 @@ local LrPathUtils = import 'LrPathUtils'
 local LrTasks = import 'LrTasks'
 
 local Log = require 'MelampusLog'
+local Rules = require 'MelampusRules'
 
 local Analyze = {}
 
@@ -194,9 +195,10 @@ end
 
 --- Run the identification pipeline over a folder of previews, writing the
 -- enriched results (quality and its rank, burst agreement, range flag,
--- encounter) to `resultsPath` in the same run.
+-- encounter) to `resultsPath` in the same run. `engine` is the engine
+-- preference (Rules.ENGINES); nil or empty leaves the choice to the CLI.
 -- Returns true plus the results path, or false plus a message.
-function Analyze.run(previewFolder, resultsPath, profile)
+function Analyze.run(previewFolder, resultsPath, profile, engine)
 	local folder = pluginDir()
 	local executable = Analyze.executablePath()
 	if not executable or not LrFileUtils.exists(executable) then
@@ -205,6 +207,9 @@ function Analyze.run(previewFolder, resultsPath, profile)
 			.. Analyze.executableName() .. ':\n' .. tostring(folder)
 			.. '\n\nCopy it there from the Melampus download and try again.'
 	end
+
+	local engineArguments, engineError = Rules.engineArguments({ engine = engine })
+	if not engineArguments then return false, engineError end
 
 	local cliLog = cliLogPath()
 	local refusal = windowsPathRefusal(folder, previewFolder, resultsPath, cliLog)
@@ -216,13 +221,18 @@ function Analyze.run(previewFolder, resultsPath, profile)
 	-- cannot ask. Selecting the photos and configuring a cloud backend with a
 	-- key were the deliberate acts; the estimate is written to melampus-cli.log,
 	-- and the model.max_images ceiling still refuses an oversized run outright.
-	local command = shellLine(table.concat({
+	local parts = {
 		quote(executable), quote(previewFolder),
 		'--profile', quote(profile or 'wildlife'),
-		'--plugin-out', quote(resultsPath),
-		'--yes',
-		'>' .. quote(cliLog) .. ' 2>&1',
-	}, ' '))
+	}
+	-- --backend only when the user chose an engine; otherwise the CLI decides.
+	if engineArguments[1] then
+		parts[#parts + 1] = engineArguments[1] .. ' ' .. quote(engineArguments[2])
+	end
+	parts[#parts + 1] = '--plugin-out ' .. quote(resultsPath)
+	parts[#parts + 1] = '--yes'
+	parts[#parts + 1] = '>' .. quote(cliLog) .. ' 2>&1'
+	local command = shellLine(table.concat(parts, ' '))
 	Log.info('running: ' .. command)
 	local code = LrTasks.execute(command)
 	if code ~= 0 then

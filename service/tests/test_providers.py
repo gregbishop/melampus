@@ -60,7 +60,7 @@ def test_mlx_is_refused_on_windows_with_directions(monkeypatch):
     with pytest.raises(providers.BackendUnavailable) as err:
         providers.build_primary_backend(_cfg())
     message = str(err.value)
-    assert "anthropic" in message and "openai" in message and "--backend" in message
+    assert "claude" in message and "openai" in message and "--backend" in message
 
 
 def test_mlx_is_refused_on_intel_mac(monkeypatch):
@@ -73,15 +73,16 @@ def test_mlx_is_refused_on_intel_mac(monkeypatch):
         providers.build_primary_backend(_cfg())
 
 
-def test_anthropic_primary_uses_provider_default_model(
+def test_claude_primary_builds_the_anthropic_backend_with_its_default_model(
     monkeypatch, no_ambient_keys, stub_sdks
 ):
+    """Card #403: `claude` is the one user-facing name of the Anthropic backend."""
     monkeypatch.setenv("MELAMPUS_ANTHROPIC_KEY", "key-from-env")
-    config = _cfg(model={"backend": "anthropic"})
+    config = _cfg(model={"backend": "claude"})
     assert providers.is_cloud_primary(config)
     backend = providers.build_primary_backend(config)
     assert isinstance(backend, AnthropicBackend)
-    assert backend.model == providers.DEFAULT_MODELS["anthropic"]
+    assert backend.model == providers.DEFAULT_MODELS["claude"]
 
 
 def test_openai_primary_respects_name_and_base_url(monkeypatch, no_ambient_keys, stub_sdks):
@@ -97,7 +98,7 @@ def test_openai_primary_respects_name_and_base_url(monkeypatch, no_ambient_keys,
 
 def test_missing_key_fails_fast_and_names_the_variable(no_ambient_keys, stub_sdks):
     with pytest.raises(ValueError) as err:
-        providers.build_primary_backend(_cfg(model={"backend": "anthropic"}))
+        providers.build_primary_backend(_cfg(model={"backend": "claude"}))
     assert "MELAMPUS_ANTHROPIC_KEY" in str(err.value)
 
 
@@ -105,7 +106,106 @@ def test_unknown_backend_is_rejected_with_choices():
     with pytest.raises(ValueError) as err:
         providers.build_primary_backend(_cfg(model={"backend": "gemini"}))
     message = str(err.value)
-    assert "gemini" in message and "anthropic" in message and "openai" in message
+    assert "gemini" in message and "claude" in message and "openai" in message
+
+
+ENGINES = ("mlx", "ollama", "openai", "claude")
+
+
+def test_backend_choices_are_the_owners_engine_names_in_order():
+    """Card #403: the engines a user chooses between are mlx, ollama, openai,
+    claude, in that order, plus the offline test fake. The order is the one
+    card #404's detection will try them in for a default."""
+    assert providers.BACKEND_CHOICES == (*ENGINES, providers.SCRIPTED)
+
+
+@pytest.mark.parametrize("engine", ENGINES)
+def test_cli_accepts_each_engine_name(engine, photos, tmp_path, no_ambient_keys, capsys):
+    """Card #403, Done-when 1: given an engine name, when the plugin passes it
+    as --backend, then the CLI receives it. --report-only stops before any
+    engine is built, so this is the parse alone: the name is accepted."""
+    from melampus.cli import main
+
+    code = main([str(photos), "--backend", engine, "--report-only",
+                 "--cache", str(tmp_path / "cache.jsonl")])
+
+    assert code == 0, capsys.readouterr().err
+
+
+@pytest.mark.parametrize("name", ["anthropic", "gemini", "MLX"])
+def test_cli_rejects_a_name_that_is_not_an_engine(name, photos, tmp_path, capsys):
+    from melampus.cli import main
+
+    with pytest.raises(SystemExit) as exit_:
+        main([str(photos), "--backend", name, "--report-only",
+              "--cache", str(tmp_path / "cache.jsonl")])
+
+    assert exit_.value.code == 2
+    err = capsys.readouterr().err
+    for engine in ENGINES:
+        assert engine in err, f"the usage error does not name {engine!r}:\n{err}"
+
+
+def test_ollama_is_refused_as_not_built_yet_and_names_what_works(no_ambient_keys):
+    """Card #403: `ollama` is one of the four names and the CLI must accept it,
+    but its backend is card #406's. Until then it is refused the way mlx is
+    refused off Apple Silicon: what is wrong, in plain words, and the backends
+    that do work on this machine. Ollama is local, so nothing about a cloud
+    primary applies to it: no retuned defaults, no cost gate, no cloud cache."""
+    config = _cfg(model={"backend": "ollama"})
+    assert not providers.is_cloud_primary(config)
+    with pytest.raises(providers.BackendUnavailable) as err:
+        providers.build_primary_backend(config)
+    message = str(err.value)
+    assert "The Ollama engine is not built yet" in message
+    assert "#406" in message
+    for works_here in ("claude", "openai", "scripted"):
+        assert works_here in message, f"{works_here!r} is not named as working here:\n{message}"
+    assert "--backend" in message
+
+
+def test_cli_backend_ollama_exits_3_with_the_refusal(photos, tmp_path, capsys, no_ambient_keys):
+    from melampus.cli import main
+
+    code = main([str(photos), "--backend", "ollama", "--cache", str(tmp_path / "cache.jsonl")])
+
+    err = capsys.readouterr().err
+    assert code == 3, err
+    assert "The Ollama engine is not built yet" in err
+    assert "cloud default" not in err, f"ollama is local; nothing was retuned for a cloud:\n{err}"
+
+
+def test_mlx_refusal_does_not_name_ollama_as_working(monkeypatch):
+    """Off Apple Silicon the mlx refusal lists what works here; an engine that
+    is not built yet does not work anywhere, so it stays off that list."""
+    monkeypatch.setattr(providers.sys, "platform", "win32")
+    with pytest.raises(providers.BackendUnavailable) as err:
+        providers.build_primary_backend(_cfg())
+    assert "ollama" not in str(err.value)
+
+
+def test_engine_round_trips_through_the_local_config(monkeypatch, tmp_path):
+    """Card #403: the engine is a setting before it is a dialog. `[model]
+    backend = "claude"` in melampus.local.toml is what load_config reads back,
+    the same way the plugin's executable reads its config (card #436)."""
+    local = tmp_path / "melampus.local.toml"
+    local.write_text('[model]\nbackend = "claude"\n', encoding="utf-8")
+    monkeypatch.setattr(providers.MelampusConfig.__module__ and __import__("melampus.config").config,
+                        "_local_config", lambda: local)
+
+    assert load_config().model.backend == "claude"
+    assert load_config(use_local=False).model.backend == "mlx"
+
+
+def test_anthropic_is_not_a_backend_name():
+    """Card #403: the engine names are mlx, ollama, openai, claude. The old
+    spelling of the Anthropic backend is refused like any other unknown name,
+    so there is exactly one name for it everywhere."""
+    with pytest.raises(ValueError) as err:
+        providers.build_primary_backend(_cfg(model={"backend": "anthropic"}))
+    message = str(err.value)
+    assert "anthropic" in message and "claude" in message
+    assert "anthropic" not in providers.BACKEND_CHOICES
 
 
 def test_key_resolution_prefers_config_then_specific_then_generic(monkeypatch):
@@ -113,12 +213,12 @@ def test_key_resolution_prefers_config_then_specific_then_generic(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "generic")
     from pydantic import SecretStr
 
-    assert providers.resolve_provider_key("anthropic", SecretStr("explicit")) == "explicit"
-    assert providers.resolve_provider_key("anthropic") == "specific"
+    assert providers.resolve_provider_key("claude", SecretStr("explicit")) == "explicit"
+    assert providers.resolve_provider_key("claude") == "specific"
     monkeypatch.delenv("MELAMPUS_ANTHROPIC_KEY")
-    assert providers.resolve_provider_key("anthropic") == "generic"
+    assert providers.resolve_provider_key("claude") == "generic"
     monkeypatch.delenv("ANTHROPIC_API_KEY")
-    assert providers.resolve_provider_key("anthropic") is None
+    assert providers.resolve_provider_key("claude") is None
 
 
 def test_cloud_defaults_retuned_when_left_at_defaults():
@@ -196,7 +296,8 @@ def test_cli_backend_mlx_on_windows_names_apple_silicon_and_the_backends_that_wo
 ):
     """Card #400, Done-when 2: given the Windows executable, when the local MLX
     engine is requested, then it says clearly that MLX needs Apple Silicon and
-    names the engines that work here."""
+    names the engines that work here — every backend but mlx and the one that
+    is not built yet (card #403)."""
     from melampus.cli import main
 
     monkeypatch.setattr(providers.sys, "platform", "win32")
@@ -207,5 +308,6 @@ def test_cli_backend_mlx_on_windows_names_apple_silicon_and_the_backends_that_wo
     err = capsys.readouterr().err
     assert code != 0
     assert "Apple Silicon" in err
-    for works_here in ("anthropic", "openai", "scripted"):
+    for works_here in ("claude", "openai", "scripted"):
         assert works_here in err, f"{works_here!r} is not named as working here:\n{err}"
+    assert "ollama" not in err, f"an engine that is not built yet is named as working:\n{err}"

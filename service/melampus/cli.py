@@ -196,9 +196,10 @@ def main(argv: list[str] | None = None) -> int:
                          "alone, over the defaults, is the whole configuration")
     ap.add_argument("--model", default=None, help="override model repo")
     ap.add_argument("--backend", choices=BACKEND_CHOICES, default=None,
-                    help="what answers: mlx locally (default), a cloud provider "
-                         "for machines with no local runtime, or scripted (a fake "
-                         "that answers nothing; for smoke tests without weights)")
+                    help="which engine answers: mlx locally (default), ollama "
+                         "(not built yet, card #406), openai or claude for machines "
+                         "with no local runtime, or scripted (a fake that answers "
+                         "nothing; for smoke tests without weights)")
     ap.add_argument("--yes", action="store_true",
                     help="skip the cost confirmation when the primary backend is a "
                          "cloud provider (for non-interactive callers)")
@@ -232,8 +233,8 @@ def main(argv: list[str] | None = None) -> int:
     cloud.add_argument("--escalate-max", type=int, default=None,
                        help="ceiling on how many frames one run may bill for")
     cloud.add_argument("--escalate-model", default=None, help="override the cloud model")
-    cloud.add_argument("--escalate-provider", choices=("anthropic", "openai"), default=None,
-                       help="which cloud to ask (default: anthropic)")
+    cloud.add_argument("--escalate-provider", choices=("claude", "openai"), default=None,
+                       help="which cloud to ask (default: claude)")
     cloud.add_argument("--escalate-yes", action="store_true",
                        help="skip the cost confirmation (for non-interactive callers)")
     cloud.add_argument("--escalate-base-url", default=None,
