@@ -146,6 +146,24 @@ def test_cli_rejects_a_name_that_is_not_an_engine(name, photos, tmp_path, capsys
         assert engine in err, f"the usage error does not name {engine!r}:\n{err}"
 
 
+def test_cli_rejects_an_escalation_provider_that_is_not_in_the_registry(photos, tmp_path, capsys):
+    """The clouds --escalate-provider offers are providers.KEY_VARIABLES, the
+    registry escalate.py reads, not a list spelled in the CLI. `anthropic` is
+    the SDK, not a provider name (card #403: `claude` everywhere a user names
+    it), so it is refused as a usage error that names every registered
+    provider, the way --backend's names every engine."""
+    from melampus.cli import main
+
+    with pytest.raises(SystemExit) as exit_:
+        main([str(photos), "--report-only", "--escalate", "--escalate-provider", "anthropic",
+              "--cache", str(tmp_path / "cache.jsonl")])
+
+    assert exit_.value.code == 2
+    err = capsys.readouterr().err
+    for provider in providers.KEY_VARIABLES:
+        assert provider in err, f"the usage error does not name {provider!r}:\n{err}"
+
+
 def test_ollama_is_refused_as_not_built_yet_and_names_what_works(no_ambient_keys):
     """Card #403: `ollama` is one of the four names and the CLI must accept it,
     but its backend is card #406's. Until then it is refused the way mlx is
