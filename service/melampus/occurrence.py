@@ -29,6 +29,8 @@ import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .config import OccurrenceConfig
+
 GBIF_SEARCH = "https://api.gbif.org/v1/occurrence/search"
 EBIRD_SPPLIST = "https://api.ebird.org/v2/product/spplist/{region}"
 USER_AGENT = "melampus/0.1 (local wildlife photo triage; +https://github.com/gregbishop/melampus)"
@@ -273,3 +275,17 @@ def rerank(
         range_flag=range_flag,
         notes=notes,
     )
+
+
+def range_lookup(settings: OccurrenceConfig) -> tuple[GBIFClient, Location] | None:
+    """The client and place a range check needs, or None when §4.3 cannot run.
+
+    None when lookups are disabled or no default location is configured. Callers
+    treat None as "skip the check", never as "everything is in range".
+    """
+    if not settings.enabled:
+        return None
+    if settings.default_latitude is None or settings.default_longitude is None:
+        return None
+    where = Location(settings.default_latitude, settings.default_longitude, settings.radius_km)
+    return GBIFClient(cache=OccurrenceCache(settings.cache_path)), where

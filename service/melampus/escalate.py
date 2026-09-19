@@ -381,16 +381,13 @@ def compute_range_flags(
     no coordinates, or no network. That matches the rest of the module — a missing
     signal must never be read as "everything is fine".
     """
-    from .occurrence import GBIFClient, Location, OccurrenceCache, applies_to, rerank
+    from .occurrence import applies_to, range_lookup, rerank
 
     settings = config.occurrence
-    if not settings.enabled:
+    lookup = range_lookup(settings)
+    if lookup is None:
         return frozenset()
-    if settings.default_latitude is None or settings.default_longitude is None:
-        return frozenset()
-
-    where = Location(settings.default_latitude, settings.default_longitude, settings.radius_km)
-    client = GBIFClient(cache=OccurrenceCache(settings.cache_path))
+    client, where = lookup
     flagged: set[str] = set()
 
     for result in results:
