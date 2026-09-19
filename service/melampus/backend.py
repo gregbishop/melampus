@@ -468,6 +468,16 @@ class _Bounded(urllib.request.HTTPHandler, urllib.request.HTTPSHandler):
         )
 
 
+def ollama_not_running(url: str, reason: object) -> str:
+    """The one message for a request Ollama did not answer at `url`: the
+    backend's mid-run failure and the model pull (card #409) say the same
+    thing about the same condition."""
+    return (
+        f"no Ollama server answering at {url} ({reason}); "
+        "start Ollama, or set [model] ollama_url to where it listens"
+    )
+
+
 class OllamaBackend(VLMBackend):
     """A local Ollama server behind the same interface (card #406): local
     inference on Windows and Linux, and on Macs that prefer it, through the
@@ -588,10 +598,7 @@ class OllamaBackend(VLMBackend):
         except urllib.error.URLError as exc:
             if isinstance(exc.reason, TimeoutError):
                 raise self._timed_out() from exc
-            raise ConnectionError(
-                f"no Ollama server answering at {self.url} ({exc.reason}); "
-                "start Ollama, or set [model] ollama_url to where it listens"
-            ) from exc
+            raise ConnectionError(ollama_not_running(self.url, exc.reason)) from exc
         except TimeoutError as exc:
             raise self._timed_out() from exc
         except http.client.HTTPException as exc:

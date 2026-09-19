@@ -509,15 +509,29 @@ def hub_env(fake_hub: FakeHub, tmp_path: Path) -> dict[str, str]:
     return {"HF_ENDPOINT": fake_hub.endpoint, "HF_HOME": str(tmp_path / "hf")}
 
 
-# --- the fake Ollama (card #406) ------------------------------------------
+# --- the fake Ollama (card #406, #409) -----------------------------------
 #
 # An HTTP server on 127.0.0.1 speaking the endpoints of Ollama's docs/api.md
-# that the service uses: § Version (`GET /api/version`, the probe) and
+# that the service uses: § Version (`GET /api/version`, the probe),
 # § Generate a chat completion (`POST /api/chat`, one response object with
-# `stream` false). No model, no weights, no network beyond loopback. `status`
-# is what the version probe answers, `delay` holds that answer, `replies` are
-# the texts the chat answers with in order (a 404 with Ollama's not-found
-# error once they run out); every chat request's JSON body lands on `chats`.
+# `stream` false), and for the Download button (card #409) § Pull a Model
+# (`POST /api/pull`, a stream of JSON objects one per line: `pulling
+# manifest`, then per layer `pulling <digest>` with `digest`, `total` and
+# `completed`, then the verifying, writing and removing statuses, then
+# `success`; an error is an object with `error`, mid-stream once content
+# has started, else the HTTP status with the same object). No model, no
+# weights, no network beyond loopback.
+#
+# `status` is what the version probe answers, `delay` holds that answer,
+# `replies` are the texts the chat answers with in order (a 404 with Ollama's
+# not-found error once they run out); every chat request's JSON body lands on
+# `chats`. `library` is what can be pulled, name -> layer sizes; `models` is
+# what is held, name -> size, filled by a pull; `pulls` keeps every pull's
+# body and `requests` every request. `throttle` (bytes per line, seconds
+# between) slows a pull so a cancel can land mid-stream, and a pull the
+# client cut off keeps what each layer had, so the next pull of the same
+# model starts there (docs/api.md § Pull a Model: "Cancelled pulls are
+# resumed from where they left off").
 
 
 def ollama_chat_reply(model: str, text: str) -> dict:
@@ -545,9 +559,16 @@ class FakeOllama:
     does; any other path is Ollama's own 404."""
 
     def __init__(
-        self, *, status: int = 200, delay: float = 0.0, replies: list[str] = (), prefix: str = ""
+        self, *, status: int = 200, delay: float = 0.0, replies: list[str] = (), prefix: str = "",
+        library: dict[str, list[int]] | None = None,
     ) -> None:
         self.chats: list[dict] = []
+        self.pulls: list[dict] = []
+        self.requests: list[tuple[str, str]] = []
+        self.library = dict(library or {})
+        self.models: dict[str, int] = {}
+        self.partial: dict[tuple[str, str], int] = {}
+        self.throttle: tuple[int, float] | None = None
         self.endpoint = ""  # set while `serve` runs
         self.server_port = 0
         self.release = threading.Event()
@@ -556,6 +577,7 @@ class FakeOllama:
 
         class Handler(QuietHandler):
             def do_GET(self):  # noqa: N802 - http.server's name
+                ollama.requests.append(("GET", self.path))
                 if self.path != f"{prefix}/api/version":
                     self._answer(404, {"error": "404 page not found"})
                     return
@@ -564,7 +586,11 @@ class FakeOllama:
                 self._answer(status, {"version": "0.0.0-fake"})
 
             def do_POST(self):  # noqa: N802 - http.server's name
+                ollama.requests.append(("POST", self.path))
                 body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                if self.path == f"{prefix}/api/pull":
+                    self._pull(body)
+                    return
                 if self.path != f"{prefix}/api/chat":
                     self._answer(404, {"error": "404 page not found"})
                     return
@@ -573,6 +599,47 @@ class FakeOllama:
                     self._answer(404, {"error": f"model '{body.get('model')}' not found"})
                     return
                 self._answer(200, ollama_chat_reply(body["model"], pending.pop(0)))
+
+            def _pull(self, body: dict) -> None:
+                ollama.pulls.append(body)
+                name = body.get("model") or ""
+                if not name:
+                    self._answer(400, {"error": "invalid model name"})
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "application/x-ndjson")
+                self.end_headers()
+                try:
+                    self._line({"status": "pulling manifest"})
+                    if name not in ollama.library:
+                        self._line({"error": "pull model manifest: file does not exist"})
+                        return
+                    for index, size in enumerate(ollama.library[name]):
+                        digest = "sha256:" + hashlib.sha256(f"{name}:{index}".encode()).hexdigest()
+                        line = {"status": f"pulling {digest[7:19]}", "digest": digest, "total": size}
+                        done = ollama.partial.get((name, digest), 0)
+                        if done == 0 and name not in ollama.models:
+                            self._line(line)
+                        step, pause = ollama.throttle or (size, 0.0)
+                        while done < size:
+                            done = min(done + step, size)
+                            ollama.partial[(name, digest)] = done
+                            self._line({**line, "completed": done})
+                            time.sleep(pause)
+                        if done == size and name in ollama.models:
+                            self._line({**line, "completed": done})
+                    for status_ in ("verifying sha256 digest", "writing manifest", "removing any unused layers"):
+                        self._line({"status": status_})
+                    ollama.models[name] = sum(ollama.library[name])
+                    self._line({"status": "success"})
+                except (BrokenPipeError, ConnectionResetError):
+                    # The client closed the stream: the pull stops with what
+                    # each layer had kept, for the next pull to start from.
+                    self.close_connection = True
+
+            def _line(self, item: dict) -> None:
+                self.wfile.write(json.dumps(item).encode("utf-8") + b"\n")
+                self.wfile.flush()
 
             def _answer(self, code: int, payload: dict) -> None:
                 self.send_response(code)

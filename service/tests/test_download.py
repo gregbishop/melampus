@@ -25,6 +25,7 @@ import sys
 import threading
 import tomllib
 import types
+from collections.abc import Iterator
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 from typing import Callable
@@ -41,6 +42,7 @@ from conftest import (
     FAKE_TOTAL,
     VENV_CLI,
     FakeHub,
+    FakeOllama,
     QuietHandler,
     Silent,
     assert_download_completed,
@@ -74,6 +76,7 @@ from melampus.download import (
     cancel_on_signals,
     download_model,
     model_status,
+    pull_model,
     remove_model,
 )
 
@@ -2448,3 +2451,66 @@ def test_pull_stream_ending_without_success_is_a_failure():
             {"status": "pulling aaa", "digest": "sha256:aaa", "total": 100, "completed": 40},
         )))
     assert "ended" in str(failure.value) and "--download-model" in str(failure.value)
+
+
+# The pull against a fake Ollama on 127.0.0.1 (Done-when 2): conftest's
+# FakeOllama grows the pull endpoint, streaming the layers of a model in its
+# `library` and keeping what a cut-off pull had, the way Ollama does.
+
+
+@pytest.fixture()
+def fake_ollama() -> Iterator[FakeOllama]:
+    """The Ollama, holding nothing and able to pull FAKE_MODEL."""
+    with FakeOllama(library={FAKE_MODEL: [3000, 1000]}).serve() as ollama:
+        yield ollama
+
+
+def _pull(ollama: FakeOllama, model: str = FAKE_MODEL, **kwargs) -> list[Update]:
+    updates: list[Update] = []
+    pull_model(model, ollama.endpoint, on_update=updates.append, **kwargs)
+    return updates
+
+
+def test_pull_asks_ollama_to_pull_the_model_and_reports_its_progress_then_done(fake_ollama: FakeOllama):
+    """Done-when 1 at the library: POST /api/pull with the model (docs/api.md
+    § Pull a Model), the stream's layer lines become progress lines that
+    climb to the whole model, `done <model>` ends it, and the fake then
+    holds the model. Every request went to the fake's pull endpoint."""
+    updates = _pull(fake_ollama)
+
+    assert [p["model"] for p in fake_ollama.pulls] == [FAKE_MODEL]
+    assert {path for _, path in fake_ollama.requests} == {"/api/pull"}
+    assert updates[0] == Update.progress(0, 3000), "the first layer's total, before any byte"
+    assert updates[-2] == Update.progress(4000, 4000)
+    assert updates[-1] == Update.done(FAKE_MODEL)
+    counts = [u.bytes_done for u in updates[:-1]]
+    assert counts == sorted(counts)
+    assert fake_ollama.models == {FAKE_MODEL: 4000}
+
+
+def test_pull_of_a_model_ollama_has_no_name_for_names_the_setting(fake_ollama: FakeOllama):
+    with pytest.raises(DownloadError) as failure:
+        _pull(fake_ollama, model="fake-org/no-such-model:1b")
+    message = str(failure.value)
+    assert "fake-org/no-such-model:1b" in message and "[model] ollama_model" in message
+
+
+def test_pull_with_no_ollama_answering_uses_the_backends_not_running_message(tmp_path: Path):
+    """The same words the ollama backend uses for the same condition, so the
+    dialog's message matches what a run would say."""
+    port = closed_port()
+    with pytest.raises(DownloadError) as failure:
+        pull_model(FAKE_MODEL, f"http://127.0.0.1:{port}", on_update=lambda update: None,
+                   cancel_marker=tmp_path / "download-cancel")
+    message = str(failure.value)
+    assert f"no Ollama server answering at http://127.0.0.1:{port}" in message
+    assert "start Ollama, or set [model] ollama_url" in message
+
+
+def test_pull_refused_before_any_content_carries_ollamas_words(fake_ollama: FakeOllama):
+    """An error before the stream starts is an HTTP status with the same
+    {"error": ...} object (server/routes.go: a bad name is 400): the message
+    carries Ollama's words, not a traceback."""
+    with pytest.raises(DownloadError) as failure:
+        _pull(fake_ollama, model="")
+    assert "invalid model name" in str(failure.value)
