@@ -19,7 +19,7 @@ from pathlib import Path
 import pytest
 from conftest import PHOTO
 
-from test_binary import per_user_config
+from test_binary import _per_user_data_dir, per_user_config
 
 REPO = Path(__file__).resolve().parents[2]
 PLUGIN = REPO / "plugin" / "Melampus.lrplugin"
@@ -350,3 +350,133 @@ def test_the_mock_hands_its_temp_paths_to_sh_as_data(tmp_path: Path):
     assert (parent / "canary").exists(), "cleanUp removed the parent of TMPDIR"
     assert (sibling / "canary").exists(), "cleanUp removed a sibling of TMPDIR"
     assert not marker.exists(), "a backtick in TMPDIR ran through sh"
+
+
+def _model_commands_the_dialog_builds(plugin_dir: Path, tmp_path: Path) -> tuple[str, str, Path]:
+    """The two shell commands the Settings dialog builds for the model (card
+    #408) under the mock SDK with `_PLUGIN.path` at `plugin_dir` and TMPDIR
+    at `tmp_path`: the `--model-status` line it runs at open, and the
+    `--download-model` line the Download button runs, stdout redirected to
+    the progress file the poller reads; and the mock's temp directory, under
+    tmp_path, where both lines put their files."""
+    script = tmp_path / "model-commands.lua"
+    script.write_text(
+        "local mock = require('lrmock')\n"
+        "mock.reset()\n"
+        "mock.install(os.getenv('MELAMPUS_PLUGIN_DIR'))\n"
+        "local Analyze = dofile(os.getenv('MELAMPUS_ANALYZE'))\n"
+        "Analyze.modelStatus()\n"
+        "local command, err = Analyze.downloadCommand()\n"
+        "assert(command, err)\n"
+        "io.write(mock.state.executed[1] .. '\\n' .. command .. '\\n' .. mock.state.tempDir .. '\\n')\n",
+        encoding="utf-8",
+    )
+    built = run_lua(script, env=os.environ | {
+        "MELAMPUS_PLUGIN_DIR": str(plugin_dir),
+        "MELAMPUS_ANALYZE": str(PLUGIN / "MelampusAnalyze.lua"),
+        "TMPDIR": str(tmp_path),
+    })
+    assert built.returncode == 0, built.stdout + built.stderr
+    status, download, temp = built.stdout.splitlines()
+    assert "--model-status" in status and "--download-model" in download
+    return status, download, Path(temp)
+
+
+def _status_the_dialog_reads(command: str, env: dict[str, str], temp: Path) -> dict:
+    proc = run_as_lightroom_would(command, env=env, cwd=temp.parent, capture_output=True, text=True, timeout=600)
+    assert proc.returncode == 0, f"exit {proc.returncode}: {_cli_log_tail(temp)}"
+    return json.loads((temp / "melampus-model-status.json").read_text(encoding="utf-8"))
+
+
+@needs_sh
+def test_the_download_command_the_dialog_builds_fetches_the_model_and_the_status_flips_to_installed(
+    built_executable: Path, fake_hub, hub_env: dict[str, str], tmp_path: Path
+):
+    """Card #408, Done-when 1 and 3 at the real boundary. The commands the
+    dialog builds, run through sh against dist/melampus with no python on
+    the path, HF_ENDPOINT at the fake hub and HF_HOME under tmp_path:
+    `--model-status` reports the model absent with the fake's size, the
+    download line fills the progress file the poller reads with protocol
+    lines ending in `done <path>`, and the status then reports installed
+    at that path. No real weights move."""
+    from conftest import FAKE_FILES, FAKE_REPO
+    from melampus.download import Update
+
+    plugin_dir = _plugin_folder_holding(built_executable, tmp_path)
+    env = per_user_config(tmp_path, f'[model]\nrepo = "{FAKE_REPO}"\n') | hub_env
+    data_dir = _per_user_data_dir(Path(env["HOME"]))
+    status_command, download_command, temp = _model_commands_the_dialog_builds(plugin_dir, tmp_path)
+    total = sum(len(data) for data in FAKE_FILES.values())
+
+    before = _status_the_dialog_reads(status_command, env, temp)
+    assert before["repo"] == FAKE_REPO and before["installed"] is False and before["path"] is None
+    assert before["bytes_total"] == total and before["bytes_done"] == 0
+    assert Path(before["cancel_path"]) == data_dir / "cache" / "download-cancel"
+
+    proc = run_as_lightroom_would(download_command, env=env, cwd=tmp_path,
+                                  capture_output=True, text=True, timeout=600)
+    log = (temp / "melampus-download.log").read_text(encoding="utf-8")
+    assert proc.returncode == 0, f"exit {proc.returncode}:\n{log[-3000:]}"
+    lines = (temp / "melampus-download.progress").read_text(encoding="utf-8").splitlines()
+    updates = [Update.parse(line) for line in lines]
+    assert updates[0] == Update.progress(0, total) and updates[-2] == Update.progress(total, total)
+    assert updates[-1].state == "done"
+    assert {p.name: p.read_bytes() for p in Path(updates[-1].path).iterdir()} == FAKE_FILES
+
+    after = _status_the_dialog_reads(status_command, env, temp)
+    assert after["installed"] is True and after["path"] == updates[-1].path
+    assert after["bytes_done"] == after["bytes_total"] == total
+
+
+@needs_sh
+def test_the_marker_the_dialog_writes_cancels_the_download_the_dialog_started(
+    built_executable: Path, tmp_path: Path
+):
+    """Card #408, Done-when 2 at the real boundary: the path `--model-status`
+    reports is the one `--download-model` watches. The download line runs
+    against a throttled fake hub; once the progress file shows the first
+    chunk, the marker is written where the status said (what Cancel does),
+    and the executable ends the file with `cancelled`, exit 4, with the
+    partial blob kept in HF_HOME."""
+    from conftest import FAKE_FILES, FAKE_REPO, FakeHub
+    from melampus.download import CANCEL_MARKER, EXIT_CANCELLED, Update
+    from test_download import CHUNK
+
+    big = bytes(range(256)) * (40 * 4096)
+    hub = FakeHub(files={"config.json": FAKE_FILES["config.json"], "model.safetensors": big})
+    hub.throttle = (64 * 1024, 0.002)
+    hub.start()
+    try:
+        plugin_dir = _plugin_folder_holding(built_executable, tmp_path)
+        env = per_user_config(tmp_path, f'[model]\nrepo = "{FAKE_REPO}"\n') | {
+            "HF_ENDPOINT": hub.endpoint, "HF_HOME": str(tmp_path / "hf")}
+        status_command, download_command, temp = _model_commands_the_dialog_builds(plugin_dir, tmp_path)
+        marker = Path(_status_the_dialog_reads(status_command, env, temp)["cancel_path"])
+        assert marker.name == CANCEL_MARKER and not marker.exists()
+
+        proc = subprocess.Popen(download_command, shell=True, env=env, cwd=tmp_path,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        progress = temp / "melampus-download.progress"
+        import time
+        deadline = time.monotonic() + 120
+        while time.monotonic() < deadline:
+            lines = progress.read_text(encoding="utf-8").splitlines() if progress.is_file() else []
+            if lines and Update.parse(lines[-1]).bytes_done >= CHUNK:
+                break
+            time.sleep(0.05)
+        else:
+            proc.kill()
+            pytest.fail("the progress file never showed a chunk")
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.touch()
+        code = proc.wait(timeout=120)
+        hub.throttle = None
+        assert code == EXIT_CANCELLED, (code, (temp / "melampus-download.log").read_text()[-3000:])
+        lines = progress.read_text(encoding="utf-8").splitlines()
+        assert Update.parse(lines[-1]) == Update.cancelled()
+        assert not marker.exists(), "the executable did not remove the marker on exit"
+        blobs = tmp_path / "hf" / "hub" / f"models--{FAKE_REPO.replace('/', '--')}" / "blobs"
+        (partial,) = blobs.glob("*.incomplete")
+        assert CHUNK <= partial.stat().st_size < len(big), "the partial file was not kept"
+    finally:
+        hub.stop()
