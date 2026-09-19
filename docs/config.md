@@ -143,7 +143,7 @@ the Settings dialog's Download button (card #408):
   whole model from the hub's file listing, **null when the hub cannot be
   reached**, and the status never fails for the network being down (the
   button then says "size unknown"). Example, absent:
-  `{"repo": "mlx-community/Qwen3-VL-30B-A3B-Instruct-4bit", "installed": false, "bytes_total": 18300000000, "bytes_done": 0, "path": null, "cancel_path": "/Users/me/Library/Application Support/Melampus/cache/download-cancel"}`.
+  `{"repo": "mlx-community/Qwen3-VL-30B-A3B-Instruct-4bit", "installed": false, "bytes_total": 18300000000, "bytes_done": 0, "path": null, "cancel_path": "~/Library/Application Support/Melampus/cache/download-cancel"}` (the path is absolute).
 - `--remove-model` deletes the repo from the cache through the hub library's
   own cache deletion (every revision, so the whole repo folder goes), prints
   `removed <path>` (that folder) and exits 0. It is refused with **exit 3**
