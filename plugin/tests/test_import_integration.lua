@@ -556,7 +556,10 @@ t.test('the Settings dialog is worded for both platforms and the executable flow
 		'the Settings dialog was not presented with its contents')
 	local strings = dialogStrings(dialog.contents)
 	local text = table.concat(strings, '\n')
-	t.isNil(string.find(text, '%f[%a]Mac%f[%A]'), 'the Settings dialog says Mac:\n' .. text)
+	for _, platform in ipairs({ 'Mac', 'Finder', 'Explorer' }) do
+		t.isNil(string.find(text, '%f[%a]' .. platform .. '%f[%A]'),
+			'the Settings dialog says ' .. platform .. ':\n' .. text)
+	end
 
 	-- The opening text says what the plugin does: it analyses, here.
 	local intro = strings[1]
