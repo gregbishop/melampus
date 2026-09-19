@@ -32,11 +32,16 @@ function Analyze.executableName()
 	return WIN_ENV and 'melampus.exe' or 'melampus'
 end
 
+--- The plugin's own folder, or nil outside Lightroom.
+local function pluginDir()
+	return _PLUGIN and _PLUGIN.path
+end
+
 --- Absolute path of the executable beside this plugin, or nil outside Lightroom.
 function Analyze.executablePath()
-	local pluginDir = _PLUGIN and _PLUGIN.path
-	if not pluginDir then return nil end
-	return LrPathUtils.child(pluginDir, Analyze.executableName())
+	local folder = pluginDir()
+	if not folder then return nil end
+	return LrPathUtils.child(folder, Analyze.executableName())
 end
 
 --- Write JPEG previews for the given photos into `folder`.
@@ -165,12 +170,12 @@ end
 -- encounter) to `resultsPath` in the same run.
 -- Returns true plus the results path, or false plus a message.
 function Analyze.run(previewFolder, resultsPath, profile)
-	local pluginDir = _PLUGIN and _PLUGIN.path
+	local folder = pluginDir()
 	local executable = Analyze.executablePath()
 	if not executable or not LrFileUtils.exists(executable) then
 		return false, 'Melampus could not find its analysis program.\n\n'
 			.. 'The plugin folder should contain a file named '
-			.. Analyze.executableName() .. ':\n' .. tostring(pluginDir)
+			.. Analyze.executableName() .. ':\n' .. tostring(folder)
 			.. '\n\nCopy it there from the Melampus download and try again.'
 	end
 
@@ -184,7 +189,7 @@ function Analyze.run(previewFolder, resultsPath, profile)
 		local inTemp = 'Melampus keeps this in the Windows temp folder. Set TEMP to a '
 			.. 'folder whose path has no "%" and try again.'
 		local checked = {
-			{ 'plugin folder', pluginDir,
+			{ 'plugin folder', folder,
 				'Move the plugin to a folder whose path has no "%" and try again.' },
 			{ 'previews folder', previewFolder, inTemp },
 			{ 'results file', resultsPath, inTemp },
