@@ -364,6 +364,14 @@ def _windows_job() -> str:
     return windows[0]
 
 
+def _windows_pytest_commands() -> list[str]:
+    """The pytest commands of ci.yml's Windows job."""
+    job = _windows_job()
+    commands = [c for c in _ci_pytest_commands() if c in job]
+    assert commands, "the Windows job runs no pytest step"
+    return commands
+
+
 def test_ci_builds_and_smoke_tests_the_windows_executable():
     """Card #400, Done-when 1: given the CI workflow runs on a Windows runner,
     when it finishes, then a melampus.exe exists that starts and analyzes a
@@ -376,8 +384,7 @@ def test_ci_builds_and_smoke_tests_the_windows_executable():
     (-rs), so the log says which tests ran against dist/melampus.exe rather
     than a count of dots."""
     job = _windows_job()
-    pytest_steps = [c for c in _ci_pytest_commands() if c in job]
-    assert pytest_steps, "the Windows job runs no pytest step"
+    pytest_steps = _windows_pytest_commands()
     assert all("--build-binary" in c and "tests/test_binary.py" in c for c in pytest_steps), (
         f"the Windows job's pytest step must build with --build-binary and run "
         f"the binary smoke tests: {pytest_steps}"
@@ -407,8 +414,8 @@ def test_ci_runs_the_plugin_command_through_cmd_exe_on_windows():
         if not line.strip().startswith("#") and "install" in line and re.search(r"\blua\b", line)
     ]
     assert installs_lua, "the Windows job installs no Lua interpreter, so the plugin tests skip there"
-    pytest_steps = [c for c in _ci_pytest_commands() if c in job]
-    assert pytest_steps and all("tests/test_lua_plugin.py" in c for c in pytest_steps), (
+    pytest_steps = _windows_pytest_commands()
+    assert all("tests/test_lua_plugin.py" in c for c in pytest_steps), (
         "the Windows job's pytest step must run tests/test_lua_plugin.py, so the "
         f"command the plugin builds for cmd.exe is run by cmd.exe: {pytest_steps}"
     )
@@ -514,8 +521,8 @@ def test_ci_packages_a_zip_per_platform_and_a_tag_releases_both():
     assert building and packaging == building, (
         f"every job that builds must package through tools/package_plugin.py: builds {sorted(building)}, "
         f"packages {sorted(packaging)}")
-    windows_steps = [c for c in _ci_pytest_commands() if c in _windows_job()]
-    assert windows_steps and all("tests/test_package_plugin.py" in c for c in windows_steps), (
+    windows_steps = _windows_pytest_commands()
+    assert all("tests/test_package_plugin.py" in c for c in windows_steps), (
         "the Windows job must run tests/test_package_plugin.py, so the Windows zip "
         f"ships from a script tested on Windows: {windows_steps}")
     missing = [z for z in RELEASE_ZIPS if z not in ci]
