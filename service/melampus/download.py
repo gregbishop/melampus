@@ -255,7 +255,7 @@ def download_model(
             f"the hub at {endpoint} has no model repo named {repo}: "
             f"check [model] repo in config, or --model ({exc})"
         ) from exc
-    except (httpx.TransportError, httpx.TimeoutException) as exc:
+    except httpx.TransportError as exc:
         raise DownloadError(
             f"could not reach the hub at {endpoint} ({type(exc).__name__}: {exc}): "
             f"check the network, then {RERUN}"
