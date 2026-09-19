@@ -700,3 +700,30 @@ def test_docs_say_the_same_button_and_flags_pull_ollamas_model():
     readme = README.read_text(encoding="utf-8")
     windows = re.search(r"^## Windows.*?\n(.*?)^## ", readme, re.MULTILINE | re.DOTALL).group(1)
     assert "Settings" in windows and "pull" in windows, "readme.md § Windows does not say the model can be pulled from Settings"
+
+
+def test_config_doc_quotes_the_claude_code_template_from_its_one_source():
+    """Card #421: one place holds Claude Code's template,
+    providers.CLAUDE_CODE_COMMAND. docs/config.md quotes it as the
+    `[model] command` a user would set to override it, in a TOML block
+    that parses to exactly that list, so the doc cannot rot into a second
+    copy; and it says what to install, how to sign in, and that runs bill
+    to the subscription."""
+    import tomllib
+
+    from melampus import providers
+
+    text = (REPO / "docs" / "config.md").read_text(encoding="utf-8")
+    blocks = [
+        block for block in re.findall(r"```toml\n(.*?)```", text, re.DOTALL)
+        if 'backend = "claude-code"' in block
+    ]
+    assert blocks, "docs/config.md has no ```toml block with backend = \"claude-code\""
+    (block,) = blocks
+    assert tomllib.loads(block)["model"]["command"] == providers.CLAUDE_CODE_COMMAND
+    for said in (providers.CLAUDE_CODE_INSTALL, f"`{providers.CLAUDE_CODE_SIGN_IN}`", "subscription"):
+        assert said in text, f"docs/config.md does not say {said!r}"
+    readme = (REPO / "readme.md").read_text(encoding="utf-8")
+    assert "`claude-code`" in readme and "--backend claude-code" in readme
+    architecture = (REPO / "docs" / "architecture.md").read_text(encoding="utf-8")
+    assert "claude-code" in architecture
