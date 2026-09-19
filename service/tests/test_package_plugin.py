@@ -28,7 +28,7 @@ from pathlib import Path
 import pytest
 from conftest import PHOTO
 
-from test_binary import _no_python_environment, _per_user_data_dir
+from test_binary import no_python_environment, per_user_data_dir
 from test_lua_plugin import TESTS, run_lua
 
 FOLDER = "Melampus.lrplugin"
@@ -218,8 +218,8 @@ def test_packaged_executable_runs_from_the_unpacked_plugin_folder(
     executable = plugin / built_executable.name
     assert executable.is_file()
 
-    env = _no_python_environment(tmp_path)
-    data_dir = _per_user_data_dir(Path(env["HOME"]))
+    env = no_python_environment(tmp_path)
+    data_dir = per_user_data_dir(Path(env["HOME"]))
     out = tmp_path / "plugin_results.json"
     proc = subprocess.run(
         [str(executable), str(photos), "--backend", "scripted", "--plugin-out", str(out)],
