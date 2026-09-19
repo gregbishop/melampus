@@ -14,6 +14,7 @@ both directions: the lines the command prints, and the parse the plugin will do.
 
 from __future__ import annotations
 
+import json
 import os
 import signal
 import subprocess
@@ -26,12 +27,17 @@ from conftest import FAKE_COMMIT, FAKE_FILES, FAKE_REPO, FakeHub
 from melampus import download
 from melampus.cli import main
 from melampus.download import (
+    CANCEL_MARKER,
     EXIT_CANCELLED,
     DownloadCancelled,
     DownloadError,
+    Status,
     Update,
+    cancel_marker_path,
     cancel_on_signals,
     download_model,
+    model_status,
+    remove_model,
 )
 
 # What `.venv/bin/melampus-id` runs, from any interpreter that has the package.
@@ -54,35 +60,43 @@ def _incomplete(cache: Path) -> list[Path]:
     return sorted((cache / f"models--{FAKE_REPO.replace('/', '--')}" / "blobs").glob("*.incomplete"))
 
 
-@pytest.mark.parametrize(
-    ("update", "line"),
-    [
-        (Update.progress(0, 18_300_000_000), "progress 0 18300000000"),
-        (Update.progress(4_096, 4_096), "progress 4096 4096"),
-        (Update.done("/hf/hub/models--x--y/snapshots/abc"), "done /hf/hub/models--x--y/snapshots/abc"),
-        (Update.done("C:\\Users\\me\\AppData\\Local\\hf hub\\snapshots\\abc"),
-         "done C:\\Users\\me\\AppData\\Local\\hf hub\\snapshots\\abc"),
-        (Update.cancelled(), "cancelled"),
-    ],
-)
-def test_progress_protocol_prints_and_parses_the_same_line(update: Update, line: str):
+# The sample lines both parsers are tested against, so the Lua one in the
+# plugin (Rules.parseDownloadLine, plugin/tests/test_rules.lua) cannot drift
+# from this one: `<input>\t<state>[\t<field>...]`, `rejected` for a non-update.
+SAMPLE_LINES = Path(__file__).with_name("fixtures") / "download-lines.txt"
+
+
+def sample_lines() -> list[tuple[str, list[str]]]:
+    rows = []
+    for row in SAMPLE_LINES.read_text(encoding="utf-8").splitlines():
+        if row.startswith("#"):
+            continue
+        line, *expected = row.split("\t")
+        rows.append((line, expected))
+    assert len(rows) >= 10 and any(e == ["rejected"] for _, e in rows) and any(e[0] == "done" for _, e in rows)
+    return rows
+
+
+@pytest.mark.parametrize(("line", "expected"), sample_lines(), ids=lambda value: repr(value)[:40])
+def test_progress_protocol_prints_and_parses_the_same_line(line: str, expected: list[str]):
     """One line per update, machine-readable and stable: `progress <done> <total>`
     while bytes arrive, `done <path>` once the model is complete, `cancelled`
     when a signal stopped it. A path may hold spaces, so it is the rest of the
-    line."""
+    line. The plugin must be able to tell an update from any other line."""
+    if expected == ["rejected"]:
+        with pytest.raises(ValueError):
+            Update.parse(line)
+        return
+    state, *fields = expected
+    update = {
+        "progress": lambda: Update.progress(int(fields[0]), int(fields[1])),
+        "done": lambda: Update.done(fields[0]),
+        "cancelled": lambda: Update.cancelled(),
+    }[state]()
     assert update.line() == line
     assert Update.parse(line) == update
     assert Update.parse(line + "\n") == update, "a line read from a pipe keeps its newline"
-
-
-@pytest.mark.parametrize("line", [
-    "", "progress", "progress 1", "progress one two", "progress 1 2 3",
-    "done", "cancelled now", "Downloading bytes: 100%", "engine: mlx",
-])
-def test_progress_protocol_rejects_what_is_not_an_update(line: str):
-    """The plugin must be able to tell an update from any other line."""
-    with pytest.raises(ValueError):
-        Update.parse(line)
+    assert Update.parse(line + "\r\n") == update
 
 
 def test_download_fetches_every_file_from_the_hub_and_reports_bytes_done_of_total(
@@ -357,3 +371,265 @@ def test_cli_cancelled_by_a_signal_keeps_the_partial_file_and_the_next_run_resum
         assert not _incomplete(Path(hub_env["HF_HOME"]) / "hub")
     finally:
         hub.stop()
+
+
+# --- the cooperative cancel: a marker file (card #408) ----------------------
+#
+# The Lightroom plugin cannot signal the executable (LrTasks.execute returns
+# only the exit code), so a download also stops when the cancel marker
+# appears, checked between chunks, and ends exactly as the signal path does:
+# `cancelled`, exit 4, the partial file kept for the next run to resume.
+
+
+def _slow_hub() -> FakeHub:
+    big = bytes(range(256)) * (40 * 4096)
+    hub = FakeHub(files={"config.json": FAKE_FILES["config.json"], "model.safetensors": big})
+    hub.throttle = (64 * 1024, 0.002)
+    hub.start()
+    return hub
+
+
+def test_download_stops_when_the_cancel_marker_appears_and_the_next_run_resumes(tmp_path: Path):
+    """Done-when 2 (#408) at the library: the marker is written once the first
+    chunk is on disk; the download raises DownloadCancelled (the same
+    exception a signal raises, so the entry point prints `cancelled` and
+    exits 4 through one path), the chunk stays in the cache, the marker is
+    gone on exit, and the re-run asks the host for the rest by Range."""
+    hub = _slow_hub()
+    marker = tmp_path / "data" / "download-cancel"
+    big = hub.files["model.safetensors"]
+    seen: list[Update] = []
+
+    def cancel_after_a_chunk(update: Update) -> None:
+        seen.append(update)
+        if update.bytes_done >= CHUNK and not marker.exists():
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.touch()
+
+    try:
+        with pytest.raises(DownloadCancelled) as cancelled:
+            download_model(FAKE_REPO, endpoint=hub.endpoint, cache_dir=tmp_path / "hub",
+                           on_update=cancel_after_a_chunk, cancel_marker=marker)
+        assert CANCEL_MARKER in str(cancelled.value)
+        assert not marker.exists(), "the marker was not removed on exit"
+        (partial,) = _incomplete(tmp_path / "hub")
+        kept = partial.stat().st_size
+        assert CHUNK <= kept < len(big), "the partial file was not kept"
+        assert partial.read_bytes() == big[:kept]
+        assert seen[-1].bytes_done < len(big) + len(FAKE_FILES["config.json"]), "the download did not stop"
+
+        hub.throttle = None
+        hub.requests.clear()
+        path, updates = _fetch(hub, tmp_path / "hub")
+        assert hub.gets("model.safetensors") == [f"bytes={kept}-"], "the rest was not asked for by Range"
+        assert _snapshot_files(path)["model.safetensors"] == big
+        assert not _incomplete(tmp_path / "hub")
+    finally:
+        hub.stop()
+
+
+def test_a_stale_cancel_marker_is_removed_when_a_download_starts(fake_hub: FakeHub, tmp_path: Path):
+    """A marker left by an earlier click must not cancel the next download
+    before it begins: it is removed on start, and the run completes."""
+    marker = tmp_path / "data" / "download-cancel"
+    marker.parent.mkdir(parents=True)
+    marker.touch()
+
+    path = download_model(FAKE_REPO, endpoint=fake_hub.endpoint, cache_dir=tmp_path / "hub",
+                          on_update=lambda update: None, cancel_marker=marker)
+
+    assert _snapshot_files(path) == FAKE_FILES
+    assert not marker.exists()
+
+
+def test_the_download_watches_the_documented_marker_by_default(monkeypatch, tmp_path: Path, fake_hub: FakeHub):
+    """`--download-model` passes no marker: the download watches the path
+    `--model-status` reports (the one docs/config.md documents), which is
+    what the plugin writes to."""
+    marker = tmp_path / "data" / "download-cancel"
+    monkeypatch.setattr(download, "cancel_marker_path", lambda: marker)
+    marker.parent.mkdir(parents=True)
+    marker.touch()
+
+    _fetch(fake_hub, tmp_path / "hub")
+
+    assert not marker.exists(), "the download did not use the documented marker"
+
+
+# --- the model's status and removal, for the Settings button (card #408) ---
+#
+# Done-when 1 and 3 of card #408: the dialog must know, without downloading,
+# whether the model is present, how big it is and what it is called, and it
+# must be able to remove it. `--model-status` and `--remove-model` are the
+# executable's answers; both are proven against the fake hub and a cache
+# under tmp_path, never the real one.
+
+
+def _status(hub: FakeHub | None, cache: Path, repo: str = FAKE_REPO) -> Status:
+    return model_status(repo, endpoint=hub.endpoint if hub else None, cache_dir=cache)
+
+
+def test_status_of_an_absent_model_reports_not_installed_with_the_size_from_the_hub(
+    fake_hub: FakeHub, tmp_path: Path
+):
+    """The button's title needs the name and the size before any byte moves:
+    the size comes from the hub's file listing, present-ness from the cache."""
+    total = sum(len(data) for data in FAKE_FILES.values())
+
+    status = _status(fake_hub, tmp_path / "hub")
+
+    assert status == Status(FAKE_REPO, installed=False, bytes_total=total, bytes_done=0,
+                            path=None, cancel_path=str(cancel_marker_path()))
+    assert not [r for r in fake_hub.requests if r[0] == "GET" and "/resolve/" in r[1]], "status moved bytes"
+
+
+def test_status_of_a_partial_download_counts_the_bytes_already_in_the_cache(fake_hub: FakeHub, tmp_path: Path):
+    fake_hub.cut_after = CHUNK + 4096
+    with pytest.raises(DownloadError):
+        _fetch(fake_hub, tmp_path / "hub")
+
+    status = _status(fake_hub, tmp_path / "hub")
+
+    assert status.installed is False and status.path is None
+    assert status.bytes_done == CHUNK + len(FAKE_FILES["config.json"])
+    assert status.bytes_total == sum(len(data) for data in FAKE_FILES.values())
+
+
+def test_status_of_an_installed_model_reports_it_with_its_path(fake_hub: FakeHub, tmp_path: Path):
+    path, _ = _fetch(fake_hub, tmp_path / "hub")
+    total = sum(len(data) for data in FAKE_FILES.values())
+
+    status = _status(fake_hub, tmp_path / "hub")
+
+    assert status.installed is True
+    assert status.path == str(path)
+    assert status.bytes_done == status.bytes_total == total
+
+
+def test_status_with_no_host_answering_says_the_size_is_unknown_and_never_fails(
+    fake_hub: FakeHub, tmp_path: Path
+):
+    """The network being down is not a reason for Settings not to open: the
+    status still says what the cache holds, with `bytes_total` null."""
+    import socket
+
+    path, _ = _fetch(fake_hub, tmp_path / "hub")
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+
+    status = model_status(FAKE_REPO, endpoint=f"http://127.0.0.1:{port}", cache_dir=tmp_path / "hub")
+
+    assert status.bytes_total is None
+    assert status.installed is True and status.path == str(path)
+    assert status.bytes_done == sum(len(data) for data in FAKE_FILES.values())
+    absent = model_status("fake-org/other", endpoint=f"http://127.0.0.1:{port}", cache_dir=tmp_path / "hub")
+    assert absent == Status("fake-org/other", installed=False, bytes_total=None, bytes_done=0,
+                            path=None, cancel_path=str(cancel_marker_path()))
+
+
+def test_the_cancel_marker_lives_under_the_per_user_data_directory_beside_the_caches():
+    """The plugin writes this file to cancel (docs/config.md § Downloading the
+    model); it is named once here and the status carries it, so the plugin
+    never derives the per-user directory itself."""
+    from melampus import config
+
+    marker = cancel_marker_path()
+    assert marker.name == CANCEL_MARKER == "download-cancel"
+    assert marker == config._cache(CANCEL_MARKER)
+    assert marker.is_relative_to(config._data_root())
+
+
+def test_remove_deletes_the_installed_model_from_the_cache(fake_hub: FakeHub, tmp_path: Path):
+    """Done-when 3 (#408), Remove: the repo's whole cache folder goes, through
+    the hub library's own deletion, and the status reads absent again."""
+    path, _ = _fetch(fake_hub, tmp_path / "hub")
+
+    removed = remove_model(FAKE_REPO, cache_dir=tmp_path / "hub")
+
+    assert removed == tmp_path / "hub" / f"models--{FAKE_REPO.replace('/', '--')}"
+    assert not removed.exists() and not path.exists()
+    status = _status(fake_hub, tmp_path / "hub")
+    assert status.installed is False and status.bytes_done == 0 and status.path is None
+
+
+def test_remove_with_nothing_installed_says_so(fake_hub: FakeHub, tmp_path: Path):
+    with pytest.raises(DownloadError) as failure:
+        remove_model(FAKE_REPO, cache_dir=tmp_path / "hub")
+    assert FAKE_REPO in str(failure.value) and "nothing to remove" in str(failure.value)
+
+
+def test_remove_refuses_while_a_download_holds_the_lock(fake_hub: FakeHub, tmp_path: Path):
+    """A running download holds the hub library's per-file lock on the blob it
+    is appending to (the one `_fetch` takes); removing the model out from
+    under it is refused, exit 3 from the CLI, and the model stays."""
+    from huggingface_hub.utils import WeakFileLock
+
+    path, _ = _fetch(fake_hub, tmp_path / "hub")
+    lock_dir = tmp_path / "hub" / ".locks" / f"models--{FAKE_REPO.replace('/', '--')}"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    with WeakFileLock(lock_dir / "abc.lock"):
+        with pytest.raises(DownloadError) as failure:
+            remove_model(FAKE_REPO, cache_dir=tmp_path / "hub")
+    assert "running" in str(failure.value) and FAKE_REPO in str(failure.value)
+    assert path.exists(), "the model was removed under a running download"
+    assert remove_model(FAKE_REPO, cache_dir=tmp_path / "hub").exists() is False, "the lock outlived its holder"
+
+
+def test_model_status_and_remove_model_flags_follow_the_download_flag(monkeypatch, capsys, tmp_path):
+    """Both need no folder and take [model] repo or --model; status prints one
+    JSON object, remove prints `removed <path>`; a refusal is exit 3 with the
+    message on stderr and nothing on stdout."""
+    seen = []
+    monkeypatch.setattr(download, "model_status", lambda repo: seen.append(("status", repo)) or Status(
+        repo, installed=False, bytes_total=None, bytes_done=0, path=None, cancel_path="/data/download-cancel"))
+    monkeypatch.setattr(download, "remove_model", lambda repo: seen.append(("remove", repo)) or tmp_path / "gone")
+
+    assert main(["--model-status"]) == 0
+    assert main(["--remove-model", "--model", "fake-org/other"]) == 0
+    out, err = capsys.readouterr()
+    assert seen == [("status", "mlx-community/Qwen3-VL-30B-A3B-Instruct-4bit"), ("remove", "fake-org/other")]
+    status_line, removed_line = out.splitlines()
+    assert json.loads(status_line) == {
+        "repo": "mlx-community/Qwen3-VL-30B-A3B-Instruct-4bit", "installed": False, "bytes_total": None,
+        "bytes_done": 0, "path": None, "cancel_path": "/data/download-cancel"}
+    assert removed_line == f"removed {tmp_path / 'gone'}"
+
+    def refuse(repo):
+        raise DownloadError("a download of x is running; cancel it first")
+
+    monkeypatch.setattr(download, "remove_model", refuse)
+    assert main(["--remove-model"]) == 3
+    out, err = capsys.readouterr()
+    assert out == "" and "cancel it first" in err
+
+
+def test_cli_reports_absent_then_installed_then_removed_against_the_fake_hub(
+    fake_hub: FakeHub, hub_env: dict[str, str]
+):
+    """Done-when 1 and 3 (#408) through the entry point, in the order the
+    Settings dialog will see them: absent with the size, installed with the
+    path after `--download-model`, absent again after `--remove-model`."""
+    total = sum(len(data) for data in FAKE_FILES.values())
+
+    before = _cli(["--model-status", "--model", FAKE_REPO], hub_env)
+    assert before.returncode == 0, before.stderr[-3000:]
+    status = json.loads(before.stdout)
+    assert status["repo"] == FAKE_REPO and status["installed"] is False
+    assert status["bytes_total"] == total and status["bytes_done"] == 0 and status["path"] is None
+    assert status["cancel_path"].endswith(CANCEL_MARKER)
+
+    downloaded = _cli(["--download-model", "--model", FAKE_REPO], hub_env)
+    assert downloaded.returncode == 0, downloaded.stderr[-3000:]
+    snapshot = Update.parse(downloaded.stdout.splitlines()[-1]).path
+
+    after = _cli(["--model-status", "--model", FAKE_REPO], hub_env)
+    assert after.returncode == 0, after.stderr[-3000:]
+    status = json.loads(after.stdout)
+    assert status["installed"] is True and status["path"] == snapshot
+    assert status["bytes_done"] == status["bytes_total"] == total
+
+    removed = _cli(["--remove-model", "--model", FAKE_REPO], hub_env)
+    assert removed.returncode == 0, removed.stderr[-3000:]
+    assert removed.stdout.startswith("removed ") and not Path(snapshot).exists()
+    assert json.loads(_cli(["--model-status", "--model", FAKE_REPO], hub_env).stdout)["installed"] is False

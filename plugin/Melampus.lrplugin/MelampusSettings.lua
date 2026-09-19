@@ -6,6 +6,7 @@ local LrFunctionContext = import 'LrFunctionContext'
 local LrHttp = import 'LrHttp'
 local LrPasswords = import 'LrPasswords'
 local LrPrefs = import 'LrPrefs'
+local LrProgressScope = import 'LrProgressScope'
 local LrTasks = import 'LrTasks'
 local LrView = import 'LrView'
 
@@ -32,7 +33,8 @@ LrTasks.startAsyncTask(function()
 		-- Which engines can run here is the executable's verdict (card #404),
 		-- asked once, now, as the dialog opens. Without the executable nothing
 		-- is greyed and the note says what is missing.
-		local engineItems, engineNote = Rules.engineItems(Analyze.detectEngines())
+		local verdicts, problem = Analyze.detectEngines()
+		local engineItems, engineNote = Rules.engineItems(verdicts, problem)
 
 		-- The picker, the reasons for whatever is greyed, and a link for each
 		-- greyed engine whose reason names where to get it.
@@ -78,6 +80,94 @@ LrTasks.startAsyncTask(function()
 					},
 				}
 			end
+		end
+
+		-- The MLX model (card #408). While it is absent, a button downloads
+		-- it, named with the model and its size; while it downloads, the
+		-- bytes so far (Lightroom's own progress bar carries the portion) and
+		-- Cancel; once present, Installed and Remove. The status is asked
+		-- once, now, and only where mlx can run at all; the row shows when
+		-- the picked engine is mlx, or the unset preference resolves to it.
+		local mlxHere = false
+		for _, verdict in ipairs(type(verdicts) == 'table' and verdicts or {}) do
+			if type(verdict) == 'table' and verdict.engine == 'mlx' and verdict.available == true then mlxHere = true end
+		end
+		local status, statusProblem
+		if mlxHere then status, statusProblem = Analyze.modelStatus() end
+		if statusProblem then
+			engineViews[#engineViews + 1] = f:static_text {
+				title = statusProblem, height_in_lines = lineCount(statusProblem), text_color = grey,
+			}
+		end
+		if status then
+			local model = LrBinding.makePropertyTable(context)
+			model.phase = status.installed == true and 'installed' or 'absent'
+			model.progress = ''
+			local function inPhase(name)
+				return bind { key = 'phase', object = model, transform = function(value) return value == name end }
+			end
+			local download = nil
+
+			local function startDownload()
+				-- Not tied to the dialog's context: the download outlives a
+				-- closed Settings dialog (nothing can kill the executable
+				-- anyway), and the scope ends when the command exits.
+				local scope = LrProgressScope { title = 'Downloading ' .. tostring(status.repo) }
+				scope:setCancelable(true)
+				model.phase, model.progress = 'downloading', 'Starting…'
+				local handle, err = Analyze.downloadModel(status.cancel_path,
+					function(update)
+						if update.state == 'progress' then
+							local text, portion = Rules.downloadProgress(update)
+							model.progress = text
+							scope:setPortionComplete(portion, 1)
+						end
+						-- Lightroom's own cancel, on its progress bar, cancels too.
+						if scope:isCanceled() and download then download.cancel() end
+					end,
+					function(code, update, tail)
+						scope:done()
+						download = nil
+						if code == 0 and update and update.state == 'done' then
+							model.phase = 'installed'
+							return
+						end
+						model.phase = 'absent'
+						if code ~= 4 then
+							LrDialogs.message('Melampus', 'The model download failed (exit ' .. tostring(code)
+								.. ').\n\n' .. tostring(tail), 'critical')
+						end
+					end)
+				download = handle
+				if not handle then
+					scope:done()
+					model.phase = 'absent'
+					LrDialogs.message('Melampus', tostring(err), 'critical')
+				end
+			end
+
+			local function removeModel()
+				LrTasks.startAsyncTask(function()
+					local ok, message = Analyze.removeModel()
+					if ok then model.phase = 'absent' else LrDialogs.message('Melampus', message, 'critical') end
+				end)
+			end
+
+			engineViews[#engineViews + 1] = f:row {
+				visible = bind {
+					key = 'engine', object = prefs,
+					transform = function(value) return Rules.resolvedEngine(value, verdicts) == 'mlx' end,
+				},
+				bind_to_object = model,
+				f:push_button { title = Rules.downloadTitle(status), visible = inPhase('absent'), action = startDownload },
+				f:push_button { title = 'Installed', enabled = false, visible = inPhase('installed') },
+				f:push_button { title = 'Remove', visible = inPhase('installed'), action = removeModel },
+				f:static_text { title = bind 'progress', visible = inPhase('downloading'), width_in_chars = 24 },
+				f:push_button {
+					title = 'Cancel', visible = inPhase('downloading'),
+					action = function() if download then download.cancel() end end,
+				},
+			}
 		end
 
 		local contents = f:column {
