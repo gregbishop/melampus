@@ -141,7 +141,7 @@ Settings dialog's Download button (card #408):
 
 With `--backend ollama` (what the plugin passes for its Ollama row; or
 `[model] backend = "ollama"`), the same three flags act on the Ollama server
-at `[model] ollama_url` and the model `[model] ollama_model`, through the
+named by `ollama_url` (`[model] ollama_url`) and the model named by `ollama_model` (`[model] ollama_model`), through the
 endpoints Ollama's own docs/api.md describes, with the standard library, as
 the backend speaks its chat endpoint (card #409):
 
