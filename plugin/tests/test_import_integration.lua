@@ -388,47 +388,51 @@ local function runAnalysis(existing)
 	return mock.state.executed or {}
 end
 
+-- The executable beside this plugin, on the fake macOS Lightroom the suite
+-- runs the import under; the mock reports it present when a test says so.
+local MAC_EXECUTABLE = PLUGIN .. '/melampus'
+
+-- A fake Windows Lightroom: the plugin in the per-user Modules folder, the
+-- previews in the temp folder the mock names for WIN_ENV.
 local WIN_PLUGIN = 'C:\\Users\\photographer\\AppData\\Roaming\\Adobe\\Lightroom\\Modules\\Melampus.lrplugin'
-local WIN_PREVIEWS = 'C:\\Users\\photographer\\AppData\\Local\\Temp\\melampus-previews-1'
+local WIN_EXECUTABLE = WIN_PLUGIN .. '\\melampus.exe'
+local WIN_TEMP = 'C:\\Users\\photographer\\AppData\\Local\\Temp'
+local WIN_PREVIEWS = WIN_TEMP .. '\\melampus-previews-1'
 
 --- Load MelampusAnalyze.lua under a fake Windows Lightroom, with or without
 --- melampus.exe beside the plugin.
 local function loadAnalyzeOnWindows(executablePresent)
 	local existing = {}
-	if executablePresent then existing[WIN_PLUGIN .. '\\melampus.exe'] = true end
+	if executablePresent then existing[WIN_EXECUTABLE] = true end
 	return loadUnderMock('MelampusAnalyze', { existing = existing }, WIN_PLUGIN, { windows = true })
 end
 
---- The words a setup instruction would use; none belongs in a plugin dialog.
-local function assertNoSetupInstructions(message)
-	local lower = string.lower(message)
-	for _, word in ipairs({ 'terminal', 'pip', 'venv', 'powershell', 'python' }) do
-		t.isNil(string.find(lower, word, 1, true), 'the message tells the user about ' .. word)
-	end
-	t.isNil(string.find(lower, '%f[%a]uv%f[%A]'), 'the message tells the user about uv')
+--- The one line the import runs on macOS: the executable beside the plugin
+--- over the first batch of previews in the mock's temp directory, the
+--- enriched results next to the previews, the CLI's own output kept in temp,
+--- every path single-quoted for sh. The whole line, so nothing of a Python
+--- checkout (python, .venv, tools/, cd) can be in it, wherever the clone is.
+local function macCommand()
+	local temp = mock.state.tempDir
+	local previews = temp .. '/melampus-previews-1'
+	return string.format("'%s' '%s' --profile 'wildlife' --plugin-out '%s/results.json' --yes >'%s/melampus-cli.log' 2>&1",
+		MAC_EXECUTABLE, previews, previews, temp)
 end
 
---- The command must name the executable and nothing of a Python checkout.
-local function assertRunsTheExecutable(command, executable)
-	t.isNotNil(string.find(command, executable, 1, true),
-		'the command does not name ' .. executable .. ':\n' .. command)
-	t.isNotNil(string.find(command, '--plugin-out', 1, true),
-		'the command does not ask for the enriched results:\n' .. command)
-	for _, forbidden in ipairs({ 'python', '.venv', 'tools/', 'tools\\', 'make_plugin_results', 'json-out' }) do
-		t.isNil(string.find(command, forbidden, 1, true),
-			'the command still goes through ' .. forbidden .. ':\n' .. command)
-	end
+--- What Analyze.run says when the executable is not beside the plugin: the
+--- file expected, named as a file (the folder's own name holds "melampus"),
+--- and the folder that should hold it. No setup instruction; the user copies
+--- one file.
+local function missingExecutableMessage(executableName, folder)
+	return 'Melampus could not find its analysis program.\n\n'
+		.. 'The plugin folder should contain a file named ' .. executableName .. ':\n' .. folder
+		.. '\n\nCopy it there from the Melampus download and try again.'
 end
 
 t.test('analysing runs the executable beside the plugin, in one command', function()
-	local executable = PLUGIN .. '/melampus'
-	local executed = runAnalysis({ [executable] = true })
+	local executed = runAnalysis({ [MAC_EXECUTABLE] = true })
 	t.equals(#executed, 1, 'expected one command for identification and enrichment together')
-	assertRunsTheExecutable(executed[1], "'" .. executable .. "'")
-	t.equals(string.sub(executed[1], 1, #executable + 2), "'" .. executable .. "'",
-		'the command does not start with the executable:\n' .. executed[1])
-	t.isNil(string.find(executed[1], 'cd ', 1, true),
-		'the command changes directory, which only a checkout needed:\n' .. executed[1])
+	t.equals(executed[1], macCommand(), 'not the one command for the executable beside the plugin')
 end)
 
 t.test('every run exports its previews afresh', function()
@@ -436,10 +440,9 @@ t.test('every run exports its previews afresh', function()
 	-- the machine's temp directory, the previews one run leaves are found by
 	-- the next, the mock's requestJpegThumbnail is never called, and the
 	-- outcome depends on what an earlier run (or an earlier suite) left behind.
-	local executable = PLUGIN .. '/melampus'
-	runAnalysis({ [executable] = true })
+	runAnalysis({ [MAC_EXECUTABLE] = true })
 	t.equals(mock.state.previewsRequested, 2, 'the first run found previews it did not export')
-	runAnalysis({ [executable] = true })
+	runAnalysis({ [MAC_EXECUTABLE] = true })
 	t.equals(mock.state.previewsRequested, 2, "the second run found the first run's previews")
 end)
 
@@ -447,33 +450,28 @@ t.test('with no results file configured, the executable analyses the selection',
 	-- docs/plugin.md: leave the results path empty and the plugin analyses. A
 	-- fresh install has no results file, so its first run must reach the offer
 	-- and run the executable, not ask for a file from a Python checkout.
-	local executable = PLUGIN .. '/melampus'
 	runImport(nil, { { 'first_01.CR3' }, { 'first_02.CR3' } }, defaultPrefs(),
-		{ existing = { [executable] = true } })
+		{ existing = { [MAC_EXECUTABLE] = true } })
 	t.isNotNil(dialogMatching('never been analysed'),
 		'no offer to analyse; first dialog: ' .. tostring((mock.state.dialogs[1] or {}).body))
 	t.isNil(dialogMatching('plugin_results.json'), 'asked for a results file instead of analysing')
 	local executed = mock.state.executed or {}
 	t.equals(#executed, 1, 'the executable did not run')
-	assertRunsTheExecutable(executed[1], "'" .. executable .. "'")
+	t.equals(executed[1], macCommand(), 'not the one command for the executable beside the plugin')
 end)
 
 t.test('on Windows the command names melampus.exe with cmd.exe quoting', function()
 	local Analyze = loadAnalyzeOnWindows(true)
 	local ok, message = Analyze.run(WIN_PREVIEWS, WIN_PREVIEWS .. '\\results.json', 'wildlife')
 	t.isTrue(ok, 'run failed: ' .. tostring(message))
-	local command = mock.state.executed[1]
-	assertRunsTheExecutable(command, '"' .. WIN_PLUGIN .. '\\melampus.exe"')
-	t.isNotNil(string.find(command, '"' .. WIN_PREVIEWS .. '\\results.json"', 1, true),
-		'the results path is not double-quoted for cmd.exe:\n' .. command)
-	t.isNil(string.find(command, "'", 1, true), 'single quotes mean nothing to cmd.exe:\n' .. command)
-	-- cmd.exe /c strips the first and last quote of a line that starts with one
-	-- and holds more than two; the whole line is wrapped so the ones that
-	-- matter survive.
-	t.equals(string.sub(command, 1, 2), '""', 'the command is not wrapped for cmd.exe:\n' .. command)
-	t.equals(string.sub(command, -1), '"', 'the command is not wrapped for cmd.exe:\n' .. command)
-	t.isNil(string.find(command, 'cd ', 1, true),
-		'the command changes directory, which only a checkout needed:\n' .. command)
+	-- Every path double-quoted (single quotes mean nothing to cmd.exe), and
+	-- the whole line wrapped in a pair of its own: cmd.exe /c strips the
+	-- first and last quote of a line that starts with one and holds more
+	-- than two, so the ones around each path survive.
+	t.equals(mock.state.executed[1], string.format(
+		'""%s" "%s" --profile "wildlife" --plugin-out "%s\\results.json" --yes >"%s\\melampus-cli.log" 2>&1"',
+		WIN_EXECUTABLE, WIN_PREVIEWS, WIN_PREVIEWS, WIN_TEMP),
+		'not the one command for melampus.exe beside the plugin, as cmd.exe needs it')
 end)
 
 t.test('the analyse offer is worded for both platforms', function()
@@ -510,11 +508,11 @@ t.test('a missing executable names the plugin folder and the file it should hold
 	t.equals(#executed, 0, 'ran a command with no executable to run')
 	local message = dialogMatching(PLUGIN)
 	t.isNotNil(message, 'no dialog names the plugin folder ' .. PLUGIN)
-	-- The plugin path already contains "melampus", so the file must be named
-	-- as the file: the phrase, followed by the folder that should hold it.
-	t.isNotNil(string.find(message, 'a file named melampus:\n' .. PLUGIN, 1, true),
-		'the dialog does not say what file is expected:\n' .. message)
-	assertNoSetupInstructions(message)
+	-- The import adds where it left the previews; the rest is Analyze.run's
+	-- message, whole, so it cannot carry a setup instruction.
+	t.equals(message, missingExecutableMessage('melampus', PLUGIN)
+		.. '\n\nPreviews kept at:\n' .. mock.state.tempDir .. '/melampus-previews-1',
+		'not the message for a missing executable')
 end)
 
 t.test('a missing executable on Windows names melampus.exe and the plugin folder', function()
@@ -522,9 +520,8 @@ t.test('a missing executable on Windows names melampus.exe and the plugin folder
 	local ok, message = Analyze.run(WIN_PREVIEWS, WIN_PREVIEWS .. '\\results.json', 'wildlife')
 	t.isFalse(ok, 'ran with no executable present')
 	t.isNil(mock.state.executed, 'ran a command with no executable to run')
-	t.isNotNil(string.find(message, WIN_PLUGIN, 1, true), 'the message does not name the plugin folder:\n' .. message)
-	t.isNotNil(string.find(message, 'melampus.exe', 1, true), 'the message does not name melampus.exe:\n' .. message)
-	assertNoSetupInstructions(message)
+	t.equals(message, missingExecutableMessage('melampus.exe', WIN_PLUGIN),
+		'not the message for a missing melampus.exe')
 end)
 
 -- ── the Settings dialog describes the plugin as it is now ──────────────────
