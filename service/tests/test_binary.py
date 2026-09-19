@@ -244,7 +244,7 @@ def test_frozen_user_data_sits_beside_the_executable_not_in_the_bundle(
 # Settings that reach the JSON — max_tokens through run_fingerprint, max_retries
 # through retries — at values that are not the defaults, so a comparison also
 # shows the process read this file and not its own melampus.local.toml.
-SYNTHETIC_LOCAL_CONFIG = "[model]\nmax_tokens = 700\n\n[run]\nmax_retries = 2\n"
+SYNTHETIC_CONFIG = "[model]\nmax_tokens = 700\n\n[run]\nmax_retries = 2\n"
 
 
 def _synthetic_config(tmp_path: Path, text: str) -> list[str]:
@@ -289,12 +289,12 @@ def test_no_local_config_makes_the_config_file_the_whole_configuration(
     out = tmp_path / "results.json"
     code = main([
         str(photos), "--backend", "scripted", "--cache", str(tmp_path / "cache.jsonl"),
-        "--json-out", str(out), *_synthetic_config(tmp_path, SYNTHETIC_LOCAL_CONFIG),
+        "--json-out", str(out), *_synthetic_config(tmp_path, SYNTHETIC_CONFIG),
     ])
     assert code == 0
     (result,) = json.loads(out.read_text(encoding="utf-8"))
     assert (result["run_fingerprint"], result["retries"]) == _fingerprint_and_retries(
-        SYNTHETIC_LOCAL_CONFIG, photos
+        SYNTHETIC_CONFIG, photos
     ), "the run did not read --config alone: melampus.local.toml beside the data was read too"
 
 
@@ -361,7 +361,7 @@ def test_executable_prints_the_same_json_as_the_cli_with_no_python_on_the_path(
     melampus.local.toml: a developer's own settings would otherwise decide
     whether the two agree, since they change the fingerprint and the retry
     count."""
-    isolated = _synthetic_config(tmp_path, SYNTHETIC_LOCAL_CONFIG)
+    isolated = _synthetic_config(tmp_path, SYNTHETIC_CONFIG)
     expected = _analyze([*VENV_CLI, *isolated], photos, tmp_path / "venv", env=None)
     actual = _analyze(
         [str(built_executable), *isolated], photos, tmp_path / "binary",
@@ -369,6 +369,6 @@ def test_executable_prints_the_same_json_as_the_cli_with_no_python_on_the_path(
     )
     assert [r["file"] for r in expected] == [PHOTO], "the CLI did not analyze the photo"
     assert (expected[0]["run_fingerprint"], expected[0]["retries"]) == _fingerprint_and_retries(
-        SYNTHETIC_LOCAL_CONFIG, photos
+        SYNTHETIC_CONFIG, photos
     ), "the CLI did not read the synthetic config file"
     assert actual == expected
