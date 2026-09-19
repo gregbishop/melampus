@@ -883,8 +883,8 @@ t.test('the mock\'s home is a folder of this run\'s own under its temp directory
 	local home = homeOfTheFakeLightroom()
 	t.equals(home, mock.state.tempDir .. '/home')
 	t.isFalse(home == os.getenv('HOME'), 'the fake Lightroom\'s home is the developer\'s')
-	local Log = loadLog({ home = '/elsewhere/home' })
-	t.equals(Log.path(), '/elsewhere/home/Library/Application Support/Melampus/logs/Melampus.log')
+	local Log = loadLog({ home = '/Volumes/Elsewhere' })
+	t.equals(Log.path(), '/Volumes/Elsewhere/Library/Application Support/Melampus/logs/Melampus.log')
 end)
 
 t.test('a line written through the module lands in the log at Log.path(), its folder made on the way', function()
