@@ -427,6 +427,19 @@ def test_no_local_config_makes_the_config_file_the_whole_configuration(
 SYNTHETIC_MODEL = "melampus-tests/synthetic-model"
 
 
+def _request_backend(
+    executable: Path, photos: Path, tmp_path: Path, backend: str, *arguments: str,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Ask the executable for `backend` on the photos, with `arguments` after
+    them, in `env`: a no-python environment, by default a fresh one."""
+    return subprocess.run(
+        [str(executable), str(photos), "--backend", backend,
+         "--cache", str(tmp_path / "cache.jsonl"), *arguments],
+        env=env or _no_python_environment(tmp_path), capture_output=True, text=True, timeout=600,
+    )
+
+
 def _request_mlx(
     executable: Path, photos: Path, tmp_path: Path, env: dict[str, str] | None = None
 ) -> subprocess.CompletedProcess[str]:
@@ -434,13 +447,10 @@ def _request_mlx(
     and offline, and a synthetic config file naming SYNTHETIC_MODEL as its
     whole configuration. `env` is the no-python environment to run in; by
     default a fresh one."""
-    env = env or _no_python_environment(tmp_path)
-    env |= {"HF_HUB_OFFLINE": "1", "HF_HOME": str(tmp_path / "hf")}
-    return subprocess.run(
-        [str(executable), str(photos), "--backend", "mlx",
-         "--cache", str(tmp_path / "cache.jsonl"),
-         *_synthetic_config(tmp_path, f'[model]\nrepo = "{SYNTHETIC_MODEL}"\n')],
-        env=env, capture_output=True, text=True, timeout=600,
+    env = (env or _no_python_environment(tmp_path)) | {"HF_HUB_OFFLINE": "1", "HF_HOME": str(tmp_path / "hf")}
+    return _request_backend(
+        executable, photos, tmp_path, "mlx",
+        *_synthetic_config(tmp_path, f'[model]\nrepo = "{SYNTHETIC_MODEL}"\n'), env=env,
     )
 
 
@@ -517,12 +527,7 @@ def test_executable_carries_the_cloud_sdks_and_asks_for_the_key(
     the cloud and openai extras stops one step earlier, on the CLI's install
     hint, which means nothing to a user who has no venv to install into. The
     environment carries no key variable, so nothing is sent anywhere."""
-    env = _no_python_environment(tmp_path)
-    proc = subprocess.run(
-        [str(built_executable), str(photos), "--backend", backend,
-         "--cache", str(tmp_path / "cache.jsonl")],
-        env=env, capture_output=True, text=True, timeout=600,
-    )
+    proc = _request_backend(built_executable, photos, tmp_path, backend)
     tail = proc.stderr[-3000:]
     assert proc.returncode == 3, f"exit {proc.returncode}:\n{tail}"
     assert "SDK is not installed" not in tail, f"the executable does not carry the {backend} SDK:\n{tail}"
