@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 from conftest import PHOTO
 
-from test_binary import _no_python_environment, _per_user_data_dir
+from test_binary import per_user_config
 
 REPO = Path(__file__).resolve().parents[2]
 PLUGIN = REPO / "plugin" / "Melampus.lrplugin"
@@ -90,11 +90,7 @@ def test_the_command_the_plugin_builds_runs_the_executable_beside_it(
     # Lightroom's previews folder: the committed frame, from conftest's fixture.
     previews = photos
     results = previews / "results.json"
-    env = _no_python_environment(tmp_path)
-    data_dir = _per_user_data_dir(Path(env["HOME"]))
-    data_dir.mkdir(parents=True)
-    (data_dir / "melampus.local.toml").write_text(
-        "[model]\nbackend = 'scripted'\n", encoding="utf-8")
+    env = per_user_config(tmp_path, "[model]\nbackend = 'scripted'\n")
 
     script = tmp_path / "command.lua"
     script.write_text(

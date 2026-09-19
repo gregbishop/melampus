@@ -260,6 +260,17 @@ def _per_user_data_dir(home: Path) -> Path:
     return home / ".local" / "share" / "Melampus"
 
 
+def per_user_config(tmp_path: Path, toml: str) -> dict[str, str]:
+    """An environment with no python and a fresh HOME whose per-user data
+    directory holds `toml` as melampus.local.toml: the way a user configures
+    the executable, and the only way the tests do."""
+    env = _no_python_environment(tmp_path)
+    data_dir = _per_user_data_dir(Path(env["HOME"]))
+    data_dir.mkdir(parents=True)
+    (data_dir / "melampus.local.toml").write_text(toml, encoding="utf-8")
+    return env
+
+
 def test_frozen_config_and_caches_live_in_the_per_user_data_directory(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, repo: Path
 ):
@@ -463,10 +474,7 @@ def test_the_mlx_smoke_test_ignores_a_local_model_in_the_per_user_directory(
     read or written."""
     weights = tmp_path / "weights"
     weights.mkdir()
-    env = _no_python_environment(tmp_path)
-    data_dir = _per_user_data_dir(Path(env["HOME"]))
-    data_dir.mkdir(parents=True)
-    (data_dir / "melampus.local.toml").write_text(f'[model]\nrepo = "{weights}"\n', encoding="utf-8")
+    env = per_user_config(tmp_path, f'[model]\nrepo = "{weights}"\n')
     tail = _look_for_weights(built_executable, photos, tmp_path, env)
     assert str(weights) not in tail, f"read melampus.local.toml under the per-user directory:\n{tail}"
     assert "LocalEntryNotFoundError" in tail, f"did not get as far as looking for weights:\n{tail}"
@@ -528,13 +536,9 @@ def test_executable_writes_the_enriched_results_and_reads_config_from_the_per_us
     from melampus.plugin_results import PLUGIN_FIELDS
     from test_plugin_results import HERON, seed
 
-    env = _no_python_environment(tmp_path)
-    data_dir = _per_user_data_dir(Path(env["HOME"]))
-    data_dir.mkdir(parents=True)
     seeded = tmp_path / "seeded.jsonl"
     seed(seeded, [photos / PHOTO], {PHOTO: HERON})
-    (data_dir / "melampus.local.toml").write_text(
-        f"[run]\ncache_path = '{seeded.as_posix()}'\n", encoding="utf-8")
+    env = per_user_config(tmp_path, f"[run]\ncache_path = '{seeded.as_posix()}'\n")
     out = tmp_path / "plugin_results.json"
 
     proc = subprocess.run(
