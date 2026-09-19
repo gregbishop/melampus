@@ -79,7 +79,7 @@ def main() -> int:
         )
         return 1
     target = zip_path()
-    listing = package(executable, target)
+    listing = package(executable, target, PLUGIN)
     print(f"wrote {target} ({target.stat().st_size / 2**20:.0f} MB)")
     print(*listing, sep="\n")
     return 0
