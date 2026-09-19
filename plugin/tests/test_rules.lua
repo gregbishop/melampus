@@ -241,31 +241,31 @@ end)
 
 t.test('the default engine is unset, so the CLI picks', function()
 	t.equals(Rules.defaultSettings().engine, '', 'the default must mean "not set"')
-	t.equals(#Rules.engineArguments(settings()), 0, 'no --backend when no engine is set')
-	t.equals(#Rules.engineArguments(settings({ engine = '' })), 0)
-	t.equals(#Rules.engineArguments({}), 0, 'a missing pref means not set')
+	local engine, message = Rules.chosenEngine(settings())
+	t.isNil(engine, 'an engine was chosen when none is set')
+	t.isNil(message, 'no engine set is not a mistake')
+	t.isNil(Rules.chosenEngine(settings({ engine = '' })), 'empty means not set')
+	t.isNil(Rules.chosenEngine({}), 'a missing pref means not set')
 end)
 
-t.test('each engine name reaches the command line as --backend', function()
+t.test('each engine name is the engine chosen', function()
 	for _, engine in ipairs(ENGINES) do
-		local args = Rules.engineArguments(settings({ engine = engine }))
-		t.isNotNil(args, engine .. ' was refused')
-		t.equals(args[1], '--backend', engine .. ': the flag')
-		t.equals(args[2], engine, engine .. ': the value')
-		t.equals(#args, 2, engine .. ': exactly the flag and the value')
+		t.equals(Rules.chosenEngine(settings({ engine = engine })), engine, engine .. ' was refused')
 	end
 end)
 
 t.test('an unknown engine is refused with the four choices named', function()
-	local args, message = Rules.engineArguments(settings({ engine = 'anthropic' }))
-	t.isNil(args, 'an unknown engine was passed on to the command line')
+	local engine, message = Rules.chosenEngine(settings({ engine = 'anthropic' }))
+	t.isNil(engine, 'an unknown engine was passed on to the command line')
 	t.isNotNil(message, 'no message for the unknown engine')
 	t.isNotNil(string.find(message, 'anthropic', 1, true), 'the message does not name what was set')
 	for _, engine in ipairs(ENGINES) do
 		t.isNotNil(string.find(message, engine, 1, true), 'the message does not name ' .. engine)
 	end
-	t.isNil(Rules.engineArguments(settings({ engine = 'MLX' })), 'names are the exact words')
-	t.isNil(Rules.engineArguments(settings({ engine = 42 })), 'a junk pref is refused, not crashed on')
+	t.isNil(Rules.chosenEngine(settings({ engine = 'MLX' })), 'names are the exact words')
+	local _, why = Rules.chosenEngine(settings({ engine = 'MLX' }))
+	t.isNotNil(why, 'a near miss is refused with a message, not silently unset')
+	t.isNil(Rules.chosenEngine(settings({ engine = 42 })), 'a junk pref is refused, not crashed on')
 end)
 
 -- ── colour labels ──────────────────────────────────────────────────────────
