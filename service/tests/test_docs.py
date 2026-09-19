@@ -167,20 +167,16 @@ def test_docs_name_only_workflows_that_exist():
     assert not stale, f"docs name workflow files that do not exist: {stale}"
 
 
-def _pytest_commands(workflow: Path) -> list[str]:
-    """The `run:` line of every step in that workflow that invokes pytest."""
-    text = workflow.read_text(encoding="utf-8")
+def _ci_pytest_commands() -> list[str]:
+    """The `run:` line of every ci.yml step that invokes pytest."""
+    text = CI_WORKFLOW.read_text(encoding="utf-8")
     commands = [
         command
         for command in re.findall(r"^\s*run:\s*(.+?)\s*$", text, re.MULTILINE)
         if "pytest" in command
     ]
-    assert commands, f"{workflow.name} runs no pytest step"
+    assert commands, f"{CI_WORKFLOW.name} runs no pytest step"
     return commands
-
-
-def _ci_pytest_commands() -> list[str]:
-    return _pytest_commands(CI_WORKFLOW)
 
 
 def test_brief_names_the_test_command_ci_runs():
@@ -352,17 +348,17 @@ def test_readme_build_blocks_sync_the_sdk_extras():
     )
 
 
-def _jobs(workflow: Path = CI_WORKFLOW) -> dict[str, str]:
-    """That workflow's jobs, by name, each as its text."""
-    text = workflow.read_text(encoding="utf-8").split("\njobs:\n", 1)[1]
+def _jobs() -> dict[str, str]:
+    """ci.yml's jobs, by name, each as its text."""
+    text = CI_WORKFLOW.read_text(encoding="utf-8").split("\njobs:\n", 1)[1]
     parts = re.split(r"^  (?=\w[\w-]*:\s*$)", text, flags=re.MULTILINE)
     return {part.split(":", 1)[0]: part for part in parts if part.strip()}
 
 
-def _windows_job(workflow: Path = CI_WORKFLOW) -> str:
-    """The text of that workflow's job on a Windows runner."""
-    windows = [job for job in _jobs(workflow).values() if re.search(r"runs-on: windows-", job)]
-    assert windows, f"{workflow.name} has no job on a Windows runner"
+def _windows_job() -> str:
+    """The text of ci.yml's job on a Windows runner."""
+    windows = [job for job in _jobs().values() if re.search(r"runs-on: windows-", job)]
+    assert windows, f"{CI_WORKFLOW.name} has no job on a Windows runner"
     return windows[0]
 
 
