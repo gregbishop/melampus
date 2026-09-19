@@ -15,6 +15,10 @@ local M = {}
 
 M.state = {}
 
+-- The host this mock runs on, as distinct from the Lightroom it fakes: Lua
+-- spells the directory separator first in package.config.
+local HOST_IS_WINDOWS = package.config:sub(1, 1) == '\\'
+
 --- Single-quote a path for sh. Every path the mock hands to a shell goes
 -- through here: the temp directory comes from TMPDIR, and a space, a quote,
 -- a "$" or a backtick in it must arrive as the name it is, not be split,
@@ -51,7 +55,6 @@ function M.reset(options)
 		privateTransactions = {},
 		dialogs = {},
 		confirmAnswer = options.confirmAnswer or 'ok',
-		logLines = {},
 		prefs = options.prefs or {},
 		cancelled = false,
 		yieldInsideWrite = false,
@@ -358,7 +361,15 @@ namespaces.LrFileUtils = {
 		if handle then handle:close(); return 'file' end
 		return false
 	end,
-	createAllDirectories = function(path) os.execute('mkdir -p ' .. sh(path)) return true end,
+	createAllDirectories = function(path)
+		-- A fake Windows Lightroom's folders exist nowhere on another host
+		-- (see windowsTemp): nothing is made there, as nothing is run. On a
+		-- Windows host cmd.exe's mkdir makes the whole path itself.
+		if WIN_ENV and not HOST_IS_WINDOWS then return false end
+		if HOST_IS_WINDOWS then os.execute('mkdir "' .. path .. '" 2>nul') return true end
+		os.execute('mkdir -p ' .. sh(path))
+		return true
+	end,
 	files = function(folder)
 		local handle = io.popen('ls -1 ' .. sh(folder) .. ' 2>/dev/null')
 		local names = {}
@@ -411,10 +422,6 @@ local function tempDir()
 	end
 	return M.state.tempDir
 end
-
--- The host this mock runs on, as distinct from the Lightroom it fakes: Lua
--- spells the directory separator first in package.config.
-local HOST_IS_WINDOWS = package.config:sub(1, 1) == '\\'
 
 --- The Windows temp folder of a fake Windows Lightroom. On a Windows host,
 -- the real one, TEMP, which is what Lightroom reports there, so a command
@@ -484,15 +491,6 @@ namespaces.LrTasks = {
 		return M.state.executeCode or 0
 	end,
 }
-
-namespaces.LrLogger = function(name)
-	return {
-		enable = function() end,
-		info = function(_, msg) M.state.logLines[#M.state.logLines + 1] = 'INFO ' .. tostring(msg) end,
-		warn = function(_, msg) M.state.logLines[#M.state.logLines + 1] = 'WARN ' .. tostring(msg) end,
-		error = function(_, msg) M.state.logLines[#M.state.logLines + 1] = 'ERROR ' .. tostring(msg) end,
-	}
-end
 
 namespaces.LrFunctionContext = {
 	callWithContext = function(name, func) return func({}) end,
