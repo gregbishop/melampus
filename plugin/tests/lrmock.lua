@@ -246,7 +246,12 @@ namespaces.LrDialogs = {
 	end,
 	runOpenPanel = function() return nil end,
 	runSavePanel = function() return nil end,
-	presentModalDialog = function() return 'ok' end,
+	-- Recorded with its view tree, so a test can read what the dialog says.
+	presentModalDialog = function(options)
+		M.state.dialogs[#M.state.dialogs + 1] = {
+			title = options.title, contents = options.contents, modal = true }
+		return 'ok'
+	end,
 }
 
 namespaces.LrFileUtils = {
@@ -356,9 +361,18 @@ namespaces.LrFunctionContext = {
 
 namespaces.LrColor = function() return {} end
 namespaces.LrShell = { revealInShell = function() end }
+--- The view factory hands back each spec as given, tagged with the kind of
+-- view asked for (static_text, group_box, ...), so a dialog's text can be
+-- read from the tree the plugin built.
 namespaces.LrView = {
 	osFactory = function()
-		return setmetatable({}, { __index = function() return function() return {} end end })
+		return setmetatable({}, { __index = function(_, kind)
+			return function(_, spec)
+				spec = spec or {}
+				spec.kind = kind
+				return spec
+			end
+		end })
 	end,
 	bind = function(key) return key end,
 }
