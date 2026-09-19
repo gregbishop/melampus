@@ -167,7 +167,7 @@ LrTasks.startAsyncTask(function()
 				f:static_text { title = 'Log: ' .. Log.path(), width_in_chars = 50 },
 				f:row {
 					f:push_button {
-						title = 'Show log in Finder',
+						title = 'Show log file',
 						action = function()
 							import('LrShell').revealInShell(Log.path())
 						end,
