@@ -9,12 +9,14 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
+from .backend import CommandFailed
 from .cache import ResultCache
 from .config import load_config
 from .identify import Identifier
 from .images import content_hash
 from .providers import (
     BACKEND_CHOICES,
+    COMMAND,
     OLLAMA,
     BackendUnavailable,
     apply_cloud_primary_defaults,
@@ -329,13 +331,14 @@ def main(argv: list[str] | None = None) -> int:
                     help="do not read melampus.local.toml beside the data: --config "
                          "alone, over the defaults, is the whole configuration")
     ap.add_argument("--model", default=None, help="override model repo")
-    ap.add_argument("--backend", choices=BACKEND_CHOICES, default=None,
+    ap.add_argument("--backend", choices=(*BACKEND_CHOICES, COMMAND), default=None,
                     help="which engine answers: mlx locally on Apple Silicon, "
                          "ollama locally through an Ollama server, openai or "
-                         "claude for machines with no local runtime, or scripted "
-                         "(a fake that answers nothing; for smoke tests without "
-                         "weights). Default: the first that can run here, per "
-                         "--detect-engines")
+                         "claude for machines with no local runtime, command "
+                         "(an installed program named by [model] command), or "
+                         "scripted (a fake that answers nothing; for smoke tests "
+                         "without weights). Default: the first that can run "
+                         "here, per --detect-engines")
     ap.add_argument("--detect-engines", action="store_true",
                     help="print, as JSON, which engines can run on this machine "
                          "and why or why not, then exit; needs no folder")
@@ -531,10 +534,16 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
 
-        stats = run_batch(
-            paths, identifier, cache,
-            force=args.force, limit=args.limit, on_result=progress,
-        )
+        try:
+            stats = run_batch(
+                paths, identifier, cache,
+                force=args.force, limit=args.limit, on_result=progress,
+            )
+        except CommandFailed as exc:
+            # The engine is broken, not the frame: stop here with the message
+            # rather than recording the same failure on every frame in turn.
+            print(str(exc), file=sys.stderr)
+            return 3
         print(
             f"\nprocessed {stats.processed}  skipped {stats.skipped}  "
             f"ok {stats.ok}  unprocessed {stats.unprocessed}  errors {stats.errors}",
