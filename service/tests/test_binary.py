@@ -44,7 +44,7 @@ progress on stdout, from a fake hub on loopback, on every platform's build.
 Card #420: `--backend command` with a program that is not installed is
 refused before any image is read, naming the command, exit 3. Card #421:
 `--backend claude-code` with no `claude` on PATH, likewise, naming where to
-install it.
+install it; card #422: `--backend codex` with no `codex`, the same.
 
 Nothing here downloads a model: the MLX check stops at the point where the
 executable goes looking for weights, and the download test's host is the fake
@@ -524,6 +524,29 @@ def test_executable_refuses_claude_code_that_is_not_installed(
         assert works_here in tail, f"{works_here!r} is not named as working here:\n{tail}"
 
 
+def test_executable_refuses_codex_that_is_not_installed(
+    built_executable: Path, photos: Path, tmp_path: Path
+):
+    """Card #422, Done-when 2 in the frozen build: `--backend codex` on a
+    PATH with no `codex`, and the executable exits 3 on the not-installed
+    message, naming where to install it and how to sign in, and the
+    backends that do work here, before any image is read."""
+    env = _no_python_environment(tmp_path)
+    assert shutil.which("codex", path=env["PATH"]) is None
+    proc = subprocess.run(
+        [str(built_executable), str(photos), "--backend", "codex",
+         "--cache", str(tmp_path / "cache.jsonl")],
+        env=env, capture_output=True, text=True, timeout=600,
+    )
+    tail = proc.stderr[-3000:]
+    assert proc.returncode == 3, f"exit {proc.returncode}:\n{tail}"
+    assert "invalid choice" not in tail, f"the executable does not accept codex:\n{tail}"
+    assert "Codex CLI is not installed" in tail, tail
+    assert "https://developers.openai.com/codex/cli" in tail and "codex login" in tail, tail
+    for works_here in ("claude", "openai", "scripted"):
+        assert works_here in tail, f"{works_here!r} is not named as working here:\n{tail}"
+
+
 def test_executable_prints_the_same_json_as_the_cli_with_no_python_on_the_path(
     built_executable: Path, photos: Path, tmp_path: Path
 ):
@@ -582,12 +605,12 @@ def test_executable_detects_engines_as_json_with_no_python_on_the_path(
     built_executable: Path, tmp_path: Path
 ):
     """Card #404, from the executable alone: valid JSON on stdout, the four
-    engines in the owner's order then claude-code (card #421), exit 0, no
-    folder needed. No Ollama answers on a runner, so ollama is unavailable
-    with the install pointer; mlx's verdict is whether this machine is Apple
-    Silicon; the cloud engines are available and name their key variable;
-    with no `claude` on the PATH, claude-code is not installed, with where
-    to get it."""
+    engines in the owner's order then claude-code and codex (cards #421,
+    #422), exit 0, no folder needed. No Ollama answers on a runner, so
+    ollama is unavailable with the install pointer; mlx's verdict is
+    whether this machine is Apple Silicon; the cloud engines are available
+    and name their key variable; with no `claude` or `codex` on the PATH,
+    both CLIs are not installed, with where to get them."""
     from melampus import providers
 
     proc = subprocess.run(
@@ -596,11 +619,15 @@ def test_executable_detects_engines_as_json_with_no_python_on_the_path(
     )
     assert proc.returncode == 0, proc.stderr[-3000:]
     verdicts = json.loads(proc.stdout)
-    assert [v["engine"] for v in verdicts] == ["mlx", "ollama", "openai", "claude", "claude-code"]
+    assert [v["engine"] for v in verdicts] == [
+        "mlx", "ollama", "openai", "claude", "claude-code", "codex"]
     by_engine = {v["engine"]: v for v in verdicts}
     assert by_engine["claude-code"]["available"] is False, "a claude on the empty PATH?"
     assert "not installed" in by_engine["claude-code"]["reason"]
     assert providers.CLAUDE_CODE_INSTALL in by_engine["claude-code"]["reason"]
+    assert by_engine["codex"]["available"] is False, "a codex on the empty PATH?"
+    assert "not installed" in by_engine["codex"]["reason"]
+    assert providers.CODEX_INSTALL in by_engine["codex"]["reason"]
     assert by_engine["mlx"]["available"] is on_apple_silicon()
     if not on_apple_silicon():
         assert by_engine["mlx"]["reason"] == "needs Apple Silicon"
