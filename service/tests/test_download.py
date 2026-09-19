@@ -14,12 +14,28 @@ both directions: the lines the command prints, and the parse the plugin will do.
 
 from __future__ import annotations
 
+import os
+import signal
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 from conftest import FAKE_COMMIT, FAKE_FILES, FAKE_REPO, FakeHub, closed_port
 
-from melampus.download import DownloadError, Update, download_model
+from melampus import download
+from melampus.cli import main
+from melampus.download import (
+    EXIT_CANCELLED,
+    DownloadCancelled,
+    DownloadError,
+    Update,
+    cancel_on_signals,
+    download_model,
+)
+
+# What `.venv/bin/melampus-id` runs, from any interpreter that has the package.
+VENV_CLI = [sys.executable, "-m", "melampus.cli"]
 
 CHUNK = 10 * 1024 * 1024  # huggingface_hub's download chunk: what a cut leaves on disk
 
@@ -168,3 +184,160 @@ def test_download_with_no_host_answering_names_the_network(tmp_path: Path):
                        on_update=lambda update: None)
     message = str(failure.value)
     assert f"http://127.0.0.1:{port}" in message and "network" in message
+
+
+# --- the command: exit codes and signals (unit) -----------------------------
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="os.kill cannot send SIGINT to this process on Windows")
+def test_a_signal_inside_cancel_on_signals_raises_cancelled_and_the_handler_is_restored():
+    """Done-when 2's mechanism: within the context a SIGINT or SIGTERM becomes
+    DownloadCancelled wherever the download is; outside it the process's own
+    handlers are back."""
+    before = signal.getsignal(signal.SIGINT), signal.getsignal(signal.SIGTERM)
+    for number in (signal.SIGINT, signal.SIGTERM):
+        with pytest.raises(DownloadCancelled) as cancelled:
+            with cancel_on_signals():
+                os.kill(os.getpid(), number)
+        assert str(cancelled.value) == signal.Signals(number).name
+    assert (signal.getsignal(signal.SIGINT), signal.getsignal(signal.SIGTERM)) == before
+
+
+def test_download_model_flag_needs_no_folder_and_passes_the_configured_repo(monkeypatch, capsys, tmp_path):
+    """Exit 0 with the `done <path>` line once the model is complete. The repo
+    is [model] repo, or --model."""
+    asked = []
+
+    def fake_download(repo, *, on_update, **_):
+        asked.append(repo)
+        on_update(Update.progress(1, 2))
+        return tmp_path / "snapshots" / "abc"
+
+    monkeypatch.setattr(download, "download_model", fake_download)
+    assert main(["--download-model"]) == 0
+    assert main(["--download-model", "--model", "fake-org/other"]) == 0
+    out = capsys.readouterr().out
+    assert asked == ["mlx-community/Qwen3-VL-30B-A3B-Instruct-4bit", "fake-org/other"]
+    assert out.splitlines() == ["progress 1 2", f"done {tmp_path / 'snapshots' / 'abc'}"] * 2
+
+
+def test_download_model_flag_exits_4_with_the_cancelled_line_when_a_signal_stops_it(monkeypatch, capsys):
+    def fake_download(repo, *, on_update, **_):
+        on_update(Update.progress(5, 9))
+        raise DownloadCancelled("SIGINT")
+
+    monkeypatch.setattr(download, "download_model", fake_download)
+    assert main(["--download-model"]) == EXIT_CANCELLED == 4
+    assert capsys.readouterr().out.splitlines() == ["progress 5 9", "cancelled"]
+
+
+def test_download_model_flag_exits_3_with_the_fix_on_stderr_when_it_fails(monkeypatch, capsys):
+    def fake_download(repo, *, on_update, **_):
+        raise DownloadError("could not reach the hub: check the network")
+
+    monkeypatch.setattr(download, "download_model", fake_download)
+    assert main(["--download-model"]) == 3
+    out, err = capsys.readouterr()
+    assert out == ""
+    assert "could not reach the hub: check the network" in err
+
+
+def test_importing_the_download_module_disables_the_xet_transfer_as_the_readme_requires():
+    """readme.md § Install: HF_HUB_DISABLE_XET=1 is not optional on some
+    networks (docs/troubleshooting.md). The command sets it itself, before
+    the hub library reads it, so the user need not know."""
+    env = {k: v for k, v in os.environ.items() if k != "HF_HUB_DISABLE_XET"}
+    proc = subprocess.run(
+        [sys.executable, "-c",
+         "import melampus.download; from huggingface_hub import constants; "
+         "import os; print(os.environ['HF_HUB_DISABLE_XET'], constants.HF_HUB_DISABLE_XET)"],
+        env=env, capture_output=True, text=True, check=True,
+    )
+    assert proc.stdout.split() == ["1", "True"]
+
+
+# --- the command, driven the way the plugin will (acceptance) --------------
+
+
+def _cli(args: list[str], env: dict[str, str], **kwargs) -> subprocess.CompletedProcess[str]:
+    return subprocess.run([*VENV_CLI, *args], env={**os.environ, **env},
+                          capture_output=True, text=True, timeout=300, **kwargs)
+
+
+def test_cli_downloads_the_model_reporting_progress_and_exits_0_on_done(
+    fake_hub: FakeHub, hub_env: dict[str, str], tmp_path: Path
+):
+    """Done-when 1 through the entry point: every stdout line is a protocol
+    line, progress climbs to the total, the last line is `done <path>` and
+    that path holds the model, byte for byte."""
+    proc = _cli(["--download-model", "--model", FAKE_REPO], hub_env)
+
+    assert proc.returncode == 0, proc.stderr[-3000:]
+    updates = [Update.parse(line) for line in proc.stdout.splitlines()]
+    total = sum(len(data) for data in FAKE_FILES.values())
+    assert updates[0] == Update.progress(0, total)
+    assert updates[-2] == Update.progress(total, total)
+    assert updates[-1].state == "done"
+    assert _snapshot_files(Path(updates[-1].path)) == FAKE_FILES
+    assert Path(updates[-1].path).is_relative_to(hub_env["HF_HOME"]), "the model went outside HF_HOME"
+
+
+def test_cli_exits_3_naming_the_fix_when_the_repo_is_not_on_the_hub(fake_hub: FakeHub, hub_env: dict[str, str]):
+    proc = _cli(["--download-model", "--model", "fake-org/no-such-model"], hub_env)
+    assert proc.returncode == 3, proc.stderr[-3000:]
+    assert proc.stdout == "", "an error must not be spoken in the protocol"
+    assert "fake-org/no-such-model" in proc.stderr and "--model" in proc.stderr
+
+
+def _interrupt(proc: subprocess.Popen) -> None:
+    if sys.platform == "win32":
+        proc.send_signal(signal.CTRL_BREAK_EVENT)
+    else:
+        proc.send_signal(signal.SIGINT)
+
+
+def test_cli_cancelled_by_a_signal_keeps_the_partial_file_and_the_next_run_resumes_it(
+    hub_env: dict[str, str], tmp_path: Path
+):
+    """Done-when 2. A 40 MiB file served slowly; once the first chunk is on
+    disk (the second progress line) the signal arrives: the command prints
+    `cancelled`, exits 4, and the chunk stays in the cache's .incomplete blob.
+    Run again at full speed, the host is asked for the rest by Range and the
+    file finishes byte-identical."""
+    big = bytes(range(256)) * (40 * 4096)
+    hub = FakeHub(files={"config.json": FAKE_FILES["config.json"], "model.safetensors": big})
+    hub.throttle = (64 * 1024, 0.002)
+    hub.start()
+    env = {**os.environ, **hub_env, "HF_ENDPOINT": hub.endpoint}
+    flags = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if sys.platform == "win32" else {}
+    try:
+        proc = subprocess.Popen([*VENV_CLI, "--download-model", "--model", FAKE_REPO], env=env,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, **flags)
+        lines = []
+        for line in proc.stdout:
+            lines.append(Update.parse(line))
+            if lines[-1].state == "progress" and lines[-1].bytes_done >= CHUNK:
+                _interrupt(proc)
+                break
+        rest = proc.stdout.read()
+        stderr = proc.stderr.read()
+        code = proc.wait(timeout=60)
+        hub.throttle = None
+        assert code == EXIT_CANCELLED, (code, stderr[-3000:])
+        assert rest.splitlines() == ["cancelled"], rest
+        assert "Traceback" not in stderr, stderr[-3000:]
+        (partial,) = _incomplete(Path(hub_env["HF_HOME"]) / "hub")
+        kept = partial.stat().st_size
+        assert CHUNK <= kept < len(big), "the partial file was not kept"
+        assert partial.read_bytes() == big[:kept]
+
+        hub.requests.clear()
+        proc = _cli(["--download-model", "--model", FAKE_REPO], {**hub_env, "HF_ENDPOINT": hub.endpoint})
+        assert proc.returncode == 0, proc.stderr[-3000:]
+        assert hub.gets("model.safetensors") == [f"bytes={kept}-"], "the rest was not asked for by Range"
+        updates = [Update.parse(line) for line in proc.stdout.splitlines()]
+        assert updates[0].bytes_done == kept + len(FAKE_FILES["config.json"])
+        assert _snapshot_files(Path(updates[-1].path))["model.safetensors"] == big
+        assert not _incomplete(Path(hub_env["HF_HOME"]) / "hub")
+    finally:
+        hub.stop()
