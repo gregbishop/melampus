@@ -29,6 +29,7 @@ AGENTS_MD = REPO / "AGENTS.md"
 PLUGIN_CHOICE = REPO / ".agents" / "on-purpose.json"
 BRIEF = REPO / "docs" / "brief.md"
 CI_WORKFLOW = REPO / ".github" / "workflows" / "ci.yml"
+LUA_PLUGIN_TESTS = REPO / "service" / "tests" / "test_lua_plugin.py"
 GITIGNORE = REPO / ".gitignore"
 README = REPO / "readme.md"
 DOCS = [README, AGENTS_MD, *sorted((REPO / "docs").glob("*.md"))]
@@ -286,7 +287,10 @@ def test_ci_runs_the_plugin_command_through_cmd_exe_on_windows():
     too, so the command the plugin builds for cmd.exe is run by cmd.exe
     against dist/melampus.exe, on the one runner that has both. That takes a
     Lua interpreter on the runner (the suite self-skips without one),
-    installed by a step of the job, and the file on its pytest line."""
+    installed by a step of the job, and the file on its pytest line. The Lua
+    the job installs is Lua 5.1, Lightroom's own, so on that runner the file
+    catches dialect errors too; its module docstring cannot still say it
+    catches logic errors and not dialect ones."""
     job = _windows_job()
     installs_lua = [
         line for line in job.splitlines()
@@ -297,6 +301,10 @@ def test_ci_runs_the_plugin_command_through_cmd_exe_on_windows():
     assert pytest_steps and all("tests/test_lua_plugin.py" in c for c in pytest_steps), (
         "the Windows job's pytest step must run tests/test_lua_plugin.py, so the "
         f"command the plugin builds for cmd.exe is run by cmd.exe: {pytest_steps}"
+    )
+    assert "not dialect ones" not in LUA_PLUGIN_TESTS.read_text(encoding="utf-8"), (
+        "test_lua_plugin.py's docstring still says it catches logic errors, not dialect "
+        "ones; the Windows job runs it on Lua 5.1"
     )
 
 
