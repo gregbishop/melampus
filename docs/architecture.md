@@ -82,8 +82,10 @@ built for the §6.6 escalation tail and reused as a primary on machines with no
 local runtime. `CommandBackend` runs an installed command-line program once per
 frame with the image path and the prompt in its arguments and reads the reply
 from its stdout: a subscription CLI such as Claude Code or Codex is vision with
-no API key (the templates for those two are cards #421 and #422; the seam knows
-no program). `ScriptedBackend` returns canned responses, which is what lets the
+no API key. The seam knows no program; `claude-code` is a name for it with
+Claude Code's template built in (`providers.CLAUDE_CODE_COMMAND`, card #421,
+docs/config.md § Claude Code) and its reply unwrapped from the print mode's
+JSON result object by an optional `decode` on stdout; Codex's is card #422. `ScriptedBackend` returns canned responses, which is what lets the
 pipeline tests cover parsing, validation, retry, caching and the downscale ladder
 in under a second with no weights on disk. Each is a class here and no change
 anywhere else: the prompts, the JSON extraction, the schema validation and the
@@ -92,8 +94,10 @@ corrective retry live above the seam and are the same whoever answers.
 `MLXBackend` loads weights lazily, so `--help` does not pull 18 GB. Whether an
 engine can run on this machine at all is `providers.detect_engines`' question,
 answered before any image is read; an Ollama that is not running is refused
-there with the address tried and where to install it, and a command that
-`shutil.which` cannot find is refused the same way, naming it. The one failure
+there with the address tried and where to install it, a command that
+`shutil.which` cannot find is refused the same way, naming it, and Claude Code
+is refused as not installed or, by its own `claude auth status`, as not
+signed in. The one failure
 that stops a batch rather than being recorded on the frame is a command exiting
 non-zero (`CommandFailed`): that is a broken engine, not a bad file, and every
 frame would fail the same way.
