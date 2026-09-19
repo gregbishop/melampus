@@ -280,8 +280,18 @@ local function runWithDroppedWrites(fileName, drops, records, photos)
 	runImport(records, photos, defaultPrefs(), { dropWrites = { [fileName] = drops } })
 end
 
+--- What the plugin's log holds: the file the module writes at Log.path(),
+--- under the mock's home; '' while nothing has landed.
+local function logText()
+	local handle = io.open(require('MelampusLog').path(), 'r')
+	if not handle then return '' end
+	local text = handle:read('*a')
+	handle:close()
+	return text
+end
+
 local function logMatching(needle)
-	for _, line in ipairs(mock.state.logLines) do
+	for line in string.gmatch(logText(), '[^\n]+') do
 		if string.find(line, needle, 1, true) then return line end
 	end
 	return nil
@@ -640,10 +650,8 @@ end)
 
 t.test('the key is never logged', function()
 	commandWithKeys('openai', { MELAMPUS_OPENAI_KEY = KEY })
-	t.isTrue(#mock.state.logLines > 0, 'the run was not logged at all')
-	for _, line in ipairs(mock.state.logLines) do
-		t.isNil(string.find(line, KEY, 1, true), 'the key was logged: ' .. line)
-	end
+	t.isTrue(logText() ~= '', 'the run was not logged at all')
+	t.isNil(string.find(logText(), KEY, 1, true), 'the key was logged: ' .. logText())
 end)
 
 t.test('a local engine, a subscription CLI, or no engine, carries no key even when keys are stored', function()
@@ -669,9 +677,7 @@ t.test('on Windows the key is set for cmd.exe before the executable, once', func
 	t.isTrue(ok, 'run failed: ' .. tostring(message))
 	t.equals(mock.state.executed[1], windowsCommand('claude', 'MELAMPUS_ANTHROPIC_KEY', KEY),
 		'not the command with the Claude key set for cmd.exe ahead of the executable')
-	for _, line in ipairs(mock.state.logLines) do
-		t.isNil(string.find(line, KEY, 1, true), 'the key was logged: ' .. line)
-	end
+	t.isNil(string.find(logText(), KEY, 1, true), 'the key was logged: ' .. logText())
 end)
 
 t.test('on Windows a stored key holding a character cmd.exe rewrites is refused before anything runs', function()
@@ -695,9 +701,7 @@ t.test('on Windows a stored key holding a character cmd.exe rewrites is refused 
 		t.isNotNil(string.find(message, 'Settings', 1, true),
 			'the message does not say where to enter the key again:\n' .. tostring(message))
 		t.isNil(string.find(message, key, 1, true), 'the message shows the key:\n' .. message)
-		for _, line in ipairs(mock.state.logLines) do
-			t.isNil(string.find(line, key, 1, true), 'the key was logged: ' .. line)
-		end
+		t.isNil(string.find(logText(), key, 1, true), 'the key was logged: ' .. logText())
 	end
 end)
 
