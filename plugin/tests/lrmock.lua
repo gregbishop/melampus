@@ -284,12 +284,15 @@ namespaces.LrFileUtils = {
 --- A temp directory of this run's own, made on first use and removed by the
 -- next reset or by M.cleanUp (as the suite does with its results file). The
 -- machine's temp directory would hand one run the previews an earlier run
--- left, and keep them.
+-- left, and keep them. Under TMPDIR when a caller sets one (pytest hands its
+-- tmp_path), which Lua's own os.tmpname would ignore.
 local function tempDir()
 	if not M.state.tempDir then
-		local path = os.tmpname()
-		os.remove(path)
-		os.execute('mkdir -p ' .. path)
+		local base = os.getenv('TMPDIR') or '/tmp'
+		local handle = assert(io.popen('mktemp -d "' .. base .. '/lrmock.XXXXXX"'))
+		local path = handle:read('*l')
+		handle:close()
+		assert(path and path ~= '', 'mktemp made no directory under ' .. base)
 		M.state.tempDir = path
 	end
 	return M.state.tempDir
