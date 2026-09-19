@@ -1,29 +1,48 @@
 --[[ File logging.
 
      "It didn't seem to do anything" is unfalsifiable without a trace, so every
-     action writes one. LrLogger's logfile target lands in
-     ~/Documents/LrClassicLogs/Melampus.log on macOS. ]]
-local LrLogger = import 'LrLogger'
-
-local logger = LrLogger('Melampus')
-logger:enable('logfile')
+     action writes one. The plugin writes the file itself, at Log.path(), one
+     line per message (card #442). It did use LrLogger's 'logfile' target,
+     which writes wherever Lightroom's native AgFileLogger decides:
+     ~/Library/Logs/Adobe/Lightroom/LrClassicLogs on macOS, and on Windows a
+     folder the SDK neither names nor lets a plugin set (LrLogger:enable takes
+     a target name or a table of functions, never a path), so the path the
+     Settings dialog showed was a guess, and wrong on Windows. ]]
+local LrFileUtils = import 'LrFileUtils'
 
 local Log = {}
 
-local function stamp()
-	return os.date('%H:%M:%S')
+--- The log, open for appending, its folder made on first use; nil when the
+-- folder cannot be made or the file cannot be opened. A log that cannot be
+-- written is not an error worth raising over in the middle of a run. The
+-- folder is checked, not the call's result, because io.open of a path whose
+-- folder is missing does not fail the same way everywhere.
+local function open()
+	local folder = Log.folder()
+	if not LrFileUtils.exists(folder) then
+		LrFileUtils.createAllDirectories(folder)
+		if not LrFileUtils.exists(folder) then return nil end
+	end
+	return io.open(Log.path(), 'a')
+end
+
+local function write(level, message)
+	local handle = open()
+	if not handle then return end
+	handle:write(os.date('%Y-%m-%d %H:%M:%S'), ' ', level, ' ', tostring(message), '\n')
+	handle:close()
 end
 
 function Log.info(message)
-	logger:info(stamp() .. ' ' .. tostring(message))
+	write('INFO', message)
 end
 
 function Log.warn(message)
-	logger:warn(stamp() .. ' ' .. tostring(message))
+	write('WARN', message)
 end
 
 function Log.error(message)
-	logger:error(stamp() .. ' ' .. tostring(message))
+	write('ERROR', message)
 end
 
 --- The per-user Melampus data directory: the root the executable keeps its
