@@ -23,6 +23,8 @@ from conftest import (
     FAKE_REPO,
     FAKE_TOTAL,
     PHOTO,
+    REAL_CLAUDE_CODE_VERDICT,
+    REAL_CODEX_VERDICT,
     FakeHub,
     closed_port,
     fake_bytes,
@@ -32,7 +34,7 @@ from huggingface_hub.constants import DOWNLOAD_CHUNK_SIZE
 
 from melampus import providers
 from melampus.download import CANCEL_MARKER, EXIT_CANCELLED, Update
-from test_binary import per_user_config, per_user_data_dir
+from test_binary import no_python_environment, per_user_config, per_user_data_dir
 
 REPO = Path(__file__).resolve().parents[2]
 PLUGIN = REPO / "plugin" / "Melampus.lrplugin"
@@ -152,12 +154,13 @@ def test_json_decoder():
 
 
 def test_the_plugin_names_the_engines_the_cli_accepts(tmp_path: Path):
-    """Card #403: the four engine names are spelled once per language, in
+    """Card #403: the engine names are spelled once per language, in
     `Rules.ENGINES` for the plugin and `providers.BACKEND_CHOICES` for the
     CLI, and this is what binds them: the plugin's list, read through lua, is
-    the CLI's list without the offline test fake, in the same order. A rename
-    on either side fails here rather than as a usage error the user never
-    sees."""
+    the CLI's list without the offline test fake, then the two subscription
+    CLIs (card #423; the command seam is not a picker choice), in the same
+    order. A rename on either side fails here rather than as a usage error
+    the user never sees."""
     script = tmp_path / "engines.lua"
     script.write_text(
         "local Rules = require('MelampusRules')\n"
@@ -168,7 +171,7 @@ def test_the_plugin_names_the_engines_the_cli_accepts(tmp_path: Path):
     assert proc.returncode == 0, proc.stdout + proc.stderr
 
     engines = [b for b in providers.BACKEND_CHOICES if b != providers.SCRIPTED]
-    assert proc.stdout.split("\n") == engines
+    assert proc.stdout.split("\n") == [*engines, providers.CLAUDE_CODE, providers.CODEX]
 
 
 def test_the_plugin_offers_a_download_row_for_exactly_the_engines_the_cli_fetches_a_model_for(tmp_path: Path):
@@ -340,6 +343,74 @@ def test_the_engine_preference_reaches_the_executable_through_the_command_the_pl
     assert "invalid choice" not in tail, f"the executable does not accept ollama:\n{tail}"
 
 
+def test_the_engines_the_plugin_knows_are_the_executables_in_its_order(
+    built_executable: Path, tmp_path: Path
+):
+    """Card #423: the plugin validates the engine preference before the shell
+    (Rules.ENGINES, the picker's order too), and the executable's
+    `--detect-engines` is the list the picker is built from, so the two are
+    one order in two places. Held to each other here against dist/melampus
+    with no python on the path: a name added to one without the other fails
+    CI, and the picker can never offer an engine the run would refuse."""
+    script = tmp_path / "engines.lua"
+    script.write_text(
+        "local Rules = require('MelampusRules')\n"
+        "io.write(table.concat(Rules.ENGINES, '\\n'))\n",
+        encoding="utf-8",
+    )
+    known = run_lua(script)
+    assert known.returncode == 0, known.stdout + known.stderr
+
+    proc = subprocess.run(
+        [str(built_executable), "--detect-engines"],
+        env=no_python_environment(tmp_path), capture_output=True, text=True, timeout=600,
+    )
+    assert proc.returncode == 0, proc.stderr[-3000:]
+    assert [v["engine"] for v in json.loads(proc.stdout)] == known.stdout.split("\n")
+
+
+@pytest.mark.parametrize("engine", ["claude-code", "codex"])
+def test_the_cli_engine_preference_reaches_the_executable_through_the_command_the_plugin_builds(
+    built_executable: Path, photos: Path, tmp_path: Path, engine: str
+):
+    """Card #423, Done-when 2 at the real boundary. With the engine
+    preference set to a subscription CLI, the command the plugin builds
+    carries `--backend claude-code` (or codex) and sets no key variable
+    ahead of the executable, whatever LrPasswords holds; run through sh
+    against dist/melampus with nothing on the PATH (so no `claude` or
+    `codex` either), through the shell LrTasks.execute hands it to, the
+    executable receives the name and answers with its own refusal for a CLI
+    that is not installed, naming where to get it, exit 3, in the CLI log
+    the plugin points a failed run at. Nothing runs, nothing is sent
+    anywhere."""
+    from melampus import providers
+
+    cli = {"claude-code": providers.CLAUDE_CODE_CLI, "codex": providers.CODEX_CLI}[engine]
+    plugin_dir = _plugin_folder_holding(built_executable, tmp_path)
+    env = no_python_environment(tmp_path)
+    assert shutil.which(cli.program, path=env["PATH"]) is None
+
+    command = _command_the_plugin_builds(
+        plugin_dir, photos, photos / "results.json", tmp_path, engine=engine,
+        stored_key="stored-in-lrpasswords-not-a-real-key-9b2d")
+    assert f"--backend {as_the_shell_receives_it(engine)}" in command, command
+    # The executable first: on Windows after the quote the whole line is
+    # wrapped in for cmd.exe, on macOS at the very start.
+    line = command[1:] if WINDOWS else command
+    assert line.startswith(as_the_shell_receives_it(plugin_dir / built_executable.name)), (
+        f"something is set ahead of the executable for an engine that needs no key:\n{command}")
+    assert "MELAMPUS_" not in command and "not-a-real-key" not in command, command
+
+    proc = run_as_lightroom_would(command, env=env, cwd=tmp_path,
+                                  capture_output=True, text=True, timeout=600)
+
+    tail = _cli_log_tail(tmp_path)
+    assert proc.returncode == 3, f"exit {proc.returncode}: {proc.stderr[-2000:]}\n{tail}"
+    assert f"{cli.title} is not installed" in tail, tail
+    assert cli.install in tail, tail
+    assert "invalid choice" not in tail, f"the executable does not accept {engine}:\n{tail}"
+
+
 @pytest.mark.parametrize("stored_key", ["", "stored-in-lrpasswords-not-a-real-key-9b2d"])
 def test_the_stored_key_reaches_the_executable_through_the_command_the_plugin_builds(
     built_executable: Path, photos: Path, tmp_path: Path, stored_key: str
@@ -386,9 +457,13 @@ def test_the_detection_the_plugin_runs_reaches_the_executable_and_fills_the_pick
     hands it to the shell LrTasks.execute hands it to on this host (sh
     against dist/melampus, cmd.exe against dist/melampus.exe); what the
     executable actually printed then goes through the plugin's own JSON
-    decoder and `Rules.engineItems`: five items in the owner's order, ollama
+    decoder and `Rules.engineItems`: seven items in the executable's order
+    (card #423: the owner's four, then the two subscription CLIs), ollama
     greyed with the download address from the executable's reason as its
-    link, mlx as this machine decides. No Ollama answers on a runner and
+    link, mlx and the CLIs as this machine decides (the CLIs' real verdicts
+    are asked from this process too, the way test_binary.py asks Ollama's,
+    so a developer's signed-in CLI decides nothing the test did not
+    measure). No Ollama answers on a runner and
     nothing is sent anywhere; the executable's output on its own, with no
     python on the path, is test_binary.py's."""
     plugin_dir = _plugin_folder_holding(built_executable, tmp_path)
@@ -404,7 +479,8 @@ def test_the_detection_the_plugin_runs_reaches_the_executable_and_fills_the_pick
         "end\n")
 
     items = [line.split("\t") for line in listing.splitlines()]
-    assert [value for value, _, _ in items] == ["", "mlx", "ollama", "openai", "claude"], listing
+    engines = [b for b in providers.BACKEND_CHOICES if b != providers.SCRIPTED]
+    assert [value for value, _, _ in items] == ["", *engines, providers.CLAUDE_CODE, providers.CODEX], listing
     enabled = {value: state == "true" for value, state, _ in items}
     links = {value: link for value, _, link in items}
     assert enabled[""] and enabled["openai"] and enabled["claude"], listing
@@ -412,6 +488,13 @@ def test_the_detection_the_plugin_runs_reaches_the_executable_and_fills_the_pick
     assert not enabled["ollama"], f"ollama greyed by nothing; an Ollama server answered?\n{listing}"
     assert links["ollama"] == providers.OLLAMA_INSTALL, listing
     assert all(links[value] == "nil" for value in ("", "mlx", "openai", "claude")), listing
+    for cli, verdict in ((providers.CLAUDE_CODE_CLI, REAL_CLAUDE_CODE_VERDICT()),
+                         (providers.CODEX_CLI, REAL_CODEX_VERDICT())):
+        assert enabled[cli.engine] is verdict.available, listing
+        # Not installed, the install page is the link; signed in, or installed
+        # and not signed in, the reason names no address.
+        expected_link = cli.install if cli.install in verdict.reason else "nil"
+        assert links[cli.engine] == expected_link, listing
 
 
 def test_the_command_the_plugin_builds_runs_the_executable_beside_it(

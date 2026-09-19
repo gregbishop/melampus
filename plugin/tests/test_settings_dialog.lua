@@ -2,10 +2,12 @@
 Runs the real MelampusSettings.lua against the mock Lightroom SDK (card #405).
 
 The engine picker shows what `melampus --detect-engines` says: the four
-engines in the owner's order, the ones that cannot run here greyed with their
-reason, a link to install Ollama when it is missing, and a password field for
-the API key of the picked cloud engine, stored through LrPasswords and never
-in the preferences, a file, or the log.
+engines in the owner's order then the two subscription CLIs (card #423), the
+ones that cannot run here greyed with their reason, a link to install Ollama
+when it is missing, and a password field for the API key of the picked cloud
+engine, stored through LrPasswords and never in the preferences, a file, or
+the log; a subscription CLI has no key field, and when picked its reason,
+what every frame bills to, shows under the picker.
 --]]
 
 local t = require('harness')
@@ -14,6 +16,15 @@ local mock = require('lrmock')
 local PLUGIN = mock.PLUGIN
 local ENGINES = mock.loadPluginFile('MelampusRules').ENGINES
 local OLLAMA_DOWNLOAD = 'https://ollama.com/download'
+local CLAUDE_CODE_INSTALL = 'https://code.claude.com/docs/en/setup'
+-- The canned answer, its titles and its reasons come from lrmock, spelled
+-- once for every suite; the signed-in reasons are this suite's overrides.
+local TITLES = {}
+for engine, verdict in pairs(mock.canned) do TITLES[engine] = verdict.title end
+local CLAUDE_CODE_NOT_INSTALLED = mock.canned['claude-code'].reason
+local CODEX_NOT_SIGNED_IN = mock.canned.codex.reason
+local CLAUDE_CODE_SIGNED_IN = 'Claude Code is signed in (claude.ai, max); every frame bills to that subscription, not to an API key'
+local CODEX_SIGNED_IN = 'Codex CLI is signed in (ChatGPT); every frame bills to that subscription, not to an API key'
 
 local REPO = 'mlx-community/Qwen3-VL-30B-A3B-Instruct-4bit'
 local OLLAMA_MODEL = 'qwen3-vl:8b-instruct'
@@ -192,7 +203,7 @@ local function modelRow(contents, engine)
 end
 
 -- ── the picker ─────────────────────────────────────────────────────────────
-t.test('the settings dialog opens with a picker bound to prefs.engine listing the four engines in order', function()
+t.test('the settings dialog opens with a picker bound to prefs.engine listing the six engines in the executable\'s order', function()
 	local contents = openSettings({ detection = mock.detectionText() })
 	local picker = enginePicker(contents)
 	t.isNotNil(picker, 'no popup_menu bound to engine')
@@ -201,8 +212,10 @@ t.test('the settings dialog opens with a picker bound to prefs.engine listing th
 	t.equals(values[1], '', 'the first item leaves the choice to Melampus, the unset preference')
 	for i, engine in ipairs(ENGINES) do
 		t.equals(values[i + 1], engine, 'item ' .. (i + 1) .. ' of the picker')
+		t.equals(string.sub(picker.items[i + 1].title, 1, #TITLES[engine]), TITLES[engine],
+			'item ' .. (i + 1) .. ' is not titled as the executable said')
 	end
-	t.equals(#values, 5)
+	t.equals(#values, 7)
 end)
 
 local function commandsRun(flag)
@@ -262,11 +275,47 @@ t.test('engines that cannot run here are greyed and their reasons shown', functi
 end)
 
 t.test('with every engine available nothing is greyed', function()
-	local contents = openSettings({ detection = mock.detectionText({ ollama = { available = true, reason = 'Ollama is answering at http://127.0.0.1:11434' } }) })
+	local contents = openSettings({ detection = mock.detectionText({
+		ollama = { available = true, reason = 'Ollama is answering at http://127.0.0.1:11434' },
+		['claude-code'] = { available = true, reason = CLAUDE_CODE_SIGNED_IN }, codex = { available = true, reason = CODEX_SIGNED_IN },
+	}) })
 	for _, item in ipairs(enginePicker(contents).items) do
 		t.isTrue(item.enabled, item.value .. ' was greyed')
 	end
 	t.equals(#titlesMatching(contents, 'Ollama'), 0, 'a reason was shown for an available engine')
+	t.equals(#titlesMatching(contents, 'signed in'), 0, 'a reason was shown for an available engine')
+end)
+
+-- ── the subscription CLIs (card #423) ──────────────────────────────────────
+t.test('a CLI that is not installed, and one not signed in, are greyed with the reason detection gave', function()
+	local contents = openSettings({ detection = mock.detectionText() })
+	local byValue = {}
+	for _, item in ipairs(enginePicker(contents).items) do byValue[item.value] = item end
+	t.isFalse(byValue['claude-code'].enabled, 'claude-code should be greyed when not installed')
+	t.equals(byValue['claude-code'].title, TITLES['claude-code'] .. ' (not available)')
+	t.isFalse(byValue.codex.enabled, 'codex should be greyed when not signed in')
+	t.equals(byValue.codex.title, TITLES.codex .. ' (not available)')
+	t.isTrue(#titlesMatching(contents, CLAUDE_CODE_NOT_INSTALLED) > 0, 'the claude-code reason is not shown')
+	t.isTrue(#titlesMatching(contents, CODEX_NOT_SIGNED_IN) > 0, 'the codex reason is not shown')
+	local clickable = {}
+	for _, view in ipairs(titlesMatching(contents, CLAUDE_CODE_INSTALL)) do
+		if type(view.mouse_down) == 'function' then clickable[#clickable + 1] = view end
+	end
+	t.equals(#clickable, 1, 'expected one clickable link to ' .. CLAUDE_CODE_INSTALL)
+	clickable[1].mouse_down()
+	t.equals(mock.state.openedUrls[#mock.state.openedUrls], CLAUDE_CODE_INSTALL)
+end)
+
+t.test('a CLI that is signed in is offered', function()
+	local contents = openSettings({ detection = mock.detectionText({
+		['claude-code'] = { available = true, reason = CLAUDE_CODE_SIGNED_IN }, codex = { available = true, reason = CODEX_SIGNED_IN },
+	}) })
+	local byValue = {}
+	for _, item in ipairs(enginePicker(contents).items) do byValue[item.value] = item end
+	t.isTrue(byValue['claude-code'].enabled, 'a signed-in claude-code should be offered')
+	t.equals(byValue['claude-code'].title, TITLES['claude-code'])
+	t.isTrue(byValue.codex.enabled, 'a signed-in codex should be offered')
+	t.equals(byValue.codex.title, TITLES.codex)
 end)
 
 -- ── the Ollama link ────────────────────────────────────────────────────────
@@ -284,7 +333,10 @@ t.test('when ollama is unavailable a link opens the Ollama download page', funct
 end)
 
 t.test('when ollama is available there is no link', function()
-	local contents = openSettings({ detection = mock.detectionText({ ollama = { available = true, reason = 'Ollama is answering at http://127.0.0.1:11434' } }) })
+	local contents = openSettings({ detection = mock.detectionText({
+		ollama = { available = true, reason = 'Ollama is answering at http://127.0.0.1:11434' },
+		['claude-code'] = { available = true, reason = CLAUDE_CODE_SIGNED_IN }, codex = { available = true, reason = CODEX_SIGNED_IN },
+	}) })
 	for _, entry in ipairs(viewsOfKind(contents, 'static_text')) do
 		t.isNil(entry.view.mouse_down, 'a clickable link is shown with nothing to install: ' .. tostring(entry.view.title))
 	end
@@ -292,16 +344,19 @@ t.test('when ollama is available there is no link', function()
 end)
 
 t.test('another engine\'s reason naming an address gives no link while ollama is available', function()
-	-- The link is Ollama's alone (Done-when 3): a reason from any other
-	-- engine is shown under the picker as text, address and all, never as
-	-- something to click.
+	-- A link is for something to go and install (Ollama, Done-when 3; the
+	-- subscription CLIs, card #423): a reason from any other engine is shown
+	-- under the picker as text, address and all, never as something to click.
 	local MLX_ADDRESS = 'https://example.com/apple-silicon'
 	local contents = openSettings({ detection = mock.detectionText({
 		ollama = { available = true, reason = 'Ollama is answering at http://127.0.0.1:11434' },
 		mlx = { available = false, reason = 'needs Apple Silicon; see ' .. MLX_ADDRESS },
 	}) })
 	for _, entry in ipairs(viewsOfKind(contents, 'static_text')) do
-		t.isNil(entry.view.mouse_down, 'a clickable link is shown for an engine other than ollama: ' .. tostring(entry.view.title))
+		local title = tostring(entry.view.title)
+		if string.find(title, MLX_ADDRESS, 1, true) or string.find(title, 'Ollama', 1, true) then
+			t.isNil(entry.view.mouse_down, 'a clickable link is shown for an engine with nothing to install: ' .. title)
+		end
 	end
 	t.equals(#titlesMatching(contents, MLX_ADDRESS), 1, 'the mlx reason is shown once, as the note under the picker')
 	t.equals(#mock.state.openedUrls, 0)
@@ -341,13 +396,29 @@ t.test('a password field takes the key for openai and for claude, shown only whe
 	local count = 0
 	for _ in pairs(fields) do count = count + 1 end
 	t.equals(count, 2, 'expected exactly two password fields')
-	for _, engine in ipairs({ '', 'mlx', 'ollama', 'claude' }) do
+	for _, engine in ipairs({ '', 'mlx', 'ollama', 'claude', 'claude-code', 'codex' }) do
 		t.isFalse(visibleFor(fields.MELAMPUS_OPENAI_KEY, engine), 'the OpenAI key field shows for ' .. engine)
 	end
 	t.isTrue(visibleFor(fields.MELAMPUS_OPENAI_KEY, 'openai'))
-	for _, engine in ipairs({ '', 'mlx', 'ollama', 'openai' }) do
+	for _, engine in ipairs({ '', 'mlx', 'ollama', 'openai', 'claude-code', 'codex' }) do
 		t.isFalse(visibleFor(fields.MELAMPUS_ANTHROPIC_KEY, engine), 'the Claude key field shows for ' .. engine)
 	end
+	t.isTrue(visibleFor(fields.MELAMPUS_ANTHROPIC_KEY, 'claude'))
+end)
+
+t.test('no password field shows for a subscription CLI; the fields for openai and claude stay', function()
+	local contents = openSettings({ detection = mock.detectionText({
+		['claude-code'] = { available = true, reason = CLAUDE_CODE_SIGNED_IN }, codex = { available = true, reason = CODEX_SIGNED_IN },
+	}) })
+	local fields, count = {}, 0
+	for variable, entry in pairs(keyFields(contents)) do fields[variable], count = entry, count + 1 end
+	t.equals(count, 2, 'expected exactly two password fields, for the two cloud engines')
+	for _, variable in ipairs({ 'MELAMPUS_OPENAI_KEY', 'MELAMPUS_ANTHROPIC_KEY' }) do
+		for _, engine in ipairs({ 'claude-code', 'codex' }) do
+			t.isFalse(visibleFor(fields[variable], engine), 'the ' .. variable .. ' field shows for ' .. engine)
+		end
+	end
+	t.isTrue(visibleFor(fields.MELAMPUS_OPENAI_KEY, 'openai'))
 	t.isTrue(visibleFor(fields.MELAMPUS_ANTHROPIC_KEY, 'claude'))
 end)
 
@@ -558,7 +629,7 @@ for _, case in ipairs(MODEL_ENGINES) do
 		local row = modelRow(contents, engine)
 		t.isTrue(visibleFor({ view = row }, engine))
 		t.equals(visibleFor({ view = row }, ''), engine == 'mlx', 'the default on this Mac is mlx')
-		for _, other in ipairs({ 'mlx', 'ollama', 'openai', 'claude' }) do
+		for _, other in ipairs({ 'mlx', 'ollama', 'openai', 'claude', 'claude-code', 'codex' }) do
 			if other ~= engine then t.isFalse(visibleFor({ view = row }, other), 'the row shows for ' .. other) end
 		end
 	end)
@@ -720,7 +791,7 @@ t.test('with no executable beside the plugin the dialog still opens, nothing gre
 	t.isNil(mock.state.executed, 'ran a command with no executable to run')
 	local picker = enginePicker(contents)
 	t.isNotNil(picker, 'no picker')
-	t.equals(#picker.items, 5)
+	t.equals(#picker.items, 7)
 	for _, item in ipairs(picker.items) do
 		t.isTrue(item.enabled, item.value .. ' was greyed with no detection to grey it')
 	end
