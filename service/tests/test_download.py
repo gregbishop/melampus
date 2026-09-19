@@ -2686,3 +2686,179 @@ def test_remove_with_no_ollama_answering_uses_the_not_running_message():
         remove_ollama_model(FAKE_MODEL, f"http://127.0.0.1:{port}")
     assert f"no Ollama server answering at http://127.0.0.1:{port}" in str(failure.value)
 
+
+
+# The three flags dispatch on the engine: --backend or [model] backend names
+# it, else detection's default, as a run does. For ollama the pull, the
+# list and the delete endpoints answer; for mlx the hub as before.
+
+
+def _ollama_settings(tmp_path: Path, url: str, model: str = FAKE_MODEL) -> Path:
+    settings = tmp_path / "settings.toml"
+    settings.write_text(f'[model]\nollama_url = "{url}"\nollama_model = "{model}"\n', encoding="utf-8")
+    return settings
+
+
+def test_the_model_flags_with_backend_ollama_go_to_the_ollama_functions_with_the_configured_model_and_address(
+    monkeypatch, capsys, tmp_path
+):
+    """`--backend ollama` (what the plugin passes) sends each flag to the
+    Ollama function with `[model] ollama_model` and `ollama_url` (its
+    default, providers.OLLAMA_URL, when unset); the same lines come out:
+    the protocol, the JSON, `removed <model>`."""
+    from melampus import providers
+
+    seen = []
+
+    def fake_pull(model, url, *, on_update, **_):
+        seen.append(("pull", model, url))
+        on_update(Update.progress(1, 2))
+        return model
+
+    monkeypatch.setattr(download, "pull_model", fake_pull)
+    monkeypatch.setattr(download, "ollama_status", lambda model, url: seen.append(("status", model, url)) or Status(
+        model, installed=False, bytes_total=None, bytes_done=0, path=None, cancel_path="/data/download-cancel"))
+    monkeypatch.setattr(download, "remove_ollama_model", lambda model, url: seen.append(("remove", model, url)) or model)
+    settings = _ollama_settings(tmp_path, "http://127.0.0.1:11435/")
+
+    assert main(["--download-model", "--no-local-config", "--backend", "ollama"]) == 0
+    assert main(["--model-status", "--backend", "ollama", "--config", str(settings)]) == 0
+    assert main(["--remove-model", "--backend", "ollama", "--config", str(settings)]) == 0
+
+    out = capsys.readouterr().out
+    assert seen == [
+        ("pull", "qwen3-vl:8b-instruct", providers.OLLAMA_URL),
+        ("status", FAKE_MODEL, "http://127.0.0.1:11435"),
+        ("remove", FAKE_MODEL, "http://127.0.0.1:11435"),
+    ]
+    progress, done, status_line, removed = out.splitlines()
+    assert (progress, done) == ("progress 1 2", "done qwen3-vl:8b-instruct")
+    assert json.loads(status_line)["repo"] == FAKE_MODEL
+    assert removed == f"removed {FAKE_MODEL}"
+
+
+def test_the_model_flags_take_the_engine_from_the_config_file_and_detection_when_nothing_names_it(
+    monkeypatch, capsys, tmp_path
+):
+    """`[model] backend = "ollama"` in the config picks the pull too; with
+    nothing named, the first engine detection says can run here decides,
+    the way a run decides (docs/config.md § [model]): mlx on this Mac,
+    ollama on a Windows machine with Ollama answering."""
+    import melampus.cli
+
+    asked = []
+    monkeypatch.setattr(download, "model_status", lambda repo: asked.append(("mlx", repo)) or Status(
+        repo, installed=False, bytes_total=None, bytes_done=0, path=None, cancel_path="/x"))
+    monkeypatch.setattr(download, "ollama_status", lambda model, url: asked.append(("ollama", model)) or Status(
+        model, installed=False, bytes_total=None, bytes_done=0, path=None, cancel_path="/x"))
+    settings = tmp_path / "settings.toml"
+    settings.write_text('[model]\nbackend = "ollama"\n', encoding="utf-8")
+    assert main(["--model-status", "--config", str(settings)]) == 0
+
+    monkeypatch.setattr(melampus.cli, "default_engine", lambda ollama_at=None: "ollama")
+    assert main(["--model-status", "--no-local-config"]) == 0
+    monkeypatch.setattr(melampus.cli, "default_engine", lambda ollama_at=None: "mlx")
+    assert main(["--model-status", "--no-local-config"]) == 0
+
+    assert asked == [("ollama", "qwen3-vl:8b-instruct"), ("ollama", "qwen3-vl:8b-instruct"),
+                     ("mlx", ModelConfig().repo)]
+    assert "engine: ollama (the first that can run here" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("engine", ["openai", "claude", "scripted"])
+def test_the_model_flags_refuse_an_engine_with_no_model_to_fetch_naming_the_two_that_have_one(capsys, engine):
+    for flag in ("--download-model", "--model-status", "--remove-model"):
+        assert main([flag, "--no-local-config", "--backend", engine]) == 3
+        out, err = capsys.readouterr()
+        assert out == "", "a refusal must not be spoken in the protocol"
+        assert engine in err and "mlx" in err and "ollama" in err and "--backend" in err
+
+
+def test_cli_pulls_the_model_from_the_fake_ollama_and_the_status_flips_to_installed_then_removed(
+    fake_ollama: FakeOllama, tmp_path: Path
+):
+    """Done-when 1 and 2 through the entry point, in the order the Settings
+    dialog sees them for ollama: absent with the size unknown, the pull's
+    protocol lines ending in `done <model>` with exit 0, installed with the
+    size, `removed <model>`, absent again. Every request went to the fake."""
+    settings = _ollama_settings(tmp_path, fake_ollama.endpoint)
+    flags = ["--backend", "ollama", "--config", str(settings)]
+
+    before = _cli(["--model-status", *flags], {})
+    assert before.returncode == 0, before.stderr[-3000:]
+    status = json.loads(before.stdout)
+    assert status["repo"] == FAKE_MODEL and status["installed"] is False
+    assert status["bytes_total"] is None and status["bytes_done"] == 0 and status["path"] is None
+    assert status["cancel_path"].endswith(CANCEL_MARKER)
+
+    pulled = _cli(["--download-model", *flags], {})
+    assert pulled.returncode == 0, pulled.stderr[-3000:]
+    updates = [Update.parse(line) for line in pulled.stdout.splitlines()]
+    assert updates[0] == Update.progress(0, 3000) and updates[-2] == Update.progress(4000, 4000)
+    assert updates[-1] == Update.done(FAKE_MODEL)
+    assert [p["model"] for p in fake_ollama.pulls] == [FAKE_MODEL]
+
+    after = _cli(["--model-status", *flags], {})
+    assert after.returncode == 0, after.stderr[-3000:]
+    status = json.loads(after.stdout)
+    assert status["installed"] is True and status["path"] == FAKE_MODEL
+    assert status["bytes_done"] == status["bytes_total"] == 4000
+
+    removed = _cli(["--remove-model", *flags], {})
+    assert removed.returncode == 0, removed.stderr[-3000:]
+    assert removed.stdout.strip() == f"removed {FAKE_MODEL}"
+    assert json.loads(_cli(["--model-status", *flags], {}).stdout)["installed"] is False
+    assert {path for _, path in fake_ollama.requests} == {"/api/tags", "/api/pull", "/api/delete"}
+
+
+def test_cli_pull_of_an_unknown_model_exits_3_naming_the_setting(fake_ollama: FakeOllama, tmp_path: Path):
+    settings = _ollama_settings(tmp_path, fake_ollama.endpoint, model="fake-org/no-such-model:1b")
+    proc = _cli(["--download-model", "--backend", "ollama", "--config", str(settings)], {})
+    assert proc.returncode == 3, proc.stderr[-3000:]
+    assert proc.stdout == "", "an error must not be spoken in the protocol"
+    assert "fake-org/no-such-model:1b" in proc.stderr and "[model] ollama_model" in proc.stderr
+
+
+def test_cli_pull_with_no_ollama_answering_exits_3_with_the_not_running_message(tmp_path: Path):
+    port = closed_port()
+    settings = _ollama_settings(tmp_path, f"http://127.0.0.1:{port}")
+    proc = _cli(["--download-model", "--backend", "ollama", "--config", str(settings)], {})
+    assert proc.returncode == 3, proc.stderr[-3000:]
+    assert proc.stdout == ""
+    assert f"no Ollama server answering at http://127.0.0.1:{port}" in proc.stderr
+    assert "Traceback" not in proc.stderr
+
+
+def test_cli_pull_cancelled_by_a_signal_prints_cancelled_exit_4_and_the_next_pull_completes(tmp_path: Path):
+    """The signal path for ollama: mid-stream against the throttled fake, the
+    signal arrives, the command prints `cancelled` and exits 4 with the
+    stream closed; run again at full speed the second pull is asked for,
+    starts from what Ollama kept, and completes."""
+    flags = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if sys.platform == "win32" else {}
+    with _slow_ollama().serve() as ollama:
+        size = ollama.library[FAKE_MODEL][0]
+        settings = _ollama_settings(tmp_path, ollama.endpoint)
+        proc = subprocess.Popen([*VENV_CLI, "--download-model", "--backend", "ollama", "--config", str(settings)],
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, **flags)
+        lines = []
+        for line in proc.stdout:
+            lines.append(Update.parse(line))
+            if lines[-1].state == "progress" and lines[-1].bytes_done >= 1024 * 1024:
+                _interrupt(proc)
+                break
+        rest = proc.stdout.read()
+        stderr = proc.stderr.read()
+        code = proc.wait(timeout=60)
+        ollama.throttle = None
+        assert code == EXIT_CANCELLED, (code, stderr[-3000:])
+        assert rest.splitlines() == ["cancelled"], rest
+        assert "Traceback" not in stderr, stderr[-3000:]
+        kept = lines[-1].bytes_done
+        assert 0 < kept < size
+
+        again = _cli(["--download-model", "--backend", "ollama", "--config", str(settings)], {})
+        assert again.returncode == 0, again.stderr[-3000:]
+        assert [p["model"] for p in ollama.pulls] == [FAKE_MODEL, FAKE_MODEL], "the second pull was not asked for"
+        updates = [Update.parse(line) for line in again.stdout.splitlines()]
+        assert updates[0].bytes_done >= kept, "the second pull did not start from what was kept"
+        assert updates[-1] == Update.done(FAKE_MODEL) and ollama.models == {FAKE_MODEL: size}

@@ -7,6 +7,7 @@ import json
 import sys
 from dataclasses import asdict
 from pathlib import Path
+from typing import TYPE_CHECKING, Callable
 
 from .cache import ResultCache
 from .config import load_config
@@ -15,16 +16,21 @@ from .images import content_hash
 from .providers import (
     BACKEND_CHOICES,
     KEY_VARIABLES,
+    OLLAMA,
     BackendUnavailable,
     apply_cloud_primary_defaults,
     build_primary_backend,
     default_engine,
     detect_engines,
     is_cloud_primary,
+    ollama_url,
 )
 from .report import name_quality, raw_table, score
 from .runner import BatchStats, list_images, run_batch, stratify_by_prediction
 from .schema import ImageResult
+
+if TYPE_CHECKING:
+    from .download import Status, Update
 
 
 def _venv_python() -> str:
@@ -181,20 +187,22 @@ def _run_escalation(paths, local_cache: ResultCache, config, *,
     return 0
 
 
-def _download_model(repo: str) -> int:
-    """--download-model (card #407): fetch the MLX model with progress on
-    stdout in the protocol the plugin parses (docs/config.md § Downloading the
-    model). Exit 0 once complete, 3 on a failure with the fix on stderr, and
+def _download_model(fetch: Callable[[Callable[[Update], None]], object]) -> int:
+    """--download-model (card #407): fetch the model with progress on stdout
+    in the protocol the plugin parses (docs/config.md § Downloading the
+    model). `fetch` takes the update callback and returns what `done`
+    prints: the snapshot folder for mlx, the model's name for ollama (card
+    #409). Exit 0 once complete, 3 on a failure with the fix on stderr, and
     EXIT_CANCELLED when a signal or the cancel marker (card #408) stopped it
-    with the partial file kept: one path for both."""
-    from .download import EXIT_CANCELLED, DownloadCancelled, DownloadError, Update, cancel_on_signals, download_model
+    with the partial kept: one path for both engines and both cancels."""
+    from .download import EXIT_CANCELLED, DownloadCancelled, DownloadError, Update, cancel_on_signals
 
     def emit(update: Update) -> None:
         print(update.line(), flush=True)
 
     try:
         with cancel_on_signals():
-            path = download_model(repo, on_update=emit)
+            path = fetch(emit)
     except DownloadCancelled:
         emit(Update.cancelled())
         return EXIT_CANCELLED
@@ -204,35 +212,87 @@ def _download_model(repo: str) -> int:
     return 0
 
 
-def _model_status(repo: str) -> int:
-    """--model-status (card #408): one JSON object on stdout saying whether the
-    MLX model is in the cache, its size, and where the plugin writes to
-    cancel a download. Never fails for the network: the size is null then.
+def _model_status(status: Callable[[], Status]) -> int:
+    """--model-status (card #408): one JSON object on stdout saying whether
+    the model is there, its size, and where the plugin writes to cancel a
+    download. Never fails for the network or the server: the size is null then.
     Exit 3 with the reason on stderr for a repo that is not a repo id, or a
     cache it cannot read."""
-    from .download import DownloadError, model_status
+    from .download import DownloadError
 
     try:
-        status = model_status(repo)
+        answer = status()
     except DownloadError as exc:
         return _fail(str(exc))
-    print(status.json())
+    print(answer.json())
     return 0
 
 
-def _remove_model(repo: str) -> int:
-    """--remove-model (card #408): delete the MLX model from the cache, exit 0
-    with `removed <path>`; exit 3 with the reason on stderr when the removal
-    is refused (the causes: docs/config.md § `--model-status` and
-    `--remove-model`, and `download.remove_model`)."""
-    from .download import DownloadError, remove_model
+def _remove_model(remove: Callable[[], object]) -> int:
+    """--remove-model (card #408): delete the model, exit 0 with `removed
+    <path>` (the cache folder for mlx, the model's name for ollama); exit 3
+    with the reason on stderr when the removal is refused (the causes:
+    docs/config.md § `--model-status` and `--remove-model`, and
+    `download.remove_model`; for ollama, no server answering)."""
+    from .download import DownloadError
 
     try:
-        path = remove_model(repo)
+        path = remove()
     except DownloadError as exc:
         return _fail(str(exc))
     print(f"removed {path}")
     return 0
+
+
+#: The engines with a local model to fetch, and so a Download button.
+MODEL_ENGINES = ("mlx", OLLAMA)
+
+
+def _model_command(args: argparse.Namespace, config) -> int:
+    """The three model flags, for the picked engine (card #409): mlx fetches
+    from the hub into its cache, ollama asks its server to pull. The engine
+    is --backend or [model] backend, else the first detection says can run
+    here, as a run decides. Any other engine has no model to fetch: exit 3
+    naming the two that have."""
+    from . import download
+
+    engine = _pick_engine(config)
+    if engine == "mlx":
+        repo = config.model.repo
+        fetch = lambda on_update: download.download_model(repo, on_update=on_update)  # noqa: E731
+        status = lambda: download.model_status(repo)  # noqa: E731
+        remove = lambda: download.remove_model(repo)  # noqa: E731
+    elif engine == OLLAMA:
+        model, url = config.model.ollama_model, ollama_url(config.model.ollama_url)
+        fetch = lambda on_update: download.pull_model(  # noqa: E731
+            model, url, on_update=on_update, timeout=config.model.timeout_seconds)
+        status = lambda: download.ollama_status(model, url)  # noqa: E731
+        remove = lambda: download.remove_ollama_model(model, url)  # noqa: E731
+    else:
+        return _fail(
+            f"the {engine} engine has no model to fetch here: the engines with one are "
+            f"{' and '.join(MODEL_ENGINES)}. Pass --backend {MODEL_ENGINES[0]} or --backend "
+            f"{MODEL_ENGINES[1]}, or set [model] backend."
+        )
+    if args.download_model:
+        return _download_model(fetch)
+    if args.model_status:
+        return _model_status(status)
+    return _remove_model(remove)
+
+
+def _pick_engine(config) -> str:
+    """The engine a command acts for when nothing named one: neither
+    --backend nor [model] backend. The first that can run here answers
+    (card #404), said on stderr, before anything reads the choice."""
+    if "backend" not in config.model.model_fields_set:
+        config.model.backend = default_engine(config.model.ollama_url)
+        print(
+            f"engine: {config.model.backend} (the first that can run here; "
+            "--backend or [model] backend chooses, --detect-engines explains)",
+            file=sys.stderr,
+        )
+    return config.model.backend
 
 
 def _write_plugin_results(paths: list[Path], cache: ResultCache, config, destination: Path) -> None:
@@ -359,25 +419,15 @@ def main(argv: list[str] | None = None) -> int:
         # cannot disagree with what --backend ollama would talk to.
         print(json.dumps([asdict(v) for v in detect_engines(config.model.ollama_url)], indent=2))
         return 0
-    if args.download_model:
-        return _download_model(config.model.repo)
-    if args.model_status:
-        return _model_status(config.model.repo)
-    if args.remove_model:
-        return _remove_model(config.model.repo)
+    if args.download_model or args.model_status or args.remove_model:
+        return _model_command(args, config)
     if args.folder is None:
         ap.error("the following arguments are required: folder")
 
-    if "backend" not in config.model.model_fields_set:
-        # Nothing named an engine: neither --backend nor [model] backend. The
-        # first that can run here answers (card #404), before anything reads
-        # the choice: the cloud retuning below, the cache file, the refusals.
-        config.model.backend = default_engine(config.model.ollama_url)
-        print(
-            f"engine: {config.model.backend} (the first that can run here; "
-            "--backend or [model] backend chooses, --detect-engines explains)",
-            file=sys.stderr,
-        )
+    # Nothing named an engine: neither --backend nor [model] backend. The
+    # first that can run here answers (card #404), before anything reads
+    # the choice: the cloud retuning below, the cache file, the refusals.
+    _pick_engine(config)
 
     cloud_primary = is_cloud_primary(config)
     if cloud_primary:

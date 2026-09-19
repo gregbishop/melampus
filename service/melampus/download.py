@@ -1049,7 +1049,7 @@ def pull_model(
 ) -> str:
     """Ask the Ollama server at `url` to pull `model` (its docs/api.md § Pull
     a Model: POST /api/pull with the model's name, the stream of JSON
-    objects mapped by `pull_updates`), handing `on_update` each protocol
+    objects mapped by `pull_updates`), handing `on_update` each progress
     update, and return the model's name: what `done` prints, and what
     `--model-status` reports as the path, since the model lives in Ollama
     under that name. The stream is read with `timeout` per line.
@@ -1073,7 +1073,10 @@ def pull_model(
     try:
         with (opener or urllib.request.urlopen)(request, timeout=timeout) as response:
             for update in pull_updates(model, _lines_until_cancelled(response, marker)):
-                on_update(update)
+                # The stream's `done` proves success was seen; the entry point
+                # prints the protocol's `done` from the return, as for mlx.
+                if update.state != DONE:
+                    on_update(update)
     except urllib.error.HTTPError as exc:
         raise _pull_error(model, OllamaBackend._error_text(exc)) from exc
     except urllib.error.URLError as exc:
