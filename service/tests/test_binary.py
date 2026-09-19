@@ -266,22 +266,56 @@ def test_melampus_local_config_names_the_local_file_in_a_checkout_and_in_the_exe
     assert load_config(use_local=False).run.profile == "wildlife", "use_local=False must still skip it"
 
 
+# The model the mlx smoke tests look for: a synthetic repo, named in a
+# synthetic melampus.local.toml, so the lookup depends neither on the default
+# model being cached nor on a developer's own model.repo.
+SYNTHETIC_MODEL = "melampus-tests/synthetic-model"
+
+
+def _look_for_weights(executable: Path, photos: Path, tmp_path: Path) -> str:
+    """Run `executable` with the mlx backend, the HuggingFace cache empty and
+    offline, and a synthetic melampus.local.toml naming SYNTHETIC_MODEL; return
+    the end of its stderr. It must fail: there are no weights and no network."""
+    local = tmp_path / "melampus.local.toml"
+    local.write_text(f'[model]\nrepo = "{SYNTHETIC_MODEL}"\n', encoding="utf-8")
+    env = _no_python_environment(tmp_path)
+    env |= {"HF_HUB_OFFLINE": "1", "HF_HOME": str(tmp_path / "hf"), "MELAMPUS_LOCAL_CONFIG": str(local)}
+    proc = subprocess.run(
+        [str(executable), str(photos), "--backend", "mlx",
+         "--cache", str(tmp_path / "cache.jsonl")],
+        env=env, capture_output=True, text=True, timeout=600,
+    )
+    assert proc.returncode != 0, "loaded a model with no weights and no network?"
+    return proc.stderr[-3000:]
+
+
 def test_executable_carries_the_service_and_mlx(built_executable: Path, photos: Path, tmp_path: Path):
     """Done-when 1. Asked for the mlx backend with the HuggingFace cache empty
     and offline, the executable must get as far as looking for weights — which
     means mlx, mlx_vlm and transformers all import inside the bundle — and stop
     there. An executable that does not carry MLX dies on an import error first."""
-    env = _no_python_environment(tmp_path)
-    env |= {"HF_HUB_OFFLINE": "1", "HF_HOME": str(tmp_path / "hf")}
-    proc = subprocess.run(
-        [str(built_executable), str(photos), "--backend", "mlx",
-         "--cache", str(tmp_path / "cache.jsonl")],
-        env=env, capture_output=True, text=True, timeout=600,
-    )
-    tail = proc.stderr[-3000:]
-    assert proc.returncode != 0, "loaded a model with no weights and no network?"
+    tail = _look_for_weights(built_executable, photos, tmp_path)
     for missing in ("ModuleNotFoundError", "ImportError"):
         assert missing not in tail, f"the executable does not carry MLX:\n{tail}"
+    assert "LocalEntryNotFoundError" in tail, f"did not get as far as looking for weights:\n{tail}"
+    assert SYNTHETIC_MODEL in tail, f"did not look for the model the synthetic melampus.local.toml names:\n{tail}"
+
+
+def test_the_mlx_smoke_test_ignores_a_local_model_beside_the_executable(
+    built_executable: Path, photos: Path, tmp_path: Path
+):
+    """A developer's dist/melampus.local.toml may point model.repo at a
+    directory of weights on disk, and mlx_vlm takes an existing directory as
+    it is: an empty, offline HuggingFace cache does not stop the executable
+    loading them. The lookup reads its synthetic file, not the one beside the
+    executable. The executable is copied into a dist/ of this test's own so
+    the checkout's dist/ is never written to."""
+    dist, weights = tmp_path / "dist", tmp_path / "weights"
+    dist.mkdir()
+    weights.mkdir()
+    (dist / "melampus.local.toml").write_text(f'[model]\nrepo = "{weights}"\n', encoding="utf-8")
+    tail = _look_for_weights(Path(shutil.copy(built_executable, dist)), photos, tmp_path)
+    assert str(weights) not in tail, f"read melampus.local.toml beside the executable:\n{tail}"
     assert "LocalEntryNotFoundError" in tail, f"did not get as far as looking for weights:\n{tail}"
 
 
