@@ -206,6 +206,13 @@ def _fenced_commands(text: str) -> list[str]:
     ]
 
 
+def _section(text: str, heading: str) -> str | None:
+    """The body of a doc's `## heading` section, up to the next `## ` heading;
+    None when the doc has no such section."""
+    match = re.search(rf"^## {heading}\n(.*?)^## ", text, re.MULTILINE | re.DOTALL)
+    return match.group(1) if match else None
+
+
 def test_install_blocks_install_from_the_lockfile():
     """Card #425, Done-when 3: given a fresh clone, when the README setup runs,
     then the resolved versions match the lockfile. Only `uv sync --locked` (or
@@ -217,8 +224,8 @@ def test_install_blocks_install_from_the_lockfile():
     Install block runs. Running the installs here would need the network, so
     the gate is on the commands themselves."""
     readme = README.read_text(encoding="utf-8")
-    install = re.search(r"^## Install\n(.*?)^## ", readme, re.MULTILINE | re.DOTALL)
-    assert install and any(_installs_from_the_lockfile(c) for c in _fenced_commands(install.group(1))), (
+    install = _section(readme, "Install")
+    assert install is not None and any(_installs_from_the_lockfile(c) for c in _fenced_commands(install)), (
         "readme.md's ## Install section must install with `uv sync --locked`"
     )
     unlocked = [
@@ -339,9 +346,9 @@ def test_readme_build_blocks_sync_the_sdk_extras():
     (the macOS block and the Windows one) names the build, cloud and openai
     extras."""
     readme = README.read_text(encoding="utf-8")
-    section = re.search(r"^## Building the executable\n(.*?)^## ", readme, re.MULTILINE | re.DOTALL)
-    assert section, "readme.md has no ## Building the executable section"
-    syncs = [c for c in _fenced_commands(section.group(1)) if re.search(r"\buv sync\b", c)]
+    section = _section(readme, "Building the executable")
+    assert section is not None, "readme.md has no ## Building the executable section"
+    syncs = [c for c in _fenced_commands(section) if re.search(r"\buv sync\b", c)]
     assert syncs, "readme.md's build section has no uv sync command"
     without = _lacking_build_extras(syncs)
     assert not without, (
@@ -563,9 +570,9 @@ def test_install_docs_name_the_release_zips_and_keep_the_from_source_path():
     }
     for doc, (heading, text) in sections.items():
         name = doc.relative_to(REPO).as_posix()
-        section = re.search(rf"^## {heading}\n(.*?)^## ", text, re.MULTILINE | re.DOTALL)
-        assert section, f"{name} has no ## {heading} section"
-        missing = [z for z in RELEASE_ZIPS if z not in section.group(1)]
+        section = _section(text, heading)
+        assert section is not None, f"{name} has no ## {heading} section"
+        missing = [z for z in RELEASE_ZIPS if z not in section]
         assert not missing, f"{name}'s {heading} section does not name {missing}"
-        assert "cp dist/melampus plugin/Melampus.lrplugin/" in section.group(1), (
+        assert "cp dist/melampus plugin/Melampus.lrplugin/" in section, (
             f"{name}'s {heading} section lost the from-source install")
