@@ -18,7 +18,9 @@ runs this and then the smoke tests: `.venv/bin/python -m pytest -q --build-binar
 
 from __future__ import annotations
 
+import os
 import sys
+import traceback
 from pathlib import Path
 
 from melampus.providers import on_apple_silicon
@@ -27,6 +29,15 @@ REPO = Path(__file__).resolve().parents[1]
 DIST = REPO / "dist"
 WORK = REPO / "build" / "pyinstaller"
 NAME = "melampus"
+# PyInstaller's switch for where it keeps its cache (bincache*/index.dat). By
+# default that is one directory per user, `~/Library/Application Support/
+# pyinstaller` on macOS, `%LOCALAPPDATA%\pyinstaller` on Windows, `~/.cache/
+# pyinstaller` elsewhere (PyInstaller/configure.py, and the manual's "Supporting
+# Multiple Operating Systems": "by default it uses a subdirectory of your home
+# directory as its cache location"), shared by every checkout on the machine;
+# two builds at once left index.dat half-written and the next build died
+# reading it (card #440).
+CONFIG_DIR_VARIABLE = "PYINSTALLER_CONFIG_DIR"
 
 # Packages PyInstaller's static analysis cannot see the whole of: mlx loads its
 # native library and Metal shaders from files beside the module; mlx_vlm, mlx_lm
@@ -41,6 +52,22 @@ COLLECT_SUBMODULES = ("mlx_vlm", "mlx_lm", "transformers")
 def executable_path() -> Path:
     """Where PyInstaller puts the one-file build for this platform."""
     return DIST / (f"{NAME}.exe" if sys.platform == "win32" else NAME)
+
+
+def config_dir(checkout: Path) -> Path:
+    """Where this checkout's build keeps PyInstaller's cache: beside the work
+    tree, under the git-ignored build/, so no two checkouts share one."""
+    return checkout / "build" / "pyinstaller-config"
+
+
+def _from_the_cache_index(error: BaseException) -> bool:
+    """Whether PyInstaller failed reading its cache index: index.dat is Python
+    source it evals (PyInstaller/utils/misc.py, load_py_data_struct), so a
+    half-written one, from an interrupted or concurrent build, is a SyntaxError
+    raised there. Any other SyntaxError is a module PyInstaller compiled."""
+    return isinstance(error, SyntaxError) and any(
+        frame.name == "load_py_data_struct" for frame in traceback.extract_tb(error.__traceback__)
+    )
 
 
 def pyinstaller_arguments(entry: Path) -> list[str]:
@@ -80,7 +107,21 @@ def main() -> int:
     entry = WORK / f"{NAME}_entry.py"
     entry.write_text("from melampus.cli import main\n\nraise SystemExit(main())\n", encoding="utf-8")
 
-    PyInstaller.__main__.run(pyinstaller_arguments(entry))
+    # Set already, the caller's choice stands: CI, or a user who wants one
+    # cache for every checkout, may point every build at the same directory.
+    os.environ.setdefault(CONFIG_DIR_VARIABLE, str(config_dir(REPO)))
+    try:
+        PyInstaller.__main__.run(pyinstaller_arguments(entry))
+    except SyntaxError as error:
+        if not _from_the_cache_index(error):
+            raise
+        cache = os.environ[CONFIG_DIR_VARIABLE]
+        print(
+            f"PyInstaller's cache under {cache} is corrupt (index.dat: {error.msg}), "
+            f"usually from a build that was interrupted; delete {cache} and re-run the build",
+            file=sys.stderr,
+        )
+        return 2
 
     built = executable_path()
     if not built.is_file():

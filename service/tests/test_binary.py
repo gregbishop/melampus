@@ -24,6 +24,16 @@ Done-when 2: given the executable, when it runs with --plugin-out and
 Done-when 3: given the occurrence cache and config, when the executable runs,
 then they resolve under the per-user data directory, never the unpack directory.
 
+Card #440: PyInstaller keeps one cache per user (bincache*/index.dat under
+~/Library/Application Support/pyinstaller on macOS) that every checkout on the
+machine shares, and two builds at once left index.dat half-written. Done-when
+1: given two checkouts, when both build at once, then neither fails on the
+other's cache: each checkout's build points PYINSTALLER_CONFIG_DIR inside the
+checkout. Done-when 2: the test command's build gets the same isolation, since
+it runs the same script with the caller's environment. Done-when 3: given a
+corrupt cache, when the build fails on it, then the error names the cache
+directory and says to delete it.
+
 Card #434: the executable carries the cloud SDKs on every platform. Done-when 2:
 given the executable with no API key set, when `--backend claude` or
 `--backend openai` runs, then it reaches the key check and says the key is
@@ -64,7 +74,7 @@ import types
 from pathlib import Path
 
 import pytest
-from conftest import FAKE_FILES, FAKE_REPO, PHOTO, FakeHub
+from conftest import BUILD_SCRIPT, FAKE_FILES, FAKE_REPO, PHOTO, FakeHub
 
 from melampus import config
 from melampus.backend import ScriptedBackend
@@ -73,6 +83,8 @@ from melampus.identify import Identifier
 from melampus.providers import on_apple_silicon
 
 CONFTEST = Path(__file__).with_name("conftest.py")
+# PyInstaller's own switch for its cache directory (card #440).
+CONFIG_DIR_VARIABLE = "PYINSTALLER_CONFIG_DIR"
 # What `.venv/bin/melampus-id` runs, spelled so it works from any interpreter
 # that has the package installed (CI has no root .venv).
 VENV_CLI = [sys.executable, "-m", "melampus.cli"]
@@ -147,7 +159,10 @@ def build(build_script: types.ModuleType, monkeypatch: pytest.MonkeyPatch, tmp_p
     monkeypatch.setattr(build_script, "WORK", tmp_path / "build" / "pyinstaller")
     monkeypatch.setattr(sys, "platform", "darwin")
     monkeypatch.setattr(platform, "machine", lambda: "arm64")
-    return build_script
+    monkeypatch.delenv(CONFIG_DIR_VARIABLE, raising=False)
+    yield build_script
+    # main() sets it when the caller did not; monkeypatch then restores the caller's.
+    os.environ.pop(CONFIG_DIR_VARIABLE, None)
 
 
 def test_build_says_pyinstaller_is_missing_and_where_the_install_is_documented(
@@ -201,6 +216,95 @@ def test_build_fails_when_pyinstaller_writes_nothing(build, monkeypatch: pytest.
     assert "does not exist" in capsys.readouterr().err
 
 
+def _pyinstaller_that_records_its_environment(monkeypatch: pytest.MonkeyPatch, build) -> dict[str, str | None]:
+    """A PyInstaller that writes the executable and keeps the value of
+    PYINSTALLER_CONFIG_DIR it saw when it ran."""
+    seen: dict[str, str | None] = {}
+
+    def run(arguments: list[str]) -> None:
+        seen[CONFIG_DIR_VARIABLE] = os.environ.get(CONFIG_DIR_VARIABLE)
+        build.DIST.mkdir()
+        (build.DIST / build.NAME).write_text("the executable", encoding="utf-8")
+
+    _fake_pyinstaller(monkeypatch, run)
+    return seen
+
+
+def test_each_checkout_has_its_own_pyinstaller_cache(build_script: types.ModuleType, tmp_path: Path):
+    """Card #440, done-when 1: the cache directory is inside the checkout, under
+    the git-ignored build/, so two checkouts never share one."""
+    one, two = tmp_path / "one", tmp_path / "two"
+    assert build_script.config_dir(one) == one / "build" / "pyinstaller-config"
+    assert build_script.config_dir(one).is_relative_to(one)
+    assert build_script.config_dir(two).is_relative_to(two)
+    assert build_script.config_dir(one) != build_script.config_dir(two)
+
+
+def test_build_points_pyinstaller_at_the_checkouts_own_cache(build, monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    """Card #440, done-when 1: the environment PyInstaller runs with names this
+    checkout's cache directory, not the per-user one every checkout shares."""
+    monkeypatch.setattr(build, "REPO", tmp_path)
+    seen = _pyinstaller_that_records_its_environment(monkeypatch, build)
+    assert build.main() == 0
+    assert seen[CONFIG_DIR_VARIABLE] == str(build.config_dir(tmp_path))
+
+
+def test_build_keeps_the_pyinstaller_cache_the_caller_chose(build, monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    """CI, or a user who wants one cache for every checkout, sets
+    PYINSTALLER_CONFIG_DIR first; the script does not override it."""
+    monkeypatch.setenv(CONFIG_DIR_VARIABLE, str(tmp_path / "shared"))
+    seen = _pyinstaller_that_records_its_environment(monkeypatch, build)
+    assert build.main() == 0
+    assert seen[CONFIG_DIR_VARIABLE] == str(tmp_path / "shared")
+
+
+def _pyinstaller_with_a_half_written_cache_index(arguments: list[str]) -> None:
+    """How PyInstaller fails on a corrupt cache: index.dat is Python source it
+    evals (PyInstaller/utils/misc.py, load_py_data_struct), and a half-written
+    one stops mid-expression."""
+
+    def load_py_data_struct(filename: str):
+        return eval("{'libfoo.dylib': ('sha256', (")
+
+    load_py_data_struct("index.dat")
+
+
+def test_build_names_the_corrupt_cache_and_says_to_delete_it(
+    build, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys
+):
+    """Card #440, done-when 3: given a corrupt cache, when the build fails on
+    it, then the error names the cache directory in effect and says to delete
+    it and re-run."""
+    monkeypatch.setattr(build, "REPO", tmp_path)
+    _fake_pyinstaller(monkeypatch, _pyinstaller_with_a_half_written_cache_index)
+    assert build.main() == 2
+    message = capsys.readouterr().err
+    assert str(build.config_dir(tmp_path)) in message
+    assert "index.dat" in message and "'(' was never closed" in message
+    assert "delete" in message and "re-run" in message
+
+
+def test_build_names_the_cache_the_caller_chose_when_it_is_corrupt(
+    build, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys
+):
+    monkeypatch.setenv(CONFIG_DIR_VARIABLE, str(tmp_path / "shared"))
+    _fake_pyinstaller(monkeypatch, _pyinstaller_with_a_half_written_cache_index)
+    assert build.main() == 2
+    assert str(tmp_path / "shared") in capsys.readouterr().err
+
+
+def test_build_lets_other_pyinstaller_failures_surface_as_themselves(build, monkeypatch: pytest.MonkeyPatch):
+    """Only the cache index maps to the delete-and-re-run advice; anything
+    else PyInstaller raises still comes out with its own traceback."""
+
+    def run(arguments: list[str]) -> None:
+        raise RuntimeError("hook failed")
+
+    _fake_pyinstaller(monkeypatch, run)
+    with pytest.raises(RuntimeError, match="hook failed"):
+        build.main()
+
+
 # Shaped like the real script: conftest.py imports it for executable_path()
 # and runs it as a program for the build.
 FAKE_BUILD_SCRIPT = """\
@@ -242,6 +346,25 @@ def test_the_test_command_builds_the_executable_before_the_smoke_tests(pytester:
     build and the executable smoke test are part of it. With --build-binary
     the fixture runs tools/build_binary.py and the smoke test gets its output."""
     _checkout(pytester)
+    pytester.runpytest("service/tests", "--build-binary").assert_outcomes(passed=1)
+
+
+def test_the_test_command_builds_with_the_same_script_and_the_callers_environment(
+    pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch, build_script: types.ModuleType
+):
+    """Card #440, done-when 2: --build-binary runs tools/build_binary.py itself,
+    with the environment the test command was given, so the cache isolation
+    the script does (and a cache the caller chose) applies there too."""
+    assert Path(build_script.__file__) == BUILD_SCRIPT
+    monkeypatch.setenv(CONFIG_DIR_VARIABLE, str(pytester.path / "chosen-cache"))
+    recording = FAKE_BUILD_SCRIPT.replace(
+        '"built by tools/build_binary.py"', 'os.environ.get("PYINSTALLER_CONFIG_DIR", "unset")'
+    ).replace("import sys\n", "import os\nimport sys\n")
+    _checkout(pytester, build_script=recording)
+    (pytester.path / "service" / "tests" / "test_smoke.py").write_text(
+        SMOKE_TEST.replace('"built by tools/build_binary.py"', repr(str(pytester.path / "chosen-cache"))),
+        encoding="utf-8",
+    )
     pytester.runpytest("service/tests", "--build-binary").assert_outcomes(passed=1)
 
 
