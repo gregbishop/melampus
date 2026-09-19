@@ -258,6 +258,53 @@ def test_build_keeps_the_pyinstaller_cache_the_caller_chose(build, monkeypatch: 
     assert seen[CONFIG_DIR_VARIABLE] == str(tmp_path / "shared")
 
 
+def _pyinstaller_with_a_half_written_cache_index(arguments: list[str]) -> None:
+    """How PyInstaller fails on a corrupt cache: index.dat is Python source it
+    evals (PyInstaller/utils/misc.py, load_py_data_struct), and a half-written
+    one stops mid-expression."""
+
+    def load_py_data_struct(filename: str):
+        return eval("{'libfoo.dylib': ('sha256', (")
+
+    load_py_data_struct("index.dat")
+
+
+def test_build_names_the_corrupt_cache_and_says_to_delete_it(
+    build, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys
+):
+    """Card #440, done-when 3: given a corrupt cache, when the build fails on
+    it, then the error names the cache directory in effect and says to delete
+    it and re-run."""
+    monkeypatch.setattr(build, "REPO", tmp_path)
+    _fake_pyinstaller(monkeypatch, _pyinstaller_with_a_half_written_cache_index)
+    assert build.main() == 2
+    message = capsys.readouterr().err
+    assert str(build.config_dir(tmp_path)) in message
+    assert "index.dat" in message and "'(' was never closed" in message
+    assert "delete" in message and "re-run" in message
+
+
+def test_build_names_the_cache_the_caller_chose_when_it_is_corrupt(
+    build, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys
+):
+    monkeypatch.setenv(CONFIG_DIR_VARIABLE, str(tmp_path / "shared"))
+    _fake_pyinstaller(monkeypatch, _pyinstaller_with_a_half_written_cache_index)
+    assert build.main() == 2
+    assert str(tmp_path / "shared") in capsys.readouterr().err
+
+
+def test_build_lets_other_pyinstaller_failures_surface_as_themselves(build, monkeypatch: pytest.MonkeyPatch):
+    """Only the cache index maps to the delete-and-re-run advice; anything
+    else PyInstaller raises still comes out with its own traceback."""
+
+    def run(arguments: list[str]) -> None:
+        raise RuntimeError("hook failed")
+
+    _fake_pyinstaller(monkeypatch, run)
+    with pytest.raises(RuntimeError, match="hook failed"):
+        build.main()
+
+
 # Shaped like the real script: conftest.py imports it for executable_path()
 # and runs it as a program for the build.
 FAKE_BUILD_SCRIPT = """\
