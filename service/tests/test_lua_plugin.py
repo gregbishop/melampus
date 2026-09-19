@@ -137,12 +137,17 @@ def test_the_mock_hands_its_temp_paths_to_sh_as_data(tmp_path: Path):
     """The mock SDK makes, lists and removes its temp directory through sh
     (`mktemp -d`, `mkdir -p`, `ls`, `rm -rf`), under TMPDIR. TMPDIR comes
     from the environment, not from the plugin, so whatever it holds must reach
-    sh as one quoted argument: a space, a quote, a `$` and a backtick in it
-    make a directory of that name, a sibling that an unquoted `rm -rf` of the
-    first word would remove stays, and nothing in the name runs."""
+    sh as one quoted argument and come back from `mktemp` whole: a space, a
+    quote, a `$`, a backtick and a newline in it make a directory of that name,
+    a sibling that an unquoted `rm -rf` of the first word would remove stays,
+    the parent that a path cut at the newline would name stays, and nothing in
+    the name runs."""
     marker = tmp_path / "marker"
-    base = tmp_path / "a b'c$HOME`touch $MARKER`"
-    base.mkdir()
+    parent = tmp_path / "a b'c$HOME`touch $MARKER`"
+    base = parent / "\nd"
+    base.mkdir(parents=True)
+    # What `rm -rf` would take if the path came back cut at the newline.
+    (parent / "canary").write_text("", encoding="utf-8")
     sibling = tmp_path / "a"
     sibling.mkdir()
     (sibling / "canary").write_text("", encoding="utf-8")
@@ -169,5 +174,6 @@ def test_the_mock_hands_its_temp_paths_to_sh_as_data(tmp_path: Path):
     temp = Path(proc.stdout)
     assert temp.parent == base, f"the temp directory is not under TMPDIR: {temp}"
     assert not temp.exists(), f"cleanUp left {temp}"
+    assert (parent / "canary").exists(), "cleanUp removed the parent of TMPDIR"
     assert (sibling / "canary").exists(), "cleanUp removed a sibling of TMPDIR"
     assert not marker.exists(), "a backtick in TMPDIR ran through sh"
