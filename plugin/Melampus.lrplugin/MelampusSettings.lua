@@ -38,11 +38,22 @@ LrTasks.startAsyncTask(function()
 		local verdicts, problem = Analyze.detectEngines()
 		local engineItems, engineNote = Rules.engineItems(verdicts, problem)
 
-		-- The picker, the reasons for whatever is greyed, and one link: Ollama's
-		-- alone, where to install it, taken from the executable's reason when
-		-- Ollama is unavailable.
+		-- The picker; under it what detection said about the picked engine
+		-- (card #423: a signed-in subscription CLI's line says every frame
+		-- bills to that subscription, before a run; a cloud engine's names
+		-- its key), then the reasons for whatever is greyed, and a link for
+		-- each greyed engine that is something to install (Ollama, a
+		-- subscription CLI; Rules.INSTALLABLE_ENGINES), taken from the
+		-- executable's reason: where to get it.
 		local engineViews = {
 			f:popup_menu { value = bind 'engine', items = engineItems },
+			f:static_text {
+				title = bind {
+					key = 'engine', object = prefs,
+					transform = function(value) return Rules.pickedReason(engineItems, value) end,
+				},
+				width_in_chars = 60, height_in_lines = 2, text_color = grey,
+			},
 		}
 		if engineNote ~= '' then
 			engineViews[#engineViews + 1] = f:static_text {

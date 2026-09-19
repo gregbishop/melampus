@@ -133,11 +133,15 @@ def test_import_runs_against_a_mock_lightroom():
 @needs_sh
 def test_settings_dialog_against_a_mock_lightroom(tmp_path: Path):
     """Card #405: executes the real MelampusSettings.lua against the mock SDK.
-    The engine picker lists the four engines in order with the ones detection
-    says cannot run here greyed and their reasons shown; the Ollama link is
-    there exactly when ollama is unavailable; the API key field shows only for
-    the picked cloud engine and stores through LrPasswords, never the
-    preferences, a file, or the log; a missing executable greys nothing.
+    The engine picker lists the engines in the executable's order with the
+    ones detection says cannot run here greyed and their reasons shown; the
+    Ollama link is there exactly when ollama is unavailable; the API key
+    field shows only for the picked cloud engine and stores through
+    LrPasswords, never the preferences, a file, or the log; a missing
+    executable greys nothing. Card #423: claude-code and codex after the
+    four, greyed as not installed or not signed in, offered when signed in,
+    no key field for either, and the picked engine's reason under the
+    picker, the billing sentence for a signed-in CLI.
     Card #408: the download plumbing, stepped through the mock's tasks: the
     command with stdout redirected on both shells, the poller reading the
     progress file, Cancel writing the marker, exit 3 with the log's tail.
