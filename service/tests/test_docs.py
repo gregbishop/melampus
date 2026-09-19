@@ -213,6 +213,15 @@ def _section(text: str, heading: str) -> str | None:
     return match.group(1) if match else None
 
 
+def test_the_section_reader_takes_the_heading_literally():
+    """Round 7, finding 1: `_section` promises the body under a literal
+    `## heading`, and readme.md has `## Windows (cloud inference)` today, so a
+    heading with regex metacharacters must find its section rather than
+    quietly reporting the doc has none."""
+    text = "## Windows (cloud inference)\ncloud body\n## macOS\nmac body\n"
+    assert _section(text, "Windows (cloud inference)") == "cloud body\n"
+
+
 def test_install_blocks_install_from_the_lockfile():
     """Card #425, Done-when 3: given a fresh clone, when the README setup runs,
     then the resolved versions match the lockfile. Only `uv sync --locked` (or
