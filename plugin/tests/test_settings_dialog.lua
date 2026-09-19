@@ -2,10 +2,12 @@
 Runs the real MelampusSettings.lua against the mock Lightroom SDK (card #405).
 
 The engine picker shows what `melampus --detect-engines` says: the four
-engines in the owner's order, the ones that cannot run here greyed with their
-reason, a link to install Ollama when it is missing, and a password field for
-the API key of the picked cloud engine, stored through LrPasswords and never
-in the preferences, a file, or the log.
+engines in the owner's order then the two subscription CLIs (card #423), the
+ones that cannot run here greyed with their reason, a link to install Ollama
+when it is missing, and a password field for the API key of the picked cloud
+engine, stored through LrPasswords and never in the preferences, a file, or
+the log; a subscription CLI has no key field, and when picked its reason,
+what every frame bills to, shows under the picker.
 --]]
 
 local t = require('harness')
@@ -18,20 +20,35 @@ end
 
 local PLUGIN = os.getenv('MELAMPUS_PLUGIN') or pluginPath()
 local EXECUTABLE = PLUGIN .. '/melampus'
-local ENGINES = { 'mlx', 'ollama', 'openai', 'claude' }
+local ENGINES = { 'mlx', 'ollama', 'openai', 'claude', 'claude-code', 'codex' }
 local OLLAMA_DOWNLOAD = 'https://ollama.com/download'
+local CLAUDE_CODE_INSTALL = 'https://code.claude.com/docs/en/setup'
+local TITLES = {
+	mlx = 'MLX — local, Apple Silicon', ollama = 'Ollama — local',
+	openai = 'OpenAI — cloud, needs an API key', claude = 'Claude — cloud, needs an API key',
+	['claude-code'] = 'Claude Code — subscription, no API key', codex = 'Codex CLI — subscription, no API key',
+}
+local CLAUDE_CODE_NOT_INSTALLED = "Claude Code is not installed: nothing on PATH is called 'claude'; "
+	.. 'install it from ' .. CLAUDE_CODE_INSTALL .. ', then sign in with `claude auth login`'
+local CODEX_NOT_SIGNED_IN = 'Codex CLI is installed but not signed in; run `codex login`'
+local CLAUDE_CODE_SIGNED_IN = 'Claude Code is signed in (claude.ai, max); every frame bills to that subscription, not to an API key'
+local CODEX_SIGNED_IN = 'Codex CLI is signed in (ChatGPT); every frame bills to that subscription, not to an API key'
 
 local function verdict(engine, available, reason)
-	return string.format('{"engine": %q, "available": %s, "reason": %q}', engine, tostring(available), reason)
+	return string.format('{"engine": %q, "title": %q, "available": %s, "reason": %q}',
+		engine, TITLES[engine], tostring(available), reason)
 end
 
---- The executable's --detect-engines answer on a Mac with no Ollama running.
+--- The executable's --detect-engines answer on a Mac with no Ollama running,
+--- no Claude Code installed and a Codex CLI that is not signed in.
 local function detection(overrides)
 	local reasons = {
 		mlx = { true, 'runs locally on this Apple Silicon Mac' },
 		ollama = { false, 'no Ollama server at http://127.0.0.1:11434; install it from ' .. OLLAMA_DOWNLOAD },
 		openai = { true, 'API key required: set MELAMPUS_OPENAI_KEY (or OPENAI_API_KEY)' },
 		claude = { true, 'API key required: set MELAMPUS_ANTHROPIC_KEY (or ANTHROPIC_API_KEY)' },
+		['claude-code'] = { false, CLAUDE_CODE_NOT_INSTALLED },
+		codex = { false, CODEX_NOT_SIGNED_IN },
 	}
 	for engine, value in pairs(overrides or {}) do reasons[engine] = value end
 	local parts = {}
@@ -202,7 +219,7 @@ local function modelRow(contents, engine)
 end
 
 -- ── the picker ─────────────────────────────────────────────────────────────
-t.test('the settings dialog opens with a picker bound to prefs.engine listing the four engines in order', function()
+t.test('the settings dialog opens with a picker bound to prefs.engine listing the six engines in the executable\'s order', function()
 	local contents = openSettings({ detection = detection() })
 	local picker = enginePicker(contents)
 	t.isNotNil(picker, 'no popup_menu bound to engine')
@@ -211,8 +228,10 @@ t.test('the settings dialog opens with a picker bound to prefs.engine listing th
 	t.equals(values[1], '', 'the first item leaves the choice to Melampus, the unset preference')
 	for i, engine in ipairs(ENGINES) do
 		t.equals(values[i + 1], engine, 'item ' .. (i + 1) .. ' of the picker')
+		t.equals(string.sub(picker.items[i + 1].title, 1, #TITLES[engine]), TITLES[engine],
+			'item ' .. (i + 1) .. ' is not titled as the executable said')
 	end
-	t.equals(#values, 5)
+	t.equals(#values, 7)
 end)
 
 local function commandsRun(flag)
@@ -272,11 +291,47 @@ t.test('engines that cannot run here are greyed and their reasons shown', functi
 end)
 
 t.test('with every engine available nothing is greyed', function()
-	local contents = openSettings({ detection = detection({ ollama = { true, 'Ollama is answering at http://127.0.0.1:11434' } }) })
+	local contents = openSettings({ detection = detection({
+		ollama = { true, 'Ollama is answering at http://127.0.0.1:11434' },
+		['claude-code'] = { true, CLAUDE_CODE_SIGNED_IN }, codex = { true, CODEX_SIGNED_IN },
+	}) })
 	for _, item in ipairs(enginePicker(contents).items) do
 		t.isTrue(item.enabled, item.value .. ' was greyed')
 	end
 	t.equals(#titlesMatching(contents, 'Ollama'), 0, 'a reason was shown for an available engine')
+	t.equals(#titlesMatching(contents, 'signed in'), 0, 'a reason was shown for an available engine')
+end)
+
+-- ── the subscription CLIs (card #423) ──────────────────────────────────────
+t.test('a CLI that is not installed, and one not signed in, are greyed with the reason detection gave', function()
+	local contents = openSettings({ detection = detection() })
+	local byValue = {}
+	for _, item in ipairs(enginePicker(contents).items) do byValue[item.value] = item end
+	t.isFalse(byValue['claude-code'].enabled, 'claude-code should be greyed when not installed')
+	t.equals(byValue['claude-code'].title, TITLES['claude-code'] .. ' (not available)')
+	t.isFalse(byValue.codex.enabled, 'codex should be greyed when not signed in')
+	t.equals(byValue.codex.title, TITLES.codex .. ' (not available)')
+	t.isTrue(#titlesMatching(contents, CLAUDE_CODE_NOT_INSTALLED) > 0, 'the claude-code reason is not shown')
+	t.isTrue(#titlesMatching(contents, CODEX_NOT_SIGNED_IN) > 0, 'the codex reason is not shown')
+	local clickable = {}
+	for _, view in ipairs(titlesMatching(contents, CLAUDE_CODE_INSTALL)) do
+		if type(view.mouse_down) == 'function' then clickable[#clickable + 1] = view end
+	end
+	t.equals(#clickable, 1, 'expected one clickable link to ' .. CLAUDE_CODE_INSTALL)
+	clickable[1].mouse_down()
+	t.equals(mock.state.openedUrls[#mock.state.openedUrls], CLAUDE_CODE_INSTALL)
+end)
+
+t.test('a CLI that is signed in is offered', function()
+	local contents = openSettings({ detection = detection({
+		['claude-code'] = { true, CLAUDE_CODE_SIGNED_IN }, codex = { true, CODEX_SIGNED_IN },
+	}) })
+	local byValue = {}
+	for _, item in ipairs(enginePicker(contents).items) do byValue[item.value] = item end
+	t.isTrue(byValue['claude-code'].enabled, 'a signed-in claude-code should be offered')
+	t.equals(byValue['claude-code'].title, TITLES['claude-code'])
+	t.isTrue(byValue.codex.enabled, 'a signed-in codex should be offered')
+	t.equals(byValue.codex.title, TITLES.codex)
 end)
 
 -- ── the Ollama link ────────────────────────────────────────────────────────
@@ -294,7 +349,10 @@ t.test('when ollama is unavailable a link opens the Ollama download page', funct
 end)
 
 t.test('when ollama is available there is no link', function()
-	local contents = openSettings({ detection = detection({ ollama = { true, 'Ollama is answering at http://127.0.0.1:11434' } }) })
+	local contents = openSettings({ detection = detection({
+		ollama = { true, 'Ollama is answering at http://127.0.0.1:11434' },
+		['claude-code'] = { true, CLAUDE_CODE_SIGNED_IN }, codex = { true, CODEX_SIGNED_IN },
+	}) })
 	for _, entry in ipairs(viewsOfKind(contents, 'static_text')) do
 		t.isNil(entry.view.mouse_down, 'a clickable link is shown with nothing to install: ' .. tostring(entry.view.title))
 	end
@@ -329,13 +387,29 @@ t.test('a password field takes the key for openai and for claude, shown only whe
 	local count = 0
 	for _ in pairs(fields) do count = count + 1 end
 	t.equals(count, 2, 'expected exactly two password fields')
-	for _, engine in ipairs({ '', 'mlx', 'ollama', 'claude' }) do
+	for _, engine in ipairs({ '', 'mlx', 'ollama', 'claude', 'claude-code', 'codex' }) do
 		t.isFalse(visibleFor(fields.MELAMPUS_OPENAI_KEY, engine), 'the OpenAI key field shows for ' .. engine)
 	end
 	t.isTrue(visibleFor(fields.MELAMPUS_OPENAI_KEY, 'openai'))
-	for _, engine in ipairs({ '', 'mlx', 'ollama', 'openai' }) do
+	for _, engine in ipairs({ '', 'mlx', 'ollama', 'openai', 'claude-code', 'codex' }) do
 		t.isFalse(visibleFor(fields.MELAMPUS_ANTHROPIC_KEY, engine), 'the Claude key field shows for ' .. engine)
 	end
+	t.isTrue(visibleFor(fields.MELAMPUS_ANTHROPIC_KEY, 'claude'))
+end)
+
+t.test('no password field shows for a subscription CLI; the fields for openai and claude stay', function()
+	local contents = openSettings({ detection = detection({
+		['claude-code'] = { true, CLAUDE_CODE_SIGNED_IN }, codex = { true, CODEX_SIGNED_IN },
+	}) })
+	local fields, count = {}, 0
+	for variable, entry in pairs(keyFields(contents)) do fields[variable], count = entry, count + 1 end
+	t.equals(count, 2, 'expected exactly two password fields, for the two cloud engines')
+	for _, variable in ipairs({ 'MELAMPUS_OPENAI_KEY', 'MELAMPUS_ANTHROPIC_KEY' }) do
+		for _, engine in ipairs({ 'claude-code', 'codex' }) do
+			t.isFalse(visibleFor(fields[variable], engine), 'the ' .. variable .. ' field shows for ' .. engine)
+		end
+	end
+	t.isTrue(visibleFor(fields.MELAMPUS_OPENAI_KEY, 'openai'))
 	t.isTrue(visibleFor(fields.MELAMPUS_ANTHROPIC_KEY, 'claude'))
 end)
 
@@ -497,7 +571,7 @@ for _, case in ipairs(MODEL_ENGINES) do
 		t.equals(bindingKey(row.visible), 'engine', 'the row is not shown by the engine')
 		t.isTrue(row.visible.transform(engine))
 		t.equals(row.visible.transform(''), engine == 'mlx', 'the default on this Mac is mlx')
-		for _, other in ipairs({ 'mlx', 'ollama', 'openai', 'claude' }) do
+		for _, other in ipairs({ 'mlx', 'ollama', 'openai', 'claude', 'claude-code', 'codex' }) do
 			if other ~= engine then t.isFalse(row.visible.transform(other), 'the row shows for ' .. other) end
 		end
 	end)
@@ -577,7 +651,7 @@ t.test('with no executable beside the plugin the dialog still opens, nothing gre
 	t.isNil(mock.state.executed, 'ran a command with no executable to run')
 	local picker = enginePicker(contents)
 	t.isNotNil(picker, 'no picker')
-	t.equals(#picker.items, 5)
+	t.equals(#picker.items, 7)
 	for _, item in ipairs(picker.items) do
 		t.isTrue(item.enabled, item.value .. ' was greyed with no detection to grey it')
 	end

@@ -530,8 +530,9 @@ end)
 -- Done-when 1: given a preference named engine with one of mlx, ollama,
 -- openai, claude, when the plugin builds the CLI command, then the CLI
 -- receives it. Done-when 2: given no preference, the plugin passes no
--- --backend and the CLI's default applies.
-local ENGINES = { 'mlx', 'ollama', 'openai', 'claude' }
+-- --backend and the CLI's default applies. Card #423 adds the two
+-- subscription CLIs, claude-code and codex, which reach it the same way.
+local ENGINES = { 'mlx', 'ollama', 'openai', 'claude', 'claude-code', 'codex' }
 
 t.test('each engine preference reaches the command line as --backend', function()
 	for _, engine in ipairs(ENGINES) do
@@ -685,9 +686,11 @@ t.test('the key is never logged', function()
 	end
 end)
 
-t.test('a local engine, or no engine, carries no key even when keys are stored', function()
+t.test('a local engine, a subscription CLI, or no engine, carries no key even when keys are stored', function()
 	local stored = { MELAMPUS_OPENAI_KEY = KEY, MELAMPUS_ANTHROPIC_KEY = KEY }
-	for _, engine in ipairs({ 'mlx', 'ollama', '' }) do
+	-- Card #423: the CLI engines bill to a subscription, never to a key
+	-- here, so their line is the executable and --backend, nothing ahead.
+	for _, engine in ipairs({ 'mlx', 'ollama', 'claude-code', 'codex', '' }) do
 		local command = commandWithKeys(engine, stored)
 		t.equals(command, macCommand(engine), engine .. ': a key travels with a run that needs none')
 	end

@@ -88,9 +88,12 @@ function Rules.defaultSettings()
 	}
 end
 
---- The engines a user can choose between, in the owner's words and order.
--- These are the CLI's --backend names; the offline test fake is not one.
-Rules.ENGINES = { 'mlx', 'ollama', 'openai', 'claude' }
+--- The engines a user can choose between, in the owner's words and the
+-- executable's order: the owner's four, then the two subscription CLIs
+-- (card #423). These are the CLI's --backend names; the offline test fake
+-- is not one. The executable's --detect-engines prints one verdict per
+-- name in this order, and test_lua_plugin.py holds the two to each other.
+Rules.ENGINES = { 'mlx', 'ollama', 'openai', 'claude', 'claude-code', 'codex' }
 
 --- The CLI arguments that carry the engine preference: `{ '--backend', name }`
 -- when one is set, `{}` when it is not, so the CLI decides. An unknown value
@@ -113,15 +116,6 @@ end
 -- passed as --backend; the others have no model to fetch.
 Rules.MODEL_ENGINES = { 'mlx', 'ollama' }
 
---- What the picker calls each engine. The reason detection gives says the
--- rest; a title only has to be recognisable.
-Rules.ENGINE_TITLES = {
-	mlx = 'MLX — local, Apple Silicon',
-	ollama = 'Ollama — local',
-	openai = 'OpenAI — cloud, needs an API key',
-	claude = 'Claude — cloud, needs an API key',
-}
-
 --- The variable a cloud engine's API key travels in to the executable
 -- (providers.KEY_VARIABLES on the Python side), which is also the name the
 -- key is stored under. nil for an engine that needs no key.
@@ -137,13 +131,15 @@ end
 
 --- The engine picker's items from what the executable said (card #405):
 -- `verdicts` is the decoded JSON of --detect-engines, a list of
--- { engine, available, reason }. The first item leaves the choice to the
--- executable (the unset preference); then Rules.ENGINES in order, each
--- disabled when detection said it cannot run here, carrying its reason and,
--- when the reason names a web address, the last one it names as `link`.
--- Without verdicts (no executable, or output that is not the list) nothing
--- is greyed and `problem` is the note. Returns the items and the note to show
--- under the picker: one line per unavailable engine, or the problem.
+-- { engine, title, available, reason }. The first item leaves the choice to
+-- the executable (the unset preference); then Rules.ENGINES in order, each
+-- titled as its verdict says (the executable is the one place that names
+-- an engine; card #423), disabled when detection said it cannot run here,
+-- carrying its reason and, when the reason names a web address, the last
+-- one it names as `link`. Without verdicts (no executable, or output that
+-- is not the list) nothing is greyed, the names stand in for the titles,
+-- and `problem` is the note. Returns the items and the note to show under
+-- the picker: one line per unavailable engine, or the problem.
 function Rules.engineItems(verdicts, problem)
 	local byEngine = {}
 	if type(verdicts) == 'table' then
@@ -162,8 +158,9 @@ function Rules.engineItems(verdicts, problem)
 		local verdict = byEngine[engine]
 		local available = verdict == nil or verdict.available ~= false
 		local reason = verdict and tostring(verdict.reason or '') or ''
+		local title = verdict and type(verdict.title) == 'string' and verdict.title or engine
 		local item = {
-			title = Rules.ENGINE_TITLES[engine] .. (available and '' or ' (not available)'),
+			title = title .. (available and '' or ' (not available)'),
 			value = engine, enabled = available, reason = reason,
 		}
 		if not available then
@@ -173,16 +170,24 @@ function Rules.engineItems(verdicts, problem)
 			for address in string.gmatch(reason, 'https?://[^%s]+') do
 				item.link = string.match(address, '^(.-)[.,;:)]*$')
 			end
-			lines[#lines + 1] = Rules.ENGINE_TITLES[engine] .. ': ' .. reason
+			lines[#lines + 1] = title .. ': ' .. reason
 		end
 		items[#items + 1] = item
 	end
 	local note = table.concat(lines, '\n')
-	if note == '' and next(byEngine) == nil then
-		note = problem or ''
-		for i = 2, #items do items[i].reason = note end
-	end
+	if note == '' and next(byEngine) == nil then note = problem or '' end
 	return items, note
+end
+
+--- What to say under the picker about the picked engine: its item's reason
+-- (card #423: a signed-in subscription CLI's says what every frame bills
+-- to, before a run; a cloud engine's names the key it needs), or '' when
+-- nothing is picked, the value is not an item, or there was no detection.
+function Rules.pickedReason(items, engine)
+	for _, item in ipairs(items or {}) do
+		if item.value == engine and item.value ~= '' then return item.reason or '' end
+	end
+	return ''
 end
 
 --- The engine a picker value comes to (card #408): the picked one, or with
