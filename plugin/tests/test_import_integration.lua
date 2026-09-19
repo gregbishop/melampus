@@ -513,6 +513,68 @@ t.test('a missing executable on Windows names melampus.exe and the plugin folder
 	assertNoSetupInstructions(message)
 end)
 
+-- ── the Settings dialog describes the plugin as it is now ──────────────────
+-- The offer and Info.lua stopped saying "Mac" and stopped presenting a results
+-- file worked out elsewhere as the plugin; the Settings dialog is read by the
+-- same Windows user and must say the same thing.
+
+--- Every string the dialog shows, from the view tree the mock kept: titles
+--- (static text, group boxes, checkboxes, buttons) and tooltips, in order.
+local function dialogStrings(view, out)
+	out = out or {}
+	if type(view) ~= 'table' then return out end
+	for _, key in ipairs({ 'title', 'tooltip' }) do
+		if type(view[key]) == 'string' then out[#out + 1] = view[key] end
+	end
+	for _, child in ipairs(view) do dialogStrings(child, out) end
+	return out
+end
+
+--- The view bound to a preference, and the group box that holds it.
+local function viewBoundTo(view, key, group)
+	if type(view) ~= 'table' then return nil end
+	if view.kind == 'group_box' then group = view end
+	if view.value == key then return view, group end
+	for _, child in ipairs(view) do
+		local found, holder = viewBoundTo(child, key, group)
+		if found then return found, holder end
+	end
+	return nil
+end
+
+t.test('the Settings dialog is worded for both platforms and the executable flow', function()
+	mock.reset({ prefs = defaultPrefs() })
+	mock.install(PLUGIN)
+	unloadPlugin()
+	dofile(PLUGIN .. '/MelampusSettings.lua')
+	local dialog = mock.state.dialogs[1]
+	t.isNotNil(dialog and dialog.modal and dialog.contents or nil,
+		'the Settings dialog was not presented with its contents')
+	local strings = dialogStrings(dialog.contents)
+	local text = table.concat(strings, '\n')
+	t.isNil(string.find(text, '%f[%a]Mac%f[%A]'), 'the Settings dialog says Mac:\n' .. text)
+
+	-- The opening text says what the plugin does: it analyses, here.
+	local intro = strings[1]
+	t.isNotNil(string.find(intro, 'analys', 1, true),
+		'the opening text does not say the plugin analyses the photos:\n' .. intro)
+
+	-- The results file is the optional import of results produced elsewhere,
+	-- not a required first step, and it is --plugin-out output that is read.
+	local field, group = viewBoundTo(dialog.contents, 'resultsPath')
+	t.isNotNil(field, 'no field is bound to resultsPath')
+	t.isNotNil(group, 'the results-file field is not in a group box')
+	t.isNotNil(string.find(string.lower(group.title), 'optional', 1, true),
+		'the results-file group does not say it is optional:\n' .. group.title)
+	t.isNotNil(string.find(tostring(field.tooltip), '--plugin-out', 1, true),
+		'the results-file tooltip does not name --plugin-out:\n' .. tostring(field.tooltip))
+	t.isNil(string.find(text, 'json-out', 1, true), 'the dialog still names --json-out:\n' .. text)
+	-- With no first step, nothing is numbered as a step.
+	for _, s in ipairs(strings) do
+		t.isNil(string.match(s, '^Step %d'), 'numbered as a step when there is no first step: ' .. s)
+	end
+end)
+
 os.remove(RESULTS)
 mock.cleanUp()
 return t.summary()
