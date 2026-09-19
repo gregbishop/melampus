@@ -476,7 +476,12 @@ class CommandBackend(VLMBackend):
 
     stdout goes through the same JSON extraction and schema validation as
     every other backend's text (identify.py); nothing here parses
-    candidates. stderr is kept for error messages only.
+    candidates. stderr is kept for error messages only. `decode`, when
+    given, turns stdout into the reply text first: a CLI that wraps its
+    reply in a result object (Claude Code's `--output-format json`, card
+    #421) is unwrapped there, and a wrapper that reports a failure raises
+    CommandFailed from it, so the batch stops as it would on a non-zero
+    exit. Without it stdout is the reply as it came.
     """
 
     #: How much of stderr an error message carries: enough to say what went
@@ -490,6 +495,7 @@ class CommandBackend(VLMBackend):
         executable: str | None = None,
         timeout: float = 180.0,
         run: Callable | None = None,
+        decode: Callable[[str], str] | None = None,
     ) -> None:
         self.command = list(command)
         # The template, so a changed flag is a changed run fingerprint and the
@@ -500,6 +506,7 @@ class CommandBackend(VLMBackend):
         # Shaped like subprocess.run(argv, **kwargs): the tests hand in a fake
         # at this edge, the way the other backends take a client.
         self._run = run or subprocess.run
+        self._decode = decode
 
     @property
     def program(self) -> str:
@@ -545,13 +552,16 @@ class CommandBackend(VLMBackend):
                 f"{self.program} exited {process.returncode}"
                 + (f": {said}" if said else " with nothing on stderr")
             )
-        if not (process.stdout or "").strip():
+        text = process.stdout or ""
+        if self._decode is not None and text.strip():
+            text = self._decode(text)
+        if not text.strip():
             said = self._stderr_lines(process.stderr)
             raise RuntimeError(
                 f"{self.program} printed nothing on stdout"
                 + (f": {said}" if said else "")
             )
-        return Completion(text=process.stdout, seconds=elapsed)
+        return Completion(text=text, seconds=elapsed)
 
 
 class ScriptedBackend(VLMBackend):
