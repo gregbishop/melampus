@@ -14,14 +14,12 @@ import io
 import json
 import socket
 import sys
-import threading
 import types
 import urllib.error
 import urllib.request
-from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
-from conftest import PHOTO
+from conftest import PHOTO, FakeOllama
 from test_pipeline import ID_OK, ROUTING_OK
 
 from melampus import providers
@@ -470,56 +468,18 @@ def test_the_refusal_names_what_detection_says_is_available(monkeypatch):
 
 @contextlib.contextmanager
 def _fake_ollama(monkeypatch, *, status: int = 200, delay: float = 0.0, replies: list[str] = ()):
-    """A server speaking Ollama's version and chat endpoints on 127.0.0.1 at
-    an ephemeral port, with detection pointed at it. `status` is what
-    GET /api/version answers; `delay` holds the answer that long. `replies`
-    are the texts POST /api/chat answers with, in order, each wrapped in the
-    final response object docs/api.md § Generate a chat completion shows;
-    every chat request's JSON body is kept on `server.chats`."""
-    release = threading.Event()
-    pending = list(replies)
-
-    class Ollama(BaseHTTPRequestHandler):
-        def do_GET(self):  # noqa: N802 - http.server's name
-            assert self.path == "/api/version", self.path
-            if delay:
-                release.wait(delay)
-            self._answer(status, {"version": "0.0.0-fake"})
-
-        def do_POST(self):  # noqa: N802 - http.server's name
-            assert self.path == "/api/chat", self.path
-            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-            self.server.chats.append(body)
-            if not pending:
-                self._answer(404, {"error": f"model '{body.get('model')}' not found"})
-                return
-            self._answer(200, {
-                "model": body["model"], "created_at": "2026-09-18T00:00:00Z",
-                "message": {"role": "assistant", "content": pending.pop(0)},
-                "done_reason": "stop", "done": True, "total_duration": 1668506709,
-                "prompt_eval_count": 26, "eval_count": 83,
-            })
-
-        def _answer(self, code: int, payload: dict) -> None:
-            self.send_response(code)
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(json.dumps(payload).encode("utf-8"))
-
-        def log_message(self, *_):
-            return None
-
-    server = HTTPServer(("127.0.0.1", 0), Ollama)
-    server.chats = []
-    thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
-    thread.start()
-    monkeypatch.setattr(providers, "OLLAMA_URL", f"http://127.0.0.1:{server.server_port}")
+    """conftest's FakeOllama (Ollama's version and chat endpoints on
+    127.0.0.1 at an ephemeral port) with detection pointed at it. `status`
+    is what GET /api/version answers; `delay` holds the answer that long.
+    `replies` are the texts POST /api/chat answers with, in order; every
+    chat request's JSON body is kept on `server.chats`."""
+    server = FakeOllama(status=status, delay=delay, replies=replies)
+    server.start()
+    monkeypatch.setattr(providers, "OLLAMA_URL", server.endpoint)
     try:
         yield server
     finally:
-        release.set()
-        server.shutdown()
-        server.server_close()
+        server.stop()
 
 
 def _closed_port() -> int:

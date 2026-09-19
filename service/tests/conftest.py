@@ -278,3 +278,66 @@ def hub_env(fake_hub: FakeHub, tmp_path: Path) -> dict[str, str]:
     under tmp_path, so the real cache is never touched and nothing can reach
     the internet (Done-when 3 of card #407)."""
     return {"HF_ENDPOINT": fake_hub.endpoint, "HF_HOME": str(tmp_path / "hf")}
+
+
+# --- the fake Ollama (card #406) ------------------------------------------
+#
+# An HTTP server on 127.0.0.1 speaking the endpoints of Ollama's docs/api.md
+# that the service uses: § Version (`GET /api/version`, the probe) and
+# § Generate a chat completion (`POST /api/chat`, one response object with
+# `stream` false). No model, no weights, no network beyond loopback. `status`
+# is what the version probe answers, `delay` holds that answer, `replies` are
+# the texts the chat answers with in order (a 404 with Ollama's not-found
+# error once they run out); every chat request's JSON body lands on `chats`.
+
+
+class FakeOllama(threading.Thread):
+    def __init__(self, *, status: int = 200, delay: float = 0.0, replies: list[str] = ()) -> None:
+        super().__init__(daemon=True)
+        self.chats: list[dict] = []
+        self.release = threading.Event()
+        pending = list(replies)
+        ollama = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):  # noqa: N802 - http.server's name
+                assert self.path == "/api/version", self.path
+                if delay:
+                    ollama.release.wait(delay)
+                self._answer(status, {"version": "0.0.0-fake"})
+
+            def do_POST(self):  # noqa: N802 - http.server's name
+                assert self.path == "/api/chat", self.path
+                body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                ollama.chats.append(body)
+                if not pending:
+                    self._answer(404, {"error": f"model '{body.get('model')}' not found"})
+                    return
+                self._answer(200, {
+                    "model": body["model"], "created_at": "2026-09-18T00:00:00Z",
+                    "message": {"role": "assistant", "content": pending.pop(0)},
+                    "done_reason": "stop", "done": True, "total_duration": 1668506709,
+                    "prompt_eval_count": 26, "eval_count": 83,
+                })
+
+            def _answer(self, code: int, payload: dict) -> None:
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps(payload).encode("utf-8"))
+
+            def log_message(self, *_):
+                return None
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.server.daemon_threads = True
+        self.server_port = self.server.server_port
+        self.endpoint = f"http://127.0.0.1:{self.server_port}"
+
+    def run(self) -> None:
+        self.server.serve_forever(poll_interval=0.05)
+
+    def stop(self) -> None:
+        self.release.set()
+        self.server.shutdown()
+        self.server.server_close()
