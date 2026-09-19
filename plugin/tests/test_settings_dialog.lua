@@ -689,14 +689,20 @@ end)
 -- The mock steps the two tasks: each tick the fake executable writes one
 -- more line and the poller reads what is there.
 
-local function loadAnalyze(options)
+--- Reset the mock, install it (`options.windows` fakes a Windows Lightroom,
+--- `options.home` names its home folder), and load one plugin file fresh.
+local function loadFresh(name, options)
 	options = options or {}
-	mock.reset({ existing = options.existing })
+	mock.reset({ existing = options.existing, home = options.home })
 	mock.install(PLUGIN, options)
-	for _, name in ipairs({ 'MelampusJson', 'MelampusRules', 'MelampusLog', 'MelampusAnalyze' }) do
-		package.loaded[name] = nil
+	for _, module in ipairs({ 'MelampusJson', 'MelampusRules', 'MelampusLog', 'MelampusAnalyze' }) do
+		package.loaded[module] = nil
 	end
-	return dofile(PLUGIN .. '/MelampusAnalyze.lua')
+	return dofile(PLUGIN .. '/' .. name .. '.lua')
+end
+
+local function loadAnalyze(options)
+	return loadFresh('MelampusAnalyze', options)
 end
 
 local function append(path, text)
@@ -823,6 +829,45 @@ t.test('a failed download hands back exit 3 and the tail of the log', function()
 	mock.settle()
 	t.equals(finished().code, 3)
 	t.isNotNil(string.find(finished().tail, 'could not reach the hub', 1, true), 'no log tail: ' .. tostring(finished().tail))
+end)
+
+-- ── the log (card #442) ────────────────────────────────────────────────────
+-- The log lives under the per-user Melampus data directory, the root the
+-- executable keeps its config and caches under (config._data_root): one
+-- rule on both platforms, exact on both, and the same folder the user is
+-- sent to for everything else of Melampus's.
+
+local function loadLog(options)
+	return loadFresh('MelampusLog', options)
+end
+
+local function homeOfTheFakeLightroom()
+	return import('LrPathUtils').getStandardFilePath('home')
+end
+
+t.test('on macOS the log is <home>/Library/Application Support/Melampus/logs/Melampus.log, the executable\'s root', function()
+	local Log = loadLog()
+	local home = homeOfTheFakeLightroom()
+	t.equals(Log.dataRoot(), home .. '/Library/Application Support/Melampus')
+	t.equals(Log.folder(), home .. '/Library/Application Support/Melampus/logs')
+	t.equals(Log.path(), home .. '/Library/Application Support/Melampus/logs/Melampus.log')
+end)
+
+t.test('on Windows the log is <home>\\AppData\\Local\\Melampus\\logs\\Melampus.log, %LOCALAPPDATA%\\Melampus by default', function()
+	local Log = loadLog({ windows = true })
+	t.equals(homeOfTheFakeLightroom(), 'C:\\Users\\photographer')
+	t.equals(Log.dataRoot(), 'C:\\Users\\photographer\\AppData\\Local\\Melampus')
+	t.equals(Log.folder(), 'C:\\Users\\photographer\\AppData\\Local\\Melampus\\logs')
+	t.equals(Log.path(), 'C:\\Users\\photographer\\AppData\\Local\\Melampus\\logs\\Melampus.log')
+end)
+
+t.test('the mock\'s home is a folder of this run\'s own under its temp directory, never the developer\'s, unless a test names one', function()
+	loadLog()
+	local home = homeOfTheFakeLightroom()
+	t.equals(home, mock.state.tempDir .. '/home')
+	t.isFalse(home == os.getenv('HOME'), 'the fake Lightroom\'s home is the developer\'s')
+	local Log = loadLog({ home = '/elsewhere/home' })
+	t.equals(Log.path(), '/elsewhere/home/Library/Application Support/Melampus/logs/Melampus.log')
 end)
 
 return t.summary()
