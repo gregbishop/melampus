@@ -29,7 +29,7 @@ import pytest
 from conftest import PHOTO
 
 from test_binary import _no_python_environment, _per_user_data_dir
-from test_lua_plugin import run_lua
+from test_lua_plugin import assert_suite_green, run_lua
 
 REPO = Path(__file__).resolve().parents[2]
 PLUGIN = REPO / "plugin" / "Melampus.lrplugin"
@@ -189,8 +189,7 @@ def test_info_lua_parses_and_names_only_files_in_the_zip(package_script, tmp_pat
         "MELAMPUS_PLUGIN_DIR": str(unpacked / FOLDER),
         "MELAMPUS_ZIP_LISTING": "\n".join(listing),
     })
-    assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert "0 failed" in proc.stdout, proc.stdout
+    assert_suite_green(proc)
 
 
 def test_packaged_executable_runs_from_the_unpacked_plugin_folder(

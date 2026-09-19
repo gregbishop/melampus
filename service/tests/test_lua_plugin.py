@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -45,6 +46,22 @@ def run_lua(script: Path, env: dict[str, str] | None = None) -> subprocess.Compl
     )
 
 
+SUMMARY = re.compile(r"^(\d+) passed, (\d+) failed$", re.MULTILINE)
+
+
+def assert_suite_green(proc: subprocess.CompletedProcess) -> None:
+    """The gate every Lua suite passes through. Card #443: the harness's
+    summary line is parsed into its counts, never substring-matched ("10
+    failed" contains "0 failed"), and the exit code is checked as well."""
+    output = proc.stdout + proc.stderr
+    assert proc.returncode == 0, output
+    summary = SUMMARY.search(proc.stdout)
+    assert summary, f"no summary line from the harness:\n{output}"
+    passed, failed = (int(n) for n in summary.groups())
+    assert failed == 0, output
+    assert passed > 0, output
+
+
 def run_as_lightroom_would(command: str, **kwargs) -> subprocess.CompletedProcess:
     """Hand the line to the shell LrTasks.execute hands it to: `cmd.exe /c`
     on Windows, as the C runtime's system() does, and `sh -c` elsewhere.
@@ -60,8 +77,7 @@ def run_as_lightroom_would(command: str, **kwargs) -> subprocess.CompletedProces
 def test_write_rules():
     """CLAUDE.md §5.3 safety rules: no overwrites, dry run, idempotency."""
     proc = run_lua(TESTS / "test_rules.lua")
-    assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert "0 failed" in proc.stdout, proc.stdout
+    assert_suite_green(proc)
 
 
 @needs_sh
@@ -79,8 +95,7 @@ def test_import_runs_against_a_mock_lightroom():
     what remains unverified.
     """
     proc = run_lua(TESTS / "test_import_integration.lua")
-    assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert "0 failed" in proc.stdout, proc.stdout
+    assert_suite_green(proc)
 
 
 @needs_sh
@@ -104,14 +119,37 @@ def test_settings_dialog_against_a_mock_lightroom(tmp_path: Path):
     temp directory is TMPDIR), and Cancel's marker folder is made by the
     mock through sh, so this suite runs where the import suite does."""
     proc = run_lua(TESTS / "test_settings_dialog.lua", env=os.environ | {"TMPDIR": str(tmp_path)})
-    assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert "0 failed" in proc.stdout, proc.stdout
+    assert_suite_green(proc)
 
 
 def test_json_decoder():
     proc = run_lua(TESTS / "test_json.lua")
-    assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert "0 failed" in proc.stdout, proc.stdout
+    assert_suite_green(proc)
+
+
+def _summary(stdout: str, returncode: int = 0) -> subprocess.CompletedProcess:
+    return subprocess.CompletedProcess(args=["lua"], returncode=returncode, stdout=stdout, stderr="")
+
+
+@pytest.mark.parametrize("stdout", [
+    "  FAIL a case: boom\n10 passed, 10 failed\n",
+    "0 passed, 0 failed\n",
+    "no summary line at all\n",
+])
+def test_the_gate_fails_a_summary_that_is_not_green(stdout: str):
+    """Card #443: "10 failed" contains "0 failed", so the counts are parsed,
+    never substring-matched; no passes is not green either."""
+    with pytest.raises(AssertionError):
+        assert_suite_green(_summary(stdout))
+
+
+def test_the_gate_fails_a_green_summary_from_a_process_that_exited_non_zero():
+    with pytest.raises(AssertionError):
+        assert_suite_green(_summary("3 passed, 0 failed\n", returncode=1))
+
+
+def test_the_gate_passes_a_green_summary():
+    assert_suite_green(_summary("3 passed, 0 failed\n"))
 
 
 def test_every_plugin_file_compiles():
