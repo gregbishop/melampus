@@ -16,8 +16,10 @@ Done-when 3); every `uv sync` that builds the executable, in CI and in
 readme.md's build section, installs the extras the executable carries (card
 #434, Done-when 1 and 3); CI packages one plugin zip per platform through the
 script on every run and, on a pushed v* tag, its release job attaches both to
-the GitHub release, which the install docs name (card #402); and no doc names
-a workflow file that does not exist.
+the GitHub release, which the install docs name (card #402); no doc names a
+workflow file that does not exist; and no doc states a test count, because
+the suite grows with every card and CI checks no such number (card #437,
+Done-when 1).
 
 The checks are deliberately dumb — substring presence of the backticked name — so
 they never argue with prose style, only with absence. The one exception runs the
@@ -46,6 +48,7 @@ WORKFLOW_SUFFIXES = (".yml", ".yaml")  # GitHub runs both
 CI_WORKFLOW = WORKFLOWS / "ci.yml"
 LUA_PLUGIN_TESTS = REPO / "service" / "tests" / "test_lua_plugin.py"
 PLUGIN_DOC = REPO / "docs" / "plugin.md"
+ARCHITECTURE_DOC = REPO / "docs" / "architecture.md"
 GITIGNORE = REPO / ".gitignore"
 README = REPO / "readme.md"
 DOCS = [README, AGENTS_MD, *sorted((REPO / "docs").glob("*.md"))]
@@ -795,3 +798,43 @@ def test_config_doc_quotes_the_codex_template_from_its_one_source():
     assert "`codex`" in readme and "--backend codex" in readme
     architecture = (REPO / "docs" / "architecture.md").read_text(encoding="utf-8")
     assert "`codex`" in architecture and "CODEX_COMMAND" in architecture
+
+
+TEST_COUNT_DOCS = (README, BRIEF, PLUGIN_DOC, ARCHITECTURE_DOC)
+# "182 tests", "46 rules tests", "11 corpus-backed tests", "410 passed",
+# "26 skipped", "skips 2": a number and a test noun, with at most one word between.
+TEST_COUNT = re.compile(
+    r"\b\d+\s+(?:[\w-]+\s+)?(?:tests?|passed|skipped|skips?)\b|\b(?:skips?|skipped)\s+\d+\b",
+    re.IGNORECASE,
+)
+# "126 Python, 56 Lua": a language count, stale only in a sentence about tests.
+LANGUAGE_COUNT = re.compile(r"\b\d+\s+(?:Python|Lua)\b")
+
+
+def _sentences(text: str) -> list[str]:
+    """Each sentence of the doc's prose, with hard-wrapped lines joined so a
+    count and its noun are seen together whichever line each falls on."""
+    return [
+        sentence
+        for paragraph in re.split(r"\n\s*\n", text)
+        for sentence in re.split(r"(?<=[.!?])\s+", " ".join(paragraph.split()))
+        if sentence
+    ]
+
+
+def test_docs_state_no_test_count():
+    """Card #437, Done-when 1: the suite grows with every card, so a count
+    written into a doc is wrong the day after, and CI checks no such number.
+    The docs say what the tests need and how to run them, never how many
+    there are, in any of the forms a count has taken: "182 tests", "46 rules
+    tests", "410 passed", "26 skipped", "skips 2", and "126 Python, 56 Lua"
+    in a sentence about tests."""
+    stated = []
+    for doc in TEST_COUNT_DOCS:
+        for sentence in _sentences(doc.read_text(encoding="utf-8")):
+            counted = TEST_COUNT.search(sentence) or (
+                "test" in sentence.lower() and LANGUAGE_COUNT.search(sentence)
+            )
+            if counted:
+                stated.append(f"{doc.relative_to(REPO)}: {sentence}")
+    assert not stated, f"docs state a test count that CI does not check: {stated}"
