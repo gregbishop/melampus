@@ -384,10 +384,11 @@ plugin folder with the executable already inside it. Unpack it (double-click,
 or `unzip Melampus-macOS.zip`), keep the `Melampus.lrplugin` folder somewhere
 it can stay, then in Lightroom: **File → Plug-in Manager → Add** and select
 that folder. It should report *Installed and running*; **Library → Plug-in
-Extras → Melampus: Settings…** opens the settings. The release workflow
-(`.github/workflows/release.yml`) builds both zips with the same commands CI
-runs, through `tools/package_plugin.py`, on every pushed `v*` tag. The
-executable is not yet signed or notarized (card #438).
+Extras → Melampus: Settings…** opens the settings. CI
+(`.github/workflows/ci.yml`) builds and packages both zips through
+`tools/package_plugin.py` on every run; on a pushed `v*` tag its `release` job
+attaches them to the release. The executable is not yet signed or notarized
+(card #438).
 
 **From source.**
 

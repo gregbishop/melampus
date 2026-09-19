@@ -10,9 +10,10 @@ root, where the plugin looks for it (card #401). A user adds that folder in
 Lightroom's Plug-in Manager and is done. The executable's mode is kept in the
 zip, so it is still executable after unzip or Archive Utility unpacks it.
 
-This is the one place that knows the layout: the release workflow runs it after
-the build, and the test suite checks its output. It needs the executable first
-(readme.md § Building the executable) and refuses otherwise.
+This is the one place that knows the layout: CI runs it after the build on
+every run (and a pushed v* tag's run attaches the zips to the release), and the
+test suite checks its output. It needs the executable first (readme.md §
+Building the executable) and refuses otherwise.
 """
 
 from __future__ import annotations
