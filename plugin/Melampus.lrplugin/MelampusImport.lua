@@ -30,36 +30,14 @@ local Rules = require 'MelampusRules'
 local PLUGIN_ID = 'net.gregbishop.melampus'
 local CHUNK = 100 -- photos per write transaction, so a crash loses little
 
---- Look for the results file in the obvious places before giving up.
--- The plugin lives at <repo>/plugin/Melampus.lrplugin, so the file the Python
--- side writes is normally two levels up. Finding it automatically removes the
--- single configuration step that made the plugin look broken.
-local function discoverResults()
-	local candidates = {}
-	local pluginDir = _PLUGIN and _PLUGIN.path
-	if pluginDir then
-		local repo = LrPathUtils.parent(LrPathUtils.parent(pluginDir))
-		if repo then
-			candidates[#candidates + 1] = LrPathUtils.child(repo, 'plugin_results.json')
-			candidates[#candidates + 1] = LrPathUtils.child(repo, 'stage1_full_results.json')
-		end
-		candidates[#candidates + 1] = LrPathUtils.child(pluginDir, 'plugin_results.json')
-	end
-	for _, candidate in ipairs(candidates) do
-		if LrFileUtils.exists(candidate) then
-			Log.info('auto-discovered results at ' .. candidate)
-			return candidate
-		end
-	end
-	return nil
-end
-
+--- The records in a results file, or an empty list when none is configured.
+-- No results file is the normal state of a fresh install, not an error: it
+-- means nothing has been analysed yet, and the selection goes to the analyse
+-- offer below, which runs the executable beside the plugin. A results file is
+-- only for identifications produced elsewhere (melampus-id --plugin-out).
 local function readResults(path)
 	if not path or path == '' then
-		path = discoverResults()
-	end
-	if not path or path == '' then
-		return nil, 'FIRST_RUN'
+		return {}
 	end
 	if not LrFileUtils.exists(path) then
 		return nil, 'Results file not found:\n' .. path
@@ -75,7 +53,7 @@ local function readResults(path)
 	if type(data) ~= 'table' then
 		return nil, 'Results file did not contain a list of records.'
 	end
-	return data, nil, path
+	return data
 end
 
 --- Flatten one Python-side record into the shape Rules expects.
@@ -367,30 +345,10 @@ LrTasks.startAsyncTask(function()
 			.. ' writeMetadata=' .. tostring(settings.writeMetadata)
 			.. ' force=' .. tostring(settings.force))
 
-		local records, err, resolvedPath = readResults(prefs.resultsPath)
-		if resolvedPath and resolvedPath ~= prefs.resultsPath then
-			-- Remember what we found so Settings shows it and the next run is direct.
-			prefs.resultsPath = resolvedPath
-		end
+		local records, err = readResults(prefs.resultsPath)
 		if not records then
 			Log.error('could not read results: ' .. tostring(err))
-			if err == 'FIRST_RUN' then
-				-- §5.4.6: a first run should explain itself, not error.
-				LrDialogs.message('Welcome to Melampus',
-					'Melampus works out what species are in your photos, on your own Mac, '
-					.. 'and then adds them to your photos as keywords.\n\n'
-					.. 'It has not been told where those identifications are yet.\n\n'
-					.. 'What to do:\n'
-					.. '1.  Go to Library > Plug-in Extras > Melampus: Settings…\n'
-					.. '2.  Under Step 1, click Choose… and pick the file\n'
-					.. '     plugin_results.json in your melampus folder.\n'
-					.. '3.  Leave "Preview only" ticked.\n'
-					.. '4.  Come back here and run Identify Selected Photos again.\n\n'
-					.. 'Nothing will be changed on your photos until you untick '
-					.. '"Preview only" yourself.', 'info')
-			else
-				LrDialogs.message('Melampus', err, 'critical')
-			end
+			LrDialogs.message('Melampus', err, 'critical')
 			return
 		end
 		Log.info('records loaded: ' .. tostring(#records))
@@ -457,14 +415,13 @@ LrTasks.startAsyncTask(function()
 			local minutes = math.max(1, math.floor(unmatched * 7 / 60))
 			local ask = LrDialogs.confirm('Melampus',
 				string.format('%d of the %d selected photos have never been analysed.\n\n'
-					.. 'Melampus can analyse them now on this Mac. Nothing is uploaded '
+					.. 'Melampus can analyse them now on this computer. Nothing is uploaded '
 					.. 'anywhere.\n\nRoughly %d minute%s at about 7 seconds a photo. '
 					.. 'You can cancel part way and keep whatever finished.',
 					unmatched, #photos, minutes, minutes == 1 and '' or 's'),
 				'Analyse them', 'Skip')
 
 			if ask == 'ok' then
-				local repo = Analyze.repoRoot()
 				local toAnalyse = {}
 				for _, photo in ipairs(photos) do
 					local name = photo:getFormattedMetadata('fileName') or ''
@@ -497,7 +454,7 @@ LrTasks.startAsyncTask(function()
 						Log.warn('no previews exported for batch starting at ' .. first)
 					else
 						local batchResults = LrPathUtils.child(workFolder, 'results.json')
-						local ok, message = Analyze.run(repo, workFolder, batchResults, settings.profile)
+						local ok, message = Analyze.run(workFolder, batchResults, settings.profile)
 						if not ok then
 							LrDialogs.message('Melampus', message
 								.. '\n\nPreviews kept at:\n' .. workFolder, 'critical')

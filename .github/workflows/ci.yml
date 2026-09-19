@@ -52,13 +52,28 @@ jobs:
       - name: Install uv
         run: pip install uv==0.12.17
 
+      # lua enables the plugin tests, as brew does on macOS. Lua for Windows
+      # is Lua 5.1, the Lua Lightroom itself runs: the pure suites and luac
+      # run on it, and the command MelampusAnalyze.lua builds for cmd.exe is
+      # built by it and run by this runner's cmd.exe against dist/melampus.exe
+      # (card #401, Done-when 3). Exact-pinned like uv, installed to a fixed
+      # folder so the steps after this one find it, and proven to run before
+      # the minutes the build takes.
+      - name: Install lua
+        shell: bash
+        run: |
+          choco install lua --version=5.1.5.52 -y --no-progress --install-arguments='/DIR=C:\Lua'
+          echo 'C:\Lua' >> "$GITHUB_PATH"
+          /c/Lua/lua.exe -v
+
       # -v -rs: the job log is where the owner reads the proof, so it names
-      # every test that ran against dist/melampus.exe and why the one that
-      # needs MLX skipped, rather than a row of dots.
-      - name: Build the executable and run its smoke tests
+      # every test that ran against dist/melampus.exe, and why each one that
+      # skipped did (the one that needs MLX; the two whose mock housekeeping
+      # runs through sh), rather than a row of dots.
+      - name: Build the executable and run its smoke tests and the plugin tests
         working-directory: service
         shell: bash
-        run: uv sync --locked --extra dev --extra build && uv run pytest -v -rs tests/test_binary.py --build-binary
+        run: uv sync --locked --extra dev --extra build && uv run pytest -v -rs tests/test_binary.py tests/test_lua_plugin.py --build-binary
 
       - name: Upload melampus.exe
         uses: actions/upload-artifact@v4

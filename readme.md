@@ -365,25 +365,33 @@ $env:VIRTUAL_ENV = ".venv"; uv sync --project service --locked --extra dev --ext
 
 ## Reviewing in Lightroom
 
-A review-only plugin lives in `plugin/Melampus.lrplugin`. It reads results from a
-JSON file and writes them into the catalog, so review happens in Lightroom's own
-grid and loupe. Dry run is on by default and nothing the user set is ever
-overwritten. Install steps and the SDK verification are in
-[docs/plugin.md](docs/plugin.md).
+The plugin lives in `plugin/Melampus.lrplugin` and ships with the executable
+inside its folder. Selected photos it has not seen are exported as previews and
+run through that executable, `melampus` on macOS or `melampus.exe` on Windows,
+with `--plugin-out`; the results are written into the catalog, so review happens
+in Lightroom's own grid and loupe. No Python environment is involved. Dry run is
+on by default and nothing the user set is ever overwritten. Install steps and the
+SDK verification are in [docs/plugin.md](docs/plugin.md).
 
 ```bash
-# identification plus the fields the plugin gates on, in one run
-.venv/bin/melampus-id fixtures_full --json-out stage1_full_results.json \
-    --plugin-out plugin_results.json
-# then: Lightroom -> File -> Plug-in Manager -> Add -> plugin/Melampus.lrplugin
+# 1. the executable goes in the plugin folder (built as in § Building the
+#    executable, or taken from a release)
+cp dist/melampus plugin/Melampus.lrplugin/     # dist\melampus.exe on Windows
+# 2. Lightroom -> File -> Plug-in Manager -> Add -> plugin/Melampus.lrplugin
 ```
+
+If the file is not there, the plugin says so, naming the folder and the file it
+expects. The executable reads `melampus.local.toml` from the per-user data
+directory (see [docs/config.md](docs/config.md)); on Windows that is where
+`[model] backend` selects a cloud provider.
 
 `--plugin-out` writes the results enriched with burst agreement, the range flag,
 the encounter, and quality with its rank within the burst; the range check needs a
 default location in `melampus.local.toml` and is the only step that uses the
-network. It runs inside the shipped executable too. `tools/make_plugin_results.py`
-still exists for the plugin, as a thin caller of the same code, until the plugin is
-rewired to pass `--plugin-out` itself.
+network. The same flag works from the CLI (`.venv/bin/melampus-id fixtures_full
+--plugin-out plugin_results.json`) to produce a results file the plugin can read
+through Settings; `tools/make_plugin_results.py` is a thin caller of the same code
+for a `--json-out` file already on disk.
 
 ## Layout
 

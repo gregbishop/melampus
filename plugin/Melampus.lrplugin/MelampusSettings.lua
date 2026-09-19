@@ -20,17 +20,18 @@ LrTasks.startAsyncTask(function()
 			spacing = f:control_spacing(),
 
 			f:static_text {
-				title = 'Melampus reads species identifications that were worked out on\n'
-					.. 'your Mac, and puts them onto your photos as keywords.',
+				title = 'Melampus analyses the photos you select with the program in its\n'
+					.. 'own plugin folder, and puts the species it finds on them as keywords.',
 				height_in_lines = 2,
 			},
 
 			f:group_box {
-				title = 'Step 1 — where the identifications are',
+				title = 'Optional — results produced elsewhere',
 				fill_horizontal = 1,
 				f:row {
 					f:edit_field { value = bind 'resultsPath', width_in_chars = 42,
-						immediate = true, tooltip = 'JSON written by melampus-id --json-out' },
+						immediate = true,
+						tooltip = 'JSON written by melampus-id --plugin-out. Leave empty to analyse here.' },
 					f:push_button {
 						title = 'Choose…',
 						action = function()
@@ -65,7 +66,7 @@ LrTasks.startAsyncTask(function()
 			},
 
 			f:group_box {
-				title = 'Step 2 — safety',
+				title = 'Safety',
 				fill_horizontal = 1,
 				f:checkbox {
 					title = 'Preview only — show me what would change, change nothing',
@@ -166,7 +167,7 @@ LrTasks.startAsyncTask(function()
 				f:static_text { title = 'Log: ' .. Log.path(), width_in_chars = 50 },
 				f:row {
 					f:push_button {
-						title = 'Show log in Finder',
+						title = 'Show log file',
 						action = function()
 							import('LrShell').revealInShell(Log.path())
 						end,

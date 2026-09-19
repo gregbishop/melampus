@@ -194,9 +194,10 @@ The plugin's write gates reason per encounter too. `plugin_results.py` adds
 configured default location), `encounter`, and `quality` with `quality_rank` and
 `encounter_frames` — quality is ranked *within* the burst, because absolute sharpness
 is not comparable across subjects and culling is a within-burst question anyway.
-`melampus-id --plugin-out` writes it in the same run as the identification, so the
-shipped executable needs no second Python step; `tools/make_plugin_results.py` is a
-thin caller of the same module for the Lightroom plugin until card #401 rewires it.
+`melampus-id --plugin-out` writes it in the same run as the identification, and
+that is the one command the Lightroom plugin runs, against the executable that
+ships inside its own folder (`MelampusAnalyze.lua`); `tools/make_plugin_results.py`
+is a thin caller of the same module for a `--json-out` file already on disk.
 
 ---
 
