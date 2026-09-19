@@ -4,17 +4,16 @@ Each test here makes one promise a doc carries mechanical, so the doc cannot
 silently fall behind the code or the repo again (as happened when [occurrence] and
 [quality] shipped undocumented). The promises: docs/config.md names every
 implemented setting; AGENTS.md, and not .gitignore, names the install command for
-the recorded plugins, and on a clone where that installer has run, it is the one
-the clone was installed from; no doc names a file by an uppercase name it does not
-have;
+the recorded plugins, and on a clone where an installer has run, that installer
+runs; no doc names a file by an uppercase name it does not have;
 docs/brief.md names the pytest command CI actually runs; AGENTS.md points at
 docs/brief.md without restating its values; and AGENTS.md points at the standard
 and names the tracker (card #410, Done-when 3).
 
 The checks are deliberately dumb — substring presence of the backticked name — so
 they never argue with prose style, only with absence. The one exception runs the
-named installer where it is installed, because a path that only read well was
-itself the drift.
+installer this clone was installed from, because a command that only read well
+was itself the drift.
 """
 
 import json
@@ -53,21 +52,20 @@ def test_every_config_field_is_documented():
     )
 
 
-def _documented_installer() -> str:
-    """The installer path in the one `node <path>/install.mjs <plugins>` command
-    AGENTS.md carries, checked against the plugins .agents/on-purpose.json records."""
+def _documented_install_command():
+    """The one `node <checkout>/bin/install.mjs <plugins>` command AGENTS.md
+    carries, checked against the plugins .agents/on-purpose.json records."""
     plugins = json.loads(PLUGIN_CHOICE.read_text(encoding="utf-8"))["plugins"]
     commands = re.findall(r"`node (\S+/install\.mjs) ([^`]*)`", AGENTS_MD.read_text(encoding="utf-8"))
     assert commands, (
         "AGENTS.md must tell a fresh clone to run `node <on-purpose checkout>/bin/install.mjs "
         f"{' '.join(plugins)}` (the plugins recorded in .agents/on-purpose.json)"
     )
-    [(installer, named_plugins)] = commands
+    [(_installer, named_plugins)] = commands
     assert named_plugins.split() == plugins, (
         f"AGENTS.md's install command names {named_plugins.split()}, "
         f".agents/on-purpose.json records {plugins}"
     )
-    return installer
 
 
 def test_agents_md_names_the_install_command_and_gitignore_does_not_restate_it():
@@ -77,7 +75,7 @@ def test_agents_md_names_the_install_command_and_gitignore_does_not_restate_it()
     one place that says so: .gitignore, which lists those outputs, points there
     rather than restating the command, so a plugin added later moves one file.
     This gate reads only the repository, so it holds on any clone and in CI."""
-    _documented_installer()
+    _documented_install_command()
     gitignore = GITIGNORE.read_text(encoding="utf-8")
     assert "install.mjs" not in gitignore, (
         ".gitignore restates the install command that AGENTS.md is gated for; "
@@ -85,23 +83,21 @@ def test_agents_md_names_the_install_command_and_gitignore_does_not_restate_it()
     )
 
 
-def test_documented_installer_is_the_one_this_clone_was_installed_from():
+def test_installer_this_clone_was_installed_from_runs():
     """A command that merely reads well left a fresh clone without the plugins
     and the secret hook. Where the installer has run, .agents/skills holds its
-    symlinks into the on-purpose checkout it ran from, so that checkout is known
-    without naming it: the documented command must point at that checkout's
-    installer, and it must run (with no plugins it prints usage and exits 2
-    before touching git or the repo). A clone without those outputs, CI included,
-    has no installation to check against and skips; the gate above still holds."""
+    symlinks into the on-purpose checkout it ran from, so the `<checkout>` the
+    documented command needs is known without naming it (a checkout can be
+    anywhere; a tracked file holds one value). Its installer must run: with no
+    plugins it prints usage and exits 2 before touching git or the repo. A clone
+    without those outputs, CI included, has no installation to check and skips;
+    the gate above still holds."""
     links = [p for p in INSTALLED_SKILLS.iterdir() if p.is_symlink()] if INSTALLED_SKILLS.is_dir() else []
     if not links:
         pytest.skip("on-purpose is not installed in this clone (no links in .agents/skills)")
     # Each link targets <checkout>/plugins/<plugin>/skills/<skill>.
     checkout = Path(os.readlink(links[0])).parents[3]
-    installer = Path(_documented_installer()).expanduser()
-    assert installer == checkout / "bin" / "install.mjs", (
-        f"AGENTS.md names {installer}, but this clone was installed from {checkout}"
-    )
+    installer = checkout / "bin" / "install.mjs"
     run = subprocess.run(["node", str(installer)], cwd=REPO, capture_output=True, text=True)
     assert run.returncode == 2 and "usage: install.mjs" in run.stderr, (
         f"`node {installer}` is not the on-purpose installer: "
