@@ -222,6 +222,15 @@ def test_the_section_reader_takes_the_heading_literally():
     assert _section(text, "Windows (cloud inference)") == "cloud body\n"
 
 
+def test_the_section_reader_reads_a_docs_last_section():
+    """Round 8, finding 1: `_section` promises None only when the doc has no
+    such section, and every doc ends in a section with no `## ` heading after
+    it (readme.md's `## License`, docs/plugin.md's `## Safety`), so the body
+    of the last heading must be read up to the end of the text rather than
+    reported as missing."""
+    assert _section("## A\na\n## B\nb\n", "B") == "b\n"
+
+
 def test_install_blocks_install_from_the_lockfile():
     """Card #425, Done-when 3: given a fresh clone, when the README setup runs,
     then the resolved versions match the lockfile. Only `uv sync --locked` (or
