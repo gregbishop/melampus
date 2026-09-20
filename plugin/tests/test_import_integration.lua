@@ -1,9 +1,12 @@
 --[[
-Runs the real MelampusImport.lua against a mock Lightroom SDK.
+Runs the real plugin files against a mock Lightroom SDK: MelampusImport.lua end
+to end, and MelampusAnalyze.lua and MelampusSettings.lua loaded fresh under the
+mock, on a fake macOS and a fake Windows Lightroom.
 
 This is the test that was missing. Everything before it checked decision logic
-in isolation; this executes the actual file the plugin loads, with a real
-results JSON on disk, and asserts on what landed in the catalog.
+in isolation; this executes the actual files the plugin loads, with a real
+results JSON on disk, and asserts on what landed in the catalog, on the command
+the plugin builds for the executable beside it, and on what its dialogs say.
 
 It is what would have caught the two failures seen in a real catalog: keywords
 failing to attach, and a counter reporting success for photos that got nothing.
@@ -45,28 +48,60 @@ local function writeResults(path, records)
 	handle:close()
 end
 
-local RESULTS = os.tmpname() .. '.json'
+-- os.tmpname() creates the file; the suite writes it and removes it at the end.
+local RESULTS = os.tmpname()
+
+--- Drop the plugin's modules so the next load runs them fresh under the mock.
+local function unloadPlugin()
+	for _, name in ipairs({ 'MelampusJson', 'MelampusRules', 'MelampusLog', 'MelampusAnalyze' }) do
+		package.loaded[name] = nil
+	end
+end
+
+--- Load one plugin file fresh, dropping the modules first, and hand back what
+--- it returns.
+local function loadPluginFile(name)
+	unloadPlugin()
+	return dofile(PLUGIN .. '/' .. name .. '.lua')
+end
+
+--- Reset the mock, install it for a plugin folder (this one by default), and
+--- load one plugin file fresh under it: the shape every load outside runImport
+--- takes.
+local function loadUnderMock(name, resetOptions, folder, installOptions)
+	mock.reset(resetOptions)
+	mock.install(folder or PLUGIN, installOptions)
+	return loadPluginFile(name)
+end
 
 --- Run the real import file end to end and hand back the resulting state.
-local function runImport(records, photos, prefs)
-	writeResults(RESULTS, records)
-	mock.reset({ prefs = prefs or {}, confirmAnswer = 'ok' })
-	mock.state.prefs.resultsPath = RESULTS
+-- `records` is what the results file holds, or nil for no results file
+-- configured at all, as on a fresh install. `photos` is a list of
+-- { fileName, rawMetadata, pluginProperties }; `options` goes through to
+-- mock.reset (confirmAnswer, existing, dropWrites), with the offer accepted
+-- unless it says otherwise. Raises if the import does.
+local function runImport(records, photos, prefs, options)
+	options = options or {}
+	options.prefs = prefs or {}
+	options.confirmAnswer = options.confirmAnswer or 'ok'
+	mock.reset(options)
+	if records then
+		writeResults(RESULTS, records)
+		mock.state.prefs.resultsPath = RESULTS
+	end
 	for _, spec in ipairs(photos) do
-		mock.addPhoto(spec[1], spec[2] or {})
+		local photo = mock.addPhoto(spec[1], spec[2] or {})
+		for k, v in pairs(spec[3] or {}) do photo._plugin[k] = v end
 	end
 	mock.install(PLUGIN)
-	package.loaded['MelampusJson'] = nil
-	package.loaded['MelampusRules'] = nil
-	package.loaded['MelampusLog'] = nil
-	local chunk = assert(loadfile(PLUGIN .. '/MelampusImport.lua'))
-	local ok, err = pcall(chunk)
-	return ok, err
+	unloadPlugin()
+	local ok, err = pcall(assert(loadfile(PLUGIN .. '/MelampusImport.lua')))
+	if not ok then error('import raised: ' .. tostring(err), 2) end
+	return true
 end
 
 local function defaultPrefs(extra)
-	package.loaded['MelampusRules'] = nil
-	local Rules = dofile(PLUGIN .. '/MelampusRules.lua')
+	local Rules = loadPluginFile('MelampusRules')
 	local prefs = Rules.defaultSettings()
 	prefs.dryRun = false
 	for k, v in pairs(extra or {}) do prefs[k] = v end
@@ -197,17 +232,9 @@ end)
 
 -- ── dry run ────────────────────────────────────────────────────────────────
 t.test('preview mode writes nothing when declined', function()
-	mock.reset()
-	local prefs = defaultPrefs({ dryRun = true })
-	writeResults(RESULTS, { { file = 'd1.jpg',
-		candidates = { { 'Snowy Egret', 'Egretta thula', 0.95 } } } })
-	mock.reset({ prefs = prefs, confirmAnswer = 'cancel' })
-	mock.state.prefs.resultsPath = RESULTS
-	mock.addPhoto('d1.CR3', {})
-	mock.install(PLUGIN)
-	package.loaded['MelampusJson'] = nil; package.loaded['MelampusRules'] = nil
-	package.loaded['MelampusLog'] = nil
-	assert(loadfile(PLUGIN .. '/MelampusImport.lua'))()
+	runImport(
+		{ { file = 'd1.jpg', candidates = { { 'Snowy Egret', 'Egretta thula', 0.95 } } } },
+		{ { 'd1.CR3' } }, defaultPrefs({ dryRun = true }), { confirmAnswer = 'cancel' })
 	t.equals(#mock.state.photos[1]:keywordPaths(), 0, 'preview wrote despite being declined')
 	t.equals(#mock.state.writeTransactions, 0, 'preview opened a write transaction')
 end)
@@ -245,14 +272,7 @@ t.test('a second run over the same photos changes nothing', function()
 
 	-- Re-run against a photo already carrying the previous result.
 	local previous = mock.state.photos[1]._plugin
-	mock.reset({ prefs = defaultPrefs(), confirmAnswer = 'ok' })
-	mock.state.prefs.resultsPath = RESULTS
-	local photo = mock.addPhoto('i1.CR3', {})
-	for k, v in pairs(previous) do photo._plugin[k] = v end
-	mock.install(PLUGIN)
-	package.loaded['MelampusJson'] = nil; package.loaded['MelampusRules'] = nil
-	package.loaded['MelampusLog'] = nil
-	assert(loadfile(PLUGIN .. '/MelampusImport.lua'))()
+	runImport(records, { { 'i1.CR3', {}, previous } }, defaultPrefs())
 	t.equals(#mock.state.photos[1]:keywordPaths(), 0,
 		'a re-run re-applied keywords it had already written')
 end)
@@ -272,14 +292,7 @@ t.test('unanalysed photos trigger an offer to analyse them', function()
 end)
 
 t.test('declining the offer leaves the photos untouched', function()
-	writeResults(RESULTS, {})
-	mock.reset({ prefs = defaultPrefs(), confirmAnswer = 'cancel' })
-	mock.state.prefs.resultsPath = RESULTS
-	mock.addPhoto('untouched.CR3', {})
-	mock.install(PLUGIN)
-	package.loaded['MelampusJson'] = nil; package.loaded['MelampusRules'] = nil
-	package.loaded['MelampusLog'] = nil; package.loaded['MelampusAnalyze'] = nil
-	assert(loadfile(PLUGIN .. '/MelampusImport.lua'))()
+	runImport({}, { { 'untouched.CR3' } }, defaultPrefs(), { confirmAnswer = 'cancel' })
 	t.equals(#mock.state.photos[1]:keywordPaths(), 0)
 	t.isNil(mock.state.photos[1]:getRawMetadata('rating'))
 end)
@@ -294,15 +307,7 @@ end)
 
 --- Run the import with a chosen number of writes swallowed for one photo.
 local function runWithDroppedWrites(fileName, drops, records, photos)
-	writeResults(RESULTS, records)
-	mock.reset({ prefs = defaultPrefs(), confirmAnswer = 'ok' })
-	mock.state.prefs.resultsPath = RESULTS
-	mock.state.dropWrites[fileName] = drops
-	for _, spec in ipairs(photos) do mock.addPhoto(spec[1], spec[2] or {}) end
-	mock.install(PLUGIN)
-	package.loaded['MelampusJson'] = nil; package.loaded['MelampusRules'] = nil
-	package.loaded['MelampusLog'] = nil; package.loaded['MelampusAnalyze'] = nil
-	assert(loadfile(PLUGIN .. '/MelampusImport.lua'))()
+	runImport(records, photos, defaultPrefs(), { dropWrites = { [fileName] = drops } })
 end
 
 local function logMatching(needle)
@@ -370,5 +375,228 @@ t.test('one failing photo does not stop the others', function()
 		'the count did not exclude the photo that failed')
 end)
 
+-- ── analysing runs the executable beside the plugin (card #401) ────────────
+-- The executable ships inside Melampus.lrplugin: `melampus` on macOS,
+-- `melampus.exe` on Windows. The plugin runs it with --plugin-out, one command,
+-- and never consults a Python environment.
+
+--- Run the import with photos the results file has never seen, accept the
+--- offer to analyse, and hand back the commands the shell was given.
+local function runAnalysis(existing)
+	runImport({}, { { 'fresh_01.CR3' }, { 'fresh_02.CR3' } }, defaultPrefs(),
+		{ existing = existing })
+	return mock.state.executed or {}
+end
+
+-- The executable beside this plugin, on the fake macOS Lightroom the suite
+-- runs the import under; the mock reports it present when a test says so.
+local MAC_EXECUTABLE = PLUGIN .. '/melampus'
+
+-- A fake Windows Lightroom: the plugin in the per-user Modules folder, the
+-- previews in the temp folder the mock names for WIN_ENV.
+local WIN_PLUGIN = 'C:\\Users\\photographer\\AppData\\Roaming\\Adobe\\Lightroom\\Modules\\Melampus.lrplugin'
+local WIN_EXECUTABLE = WIN_PLUGIN .. '\\melampus.exe'
+local WIN_TEMP = 'C:\\Users\\photographer\\AppData\\Local\\Temp'
+local WIN_PREVIEWS = WIN_TEMP .. '\\melampus-previews-1'
+
+--- Load MelampusAnalyze.lua under a fake Windows Lightroom, with or without
+--- melampus.exe beside the plugin.
+local function loadAnalyzeOnWindows(executablePresent)
+	local existing = {}
+	if executablePresent then existing[WIN_EXECUTABLE] = true end
+	return loadUnderMock('MelampusAnalyze', { existing = existing }, WIN_PLUGIN, { windows = true })
+end
+
+--- The one line the import runs on macOS: the executable beside the plugin
+--- over the first batch of previews in the mock's temp directory, the
+--- enriched results next to the previews, the CLI's own output kept in temp,
+--- every path single-quoted for sh, an apostrophe in it (a checkout or a
+--- TMPDIR under a name like O'Brien) closed, escaped and reopened, as sh
+--- needs it. The whole line, so nothing of a Python checkout (python, .venv,
+--- tools/, cd) can be in it, wherever the clone is.
+local function macCommand()
+	local temp = mock.state.tempDir
+	local previews = temp .. '/melampus-previews-1'
+	return table.concat({
+		mock.sh(MAC_EXECUTABLE), mock.sh(previews),
+		'--profile', mock.sh('wildlife'),
+		'--plugin-out', mock.sh(previews .. '/results.json'),
+		'--yes',
+		'>' .. mock.sh(temp .. '/melampus-cli.log') .. ' 2>&1',
+	}, ' ')
+end
+
+--- What Analyze.run says when the executable is not beside the plugin: the
+--- file expected, named as a file (the folder's own name holds "melampus"),
+--- and the folder that should hold it. No setup instruction; the user copies
+--- one file.
+local function missingExecutableMessage(executableName, folder)
+	return 'Melampus could not find its analysis program.\n\n'
+		.. 'The plugin folder should contain a file named ' .. executableName .. ':\n' .. folder
+		.. '\n\nCopy it there from the Melampus download and try again.'
+end
+
+t.test('analysing runs the executable beside the plugin, in one command', function()
+	local executed = runAnalysis({ [MAC_EXECUTABLE] = true })
+	t.equals(#executed, 1, 'expected one command for identification and enrichment together')
+	t.equals(executed[1], macCommand(), 'not the one command for the executable beside the plugin')
+end)
+
+t.test('every run exports its previews afresh', function()
+	-- exportPreviews skips a preview that is already on disk. If runs share
+	-- the machine's temp directory, the previews one run leaves are found by
+	-- the next, the mock's requestJpegThumbnail is never called, and the
+	-- outcome depends on what an earlier run (or an earlier suite) left behind.
+	runAnalysis({ [MAC_EXECUTABLE] = true })
+	t.equals(mock.state.previewsRequested, 2, 'the first run found previews it did not export')
+	runAnalysis({ [MAC_EXECUTABLE] = true })
+	t.equals(mock.state.previewsRequested, 2, "the second run found the first run's previews")
+end)
+
+t.test('with no results file configured, the executable analyses the selection', function()
+	-- docs/plugin.md: leave the results path empty and the plugin analyses. A
+	-- fresh install has no results file, so its first run must reach the offer
+	-- and run the executable, not ask for a file from a Python checkout.
+	runImport(nil, { { 'first_01.CR3' }, { 'first_02.CR3' } }, defaultPrefs(),
+		{ existing = { [MAC_EXECUTABLE] = true } })
+	t.isNotNil(dialogMatching('never been analysed'),
+		'no offer to analyse; first dialog: ' .. tostring((mock.state.dialogs[1] or {}).body))
+	t.isNil(dialogMatching('plugin_results.json'), 'asked for a results file instead of analysing')
+	local executed = mock.state.executed or {}
+	t.equals(#executed, 1, 'the executable did not run')
+	t.equals(executed[1], macCommand(), 'not the one command for the executable beside the plugin')
+end)
+
+t.test('on Windows the command names melampus.exe with cmd.exe quoting', function()
+	local Analyze = loadAnalyzeOnWindows(true)
+	local ok, message = Analyze.run(WIN_PREVIEWS, WIN_PREVIEWS .. '\\results.json', 'wildlife')
+	t.isTrue(ok, 'run failed: ' .. tostring(message))
+	-- Every path double-quoted (single quotes mean nothing to cmd.exe), and
+	-- the whole line wrapped in a pair of its own: cmd.exe /c strips the
+	-- first and last quote of a line that starts with one and holds more
+	-- than two, so the ones around each path survive.
+	t.equals(mock.state.executed[1], string.format(
+		'""%s" "%s" --profile "wildlife" --plugin-out "%s\\results.json" --yes >"%s\\melampus-cli.log" 2>&1"',
+		WIN_EXECUTABLE, WIN_PREVIEWS, WIN_PREVIEWS, WIN_TEMP),
+		'not the one command for melampus.exe beside the plugin, as cmd.exe needs it')
+end)
+
+t.test('the analyse offer is worded for both platforms', function()
+	-- Windows is a covered invocation path; a Windows user is not on a Mac.
+	runAnalysis({})
+	local offer = dialogMatching('never been analysed')
+	t.isNotNil(offer, 'no offer to analyse')
+	t.isNil(string.find(offer, '%f[%a]Mac%f[%A]'), 'the offer says Mac:\n' .. offer)
+end)
+
+t.test('the "%" refusal names the path that has it, and the fix for that path', function()
+	-- cmd.exe rewrites %NAME% even inside quotes; the plugin refuses rather
+	-- than run against a path the user never named. Moving the plugin is the
+	-- fix only when the "%" is in the plugin folder.
+	local Analyze = loadAnalyzeOnWindows(true)
+	local previews = 'C:\\Users\\photo%grapher\\AppData\\Local\\Temp\\melampus-previews-1'
+	local ok, message = Analyze.run(previews, previews .. '\\results.json', 'wildlife')
+	t.isFalse(ok, 'ran with a "%" in the previews path')
+	t.isNotNil(string.find(message, previews, 1, true),
+		'the message does not name the previews path:\n' .. message)
+	t.isNil(string.find(message, 'Move the plugin', 1, true),
+		'moving the plugin would not fix the previews path:\n' .. message)
+
+	local results = 'D:\\out%put\\results.json'
+	ok, message = Analyze.run(WIN_PREVIEWS, results, 'wildlife')
+	t.isFalse(ok, 'ran with a "%" in the results path')
+	t.isNotNil(string.find(message, results, 1, true),
+		'the message does not name the results path:\n' .. message)
+	t.isNil(mock.state.executed, 'ran a command through a path with "%"')
+end)
+
+t.test('a missing executable names the plugin folder and the file it should hold', function()
+	-- Absent by name, not by omission: the readme's install step puts the
+	-- real executable beside this plugin, and a mock that then looked at the
+	-- disk would find it and run it, so the test must hold on an installed
+	-- checkout as on a bare one.
+	local executed = runAnalysis({ [MAC_EXECUTABLE] = false })
+	t.equals(#executed, 0, 'ran a command with no executable to run')
+	local message = dialogMatching(PLUGIN)
+	t.isNotNil(message, 'no dialog names the plugin folder ' .. PLUGIN)
+	-- The import adds where it left the previews; the rest is Analyze.run's
+	-- message, whole, so it cannot carry a setup instruction.
+	t.equals(message, missingExecutableMessage('melampus', PLUGIN)
+		.. '\n\nPreviews kept at:\n' .. mock.state.tempDir .. '/melampus-previews-1',
+		'not the message for a missing executable')
+end)
+
+t.test('a missing executable on Windows names melampus.exe and the plugin folder', function()
+	local Analyze = loadAnalyzeOnWindows(false)
+	local ok, message = Analyze.run(WIN_PREVIEWS, WIN_PREVIEWS .. '\\results.json', 'wildlife')
+	t.isFalse(ok, 'ran with no executable present')
+	t.isNil(mock.state.executed, 'ran a command with no executable to run')
+	t.equals(message, missingExecutableMessage('melampus.exe', WIN_PLUGIN),
+		'not the message for a missing melampus.exe')
+end)
+
+-- ── the Settings dialog describes the plugin as it is now ──────────────────
+-- The offer and Info.lua stopped saying "Mac" and stopped presenting a results
+-- file worked out elsewhere as the plugin; the Settings dialog is read by the
+-- same Windows user and must say the same thing.
+
+--- Every string the dialog shows, from the view tree the mock kept: titles
+--- (static text, group boxes, checkboxes, buttons) and tooltips, in order.
+local function dialogStrings(view, out)
+	out = out or {}
+	if type(view) ~= 'table' then return out end
+	for _, key in ipairs({ 'title', 'tooltip' }) do
+		if type(view[key]) == 'string' then out[#out + 1] = view[key] end
+	end
+	for _, child in ipairs(view) do dialogStrings(child, out) end
+	return out
+end
+
+--- The view bound to a preference, and the group box that holds it.
+local function viewBoundTo(view, key, group)
+	if type(view) ~= 'table' then return nil end
+	if view.kind == 'group_box' then group = view end
+	if view.value == key then return view, group end
+	for _, child in ipairs(view) do
+		local found, holder = viewBoundTo(child, key, group)
+		if found then return found, holder end
+	end
+	return nil
+end
+
+t.test('the Settings dialog is worded for both platforms and the executable flow', function()
+	loadUnderMock('MelampusSettings', { prefs = defaultPrefs() })
+	local dialog = mock.state.dialogs[1]
+	t.isNotNil(dialog and dialog.modal and dialog.contents or nil,
+		'the Settings dialog was not presented with its contents')
+	local strings = dialogStrings(dialog.contents)
+	local text = table.concat(strings, '\n')
+	for _, platform in ipairs({ 'Mac', 'Finder', 'Explorer' }) do
+		t.isNil(string.find(text, '%f[%a]' .. platform .. '%f[%A]'),
+			'the Settings dialog says ' .. platform .. ':\n' .. text)
+	end
+
+	-- The opening text says what the plugin does: it analyses, here.
+	local intro = strings[1]
+	t.isNotNil(string.find(intro, 'analys', 1, true),
+		'the opening text does not say the plugin analyses the photos:\n' .. intro)
+
+	-- The results file is the optional import of results produced elsewhere,
+	-- not a required first step, and it is --plugin-out output that is read.
+	local field, group = viewBoundTo(dialog.contents, 'resultsPath')
+	t.isNotNil(field, 'no field is bound to resultsPath')
+	t.isNotNil(group, 'the results-file field is not in a group box')
+	t.isNotNil(string.find(string.lower(group.title), 'optional', 1, true),
+		'the results-file group does not say it is optional:\n' .. group.title)
+	t.isNotNil(string.find(tostring(field.tooltip), '--plugin-out', 1, true),
+		'the results-file tooltip does not name --plugin-out:\n' .. tostring(field.tooltip))
+	t.isNil(string.find(text, 'json-out', 1, true), 'the dialog still names --json-out:\n' .. text)
+	-- With no first step, nothing is numbered as a step.
+	for _, s in ipairs(strings) do
+		t.isNil(string.match(s, '^Step %d'), 'numbered as a step when there is no first step: ' .. s)
+	end
+end)
+
 os.remove(RESULTS)
+mock.cleanUp()
 return t.summary()

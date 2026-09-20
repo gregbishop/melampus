@@ -1,9 +1,9 @@
 # The Lightroom Classic plugin
 
-A **review-only** build. It reads identification results from a JSON file and
-writes them into the catalog, so review happens inside Lightroom's own grid and
-loupe rather than a separate window. There is no HTTP service and no bundled
-binary yet — those are Stage 3.
+It analyses the selected photos with the executable that sits in its own folder
+and writes the identifications into the catalog, so review happens inside
+Lightroom's own grid and loupe rather than a separate window. It can also read
+results from a JSON file produced elsewhere. There is no HTTP service.
 
 Developed against **Lightroom Classic 15.4.1**.
 
@@ -12,20 +12,23 @@ Developed against **Lightroom Classic 15.4.1**.
 ## Install
 
 ```bash
-# 1. Produce results the plugin can read: identification and the enrichment
-#    (burst agreement, range flag, encounter, quality) in one run
-.venv/bin/melampus-id fixtures_full --plugin-out plugin_results.json
+# 1. Put the executable in the plugin folder: melampus on macOS, melampus.exe
+#    on Windows (readme.md § Building the executable, or a release download).
+cp dist/melampus plugin/Melampus.lrplugin/
 ```
 
-(`tools/make_plugin_results.py` still produces the same file from an existing
-`--json-out` — it is a thin caller of `melampus.plugin_results`, kept for the
-plugin's Analyze command until it is rewired to pass `--plugin-out`.)
+The plugin runs that file, from its own folder, to analyse photos it has not seen:
+identification and the enrichment (burst agreement, range flag, encounter,
+quality) in one run, through `--plugin-out`. It never looks for a Python
+environment; if the file is missing it says which folder should hold it and what
+the file is called.
 
 2. In Lightroom: **File → Plug-in Manager… → Add**, and select
    `plugin/Melampus.lrplugin`. It should report *Installed and running*.
 
-3. **Library → Plug-in Extras → Melampus: Settings…** → Choose → select
-   `plugin_results.json`. Leave **Dry Run** on.
+3. **Library → Plug-in Extras → Melampus: Settings…** Leave **Dry Run** on. To
+   import results produced elsewhere (`melampus-id … --plugin-out
+   plugin_results.json`), Choose → select that file; otherwise leave it empty.
 
 4. Select photos, then **Plug-in Extras → Melampus: Import Identifications…**
    It reports what it would change and writes nothing.
@@ -112,8 +115,10 @@ skip cleanly when no interpreter is present:
 - **8 JSON tests** plus a parse of 1,093 real records.
 - **`luac -p` over every plugin file**, which has already caught a real bug.
 
-Note that Lightroom runs **Lua 5.1** while the local interpreter is 5.5. These
-catch logic errors, not dialect differences.
+Lightroom itself runs **Lua 5.1**. A local run and the macOS CI job use
+whatever Lua is installed (brew's, currently 5.5), so there these catch logic
+errors only; the Windows CI job installs Lua 5.1, Lightroom's own, and runs the
+same suites on it, so dialect differences are caught there.
 
 ---
 

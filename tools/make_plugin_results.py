@@ -4,10 +4,10 @@
         plugin_results.json --occurrence --quality
 
 A thin caller of `melampus.plugin_results`, which is what `melampus-id
---plugin-out` runs inside the executable (card #436). This entry point stays
-because the Lightroom plugin still invokes it until card #401 rewires the
-plugin; the enrichment itself lives in the service package, so the two write
-the same bytes from the same inputs.
+--plugin-out` runs inside the executable (card #436): the Lightroom plugin runs
+that one command against the executable beside it, and this entry point enriches
+a `--json-out` file already on disk. The enrichment itself lives in the service
+package, so the two write the same bytes from the same inputs.
 """
 
 from __future__ import annotations

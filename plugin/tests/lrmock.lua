@@ -15,8 +15,37 @@ local M = {}
 
 M.state = {}
 
+--- Single-quote a path for sh. Every path the mock hands to a shell goes
+-- through here: the temp directory comes from TMPDIR, and a space, a quote,
+-- a "$" or a backtick in it must arrive as the name it is, not be split,
+-- expanded or run.
+--
+-- The plugin's own quote() in MelampusAnalyze.lua has the same sh branch and
+-- is not used here on purpose. The mock's shell is always the host's sh, even
+-- while it fakes Windows; the plugin's quote() follows WIN_ENV, which the
+-- last install left set when the next reset's cleanUp runs, so it would
+-- double-quote for sh and "$" would expand again. And the mock stands in for
+-- the SDK beneath the plugin: it is loaded before `import` exists, so no
+-- plugin module can load yet, and its housekeeping must not depend on the
+-- module it exists to exercise.
+local function sh(text)
+	return "'" .. string.gsub(tostring(text), "'", "'\\''") .. "'"
+end
+-- Exposed so a suite can spell what a sh line must hold, from the same
+-- quoting the mock's own shell traffic uses, and still not from the plugin's.
+M.sh = sh
+
+--- Remove the temp directory this run made, if it made one.
+function M.cleanUp()
+	if M.state.tempDir then
+		os.execute('rm -rf ' .. sh(M.state.tempDir))
+		M.state.tempDir = nil
+	end
+end
+
 function M.reset(options)
 	options = options or {}
+	M.cleanUp()
 	M.state = {
 		photos = {},
 		keywords = {},        -- id -> { name, parent, children }
@@ -34,6 +63,13 @@ function M.reset(options)
 		-- failure this project actually hit: a write that raises nothing and lands
 		-- nothing, so a counter next to the call reports success that never happened.
 		dropWrites = options.dropWrites or {},
+		-- Paths LrFileUtils.exists answers for without touching the disk:
+		-- true is present, false is absent. The executable beside the
+		-- plugin, on either platform; false so a test that wants it missing
+		-- holds after the readme's install step has put the real one there.
+		existing = options.existing or {},
+		-- How many previews the plugin asked for in this run.
+		previewsRequested = 0,
 	}
 end
 
@@ -94,6 +130,15 @@ function Photo:addKeyword(keyword)
 end
 
 function Photo:getPropertyForPlugin(_, field) return self._plugin[field] end
+
+--- The real call is asynchronous and the plugin must retain the returned object;
+-- the mock answers at once with bytes that are not a JPEG, which is enough for
+-- the export loop to write a file and count it.
+function Photo:requestJpegThumbnail(width, height, callback)
+	M.state.previewsRequested = M.state.previewsRequested + 1
+	callback('mock-preview-bytes', nil)
+	return {}
+end
 
 function Photo:setPropertyForPlugin(_, field, value)
 	assert(M.state.inWriteGate, 'setPropertyForPlugin outside a write gate')
@@ -215,18 +260,26 @@ namespaces.LrDialogs = {
 	end,
 	runOpenPanel = function() return nil end,
 	runSavePanel = function() return nil end,
-	presentModalDialog = function() return 'ok' end,
+	-- Recorded with its view tree, so a test can read what the dialog says.
+	presentModalDialog = function(options)
+		M.state.dialogs[#M.state.dialogs + 1] = {
+			title = options.title, contents = options.contents, modal = true }
+		return 'ok'
+	end,
 }
 
 namespaces.LrFileUtils = {
 	exists = function(path)
+		if M.state.existing[path] ~= nil then
+			return M.state.existing[path] and 'file' or false
+		end
 		local handle = io.open(path, 'r')
 		if handle then handle:close(); return 'file' end
 		return false
 	end,
-	createAllDirectories = function(path) os.execute('mkdir -p ' .. path) return true end,
+	createAllDirectories = function(path) os.execute('mkdir -p ' .. sh(path)) return true end,
 	files = function(folder)
-		local handle = io.popen('ls -1 ' .. folder .. ' 2>/dev/null')
+		local handle = io.popen('ls -1 ' .. sh(folder) .. ' 2>/dev/null')
 		local names = {}
 		if handle then
 			for line in handle:lines() do names[#names + 1] = folder .. '/' .. line end
@@ -257,11 +310,51 @@ namespaces.LrFileUtils = {
 	end,
 }
 
+--- A temp directory of this run's own, made on first use and removed by the
+-- next reset or by M.cleanUp (as the suite does with its results file). The
+-- machine's temp directory would hand one run the previews an earlier run
+-- left, and keep them. Under TMPDIR when a caller sets one (pytest hands its
+-- tmp_path), which Lua's own os.tmpname would ignore.
+local function tempDir()
+	if not M.state.tempDir then
+		local base = os.getenv('TMPDIR') or '/tmp'
+		local handle = assert(io.popen('mktemp -d ' .. sh(base .. '/lrmock.XXXXXX')))
+		-- mktemp prints the path and one newline. The path is TMPDIR's and may
+		-- hold newlines of its own; read one line and it comes back cut, naming
+		-- TMPDIR's parent, which cleanUp would then remove. Read it whole and
+		-- drop only the newline mktemp added.
+		local path = (string.gsub(handle:read('*a') or '', '\n$', ''))
+		handle:close()
+		assert(path ~= '', 'mktemp made no directory under ' .. base)
+		M.state.tempDir = path
+	end
+	return M.state.tempDir
+end
+
+-- The host this mock runs on, as distinct from the Lightroom it fakes: Lua
+-- spells the directory separator first in package.config.
+local HOST_IS_WINDOWS = package.config:sub(1, 1) == '\\'
+
+--- The Windows temp folder of a fake Windows Lightroom. On a Windows host,
+-- the real one, TEMP, which is what Lightroom reports there, so a command
+-- built for cmd.exe can be run by cmd.exe and the CLI log it names has a
+-- folder to land in. Elsewhere a Windows path that exists nowhere: the
+-- host's shell could not run the command anyway, and the suites read the
+-- line, not the disk.
+local function windowsTemp()
+	if HOST_IS_WINDOWS then return assert(os.getenv('TEMP'), 'TEMP is not set') end
+	return 'C:\\Users\\photographer\\AppData\\Local\\Temp'
+end
+
+-- Lightroom joins paths with the platform's separator; WIN_ENV picks it.
 namespaces.LrPathUtils = {
-	child = function(dir, name) return dir .. '/' .. name end,
-	parent = function(path) return (string.gsub(path, '/[^/]+$', '')) end,
+	child = function(dir, name) return dir .. (WIN_ENV and '\\' or '/') .. name end,
+	parent = function(path) return (string.gsub(path, '[/\\][^/\\]+$', '')) end,
 	getStandardFilePath = function(which)
-		if which == 'temp' then return '/tmp' end
+		if which == 'temp' then
+			if WIN_ENV then return windowsTemp() end
+			return tempDir()
+		end
 		return os.getenv('HOME') or '/tmp'
 	end,
 }
@@ -303,21 +396,35 @@ namespaces.LrFunctionContext = {
 
 namespaces.LrColor = function() return {} end
 namespaces.LrShell = { revealInShell = function() end }
+--- The view factory hands back each spec as given, tagged with the kind of
+-- view asked for (static_text, group_box, ...), so a dialog's text can be
+-- read from the tree the plugin built.
 namespaces.LrView = {
 	osFactory = function()
-		return setmetatable({}, { __index = function() return function() return {} end end })
+		return setmetatable({}, { __index = function(_, kind)
+			return function(_, spec)
+				spec = spec or {}
+				spec.kind = kind
+				return spec
+			end
+		end })
 	end,
 	bind = function(key) return key end,
 }
 
 --- Install the SDK globals so plugin files can be dofile()'d directly.
-function M.install(pluginPath)
+-- `options.windows` fakes a Windows Lightroom: WIN_ENV set, MAC_ENV unset,
+-- backslash paths. The default is macOS.
+function M.install(pluginPath, options)
+	options = options or {}
 	_G.import = function(name)
 		local ns = namespaces[name]
 		if ns == nil then error('mock: unknown Lightroom namespace ' .. tostring(name), 2) end
 		return ns
 	end
 	_G._PLUGIN = { path = pluginPath, id = 'net.gregbishop.melampus' }
+	_G.WIN_ENV = options.windows and true or nil
+	_G.MAC_ENV = (not options.windows) and true or nil
 	_G.LOC = function(text) return text end
 end
 
