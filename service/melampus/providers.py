@@ -194,10 +194,12 @@ def is_cloud_primary(config: MelampusConfig) -> bool:
 def build_primary_backend(config: MelampusConfig) -> VLMBackend:
     """The backend the main pipeline talks to, per `[model] backend`.
 
-    `mlx` is the default and the local-first path; it exists only on Apple
-    Silicon. The cloud choices are for machines without a local runtime —
-    they reuse the exact classes escalation uses, so prompts, schema validation
-    and the corrective retry are identical wherever the answer comes from.
+    Nothing set, the CLI has already written `default_engine()` here: the
+    first engine detection says can run on this machine (card #404). `mlx` is
+    the local-first path and exists only on Apple Silicon. The cloud choices
+    are for machines without a local runtime — they reuse the exact classes
+    escalation uses, so prompts, schema validation and the corrective retry
+    are identical wherever the answer comes from.
     """
     kind = (config.model.backend or "mlx").strip().lower()
 
