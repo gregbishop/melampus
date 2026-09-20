@@ -20,7 +20,7 @@ import pytest
 from conftest import PHOTO
 
 from melampus import providers
-from test_binary import no_python_environment, on_apple_silicon, per_user_config
+from test_binary import no_python_environment, per_user_config
 
 REPO = Path(__file__).resolve().parents[2]
 PLUGIN = REPO / "plugin" / "Melampus.lrplugin"
@@ -363,7 +363,7 @@ def test_the_detection_the_plugin_runs_reaches_the_executable_and_fills_the_pick
     enabled = {value: state == "true" for value, state, _ in items}
     links = {value: link for value, _, link in items}
     assert enabled[""] and enabled["openai"] and enabled["claude"], listing
-    assert enabled["mlx"] is on_apple_silicon(), listing
+    assert enabled["mlx"] is providers.on_apple_silicon(), listing
     assert not enabled["ollama"], f"ollama greyed by nothing; an Ollama server answered?\n{listing}"
     assert links["ollama"] == providers.OLLAMA_INSTALL, listing
     assert all(links[value] == "nil" for value in ("", "mlx", "openai", "claude")), listing
