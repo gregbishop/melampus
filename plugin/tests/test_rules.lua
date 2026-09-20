@@ -16,6 +16,7 @@ catalog; applying the plan is the thin Lightroom layer's job.
 --]]
 
 local t = require('harness')
+local mock = require('lrmock')
 local Rules = require('MelampusRules')
 
 local function result(overrides)
@@ -273,20 +274,7 @@ end)
 -- only shows it. Rules.engineItems turns the decoded verdict list into the
 -- picker's items, in the owner's order, with the unavailable ones disabled and
 -- carrying their reason, and a note to show under the picker.
-local function verdicts(overrides)
-	local list = {
-		{ engine = 'mlx', available = true, reason = 'runs locally on this Apple Silicon Mac' },
-		{ engine = 'ollama', available = false,
-			reason = 'no Ollama server at http://127.0.0.1:11434; install it from https://ollama.com/download' },
-		{ engine = 'openai', available = true, reason = 'API key required: set MELAMPUS_OPENAI_KEY (or OPENAI_API_KEY)' },
-		{ engine = 'claude', available = true, reason = 'API key required: set MELAMPUS_ANTHROPIC_KEY (or ANTHROPIC_API_KEY)' },
-	}
-	for _, v in ipairs(list) do
-		local o = overrides and overrides[v.engine]
-		if o then for k, value in pairs(o) do v[k] = value end end
-	end
-	return list
-end
+local verdicts = mock.detectionVerdicts
 
 --- The items' values after the first, which lets the CLI choose.
 local function engineValues(items)

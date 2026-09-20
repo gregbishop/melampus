@@ -46,6 +46,52 @@ function M.runThroughTheShell(command)
 	return code
 end
 
+--- What `melampus --detect-engines` says on a Mac with no Ollama running,
+-- decoded: one verdict per engine, in the order the executable prints them.
+-- `overrides[engine]` replaces fields of that engine's verdict. The one
+-- canned answer every suite starts from, so a reason is spelled once.
+function M.detectionVerdicts(overrides)
+	local list = {
+		{ engine = 'mlx', available = true, reason = 'runs locally on this Apple Silicon Mac' },
+		{ engine = 'ollama', available = false,
+			reason = 'no Ollama server at http://127.0.0.1:11434; install it from https://ollama.com/download' },
+		{ engine = 'openai', available = true, reason = 'API key required: set MELAMPUS_OPENAI_KEY (or OPENAI_API_KEY)' },
+		{ engine = 'claude', available = true, reason = 'API key required: set MELAMPUS_ANTHROPIC_KEY (or ANTHROPIC_API_KEY)' },
+	}
+	for _, v in ipairs(list) do
+		local o = overrides and overrides[v.engine]
+		if o then for k, value in pairs(o) do v[k] = value end end
+	end
+	return list
+end
+
+--- The same answer as the JSON text the executable prints.
+function M.detectionText(overrides)
+	local function quoted(text)
+		return '"' .. string.gsub(tostring(text), '[\\"]', '\\%0') .. '"'
+	end
+	local parts = {}
+	for _, v in ipairs(M.detectionVerdicts(overrides)) do
+		parts[#parts + 1] = string.format('{"engine": %s, "available": %s, "reason": %s}',
+			quoted(v.engine), tostring(v.available), quoted(v.reason))
+	end
+	return '[' .. table.concat(parts, ', ') .. ']'
+end
+
+--- A fake executable for state.onExecute: answers a --detect-engines command
+-- by writing `text` to the file the command's stdout is redirected to, and
+-- exits with `code`; any other command exits 0 and writes nothing.
+function M.answersDetection(text, code)
+	return function(command)
+		if not string.find(command, '--detect-engines', 1, true) then return 0 end
+		local target = string.match(command, ">'([^']+)'")
+		local handle = assert(io.open(target, 'w'))
+		handle:write(text)
+		handle:close()
+		return code or 0
+	end
+end
+
 --- Remove the temp directory this run made, if it made one.
 function M.cleanUp()
 	if M.state.tempDir then

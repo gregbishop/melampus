@@ -16,44 +16,17 @@ local EXECUTABLE = PLUGIN .. '/melampus'
 local ENGINES = mock.loadPluginFile('MelampusRules').ENGINES
 local OLLAMA_DOWNLOAD = 'https://ollama.com/download'
 
-local function verdict(engine, available, reason)
-	return string.format('{"engine": %q, "available": %s, "reason": %q}', engine, tostring(available), reason)
-end
-
---- The executable's --detect-engines answer on a Mac with no Ollama running.
-local function detection(overrides)
-	local reasons = {
-		mlx = { true, 'runs locally on this Apple Silicon Mac' },
-		ollama = { false, 'no Ollama server at http://127.0.0.1:11434; install it from ' .. OLLAMA_DOWNLOAD },
-		openai = { true, 'API key required: set MELAMPUS_OPENAI_KEY (or OPENAI_API_KEY)' },
-		claude = { true, 'API key required: set MELAMPUS_ANTHROPIC_KEY (or ANTHROPIC_API_KEY)' },
-	}
-	for engine, value in pairs(overrides or {}) do reasons[engine] = value end
-	local parts = {}
-	for _, engine in ipairs(ENGINES) do
-		parts[#parts + 1] = verdict(engine, reasons[engine][1], reasons[engine][2])
-	end
-	return '[' .. table.concat(parts, ', ') .. ']'
-end
-
 --- Open the real Settings dialog under the mock. `options.detection` is what
---- the executable prints for --detect-engines (nil: no executable beside the
---- plugin); `options.onDialog` plays the user while the dialog is up.
+--- the executable prints for --detect-engines, from mock.detectionText (nil:
+--- no executable beside the plugin); `options.onDialog` plays the user while
+--- the dialog is up.
 local function openSettings(options)
 	options = options or {}
 	mock.reset({
 		prefs = mock.defaultPrefs(options.prefs),
 		existing = options.detection and { [EXECUTABLE] = true } or {},
 		passwords = options.passwords,
-		onExecute = function(command)
-			local target = string.match(command, ">'([^']+)'")
-			if target and options.detection then
-				local handle = assert(io.open(target, 'w'))
-				handle:write(options.detection)
-				handle:close()
-			end
-			return 0
-		end,
+		onExecute = options.detection and mock.answersDetection(options.detection) or nil,
 		onModalDialog = options.onDialog,
 	})
 	mock.install(PLUGIN)
@@ -104,7 +77,7 @@ end
 
 -- ── the picker ─────────────────────────────────────────────────────────────
 t.test('the settings dialog opens with a picker bound to prefs.engine listing the four engines in order', function()
-	local contents = openSettings({ detection = detection() })
+	local contents = openSettings({ detection = mock.detectionText() })
 	local picker = enginePicker(contents)
 	t.isNotNil(picker, 'no popup_menu bound to engine')
 	local values = {}
@@ -117,7 +90,7 @@ t.test('the settings dialog opens with a picker bound to prefs.engine listing th
 end)
 
 t.test('detection runs once, when the dialog opens', function()
-	openSettings({ detection = detection() })
+	openSettings({ detection = mock.detectionText() })
 	local detections = 0
 	for _, command in ipairs(mock.state.executed or {}) do
 		if string.find(command, '--detect-engines', 1, true) then detections = detections + 1 end
@@ -127,7 +100,7 @@ t.test('detection runs once, when the dialog opens', function()
 end)
 
 t.test('engines that cannot run here are greyed and their reasons shown', function()
-	local contents = openSettings({ detection = detection({ mlx = { false, 'needs Apple Silicon' } }) })
+	local contents = openSettings({ detection = mock.detectionText({ mlx = { available = false, reason = 'needs Apple Silicon' } }) })
 	local enabled = {}
 	for _, item in ipairs(enginePicker(contents).items) do enabled[item.value] = item.enabled end
 	t.isFalse(enabled.mlx, 'mlx should be greyed')
@@ -141,7 +114,7 @@ t.test('engines that cannot run here are greyed and their reasons shown', functi
 end)
 
 t.test('with every engine available nothing is greyed', function()
-	local contents = openSettings({ detection = detection({ ollama = { true, 'Ollama is answering at http://127.0.0.1:11434' } }) })
+	local contents = openSettings({ detection = mock.detectionText({ ollama = { available = true, reason = 'Ollama is answering at http://127.0.0.1:11434' } }) })
 	for _, item in ipairs(enginePicker(contents).items) do
 		t.isTrue(item.enabled, item.value .. ' was greyed')
 	end
@@ -150,7 +123,7 @@ end)
 
 -- ── the Ollama link ────────────────────────────────────────────────────────
 t.test('when ollama is unavailable a link opens the Ollama download page', function()
-	local contents = openSettings({ detection = detection() })
+	local contents = openSettings({ detection = mock.detectionText() })
 	local links = titlesMatching(contents, OLLAMA_DOWNLOAD)
 	local clickable = {}
 	for _, view in ipairs(links) do
@@ -163,7 +136,7 @@ t.test('when ollama is unavailable a link opens the Ollama download page', funct
 end)
 
 t.test('when ollama is available there is no link', function()
-	local contents = openSettings({ detection = detection({ ollama = { true, 'Ollama is answering at http://127.0.0.1:11434' } }) })
+	local contents = openSettings({ detection = mock.detectionText({ ollama = { available = true, reason = 'Ollama is answering at http://127.0.0.1:11434' } }) })
 	for _, entry in ipairs(viewsOfKind(contents, 'static_text')) do
 		t.isNil(entry.view.mouse_down, 'a clickable link is shown with nothing to install: ' .. tostring(entry.view.title))
 	end
@@ -191,7 +164,7 @@ local function visibleFor(entry, engine)
 end
 
 t.test('a password field takes the key for openai and for claude, shown only when that engine is picked', function()
-	local contents = openSettings({ detection = detection() })
+	local contents = openSettings({ detection = mock.detectionText() })
 	local fields = keyFields(contents)
 	t.isNotNil(fields.MELAMPUS_OPENAI_KEY, 'no password field for the OpenAI key')
 	t.isNotNil(fields.MELAMPUS_ANTHROPIC_KEY, 'no password field for the Claude key')
@@ -209,7 +182,7 @@ t.test('a password field takes the key for openai and for claude, shown only whe
 end)
 
 t.test('the password fields are not bound to the preferences', function()
-	local contents = openSettings({ detection = detection() })
+	local contents = openSettings({ detection = mock.detectionText() })
 	for variable, entry in pairs(keyFields(contents)) do
 		t.isNotNil(entry.view.bind_to_object, variable .. ' inherits the dialog\'s binding target, the preferences')
 		t.isFalse(entry.view.bind_to_object == mock.state.prefs, variable .. ' is bound to the preferences')
@@ -235,7 +208,7 @@ local TYPED = 'typed-into-the-dialog-not-a-real-key-7f3a'
 
 t.test('a typed key is stored through LrPasswords and lands nowhere else', function()
 	openSettings({
-		detection = detection(),
+		detection = mock.detectionText(),
 		prefs = { engine = 'openai' },
 		onDialog = function(options)
 			local fields = keyFields(options.contents)
@@ -259,7 +232,7 @@ end)
 
 t.test('a stored key is shown back in its field, and an emptied one is forgotten', function()
 	local contents = openSettings({
-		detection = detection(),
+		detection = mock.detectionText(),
 		passwords = { MELAMPUS_ANTHROPIC_KEY = TYPED },
 		onDialog = function(options)
 			local fields = keyFields(options.contents)

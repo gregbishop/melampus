@@ -728,30 +728,11 @@ end)
 -- runs the executable beside it once, reads the JSON it printed, and hands the
 -- decoded list to Rules.engineItems; a missing executable is the same message
 -- the analysis gives, never a crash.
-local DETECTION = '[{"engine": "mlx", "available": true, "reason": "runs locally on this Apple Silicon Mac"},'
-	.. ' {"engine": "ollama", "available": false, "reason": "no Ollama server at http://127.0.0.1:11434; install it from https://ollama.com/download"},'
-	.. ' {"engine": "openai", "available": true, "reason": "API key required: set MELAMPUS_OPENAI_KEY (or OPENAI_API_KEY)"},'
-	.. ' {"engine": "claude", "available": true, "reason": "API key required: set MELAMPUS_ANTHROPIC_KEY (or ANTHROPIC_API_KEY)"}]'
-
---- A fake executable for the mock's LrTasks.execute: answers a --detect-engines
---- command by writing `text` to the file the command's stdout is redirected to,
---- and exits with `code`.
-local function answersDetection(text, code)
-	return function(command)
-		if not string.find(command, '--detect-engines', 1, true) then return 0 end
-		local target = string.match(command, ">'([^']+)'")
-		local handle = assert(io.open(target, 'w'))
-		handle:write(text)
-		handle:close()
-		return code or 0
-	end
-end
-
 --- Load MelampusAnalyze.lua under a fake macOS Lightroom with the executable
---- beside the plugin, played by answersDetection(text, code).
+--- beside the plugin, played by mock.answersDetection(text, code).
 local function loadAnalyzeAnswering(text, code)
 	return loadUnderMock('MelampusAnalyze',
-		{ existing = { [MAC_EXECUTABLE] = true }, onExecute = answersDetection(text, code) })
+		{ existing = { [MAC_EXECUTABLE] = true }, onExecute = mock.answersDetection(text, code) })
 end
 
 --- The one line detection runs on macOS: the executable beside the plugin
@@ -764,7 +745,7 @@ local function macDetectionCommand()
 end
 
 t.test('detection runs the executable once with --detect-engines and returns the decoded list', function()
-	local Analyze = loadAnalyzeAnswering(DETECTION)
+	local Analyze = loadAnalyzeAnswering(mock.detectionText())
 	local verdicts, problem = Analyze.detectEngines()
 	t.isNotNil(verdicts, 'no verdicts: ' .. tostring(problem))
 	t.equals(#mock.state.executed, 1, 'detection should run the executable exactly once')
