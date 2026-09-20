@@ -9,10 +9,14 @@ live here and both callers import them.
 
 from __future__ import annotations
 
+import contextlib
+import http.client
 import platform
+import socket
 import sys
-import urllib.request
+import threading
 from dataclasses import dataclass
+from urllib.parse import urlsplit
 
 from pydantic import SecretStr
 
@@ -91,33 +95,53 @@ def _refusal(reason: str, *, works_here: tuple[str, ...]) -> BackendUnavailable:
     )
 
 
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    """Refuses every redirect: returning None makes urllib raise the 3xx as an
-    HTTPError instead of following its Location."""
-
-    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: PLR0913 - urllib's signature
-        return None
+def _hang_up(connection: http.client.HTTPConnection, expired: threading.Event) -> None:
+    """The deadline, from its timer. Not connection.close(): the response
+    being read holds the socket's file object, and socket.close() waits for
+    that to go before it really closes, so the blocked read would read on.
+    shutdown(SHUT_RDWR) ends the stream now. And `expired`, because
+    http.client takes end-of-stream as the end of the headers: a status line
+    that arrived before the trickle would still parse as a 200, and the
+    probe must know the deadline finished the response, not the server. No
+    socket yet means the probe is still connecting, and the socket timeout
+    bounds that."""
+    expired.set()
+    if connection.sock is not None:
+        with contextlib.suppress(OSError):
+            connection.sock.shutdown(socket.SHUT_RDWR)
 
 
 def ollama_answers() -> bool:
     """Whether an Ollama server answers at OLLAMA_URL: GET /api/version
     (Ollama's docs/api.md § Version) within OLLAMA_PROBE_SECONDS, status 200.
     Connection refused, a timeout, a non-200: unavailable. Never raises; a
-    probe reports. Straight to the address, never through a proxy: urlopen's
-    default honours http_proxy and the system proxy settings, which would send
-    a loopback probe off the machine and let the proxy's answer stand in for
-    Ollama's. And never past the address: redirects are refused, because
-    build_opener follows them by default, and whatever listens on the port
-    when Ollama does not could point the probe at any host and have that
-    host's 200 stand in for Ollama's. A 3xx is a non-200: unavailable."""
-    direct = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect)
+    probe reports. Straight to the address, never through a proxy: urlopen
+    honours http_proxy and the system proxy settings, which would send a
+    loopback probe off the machine and let the proxy's answer stand in for
+    Ollama's; http.client consults neither. And never past the address:
+    http.client follows no redirect, and a 3xx is a non-200, so whatever
+    listens on the port when Ollama does not cannot point the probe at another
+    host and have that host's 200 stand in for Ollama's. And never past the
+    deadline: the socket timeout bounds each read, not the probe, so a
+    listener trickling headers a byte at a time could hold detection for as
+    long as it liked; a timer hangs up at OLLAMA_PROBE_SECONDS, and whatever
+    was read by then, the probe reports unavailable."""
+    address = urlsplit(OLLAMA_URL)
+    connection = http.client.HTTPConnection(
+        address.hostname, address.port, timeout=OLLAMA_PROBE_SECONDS
+    )
+    expired = threading.Event()
+    deadline = threading.Timer(OLLAMA_PROBE_SECONDS, _hang_up, [connection, expired])
+    deadline.start()
     try:
-        with direct.open(
-            f"{OLLAMA_URL}/api/version", timeout=OLLAMA_PROBE_SECONDS
-        ) as response:
-            return response.status == 200
+        connection.request("GET", "/api/version")
+        answered = connection.getresponse().status == 200
     except Exception:  # noqa: BLE001 - every failure means the same thing: not here
         return False
+    finally:
+        deadline.cancel()
+        connection.close()
+    return answered and not expired.is_set()
 
 
 @dataclass(frozen=True, slots=True)
