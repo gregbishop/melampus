@@ -250,14 +250,14 @@ end
 
 --- The shell line that runs the executable with `flag`, stdout to `stdout`
 -- and stderr to `stderr` (both under temp), or nil plus a message: the
--- executable is missing, or on Windows a path holds "%" (`what` names the
+-- executable is missing, or on Windows a path holds "%" (`label` names the
 -- stdout file for that refusal).
-local function commandLine(flag, stdout, stderr, what)
+local function commandLine(flag, stdout, stderr, label)
 	local executable, err = executableOrMessage()
 	if not executable then return nil, err end
 	local refusal = windowsPathRefusal({
 		{ 'plugin folder', pluginDir(), MOVE_PLUGIN },
-		{ what, stdout, IN_TEMP },
+		{ label, stdout, IN_TEMP },
 		{ 'log file', stderr, IN_TEMP },
 	})
 	if refusal then return nil, refusal end
@@ -273,11 +273,12 @@ local function execute(command, logged)
 end
 
 --- Run the executable once for one answer: `flag` with stdout to `output`
--- under temp and stderr to the CLI log. Returns the exit code and the two
--- paths, or nil plus a message when it could not run (commandLine).
-local function runFlag(flag, output, what)
+-- under temp and stderr to the CLI log (`label` names the output file for
+-- the Windows "%" refusal). Returns the exit code and the two paths, or nil
+-- plus a message when it could not run (commandLine).
+local function runFlag(flag, output, label)
 	local target, cliLog = tempPath(output), cliLogPath()
-	local command, err = commandLine(flag, target, cliLog, what)
+	local command, err = commandLine(flag, target, cliLog, label)
 	if not command then return nil, err end
 	return execute(command), target, cliLog
 end
@@ -300,10 +301,10 @@ end
 -- exited non-zero, or printed something `accept` does not recognise.
 -- `what` names the question for the messages, phrased to follow both
 -- "could not ask its analysis program" and "what its analysis program
--- said" ('about the model'); `file` the output file for the Windows "%"
+-- said" ('about the model'); `label` the output file for the Windows "%"
 -- refusal.
-local function askJson(flag, output, what, file, accept)
-	local code, target, cliLog = runFlag(flag, output, file)
+local function askJson(flag, output, what, label, accept)
+	local code, target, cliLog = runFlag(flag, output, label)
 	if not code then return nil, target end
 	if code ~= 0 then
 		return nil, 'Melampus could not ask its analysis program ' .. what
