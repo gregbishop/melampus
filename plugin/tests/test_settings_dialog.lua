@@ -471,9 +471,7 @@ t.test('Cancel writes the marker at the path the status named', function()
 	theButton(row, model, 'Download ' .. REPO, true).action()
 	mock.tick()
 	theButton(row, model, 'Cancel', true).action()
-	local handle = io.open(CANCEL_PATH, 'r')
-	t.isNotNil(handle, 'the marker was not written at ' .. CANCEL_PATH)
-	if handle then handle:close() end
+	t.isTrue(exists(CANCEL_PATH), 'the marker was not written at ' .. CANCEL_PATH)
 	mock.settle()
 	t.equals(model.phase, 'absent', 'a cancelled download should offer Download again')
 	t.equals(#dialogsShown(false), 0, 'a cancel is not an error')
@@ -572,12 +570,6 @@ local function loadAnalyze(options)
 	return mock.loadUnderMock('MelampusAnalyze', { existing = options.existing }, PLUGIN, options)
 end
 
-local function append(path, text)
-	local handle = assert(io.open(path, 'a'))
-	handle:write(text)
-	handle:close()
-end
-
 t.test('the download command runs the executable with stdout to the progress file and stderr to the log, on both shells', function()
 	local Analyze = loadAnalyze({ existing = { [mock.EXECUTABLE] = true } })
 	local progress, log = Analyze.downloadFiles()
@@ -611,13 +603,13 @@ local function startDownload(lines, code, stderr)
 		-- One line per tick, each after the poller has had its turn.
 		for _, line in ipairs(lines) do
 			mock.yield()
-			append(progressFile, line .. '\n')
+			writeFile(progressFile, line .. '\n', 'a')
 		end
-		if stderr then append(logFile, stderr) end
+		if stderr then writeFile(logFile, stderr, 'a') end
 		return code
 	end
 	local seen, finished = {}, nil
-	local handle, err = Analyze.downloadModel(os.getenv('TMPDIR') .. '/melampus-data/cache/download-cancel',
+	local handle, err = Analyze.downloadModel(CANCEL_PATH,
 		function(update) seen[#seen + 1] = update end,
 		function(exit, update, tail) finished = { code = exit, update = update, tail = tail } end)
 	t.isNotNil(handle, 'the download did not start: ' .. tostring(err))
@@ -648,9 +640,7 @@ end)
 t.test('a download that starts from a previous run\'s file does not read stale lines', function()
 	local Analyze = loadAnalyze({ existing = { [mock.EXECUTABLE] = true } })
 	local progressFile = Analyze.downloadFiles()
-	local handle = assert(io.open(progressFile, 'w'))
-	handle:write('done /previous/run\n')
-	handle:close()
+	writeFile(progressFile, 'done /previous/run\n')
 	local seen, finished = startDownload({ 'progress 0 100' }, 4)
 	mock.settle()
 	t.equals(seen[1].state, 'progress', 'the previous run\'s done line was read')
@@ -658,16 +648,15 @@ t.test('a download that starts from a previous run\'s file does not read stale l
 end)
 
 t.test('Cancel writes the marker where the status said, creating its folder', function()
-	local marker = os.getenv('TMPDIR') .. '/melampus-data/cache/download-cancel'
-	os.remove(marker)
+	os.remove(CANCEL_PATH)
 	local seen, finished, handle = startDownload({ 'progress 0 100', 'progress 10 100', 'cancelled' }, 4)
 	mock.tick()
 	handle.cancel()
-	t.isTrue(exists(marker), 'the marker was not written at ' .. marker)
+	t.isTrue(exists(CANCEL_PATH), 'the marker was not written at ' .. CANCEL_PATH)
 	mock.settle()
 	t.equals(finished().code, 4)
 	t.equals(finished().update.state, 'cancelled')
-	os.remove(marker)
+	os.remove(CANCEL_PATH)
 end)
 
 t.test('a Cancel clicked while the executable is still starting holds: the marker comes back on the next tick', function()
@@ -685,9 +674,9 @@ t.test('a Cancel clicked while the executable is still starting holds: the marke
 		markerAtStart = exists(CANCEL_PATH)
 		os.remove(CANCEL_PATH)
 		mock.yield()
-		append(progressFile, 'progress 0 100\n')
+		writeFile(progressFile, 'progress 0 100\n', 'a')
 		mock.yield()
-		append(progressFile, 'cancelled\n')
+		writeFile(progressFile, 'cancelled\n', 'a')
 		-- And on exit, whatever the outcome.
 		os.remove(CANCEL_PATH)
 		return 4
