@@ -583,6 +583,9 @@ t.test('the Settings dialog is worded for both platforms and the executable flow
 		t.isNil(string.find(text, '%f[%a]' .. platform .. '%f[%A]'),
 			'the Settings dialog says ' .. platform .. ':\n' .. text)
 	end
+	-- Windows has no keychain: the key's tooltip is read there too.
+	t.isNil(string.find(string.lower(text), 'keychain', 1, true),
+		'the Settings dialog says keychain, which Windows has not:\n' .. text)
 
 	-- The opening text says what the plugin does: it analyses, here.
 	local intro = strings[1]

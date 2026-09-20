@@ -628,3 +628,7 @@ def test_docs_describe_the_engine_picker_and_where_the_key_lives():
     assert section, "readme.md has no ## Reviewing in Lightroom section"
     assert "docs/settings-dialog.png" in section.group(1), (
         "readme.md's Lightroom section does not show the settings dialog")
+    # The section is read on Windows too, which has no keychain: where the
+    # key is kept is said in platform-neutral words, as the dialog says it.
+    assert "keychain" not in section.group(1).lower(), (
+        "readme.md's Lightroom section says keychain, which Windows has not")

@@ -392,7 +392,7 @@ that folder. It should report *Installed and running*; **Library → Plug-in
 Extras → Melampus: Settings…** opens the settings, where **Where
 identification runs** picks the engine (mlx, ollama, openai, claude; the
 ones this machine cannot run are greyed with the reason) and takes the API
-key for a cloud engine, kept in your keychain:
+key for a cloud engine, kept in the system's secure store, not in a file:
 
 ![The Melampus settings dialog, with the engine picker](docs/settings-dialog.png)
 

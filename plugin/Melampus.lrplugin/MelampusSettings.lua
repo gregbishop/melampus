@@ -78,7 +78,7 @@ LrTasks.startAsyncTask(function()
 					f:password_field {
 						bind_to_object = keys, value = bind(variable),
 						width_in_chars = 42, immediate = true,
-						tooltip = 'Kept in your keychain, not in a file',
+						tooltip = 'Kept in the system\'s secure store, not in a file',
 					},
 				}
 			end
