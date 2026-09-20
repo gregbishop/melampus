@@ -634,10 +634,13 @@ def test_executable_detects_engines_as_json_with_no_python_on_the_path(
     built_executable: Path, tmp_path: Path
 ):
     """Card #404, from the executable alone: valid JSON on stdout, the four
-    engines in the owner's order, exit 0, no folder needed. No Ollama answers
-    on a runner, so ollama is unavailable with the install pointer; mlx's
-    verdict is whether this machine is Apple Silicon; the cloud engines are
-    available and name their key variable."""
+    engines in the owner's order, exit 0, no folder needed. Each local verdict
+    mirrors the machine running the suite, never a guess about it: mlx's is
+    whether this is Apple Silicon, ollama's is whether a server answers at
+    OLLAMA_URL, asked from this process over loopback (Done-when 4: a
+    developer's running Ollama decides nothing the test did not measure too),
+    with the install pointer when none does; the cloud engines are available
+    and name their key variable."""
     from melampus import providers
 
     proc = subprocess.run(
@@ -651,8 +654,10 @@ def test_executable_detects_engines_as_json_with_no_python_on_the_path(
     assert by_engine["mlx"]["available"] is on_apple_silicon()
     if not on_apple_silicon():
         assert by_engine["mlx"]["reason"] == "needs Apple Silicon"
-    assert by_engine["ollama"]["available"] is False, "an Ollama server answered on the runner?"
-    assert providers.OLLAMA_INSTALL in by_engine["ollama"]["reason"]
+    ollama_here = providers.ollama_answers()
+    assert by_engine["ollama"]["available"] is ollama_here
+    if not ollama_here:
+        assert providers.OLLAMA_INSTALL in by_engine["ollama"]["reason"]
     for engine in ("openai", "claude"):
         assert by_engine[engine]["available"] is True
         assert "API key required" in by_engine[engine]["reason"]
