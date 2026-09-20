@@ -21,7 +21,7 @@ import sys
 from pathlib import Path
 
 import pytest
-from conftest import FAKE_COMMIT, FAKE_FILES, FAKE_REPO, FakeHub, closed_port
+from conftest import FAKE_COMMIT, FAKE_FILES, FAKE_REPO, FakeHub, assert_download_completed, closed_port, snapshot_files
 
 from melampus import download
 from melampus.cli import main
@@ -44,10 +44,6 @@ def _fetch(hub: FakeHub, cache: Path, repo: str = FAKE_REPO) -> tuple[Path, list
     updates: list[Update] = []
     path = download_model(repo, endpoint=hub.endpoint, cache_dir=cache, on_update=updates.append)
     return path, updates
-
-
-def _snapshot_files(path: Path) -> dict[str, bytes]:
-    return {p.name: p.read_bytes() for p in sorted(path.iterdir())}
 
 
 def _incomplete(cache: Path) -> list[Path]:
@@ -96,7 +92,7 @@ def test_download_fetches_every_file_from_the_hub_and_reports_bytes_done_of_tota
 
     path, updates = _fetch(fake_hub, tmp_path / "hub")
 
-    assert _snapshot_files(path) == FAKE_FILES
+    assert snapshot_files(path) == FAKE_FILES
     assert path == tmp_path / "hub" / f"models--{FAKE_REPO.replace('/', '--')}" / "snapshots" / FAKE_COMMIT
     assert (path.parent.parent / "refs" / "main").read_text() == FAKE_COMMIT, "no ref for mlx-vlm to load offline"
     assert [u.state for u in updates] == ["progress"] * len(updates)
@@ -159,7 +155,7 @@ def test_download_keeps_the_partial_file_when_the_connection_drops_and_resumes_i
     path, updates = _fetch(fake_hub, tmp_path / "hub")
 
     assert fake_hub.gets("model.safetensors") == [f"bytes={CHUNK}-"], "the rest was not asked for by Range"
-    assert _snapshot_files(path) == FAKE_FILES
+    assert snapshot_files(path) == FAKE_FILES
     assert not _incomplete(tmp_path / "hub")
     total = sum(len(data) for data in FAKE_FILES.values())
     assert updates[0] == Update.progress(CHUNK + len(FAKE_FILES["config.json"]), total), (
@@ -193,7 +189,7 @@ def test_download_rejects_bytes_that_do_not_match_the_hub_checksum_and_keeps_no_
     path, _ = _fetch(fake_hub, tmp_path / "hub")
 
     assert fake_hub.gets(name) == [None], "the next run resumed the discarded partial instead of fetching whole"
-    assert _snapshot_files(path) == FAKE_FILES
+    assert snapshot_files(path) == FAKE_FILES
 
 
 def test_download_sends_the_user_token_to_the_hub_and_never_to_the_host_serving_the_bytes(
@@ -209,7 +205,7 @@ def test_download_sends_the_user_token_to_the_hub_and_never_to_the_host_serving_
         fake_hub.bytes_host = cdn.endpoint
         path, _ = _fetch(fake_hub, tmp_path / "hub")
 
-    assert _snapshot_files(path) == FAKE_FILES
+    assert snapshot_files(path) == FAKE_FILES
     assert all(a == "Bearer synthetic-token" for a in fake_hub.authorizations), fake_hub.authorizations
     assert [name for name in FAKE_FILES if cdn.gets(name)] == list(FAKE_FILES), "the bytes did not come from the CDN"
     assert cdn.authorizations == [None] * len(cdn.authorizations), "the token left the hub"
@@ -333,13 +329,7 @@ def test_cli_downloads_the_model_reporting_progress_and_exits_0_on_done(
     proc = _cli(["--download-model", "--model", FAKE_REPO], hub_env)
 
     assert proc.returncode == 0, proc.stderr[-3000:]
-    updates = [Update.parse(line) for line in proc.stdout.splitlines()]
-    total = sum(len(data) for data in FAKE_FILES.values())
-    assert updates[0] == Update.progress(0, total)
-    assert updates[-2] == Update.progress(total, total)
-    assert updates[-1].state == "done"
-    assert _snapshot_files(Path(updates[-1].path)) == FAKE_FILES
-    assert Path(updates[-1].path).is_relative_to(hub_env["HF_HOME"]), "the model went outside HF_HOME"
+    assert_download_completed(proc.stdout, hub_env)
 
 
 def test_cli_exits_3_naming_the_fix_when_the_repo_is_not_on_the_hub(fake_hub: FakeHub, hub_env: dict[str, str]):
@@ -396,5 +386,5 @@ def test_cli_cancelled_by_a_signal_keeps_the_partial_file_and_the_next_run_resum
         assert hub.gets("model.safetensors") == [f"bytes={kept}-"], "the rest was not asked for by Range"
         updates = [Update.parse(line) for line in proc.stdout.splitlines()]
         assert updates[0].bytes_done == kept + len(FAKE_FILES["config.json"])
-        assert _snapshot_files(Path(updates[-1].path))["model.safetensors"] == big
+        assert snapshot_files(Path(updates[-1].path))["model.safetensors"] == big
         assert not _incomplete(Path(hub_env["HF_HOME"]) / "hub")

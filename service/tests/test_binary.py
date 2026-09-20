@@ -61,7 +61,7 @@ import types
 from pathlib import Path
 
 import pytest
-from conftest import FAKE_FILES, FAKE_REPO, PHOTO, FakeHub, closed_port, fake_platform
+from conftest import FAKE_REPO, PHOTO, FakeHub, assert_download_completed, closed_port, fake_platform
 
 from melampus import config
 from melampus.backend import ScriptedBackend
@@ -682,8 +682,6 @@ def test_executable_downloads_the_model_from_the_hub_with_no_python_on_the_path(
     the hub library is in the bundle (on Windows only because pyproject names
     it), the protocol lines come out on stdout, exit 0 with `done <path>`, and
     the path under HF_HOME holds the fake host's files byte for byte."""
-    from melampus.download import Update
-
     env = no_python_environment(tmp_path) | hub_env
     proc = subprocess.run(
         [str(built_executable), "--download-model", "--model", FAKE_REPO],
@@ -692,11 +690,4 @@ def test_executable_downloads_the_model_from_the_hub_with_no_python_on_the_path(
     tail = proc.stderr[-3000:]
     _assert_no_missing_module(tail, "the executable does not carry the hub library")
     assert proc.returncode == 0, f"exit {proc.returncode}:\n{tail}"
-    updates = [Update.parse(line) for line in proc.stdout.splitlines()]
-    total = sum(len(data) for data in FAKE_FILES.values())
-    assert updates[0] == Update.progress(0, total)
-    assert updates[-2] == Update.progress(total, total)
-    assert updates[-1].state == "done"
-    snapshot = Path(updates[-1].path)
-    assert snapshot.is_relative_to(hub_env["HF_HOME"])
-    assert {p.name: p.read_bytes() for p in snapshot.iterdir()} == FAKE_FILES
+    assert_download_completed(proc.stdout, hub_env)
