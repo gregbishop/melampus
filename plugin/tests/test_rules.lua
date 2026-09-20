@@ -469,6 +469,17 @@ t.test('the engine the picker resolves to is the picked one, else the first dete
 	t.isNil(Rules.resolvedEngine('', nil), 'without detection nothing is resolved')
 end)
 
+t.test('whether an engine can run here is detection\'s verdict on it, and nothing runs without detection', function()
+	-- The dialog asks this to decide whether to ask about the MLX model at
+	-- all; it holds no engine knowledge of its own.
+	t.isTrue(Rules.canRun(verdicts(), 'mlx'))
+	t.isFalse(Rules.canRun(verdicts(), 'ollama'), 'no Ollama server is answering')
+	t.isFalse(Rules.canRun(verdicts({ mlx = { available = false, reason = 'needs Apple Silicon' } }), 'mlx'))
+	t.isFalse(Rules.canRun(nil, 'mlx'), 'without detection nothing is known to run')
+	t.isFalse(Rules.canRun({ 'not', 'verdicts' }, 'mlx'), 'output that is not the list')
+	t.isFalse(Rules.canRun(verdicts(), 'scripted'), 'an engine detection never names')
+end)
+
 -- ── colour labels ──────────────────────────────────────────────────────────
 t.test('colour labels mean something specific', function()
 	local s = settings({ writeLabel = true })

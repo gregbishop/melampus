@@ -93,12 +93,8 @@ LrTasks.startAsyncTask(function()
 		-- Cancel; once present, Installed and Remove. The status is asked
 		-- once, now, and only where mlx can run at all; the row shows when
 		-- the picked engine is mlx, or the unset preference resolves to it.
-		local mlxHere = false
-		for _, verdict in ipairs(type(verdicts) == 'table' and verdicts or {}) do
-			if type(verdict) == 'table' and verdict.engine == 'mlx' and verdict.available == true then mlxHere = true end
-		end
 		local status, statusProblem
-		if mlxHere then status, statusProblem = Analyze.modelStatus() end
+		if Rules.canRun(verdicts, 'mlx') then status, statusProblem = Analyze.modelStatus() end
 		if statusProblem then
 			engineViews[#engineViews + 1] = f:static_text {
 				title = statusProblem, height_in_lines = lineCount(statusProblem), text_color = grey,

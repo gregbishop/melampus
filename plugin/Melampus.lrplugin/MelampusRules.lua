@@ -182,16 +182,35 @@ function Rules.engineItems(verdicts, problem)
 	return items, note
 end
 
+--- The engines detection says can run here, by name, in the order the
+-- executable prints them (the owner's); empty without verdicts (no
+-- executable, or output that is not the list). The one walk of the
+-- verdicts for what can run.
+local function availableEngines(verdicts)
+	local names = {}
+	for _, verdict in ipairs(type(verdicts) == 'table' and verdicts or {}) do
+		if type(verdict) == 'table' and verdict.available == true then names[#names + 1] = verdict.engine end
+	end
+	return names
+end
+
+--- Whether detection said `engine` can run here (card #408: the dialog
+-- asks about the MLX model only where mlx can run). false without
+-- detection: nothing is known to run.
+function Rules.canRun(verdicts, engine)
+	for _, name in ipairs(availableEngines(verdicts)) do
+		if name == engine then return true end
+	end
+	return false
+end
+
 --- The engine a picker value comes to (card #408): the picked one, or with
 -- the preference unset the first that detection says can run here, in the
 -- owner's order, which is the executable's own default (providers
 -- .default_engine). nil when nothing is picked and there is no detection.
 function Rules.resolvedEngine(engine, verdicts)
 	if engine ~= nil and engine ~= '' then return engine end
-	for _, verdict in ipairs(type(verdicts) == 'table' and verdicts or {}) do
-		if type(verdict) == 'table' and verdict.available == true then return verdict.engine end
-	end
-	return nil
+	return availableEngines(verdicts)[1]
 end
 
 -- ── the model download (card #408) ─────────────────────────────────────────
