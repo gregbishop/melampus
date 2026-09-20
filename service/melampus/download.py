@@ -635,8 +635,11 @@ def model_status(repo: str, *, endpoint: str | None = None, cache_dir: Path | No
     for the file listing (the repo's info with file metadata, the one listing
     call that takes a timeout: STATUS_TIMEOUT) and, when it cannot answer or
     does not within that time, `bytes_total` is None: the status never fails
-    for the network being down."""
+    for the network being down. The hub is asked through `_hub_client`, as
+    the download asks it: the user's token goes only where that client lets
+    it go."""
     endpoint = endpoint or constants.ENDPOINT
+    set_client_factory(lambda: _hub_client(endpoint))
     cache, storage, _ = _cache_paths(repo, cache_dir)
     _, cached = _cached(repo, cache)
     main = next((r for r in cached.revisions if "main" in r.refs), None) if cached else None

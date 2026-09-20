@@ -1227,6 +1227,43 @@ def test_status_gives_up_on_a_hub_that_accepts_the_connection_and_never_answers(
                             path=None, cancel_path=str(cancel_marker_path()))
 
 
+@pytest.mark.parametrize(("host", "carried"), [("127.0.0.1", True), ("hub.example", False)],
+                         ids=["loopback http", "remote http"])
+def test_status_sends_the_user_token_to_a_loopback_hub_and_never_to_a_remote_http_hub(
+    fake_hub: FakeHub, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, host: str, carried: bool
+):
+    """Security (Codex review 1 of #16, download.py:645). The status asked the
+    hub through the hub library's default client, not `_hub_client`, which
+    `download_model` installs for every request the library makes: so
+    `--model-status`, run on its own as the Settings dialog runs it, sent the
+    user's token (`hf auth login`, or HF_TOKEN) to the hub whatever its origin,
+    in cleartext to an `http://` hub on another machine. The status goes
+    through the same client, so the token's rule is one rule: carried to a
+    loopback hub, stripped from a request to a remote http one. The remote
+    name resolves to the fake hub here, in this process only, so the request
+    it records is the one that would have left the machine."""
+    import socket
+
+    from huggingface_hub import set_client_factory
+    from huggingface_hub.utils._http import default_client_factory
+
+    monkeypatch.setenv("HF_TOKEN", "synthetic-token")
+    # The client `--model-status` starts with: the library's own, before any
+    # download in this process installed the protected one.
+    set_client_factory(default_client_factory)
+    resolve = socket.getaddrinfo
+    monkeypatch.setattr(socket, "getaddrinfo", lambda name, *rest, **kw: resolve(
+        "127.0.0.1" if name == "hub.example" else name, *rest, **kw))
+    port = fake_hub.endpoint.rpartition(":")[2]
+
+    status = model_status(FAKE_REPO, endpoint=f"http://{host}:{port}", cache_dir=tmp_path / "hub")
+
+    assert status.bytes_total == FAKE_TOTAL, "the hub was not asked"
+    assert fake_hub.requests, "no request reached the hub"
+    expected = "Bearer synthetic-token" if carried else None
+    assert all(r.authorization == expected for r in fake_hub.requests), fake_hub.requests
+
+
 def test_the_cancel_marker_lives_under_the_per_user_data_directory_beside_the_caches():
     """The plugin writes this file to cancel (docs/config.md § Downloading the
     model); it is named once here and the status carries it, so the plugin
