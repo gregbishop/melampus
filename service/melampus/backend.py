@@ -567,14 +567,22 @@ class OllamaBackend(VLMBackend):
     @classmethod
     def _error_text(cls, exc: urllib.error.HTTPError) -> str:
         """Ollama's own words when the body is its {"error": ...} object,
-        else the body as it came (a proxy's HTML, say), else the status line;
-        at most MAX_ERROR_BYTES of it."""
+        else the body as it came (a proxy's HTML, say), else the status
+        line's reason; at most MAX_ERROR_BYTES of it, and only its printable
+        characters. All three are the server's to write, and the text lands
+        in the frame's error record, the log and the terminal: an escape
+        sequence in it would move the cursor, recolour the terminal or erase
+        a line, and a line break would fake a line of the log. Whatever is
+        not printable (str.isprintable: the C0 and C1 controls, line and
+        paragraph breaks, the unassigned) becomes a space, and runs of
+        whitespace collapse to one, so what is left is one line of words."""
         body = exc.read(cls.MAX_ERROR_BYTES).decode("utf-8", "replace").strip()
         try:
             error = json.loads(body).get("error")
         except (json.JSONDecodeError, AttributeError):
             error = None
-        return error or body or exc.reason
+        text = f"{error}" if error else body or exc.reason
+        return " ".join("".join(c if c.isprintable() else " " for c in text).split())
 
     def complete(self, image_path: Path, prompt: str, max_tokens: int) -> Completion:
         request = self._request(image_path, prompt, max_tokens)

@@ -1472,6 +1472,40 @@ def test_ollama_backend_bounds_what_it_reads_of_an_error_body(tmp_path):
     assert len(str(err.value)) <= OllamaBackend.MAX_ERROR_BYTES + 40, len(str(err.value))
 
 
+@pytest.mark.parametrize(
+    ("error", "reason", "body", "said"),
+    [
+        ("\x1b[2K\rmodel 'x' not found\x07", "Not Found", None, "[2K model 'x' not found"),
+        (None, "Bad Gateway", b"<p>\x1b[31mproxy\x00error\r\nline two</p>", "<p> [31mproxy error line two</p>"),
+        (None, "Boom\x1b[0m\r\nfake log line", b"", "Boom [0m fake log line"),
+    ],
+    ids=["ollama-error-field", "plain-body", "status-reason"],
+)
+def test_ollama_backend_neutralises_control_characters_in_a_servers_error_text(
+    tmp_path, error, reason, body, said
+):
+    """Codex round 1 (backend.py:451), security: a non-200's text is the
+    server's, and it lands in the frame's error record, the log and the
+    terminal. Escape sequences and control characters in it would move the
+    cursor, recolour the terminal, erase a line, or fake a line of the log.
+    Given Ollama's `error` field, a plain body, or the status line's own
+    reason carrying ESC, BEL, NUL and line breaks, the message keeps the
+    words and none of the control characters: each becomes a space, runs
+    of whitespace collapse to one (what an escape sequence leaves behind,
+    `[2K`, is words), and the status is still named."""
+    image = tmp_path / "image.jpg"
+    image.write_bytes(b"jpeg")
+    if body is None:
+        body = json.dumps({"error": error}).encode("utf-8")
+    exc = urllib.error.HTTPError("http://127.0.0.1:11435/api/chat", 502, reason, {}, io.BytesIO(body))
+    backend = _ollama_backend(_FakeUrlopen(error=exc))
+    with pytest.raises(RuntimeError) as err:
+        backend.complete(image, "prompt", 10)
+    message = str(err.value)
+    assert message == f"Ollama answered 502: {said}", message
+    assert all(c.isprintable() for c in message), message
+
+
 def test_ollama_backend_bounds_what_it_reads_of_a_reply(tmp_path):
     """The reply is one object read into memory whole (`stream` false); a
     server that keeps sending must not fill it. Ollama's reply is the text of
