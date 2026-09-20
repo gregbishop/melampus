@@ -238,32 +238,53 @@ local function seeTheLogs(cliLog)
 	return '\n\nSee the logs:\n' .. Log.path() .. '\n' .. cliLog
 end
 
---- Run the executable for one JSON answer: `flag` with stdout to `output`
--- under temp and stderr to the CLI log, decoded. Returns the value, or nil
--- plus a message: the executable is missing, exited non-zero, or printed
--- something `accept` does not recognise. `what` names the question for the
--- messages, `file` the output file for the Windows "%" refusal. Runs the
--- executable once per call.
-local function askJson(flag, output, what, file, accept)
+--- The executable beside the plugin, or nil plus the missing message: the
+-- one check every command starts with.
+local function executableOrMessage()
 	local executable = Analyze.executablePath()
 	if not executable or not LrFileUtils.exists(executable) then
 		return nil, missingExecutable()
 	end
-	local target, cliLog = tempPath(output), cliLogPath()
+	return executable
+end
+
+--- The shell line that runs the executable with `flag`, stdout to `stdout`
+-- and stderr to `stderr` (both under temp), or nil plus a message: the
+-- executable is missing, or on Windows a path holds "%" (`what` names the
+-- stdout file for that refusal).
+local function commandLine(flag, stdout, stderr, what)
+	local executable, err = executableOrMessage()
+	if not executable then return nil, err end
 	local refusal = windowsPathRefusal({
 		{ 'plugin folder', pluginDir(), MOVE_PLUGIN },
-		{ file, target, IN_TEMP },
-		{ 'log file', cliLog, IN_TEMP },
+		{ what, stdout, IN_TEMP },
+		{ 'log file', stderr, IN_TEMP },
 	})
 	if refusal then return nil, refusal end
-	local command = shellLine(quote(executable) .. ' ' .. flag .. ' >'
-		.. quote(target) .. ' 2>' .. quote(cliLog))
-	Log.info('running: ' .. command)
-	local code = LrTasks.execute(command)
-	if code ~= 0 then
-		return nil, 'Melampus could not ask its analysis program ' .. what
-			.. ' (exit ' .. tostring(code) .. ').' .. seeTheLogs(cliLog)
-	end
+	return shellLine(quote(executable) .. ' ' .. flag .. ' >' .. quote(stdout) .. ' 2>' .. quote(stderr))
+end
+
+--- Run a line, logged as `logged` (the line itself by default; a run with
+-- a key in its environment logs the line with the key blanked), and hand
+-- back the exit code. Blocks for the run's duration.
+local function execute(command, logged)
+	Log.info('running: ' .. (logged or command))
+	return LrTasks.execute(command)
+end
+
+--- Run the executable once for one answer: `flag` with stdout to `output`
+-- under temp and stderr to the CLI log. Returns the exit code and the two
+-- paths, or nil plus a message when it could not run (commandLine).
+local function runFlag(flag, output, what)
+	local target, cliLog = tempPath(output), cliLogPath()
+	local command, err = commandLine(flag, target, cliLog, what)
+	if not command then return nil, err end
+	return execute(command), target, cliLog
+end
+
+--- The JSON the executable printed to `target`, decoded, or nil plus a
+-- message when `accept` does not recognise it. `what` names the question.
+local function decodeJson(target, cliLog, what, accept)
 	local value, err = Json.decode(LrFileUtils.readFile(target) or '')
 	if not accept(value) then
 		return nil, 'Melampus did not understand what its analysis program said about ' .. what
@@ -271,6 +292,21 @@ local function askJson(flag, output, what, file, accept)
 			.. seeTheLogs(cliLog)
 	end
 	return value
+end
+
+--- Run the executable for one JSON answer (runFlag, then decodeJson).
+-- Returns the value, or nil plus a message: the executable is missing,
+-- exited non-zero, or printed something `accept` does not recognise.
+-- `what` names the question for the messages, `file` the output file for
+-- the Windows "%" refusal.
+local function askJson(flag, output, what, file, accept)
+	local code, target, cliLog = runFlag(flag, output, file)
+	if not code then return nil, target end
+	if code ~= 0 then
+		return nil, 'Melampus could not ask its analysis program ' .. what
+			.. ' (exit ' .. tostring(code) .. ').' .. seeTheLogs(cliLog)
+	end
+	return decodeJson(target, cliLog, what, accept)
 end
 
 --- Ask the executable which engines can run here: `--detect-engines` (card
@@ -294,14 +330,8 @@ end
 -- 0 once it is gone. Returns true, or false plus a message with the CLI
 -- log's tail (a download of it is running, or nothing is installed).
 function Analyze.removeModel()
-	local executable = Analyze.executablePath()
-	if not executable or not LrFileUtils.exists(executable) then
-		return false, missingExecutable()
-	end
-	local cliLog = cliLogPath()
-	local command = shellLine(quote(executable) .. ' --remove-model >' .. quote(cliLog) .. ' 2>&1')
-	Log.info('running: ' .. command)
-	local code = LrTasks.execute(command)
+	local code, target, cliLog = runFlag('--remove-model', 'melampus-removed.txt', 'removal file')
+	if not code then return false, target end
 	if code ~= 0 then
 		return false, 'Melampus could not remove the model (exit ' .. tostring(code) .. ').\n\n'
 			.. Analyze.tail(LrFileUtils.readFile(cliLog))
@@ -336,15 +366,11 @@ function Analyze.downloadFiles()
 	return tempPath('melampus-download.progress'), tempPath('melampus-download.log')
 end
 
---- The shell line that downloads the model, or nil plus the missing-
--- executable message.
+--- The shell line that downloads the model, or nil plus a message
+-- (commandLine: the executable is missing, or a Windows path holds "%").
 function Analyze.downloadCommand()
-	local executable = Analyze.executablePath()
-	if not executable or not LrFileUtils.exists(executable) then
-		return nil, missingExecutable()
-	end
 	local progress, log = Analyze.downloadFiles()
-	return shellLine(quote(executable) .. ' --download-model >' .. quote(progress) .. ' 2>' .. quote(log))
+	return commandLine('--download-model', progress, log, 'progress file')
 end
 
 --- Start the download. One task runs the command; another reads the
@@ -375,9 +401,8 @@ function Analyze.downloadModel(cancelPath, onProgress, onFinish)
 		local handle = io.open(cancelPath, 'w')
 		if handle then handle:close() else Log.warn('could not write ' .. cancelPath) end
 	end
-	Log.info('running: ' .. command)
 	local code = nil
-	LrTasks.startAsyncTask(function() code = LrTasks.execute(command) end)
+	LrTasks.startAsyncTask(function() code = execute(command) end)
 	LrTasks.startAsyncTask(function()
 		while code == nil do
 			LrTasks.sleep(1)
@@ -406,10 +431,8 @@ end
 -- Returns true plus the results path, or false plus a message.
 function Analyze.run(previewFolder, resultsPath, profile, engine)
 	local folder = pluginDir()
-	local executable = Analyze.executablePath()
-	if not executable or not LrFileUtils.exists(executable) then
-		return false, missingExecutable()
-	end
+	local executable, missing = executableOrMessage()
+	if not executable then return false, missing end
 
 	local chosen, engineError = Rules.chosenEngine({ engine = engine })
 	if engineError then return false, engineError end
@@ -457,9 +480,7 @@ function Analyze.run(previewFolder, resultsPath, profile, engine)
 		line = environmentPrefix(variable, key) .. line
 		logged = environmentPrefix(variable, '') .. logged
 	end
-	local command = shellLine(line)
-	Log.info('running: ' .. shellLine(logged))
-	local code = LrTasks.execute(command)
+	local code = execute(shellLine(line), shellLine(logged))
 	if code ~= 0 then
 		return false, 'Identification failed (exit ' .. tostring(code) .. ').' .. seeTheLogs(cliLog)
 	end
