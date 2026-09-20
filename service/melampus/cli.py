@@ -32,17 +32,22 @@ def _venv_python() -> str:
     return ".venv\\Scripts\\python.exe" if sys.platform == "win32" else ".venv/bin/python"
 
 
+def _fail(message: str) -> int:
+    """Exit 3, the code for "could not run; the message on stderr names the
+    fix", from every site that refuses a run."""
+    print(message, file=sys.stderr)
+    return 3
+
+
 def _sdk_missing(backend: str) -> int:
     """The install hint for a cloud backend whose SDK is not here: which
     backend, and the extra that ships its SDK. Exit 3, for both the primary
     backend and the escalation provider."""
     extra = "openai" if backend == "openai" else "cloud"
-    print(
+    return _fail(
         f"The SDK for the {backend} backend is not installed. Run:\n"
-        f'  uv pip install --python {_venv_python()} "./service[{extra}]"',
-        file=sys.stderr,
+        f'  uv pip install --python {_venv_python()} "./service[{extra}]"'
     )
-    return 3
 
 
 def _humanise(seconds: float) -> str:
@@ -94,8 +99,7 @@ def _run_escalation(paths, local_cache: ResultCache, config, *,
         except ImportError:
             return _sdk_missing(config.escalation.provider)
         except ValueError as exc:
-            print(str(exc), file=sys.stderr)
-            return 3
+            return _fail(str(exc))
 
     # Range flags make the on_range_flag trigger reachable at all; previously
     # nothing computed them, so that documented case never fired.
@@ -121,8 +125,7 @@ def _run_escalation(paths, local_cache: ResultCache, config, *,
             range_flagged=range_flagged, dry_run=True,
         )
     except EscalationRefused as exc:
-        print(str(exc), file=sys.stderr)
-        return 3
+        return _fail(str(exc))
 
     settings = config.escalation
     print(
@@ -152,8 +155,7 @@ def _run_escalation(paths, local_cache: ResultCache, config, *,
             range_flagged=range_flagged, dry_run=False, on_result=progress,
         )
     except EscalationRefused as exc:
-        print(str(exc), file=sys.stderr)
-        return 3
+        return _fail(str(exc))
 
     print(
         f"  processed {run.processed}  changed {run.changed}  "
@@ -196,8 +198,7 @@ def _download_model(repo: str) -> int:
         emit(Update.cancelled())
         return EXIT_CANCELLED
     except DownloadError as exc:
-        print(str(exc), file=sys.stderr)
-        return 3
+        return _fail(str(exc))
     emit(Update.done(str(path)))
     return 0
 
@@ -358,8 +359,7 @@ def main(argv: list[str] | None = None) -> int:
         except ImportError:
             return _sdk_missing(config.model.backend)
         except (BackendUnavailable, ValueError) as exc:
-            print(str(exc), file=sys.stderr)
-            return 3
+            return _fail(str(exc))
         identifier = Identifier(backend, config)
 
         if cloud_primary:
@@ -391,13 +391,11 @@ def main(argv: list[str] | None = None) -> int:
             # truncated batch meaningful, so refusing outright beats billing an
             # arbitrary subset. Raising it is a config edit, i.e. deliberate.
             if pending > config.model.max_images:
-                print(
+                return _fail(
                     f"  refused: {pending} frame(s) exceed model.max_images = "
                     f"{config.model.max_images}. A cloud primary bills every frame — "
-                    "raise model.max_images in config, or narrow the run with --limit.",
-                    file=sys.stderr,
+                    "raise model.max_images in config, or narrow the run with --limit."
                 )
-                return 3
             if pending and not args.yes and not _confirm(pending, cost, yes_flag="--yes"):
                 print("  cancelled; nothing was sent", file=sys.stderr)
                 return 0
