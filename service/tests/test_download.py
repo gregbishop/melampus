@@ -386,6 +386,30 @@ def test_download_sends_the_user_token_to_the_hub_and_never_to_the_host_serving_
     assert all(r.authorization is None for r in cdn.requests), "the token left the hub"
 
 
+def test_download_sends_the_user_token_to_the_hub_and_never_to_a_host_the_listing_pages_on_to(
+    fake_hub: FakeHub, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Security (Codex round 2, download.py:244). The tree listing is paged:
+    huggingface_hub follows the `Link: rel="next"` URL the hub names, with
+    the same headers, wherever it points. The token's origin rule covered a
+    file's bytes only, so a hub naming another origin as the next page (another
+    host, or an `http://` downgrade of its own) had the user's token sent
+    there. Given a listing whose next page is on another loopback host, the
+    listing is followed there (it lists the rest, here nothing more) and
+    every request to it goes without the token, while every request to the
+    hub carries it; the model completes."""
+    monkeypatch.setenv("HF_TOKEN", "synthetic-token")
+    with FakeHub(files={}).serve() as elsewhere:
+        fake_hub.next_page = f"{elsewhere.endpoint}/api/models/{FAKE_REPO}/tree/{FAKE_COMMIT}?cursor=2"
+        path, _ = _fetch(fake_hub, tmp_path / "hub")
+
+    assert snapshot_files(path) == FAKE_FILES
+    assert [r.path for r in elsewhere.requests] == [f"/api/models/{FAKE_REPO}/tree/{FAKE_COMMIT}?cursor=2"], (
+        "the listing's next page was not followed")
+    assert all(r.authorization is None for r in elsewhere.requests), "the token left the hub"
+    assert all(r.authorization == "Bearer synthetic-token" for r in fake_hub.requests), fake_hub.requests
+
+
 @pytest.mark.parametrize(("url", "endpoint", "trusted"), [
     ("http://127.0.0.1:8/fake-org/fake-model/resolve/abc/config.json", "http://127.0.0.1:8", True),
     ("https://huggingface.co/x/resolve/abc/config.json", "https://huggingface.co", True),

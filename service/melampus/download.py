@@ -215,13 +215,23 @@ class _Progress:
         return ChunkCounter
 
 
-def _bounded_client() -> httpx.Client:
-    """The hub library's own httpx client, with every request it sends
-    without a timeout bounded by its own metadata timeout,
-    HF_HUB_ETAG_TIMEOUT. Its repo info and tree listing (each page) name
-    none, and httpx reads none as wait forever, so a hub that accepts the
-    connection and never answers held the command for good. Requests that
-    name a timeout (the bytes, the metadata HEAD) keep theirs."""
+def _hub_client(endpoint: str) -> httpx.Client:
+    """The hub library's own httpx client, with two rules on every request it
+    sends, wherever in the library the request is made.
+
+    Every request without a timeout is bounded by the library's own metadata
+    timeout, HF_HUB_ETAG_TIMEOUT. Its repo info and tree listing (each page)
+    name none, and httpx reads none as wait forever, so a hub that accepts
+    the connection and never answers held the command for good. Requests
+    that name a timeout (the bytes, the metadata HEAD) keep theirs.
+
+    The user's token goes only to the hub's own origin. The library sends
+    the token on every request it makes with the user's headers: the bytes
+    of an LFS file, which the hub redirects to its CDN (a signed URL on
+    another host), and each further page of the tree listing, at whatever
+    URL the hub's `Link: rel="next"` names. Any request whose origin is not
+    the endpoint's, another host or an `http://` downgrade of the hub's own,
+    goes without it."""
     client = default_client_factory()
 
     def bound(request: httpx.Request) -> None:
@@ -230,6 +240,8 @@ def _bounded_client() -> httpx.Client:
             phase: constants.HF_HUB_ETAG_TIMEOUT if timeout.get(phase) is None else timeout[phase]
             for phase in ("connect", "read", "write", "pool")
         }
+        if not _same_origin(str(request.url), endpoint):
+            request.headers.pop("authorization", None)
 
     client.event_hooks["request"].append(bound)
     return client
@@ -301,10 +313,10 @@ def _verify(blob: _Blob) -> None:
 
 
 def _same_origin(url: str, endpoint: str) -> bool:
-    """Whether a file's bytes are served by the hub itself, so the user's
-    token may go with the request: the whole origin, scheme and host, must
-    match. An `http://` URL on an `https://` hub's host is another origin,
-    or the token would go in cleartext."""
+    """Whether a request goes to the hub itself, so the user's token may go
+    with it: the whole origin, scheme and host, must match. An `http://` URL
+    on an `https://` hub's host is another origin, or the token would go in
+    cleartext."""
     ours, theirs = urlparse(url), urlparse(endpoint)
     return (ours.scheme, ours.netloc) == (theirs.scheme, theirs.netloc)
 
@@ -363,21 +375,17 @@ def download_model(
     endpoint = endpoint or constants.ENDPOINT
     cache = Path(cache_dir or constants.HF_HUB_CACHE)
     folder = repo_folder_name(repo_id=repo, repo_type="model")
-    set_client_factory(_bounded_client)
+    set_client_factory(lambda: _hub_client(endpoint))
     try:
         commit, blobs = _plan(repo, endpoint, cache)
         progress = _Progress(sum(b.size for b in blobs), on_update)
         progress.advance(sum(b.on_disk() for b in blobs))
+        # The user's token is for the hub: `_hub_client` keeps it off any
+        # request to another origin, an LFS file's bytes from the CDN included.
         headers = build_hf_headers()
-        # The user's token is for the hub. An LFS file's bytes come from the
-        # hub's CDN (a signed URL on another host): no token goes there, as
-        # huggingface_hub's own download strips it when the host differs,
-        # nor to a plain-HTTP URL on the hub's own host.
-        no_token = {k: v for k, v in headers.items() if k.lower() != "authorization"}
         for blob in blobs:
             if not blob.path.exists():
-                _fetch(blob, progress, headers if _same_origin(blob.url, endpoint) else no_token,
-                       cache / ".locks" / folder)
+                _fetch(blob, progress, headers, cache / ".locks" / folder)
         # Every blob is complete and verified: the snapshot of the planned
         # commit points at those blobs and nothing else.
         return _lay_out(cache / folder, commit, blobs)

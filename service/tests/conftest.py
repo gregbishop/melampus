@@ -241,9 +241,11 @@ def built_executable(request: pytest.FixtureRequest) -> Path:
 # is what `main` points at: a test moves the branch mid-run by setting it. The
 # etags are the real hub's: the sha256 of an LFS file (the weights), git's blob
 # sha1 of a regular file; `later_etag` is what every HEAD after a file's first
-# answers instead, a hub that changes its story once the run has planned. Every
-# request is kept on `requests`, one HubRequest each: method, path, and the
-# Range and Authorization headers it carried.
+# answers instead, a hub that changes its story once the run has planned.
+# `next_page` is a URL the tree listing names in its `Link: rel="next"`
+# header, as the real hub paginates a long listing and huggingface_hub
+# follows. Every request is kept on `requests`, one HubRequest each: method,
+# path, and the Range and Authorization headers it carried.
 
 FAKE_REPO = "fake-org/fake-model"
 FAKE_COMMIT = "0123456789abcdef0123456789abcdef01234567"
@@ -310,6 +312,7 @@ class FakeHub:
         self.gated = False
         self.commit = FAKE_COMMIT  # what `main` points at; a test moves the branch by setting it
         self.later_etag: str | None = None  # the etag of every HEAD after a file's first
+        self.next_page: str | None = None  # the tree listing's `Link: rel="next"` URL
         hub = self
         etags = self.etags = {
             name: hashlib.sha256(data).hexdigest() if name.endswith(".safetensors")
@@ -370,7 +373,7 @@ class FakeHub:
                             {"type": "file", "path": name, "size": len(data),
                              "oid": hashlib.sha1(data).hexdigest()}
                             for name, data in hub.files.items()
-                        ])
+                        ], {"Link": f'<{hub.next_page}>; rel="next"'} if hub.next_page else {})
                     elif path.removeprefix(f"/api/models/{hub.repo}") in ("", "/revision/main"):
                         self._json(200, {"id": hub.repo, "sha": hub.commit,
                                          "siblings": [{"rfilename": name} for name in hub.files]})
