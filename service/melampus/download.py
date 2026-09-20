@@ -397,17 +397,31 @@ def _fetch(blob: _Blob, progress: _Progress, headers: dict[str, str], lock_dir: 
     size and the checksum check out, make it the blob. huggingface_hub's own
     `http_get` asks for the rest by Range and verifies the size; the lock is
     the one it takes for the same blob, so two runs cannot append to the same
-    file."""
+    file.
+
+    The OSError of its size check, or of a write, is reported by the file's
+    name and the two sizes, never by its own text: `http_get` retries a
+    dropped connection without the file's name, so on the retry its size
+    check names the file by the last forty characters of the URL, an LFS
+    file's being the tail of the CDN's signed query, which no URL rule on
+    the message catches. The hub's HTTP errors, OSErrors too in the hub
+    library, keep their own handling in `download_model`."""
     blob.partial.parent.mkdir(parents=True, exist_ok=True)
     lock_dir.mkdir(parents=True, exist_ok=True)
     with WeakFileLock(lock_dir / f"{blob.etag}.lock", timeout=5):
         with blob.partial.open("ab") as partial:
             resumed = partial.tell()
-            http_get(
-                blob.url, partial,
-                resume_size=resumed, headers=headers, expected_size=blob.size,
-                displayed_filename=blob.filename, tqdm_class=progress.tqdm_class(resumed),
-            )
+            try:
+                http_get(
+                    blob.url, partial,
+                    resume_size=resumed, headers=headers, expected_size=blob.size,
+                    displayed_filename=blob.filename, tqdm_class=progress.tqdm_class(resumed),
+                )
+            except httpx.HTTPError:
+                raise
+            except OSError as exc:
+                why = exc.strerror or f"{partial.tell()} bytes arrived where the hub said {blob.size}"
+                raise DownloadError(f"{blob.filename}: {why}; the partial file is kept; {RERUN}") from exc
         _verify(blob)
         blob.partial.replace(blob.path)
 

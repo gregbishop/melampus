@@ -99,7 +99,11 @@ check it and re-run, a hub that accepts the connection and never answers
 included, since every request to it is bounded by the hub library's own
 metadata timeout, `HF_HUB_ETAG_TIMEOUT`, ten seconds;
 a file whose bytes do not match the checksum the hub names for it, so its partial
-is discarded and the re-run fetches it whole; a hub whose answers are not a hub's,
+is discarded and the re-run fetches it whole; a file that arrived at a size other
+than the one the hub named, so its partial is kept and the re-run resumes it (the
+message names the file and both sizes, never the hub library's own wording, which
+after its own retry of a dropped connection names the file by the tail of its
+URL); a hub whose answers are not a hub's,
 an etag that is not a checksum or a commit that is not a hash, neither of which
 is let become a path in the cache, so check `HF_ENDPOINT`);
 **exit 4** when a signal cancelled it (`cancelled`). The signals are SIGINT

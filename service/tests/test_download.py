@@ -242,6 +242,41 @@ def test_download_takes_back_the_partial_when_the_host_ignores_the_range_and_nev
     assert max(u.bytes_done for u in updates) == FAKE_TOTAL == updates[-1].bytes_done, "progress passed the total"
 
 
+def test_download_names_the_file_and_both_sizes_when_the_resumed_answer_is_the_wrong_size_and_keeps_the_partial(
+    fake_hub: FakeHub, tmp_path: Path
+):
+    """Security (Codex round 4, download.py:508). The host drops the
+    connection after one chunk and answers the hub library's own retry, a
+    Range request, with a complete body that ends short of the file, so its
+    size check fails. Its message names the file as the library formatted
+    it, which on its retry is the tail of the URL; that wording is not
+    repeated. The run fails naming the file, the bytes that arrived, the size
+    the hub said and the re-run, with the partial kept, and the next run,
+    from a host that serves the rest, finishes the file byte-identical."""
+    big = len(FAKE_FILES["model.safetensors"])
+    fake_hub.cut_after = DOWNLOAD_CHUNK_SIZE + 4096
+    fake_hub.short_resume = 100
+
+    with pytest.raises(DownloadError) as failure:
+        _fetch(fake_hub, tmp_path / "hub")
+
+    message = str(failure.value)
+    assert fake_hub.gets("model.safetensors") == [None, f"bytes={DOWNLOAD_CHUNK_SIZE}-"], "the drop was not retried by Range"
+    assert "model.safetensors" in message and "--download-model" in message, message
+    assert f"{big - 100}" in message and f"{big}" in message, message
+    assert "Consistency check" not in message and "(…)" not in message, "the library's own wording is repeated"
+    (partial,) = _incomplete(tmp_path / "hub")
+    assert partial.stat().st_size == big - 100, "the partial file was not kept"
+
+    fake_hub.short_resume = 0
+    fake_hub.requests.clear()
+    path, _ = _fetch(fake_hub, tmp_path / "hub")
+
+    assert fake_hub.gets("model.safetensors") == [f"bytes={big - 100}-"], "the rest was not asked for by Range"
+    assert snapshot_files(path) == FAKE_FILES
+    assert not _incomplete(tmp_path / "hub")
+
+
 # Two weight files with the same bytes: the hub names one etag for both, so
 # the cache holds one blob that two pointers share.
 SHARED_FILES = {
@@ -817,6 +852,31 @@ def test_cli_exits_3_naming_the_fix_when_the_repo_id_is_a_pasted_url(hub_env: di
     assert "[model] repo" in proc.stderr and "--model" in proc.stderr
 
 
+# The query of the CDN's signed URL, in the order the real CDN's carry it:
+# the signature last, where the hub library's forty-character tail of a URL
+# lands.
+SIGNED_QUERY = "Expires=1700000000&Signature=synthetic-not-a-secret"
+
+
+def _cli_with_the_bytes_on_a_signed_cdn(
+    fake_hub: FakeHub, hub_env: dict[str, str], **cdn_knobs
+) -> tuple[FakeHub, subprocess.CompletedProcess[str]]:
+    """`--download-model` with the hub redirecting every LFS file's bytes to
+    a second fake host at a signed URL (SIGNED_QUERY), `cdn_knobs` set on
+    that host: the host, for its requests, and the run."""
+    with FakeHub().serve() as cdn:
+        fake_hub.bytes_host = cdn.endpoint
+        fake_hub.cdn_query = SIGNED_QUERY
+        for knob, value in cdn_knobs.items():
+            setattr(cdn, knob, value)
+        return cdn, _cli(["--download-model", "--model", FAKE_REPO], hub_env)
+
+
+def _assert_no_signature_on(stderr: str) -> None:
+    assert "synthetic-not-a-secret" not in stderr, "the signature is on stderr"
+    assert "Signature=" not in stderr and "Expires=" not in stderr, "the signed query is on stderr"
+
+
 def test_cli_names_the_cdn_url_on_stderr_without_its_signed_query_when_the_bytes_fail(
     fake_hub: FakeHub, hub_env: dict[str, str]
 ):
@@ -828,18 +888,37 @@ def test_cli_names_the_cdn_url_on_stderr_without_its_signed_query_when_the_bytes
     connection drops after one chunk and then answers 503, stderr names the
     file's path on the CDN and neither the signature's value nor its
     parameter, and the run fails naming the re-run, exit 3."""
-    with FakeHub().serve() as cdn:
-        fake_hub.bytes_host = cdn.endpoint
-        fake_hub.cdn_query = "Signature=synthetic-not-a-secret&Expires=1700000000"
-        cdn.cut_after = DOWNLOAD_CHUNK_SIZE + 4096
-        proc = _cli(["--download-model", "--model", FAKE_REPO], hub_env)
+    cdn, proc = _cli_with_the_bytes_on_a_signed_cdn(fake_hub, hub_env, cut_after=DOWNLOAD_CHUNK_SIZE + 4096)
 
     assert proc.returncode == 3, proc.stderr[-3000:]
     assert cdn.gets("model.safetensors") == [None, f"bytes={DOWNLOAD_CHUNK_SIZE}-"], "the drop was not retried by Range"
     assert "503" in proc.stderr and "--download-model" in proc.stderr
     assert f"{cdn.endpoint}/{FAKE_REPO}/resolve/{FAKE_COMMIT}/model.safetensors" in proc.stderr, "the URL's path is not named"
-    assert "synthetic-not-a-secret" not in proc.stderr, "the signature is on stderr"
-    assert "Signature=" not in proc.stderr and "Expires=" not in proc.stderr, "the signed query is on stderr"
+    _assert_no_signature_on(proc.stderr)
+
+
+def test_cli_names_the_file_on_stderr_and_never_the_tail_of_its_signed_url_when_the_resumed_bytes_are_the_wrong_size(
+    fake_hub: FakeHub, hub_env: dict[str, str]
+):
+    """Security (Codex round 4, download.py:508). The hub library's
+    `http_get` retries a dropped connection without the file's name, so its
+    size check names the file by the last forty characters of its URL: for
+    an LFS file, the tail of the CDN's signed query, which no URL rule on
+    the message catches. Given a CDN whose connection drops after one chunk
+    and whose answer to the retry's Range request is complete but short of
+    the file, the failure line on stderr names the file and the sizes, and
+    stderr carries neither the signature's value nor its parameter nor the
+    library's `(…)` tail; the run fails naming the re-run, exit 3."""
+    cdn, proc = _cli_with_the_bytes_on_a_signed_cdn(fake_hub, hub_env, cut_after=DOWNLOAD_CHUNK_SIZE + 4096, short_resume=100)
+
+    assert proc.returncode == 3, proc.stderr[-3000:]
+    assert cdn.gets("model.safetensors") == [None, f"bytes={DOWNLOAD_CHUNK_SIZE}-"], "the drop was not retried by Range"
+    _assert_no_signature_on(proc.stderr)
+    assert "(…)" not in proc.stderr, "the library's tail of the URL is on stderr"
+    failure = proc.stderr.strip().splitlines()[-1]
+    big = len(FAKE_FILES["model.safetensors"])
+    assert "model.safetensors" in failure and f"{big - 100}" in failure and f"{big}" in failure, failure
+    assert "--download-model" in failure, failure
 
 
 def _interrupt(proc: subprocess.Popen) -> None:

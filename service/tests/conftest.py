@@ -231,7 +231,11 @@ def built_executable(request: pytest.FixtureRequest) -> Path:
 # the connection once that many bytes of a file have been sent and starts an
 # outage (503 until `outage` is cleared); `throttle` slows the bytes so a cancel
 # can land mid-file; `ignore_range` answers a Range request with 200 and the
-# whole file, as a CDN that ignores Range does. `bytes_host` is the real hub's CDN: the resolve HEAD
+# whole file, as a CDN that ignores Range does; `short_resume` answers a Range
+# request with a body that ends that many bytes before the file's end,
+# Content-Length agreeing, a host whose resumed answer is complete and the
+# wrong size (a cut then starts no outage, so the retry's Range request gets
+# that answer). `bytes_host` is the real hub's CDN: the resolve HEAD
 # answers 302 to that host, as huggingface.co does for every LFS file, so the
 # bytes are fetched from a host that is not the hub; `cdn_query` is the query
 # that Location carries, as the real CDN's signed URLs do. `corrupt` names files
@@ -313,6 +317,7 @@ class FakeHub:
         self.cut_after: int | None = None
         self.outage = False
         self.ignore_range = False
+        self.short_resume = 0  # bytes a Range answer stops short of the file's end, Content-Length agreeing
         self.throttle: tuple[int, float] | None = None  # (bytes per write, seconds between)
         self.bytes_host: str | None = None
         self.cdn_query: str | None = None  # `Signature=...&Expires=...` on the LFS redirect's Location
@@ -411,12 +416,12 @@ class FakeHub:
                     self.send_header("Content-Range", f"bytes {start}-{len(data) - 1}/{len(data)}")
                 else:
                     self.send_response(200)
-                self.send_header("Content-Length", str(len(data) - start))
+                end = len(data) - (hub.short_resume if start else 0)
+                self.send_header("Content-Length", str(end - start))
                 self.send_header("Accept-Ranges", "bytes")
                 self.end_headers()
-                end = len(data)
                 if hub.cut_after is not None and hub.cut_after < end:
-                    end, hub.cut_after, hub.outage = hub.cut_after, None, True
+                    end, hub.cut_after, hub.outage = hub.cut_after, None, not hub.short_resume
                     self.close_connection = True
                 if hub.throttle:
                     step, pause = hub.throttle
