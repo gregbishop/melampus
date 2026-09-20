@@ -204,14 +204,10 @@ def test_download_sends_the_user_token_to_the_hub_and_never_to_the_host_serving_
     or HF_TOKEN) belongs to the hub: it goes on the hub's requests and on no
     request to the other host, exactly as huggingface_hub's own download
     strips it when the location's host is not the endpoint's."""
-    cdn = FakeHub()
-    cdn.start()
-    fake_hub.bytes_host = cdn.endpoint
     monkeypatch.setenv("HF_TOKEN", "synthetic-token")
-    try:
+    with FakeHub().serve() as cdn:
+        fake_hub.bytes_host = cdn.endpoint
         path, _ = _fetch(fake_hub, tmp_path / "hub")
-    finally:
-        cdn.stop()
 
     assert _snapshot_files(path) == FAKE_FILES
     assert all(a == "Bearer synthetic-token" for a in fake_hub.authorizations), fake_hub.authorizations
@@ -371,10 +367,9 @@ def test_cli_cancelled_by_a_signal_keeps_the_partial_file_and_the_next_run_resum
     big = bytes(range(256)) * (40 * 4096)
     hub = FakeHub(files={"config.json": FAKE_FILES["config.json"], "model.safetensors": big})
     hub.throttle = (64 * 1024, 0.002)
-    hub.start()
-    env = {**os.environ, **hub_env, "HF_ENDPOINT": hub.endpoint}
     flags = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if sys.platform == "win32" else {}
-    try:
+    with hub.serve():
+        env = {**os.environ, **hub_env, "HF_ENDPOINT": hub.endpoint}
         proc = subprocess.Popen([*VENV_CLI, "--download-model", "--model", FAKE_REPO], env=env,
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, **flags)
         lines = []
@@ -403,5 +398,3 @@ def test_cli_cancelled_by_a_signal_keeps_the_partial_file_and_the_next_run_resum
         assert updates[0].bytes_done == kept + len(FAKE_FILES["config.json"])
         assert _snapshot_files(Path(updates[-1].path))["model.safetensors"] == big
         assert not _incomplete(Path(hub_env["HF_HOME"]) / "hub")
-    finally:
-        hub.stop()

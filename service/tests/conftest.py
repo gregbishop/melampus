@@ -159,11 +159,16 @@ def closed_port() -> int:
 
 
 @contextlib.contextmanager
-def loopback_server(handler: type[BaseHTTPRequestHandler]) -> Iterator[HTTPServer]:
+def loopback_server(
+    handler: type[BaseHTTPRequestHandler], server_class: type[HTTPServer] = HTTPServer
+) -> Iterator[HTTPServer]:
     """An HTTP server on 127.0.0.1 at an ephemeral port, serving `handler` on
     a daemon thread until exit, then stopped and joined. The caller points the
-    client under test at `server.server_port`; nothing leaves the machine."""
-    server = HTTPServer(("127.0.0.1", 0), handler)
+    client under test at `server.server_port`; nothing leaves the machine.
+    `server_class` is ThreadingHTTPServer (a daemon thread per request) for a
+    client that keeps HTTP/1.1 connections open: a single-threaded server
+    would sit on an idle one instead of taking the next."""
+    server = server_class(("127.0.0.1", 0), handler)
     thread = threading.Thread(
         target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True
     )
@@ -219,10 +224,12 @@ FAKE_FILES = {
 }
 
 
-class FakeHub(threading.Thread):
+class FakeHub:
+    """The hub's state and its handler; `serve` puts it on loopback."""
+
     def __init__(self, files: dict[str, bytes] = FAKE_FILES, repo: str = FAKE_REPO) -> None:
-        super().__init__(daemon=True)
         self.files, self.repo = files, repo
+        self.endpoint = ""  # set while `serve` runs
         self.requests: list[tuple[str, str, str | None]] = []
         self.cut_after: int | None = None
         self.outage = False
@@ -336,19 +343,15 @@ class FakeHub(threading.Thread):
                 self.send_header("Accept-Ranges", "bytes")
                 self.end_headers()
 
-        # Threaded: huggingface_hub keeps HTTP/1.1 connections open, and a
-        # single-threaded server would sit on an idle one instead of taking
-        # the next.
-        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        self.server.daemon_threads = True
-        self.endpoint = f"http://127.0.0.1:{self.server.server_port}"
+        self.handler = Handler
 
-    def run(self) -> None:
-        self.server.serve_forever(poll_interval=0.05)
-
-    def stop(self) -> None:
-        self.server.shutdown()
-        self.server.server_close()
+    @contextlib.contextmanager
+    def serve(self) -> Iterator[FakeHub]:
+        """Serve this hub on loopback for the block; `endpoint` is its URL.
+        Threaded, because huggingface_hub keeps HTTP/1.1 connections open."""
+        with loopback_server(self.handler, ThreadingHTTPServer) as server:
+            self.endpoint = f"http://127.0.0.1:{server.server_port}"
+            yield self
 
     def gets(self, name: str) -> list[str | None]:
         """The Range header of every GET for `name`'s bytes, at any revision,
@@ -358,13 +361,9 @@ class FakeHub(threading.Thread):
 
 
 @pytest.fixture()
-def fake_hub() -> FakeHub:
-    hub = FakeHub()
-    hub.start()
-    try:
+def fake_hub() -> Iterator[FakeHub]:
+    with FakeHub().serve() as hub:
         yield hub
-    finally:
-        hub.stop()
 
 
 @pytest.fixture()
