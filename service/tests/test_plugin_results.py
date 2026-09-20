@@ -26,11 +26,10 @@ from __future__ import annotations
 import importlib.util
 import json
 import urllib.parse
-from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 
 import pytest
-from conftest import FIXTURE, PHOTO, loopback_server
+from conftest import FIXTURE, PHOTO, QuietHandler, loopback_server
 from PIL import Image
 
 from melampus import cli, occurrence
@@ -252,7 +251,7 @@ def offline_gbif(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, int | None]
     return calls
 
 
-class _GBIFOccurrenceSearch(BaseHTTPRequestHandler):
+class _GBIFOccurrenceSearch(QuietHandler):
     """GBIF's /v1/occurrence/search, as far as the client reads it: the count for
     the species in the query, in the JSON shape the real API answers with."""
 
@@ -269,9 +268,6 @@ class _GBIFOccurrenceSearch(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
-
-    def log_message(self, *_args) -> None:
-        """Keep the request log out of pytest's output."""
 
 
 @pytest.fixture()

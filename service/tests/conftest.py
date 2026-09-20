@@ -15,7 +15,11 @@ the executable and from the CLI alike.
 
 `loopback_server` is the one fake-server plumbing for tests at a real HTTP
 boundary (GBIF's occurrence search, Ollama's version endpoint): a handler
-speaking the real protocol, served on 127.0.0.1 at an ephemeral port.
+speaking the real protocol, served on 127.0.0.1 at an ephemeral port. Every
+handler derives from `QuietHandler`, which keeps http.server's request log
+out of pytest's output, and `recording_handler` is the one that answers 200
+to anything and remembers what it was asked, for the assertion "this server
+never heard from the client".
 
 `fake_platform` is the one way the suite fakes the machine `on_apple_silicon`
 reads (sys.platform and platform.machine(), together), whether the caller is
@@ -109,6 +113,29 @@ def fake_platform(monkeypatch: pytest.MonkeyPatch, platform_name: str, machine: 
     platform.machine(), faked together, the only way the suite fakes them."""
     monkeypatch.setattr(sys, "platform", platform_name)
     monkeypatch.setattr(platform, "machine", lambda: machine)
+
+
+class QuietHandler(BaseHTTPRequestHandler):
+    """The base of every fake server's handler: http.server logs each request
+    to stderr, and a test's output is its assertions, not the fake's log."""
+
+    def log_message(self, *_args) -> None:
+        return None
+
+
+def recording_handler(seen: list[str]) -> type[QuietHandler]:
+    """A handler that answers 200 `{}` to any GET and appends the path it was
+    asked to `seen`: the server a test stands up to prove the client under
+    test never reached it (a proxy, a redirect's destination)."""
+
+    class Recording(QuietHandler):
+        def do_GET(self) -> None:  # noqa: N802 - http.server's name
+            seen.append(self.path)
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"{}")
+
+    return Recording
 
 
 @contextlib.contextmanager

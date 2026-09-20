@@ -16,10 +16,9 @@ import threading
 import time
 import types
 import urllib.request
-from http.server import BaseHTTPRequestHandler
 
 import pytest
-from conftest import PHOTO, fake_platform, loopback_server
+from conftest import PHOTO, QuietHandler, fake_platform, loopback_server, recording_handler
 
 from melampus import providers
 from melampus.backend import AnthropicBackend, MLXBackend, OpenAIBackend, ScriptedBackend
@@ -482,7 +481,7 @@ def _fake_ollama(monkeypatch, *, status: int = 200, delay: float = 0.0):
     GET /api/version answers; `delay` holds the answer that long."""
     release = threading.Event()
 
-    class Version(BaseHTTPRequestHandler):
+    class Version(QuietHandler):
         def do_GET(self):  # noqa: N802 - http.server's name
             assert self.path == "/api/version", self.path
             if delay:
@@ -491,9 +490,6 @@ def _fake_ollama(monkeypatch, *, status: int = 200, delay: float = 0.0):
             self.send_header("Content-Type", "application/json")
             self.end_headers()
             self.wfile.write(b'{"version": "0.0.0-fake"}')
-
-        def log_message(self, *_):
-            return None
 
     with loopback_server(Version) as server:
         monkeypatch.setattr(providers, "OLLAMA_URL", f"http://127.0.0.1:{server.server_port}")
@@ -547,7 +543,7 @@ def test_ollama_probe_gives_up_at_its_deadline_when_the_headers_trickle(monkeypa
     unavailable and returns within its deadline."""
     monkeypatch.setattr(providers, "OLLAMA_PROBE_SECONDS", 0.3)
 
-    class Trickling(BaseHTTPRequestHandler):
+    class Trickling(QuietHandler):
         def do_GET(self):  # noqa: N802 - http.server's name
             # Once the probe hangs up, the next write raises; that ends the trickle.
             with contextlib.suppress(OSError):
@@ -556,9 +552,6 @@ def test_ollama_probe_gives_up_at_its_deadline_when_the_headers_trickle(monkeypa
                     time.sleep(0.1)
                     self.wfile.write(bytes([byte]))
                 self.wfile.write(b"{}")
-
-        def log_message(self, *_):
-            return None
 
     with loopback_server(Trickling) as ollama:
         monkeypatch.setattr(providers, "OLLAMA_URL", f"http://127.0.0.1:{ollama.server_port}")
@@ -609,24 +602,13 @@ def test_ollama_probe_stays_on_loopback_whatever_proxy_the_environment_names(mon
     answers 200 to everything and nothing at OLLAMA_URL, the probe reports
     unavailable and the proxy never hears from it."""
     seen: list[str] = []
-
-    class AnythingGoes(BaseHTTPRequestHandler):
-        def do_GET(self):  # noqa: N802 - http.server's name
-            seen.append(self.path)
-            self.send_response(200)
-            self.end_headers()
-            self.wfile.write(b"{}")
-
-        def log_message(self, *_):
-            return None
-
     monkeypatch.setattr(providers, "OLLAMA_URL", f"http://127.0.0.1:{_closed_port()}")
     for name in ("no_proxy", "NO_PROXY"):
         monkeypatch.delenv(name, raising=False)
     # urlopen builds its default opener once, reading the proxy variables then;
     # start it fresh so the environment set here is the one it would see.
     monkeypatch.setattr(urllib.request, "_opener", None)
-    with loopback_server(AnythingGoes) as proxy:
+    with loopback_server(recording_handler(seen)) as proxy:
         monkeypatch.setenv("http_proxy", f"http://127.0.0.1:{proxy.server_port}")
         assert providers.ollama_answers() is False
     assert seen == [], f"the probe left the machine through the proxy: {seen}"
@@ -642,28 +624,14 @@ def test_ollama_probe_refuses_a_redirect_off_loopback(monkeypatch):
     server that records every request, the probe reports unavailable and the
     redirected destination never hears from it."""
     seen: list[str] = []
-
-    class Destination(BaseHTTPRequestHandler):
-        def do_GET(self):  # noqa: N802 - http.server's name
-            seen.append(self.path)
-            self.send_response(200)
-            self.end_headers()
-            self.wfile.write(b"{}")
-
-        def log_message(self, *_):
-            return None
-
-    with loopback_server(Destination) as destination:
+    with loopback_server(recording_handler(seen)) as destination:
         elsewhere = f"http://127.0.0.1:{destination.server_port}/api/version"
 
-        class Redirecting(BaseHTTPRequestHandler):
+        class Redirecting(QuietHandler):
             def do_GET(self):  # noqa: N802 - http.server's name
                 self.send_response(302)
                 self.send_header("Location", elsewhere)
                 self.end_headers()
-
-            def log_message(self, *_):
-                return None
 
         with loopback_server(Redirecting) as ollama:
             monkeypatch.setattr(providers, "OLLAMA_URL", f"http://127.0.0.1:{ollama.server_port}")
