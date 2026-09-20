@@ -89,6 +89,9 @@ function M.reset(options)
 		-- asked to open.
 		passwords = options.passwords or {},
 		openedUrls = {},
+		-- The Windows temp folder a fake Windows Lightroom reports, when a
+		-- test names one; otherwise windowsTemp() decides.
+		windowsTemp = options.windowsTemp,
 		-- How many previews the plugin asked for in this run.
 		previewsRequested = 0,
 	}
@@ -382,13 +385,15 @@ end
 -- spells the directory separator first in package.config.
 local HOST_IS_WINDOWS = package.config:sub(1, 1) == '\\'
 
---- The Windows temp folder of a fake Windows Lightroom. On a Windows host,
--- the real one, TEMP, which is what Lightroom reports there, so a command
+--- The Windows temp folder of a fake Windows Lightroom: the one the test
+-- named in reset's options, if it did. Otherwise, on a Windows host, the
+-- real one, TEMP, which is what Lightroom reports there, so a command
 -- built for cmd.exe can be run by cmd.exe and the CLI log it names has a
 -- folder to land in. Elsewhere a Windows path that exists nowhere: the
 -- host's shell could not run the command anyway, and the suites read the
 -- line, not the disk.
 local function windowsTemp()
+	if M.state.windowsTemp then return M.state.windowsTemp end
 	if HOST_IS_WINDOWS then return assert(os.getenv('TEMP'), 'TEMP is not set') end
 	return 'C:\\Users\\photographer\\AppData\\Local\\Temp'
 end

@@ -838,6 +838,36 @@ t.test('on Windows detection names melampus.exe with cmd.exe quoting', function(
 		'not the one command that asks melampus.exe for the verdicts, as cmd.exe needs it')
 end)
 
+t.test('on Windows detection refuses a path with "%" the way the run does, naming the fix', function()
+	-- Detection redirects to the same temp-folder paths the run refuses when
+	-- they hold "%", and its executable is in the same plugin folder. Run
+	-- through cmd.exe unchecked, a rewritten path reports "could not ask"
+	-- or "did not understand" instead of the refusal that names the fix.
+	local folder = 'C:\\Users\\photo%grapher\\AppData\\Roaming\\Adobe\\Lightroom\\Modules\\Melampus.lrplugin'
+	local Analyze = loadUnderMock('MelampusAnalyze',
+		{ existing = { [folder .. '\\melampus.exe'] = true } }, folder, { windows = true })
+	local verdicts, problem = Analyze.detectEngines()
+	t.isNil(verdicts, 'detected through a plugin folder with "%"')
+	t.isNil(mock.state.executed, 'ran detection through a plugin folder with "%"')
+	t.isNotNil(string.find(problem, folder, 1, true),
+		'the message does not name the plugin folder:\n' .. tostring(problem))
+	t.isNotNil(string.find(problem, 'Move the plugin', 1, true),
+		'the message does not name the fix for the plugin folder:\n' .. problem)
+
+	local temp = 'C:\\Users\\photo%grapher\\AppData\\Local\\Temp'
+	Analyze = loadUnderMock('MelampusAnalyze',
+		{ existing = { [WIN_EXECUTABLE] = true }, windowsTemp = temp }, WIN_PLUGIN, { windows = true })
+	verdicts, problem = Analyze.detectEngines()
+	t.isNil(verdicts, 'detected through a temp folder with "%"')
+	t.isNil(mock.state.executed, 'ran detection through a temp folder with "%"')
+	t.isNotNil(string.find(problem, temp .. '\\melampus-engines.json', 1, true),
+		'the message does not name the file in the temp folder:\n' .. tostring(problem))
+	t.isNotNil(string.find(problem, 'Set TEMP', 1, true),
+		'the message does not name the fix for the temp folder:\n' .. problem)
+	t.isNil(string.find(problem, 'Move the plugin', 1, true),
+		'moving the plugin would not fix the temp folder:\n' .. problem)
+end)
+
 os.remove(RESULTS)
 mock.cleanUp()
 return t.summary()

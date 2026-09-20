@@ -159,20 +159,16 @@ end
 --- Why the command must not run on Windows, or nil when it may.
 -- cmd.exe expands %NAME% even inside double quotes, silently rewriting the
 -- path before execution. Refusing loudly beats running against a path the
--- user never named. The message names the path that has the "%" and the fix
--- for that path: the plugin folder is where the user put it; the other three
--- are in the Windows temp folder.
-local function windowsPathRefusal(folder, previewFolder, resultsPath, cliLog)
+-- user never named. `checked` lists { what, path, advice }: the message
+-- names the path that has the "%" and the fix for that path, the plugin
+-- folder being where the user put it (MOVE_PLUGIN) and the rest in the
+-- Windows temp folder (IN_TEMP).
+local MOVE_PLUGIN = 'Move the plugin to a folder whose path has no "%" and try again.'
+local IN_TEMP = 'Melampus keeps this in the Windows temp folder. Set TEMP to a '
+	.. 'folder whose path has no "%" and try again.'
+
+local function windowsPathRefusal(checked)
 	if not WIN_ENV then return nil end
-	local inTemp = 'Melampus keeps this in the Windows temp folder. Set TEMP to a '
-		.. 'folder whose path has no "%" and try again.'
-	local checked = {
-		{ 'plugin folder', folder,
-			'Move the plugin to a folder whose path has no "%" and try again.' },
-		{ 'previews folder', previewFolder, inTemp },
-		{ 'results file', resultsPath, inTemp },
-		{ 'log file', cliLog, inTemp },
-	}
 	for _, entry in ipairs(checked) do
 		local what, path, advice = entry[1], tostring(entry[2]), entry[3]
 		if path:find('%%') then
@@ -246,6 +242,12 @@ function Analyze.detectEngines()
 		return nil, missingExecutable()
 	end
 	local output, cliLog = tempPath('melampus-engines.json'), cliLogPath()
+	local refusal = windowsPathRefusal({
+		{ 'plugin folder', pluginDir(), MOVE_PLUGIN },
+		{ 'engines file', output, IN_TEMP },
+		{ 'log file', cliLog, IN_TEMP },
+	})
+	if refusal then return nil, refusal end
 	local command = shellLine(quote(executable) .. ' --detect-engines >'
 		.. quote(output) .. ' 2>' .. quote(cliLog))
 	Log.info('running: ' .. command)
@@ -278,7 +280,12 @@ function Analyze.run(previewFolder, resultsPath, profile, engine)
 	if engineError then return false, engineError end
 
 	local cliLog = cliLogPath()
-	local refusal = windowsPathRefusal(folder, previewFolder, resultsPath, cliLog)
+	local refusal = windowsPathRefusal({
+		{ 'plugin folder', folder, MOVE_PLUGIN },
+		{ 'previews folder', previewFolder, IN_TEMP },
+		{ 'results file', resultsPath, IN_TEMP },
+		{ 'log file', cliLog, IN_TEMP },
+	})
 	if refusal then return false, refusal end
 
 	-- Identification and enrichment, one process. Long-running, so it must not
