@@ -277,35 +277,38 @@ class _Progress:
 
 def _hub_client(endpoint: str) -> httpx.Client:
     """The hub library's own httpx client, with two rules on every request it
-    sends, wherever in the library the request is made.
+    sends, wherever in the library the request is made, one hook each.
 
-    Every request without a timeout is bounded by the library's own metadata
-    timeout, HF_HUB_ETAG_TIMEOUT. Its repo info and tree listing (each page)
-    name none, and httpx reads none as wait forever, so a hub that accepts
-    the connection and never answers held the command for good. Requests
-    that name a timeout (the bytes, the metadata HEAD) keep theirs.
+    `bound_by_the_metadata_timeout`: every request without a timeout is
+    bounded by the library's own metadata timeout, HF_HUB_ETAG_TIMEOUT. Its
+    repo info and tree listing (each page) name none, and httpx reads none
+    as wait forever, so a hub that accepts the connection and never answers
+    held the command for good. Requests that name a timeout (the bytes, the
+    metadata HEAD) keep theirs.
 
-    The user's token goes only to the hub's own origin, and only where it
-    cannot cross the wire in cleartext. The library sends the token on
-    every request it makes with the user's headers: the bytes of an LFS
-    file, which the hub redirects to its CDN (a signed URL on another
-    host), and each further page of the tree listing, at whatever URL the
-    hub's `Link: rel="next"` names. Any request whose origin is not the
-    endpoint's, another host or an `http://` downgrade of the hub's own,
-    goes without it; so does every request to an `http://` hub that is not
-    on loopback (`_token_may_go`)."""
+    `token_only_to_the_hub`: the user's token goes only to the hub's own
+    origin, and only where it cannot cross the wire in cleartext. The
+    library sends the token on every request it makes with the user's
+    headers: the bytes of an LFS file, which the hub redirects to its CDN
+    (a signed URL on another host), and each further page of the tree
+    listing, at whatever URL the hub's `Link: rel="next"` names. Any
+    request whose origin is not the endpoint's, another host or an
+    `http://` downgrade of the hub's own, goes without it; so does every
+    request to an `http://` hub that is not on loopback (`_token_may_go`)."""
     client = default_client_factory()
 
-    def bound(request: httpx.Request) -> None:
+    def bound_by_the_metadata_timeout(request: httpx.Request) -> None:
         timeout = request.extensions.get("timeout") or {}
         request.extensions["timeout"] = {
             phase: constants.HF_HUB_ETAG_TIMEOUT if timeout.get(phase) is None else timeout[phase]
             for phase in ("connect", "read", "write", "pool")
         }
+
+    def token_only_to_the_hub(request: httpx.Request) -> None:
         if not _token_may_go(str(request.url), endpoint):
             request.headers.pop("authorization", None)
 
-    client.event_hooks["request"].append(bound)
+    client.event_hooks["request"].extend([bound_by_the_metadata_timeout, token_only_to_the_hub])
     return client
 
 
