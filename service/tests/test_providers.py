@@ -194,7 +194,7 @@ def test_ollama_not_running_is_refused_before_any_image_is_read_and_names_the_fi
     with pytest.raises(providers.BackendUnavailable) as err:
         providers.build_primary_backend(config)
     message = str(err.value)
-    assert "No Ollama server is answering at" in message
+    assert "No Ollama server at" in message
     assert providers.OLLAMA_URL in message
     assert providers.OLLAMA_INSTALL in message
     for works_here in ("claude", "openai", "scripted"):
@@ -204,7 +204,10 @@ def test_ollama_not_running_is_refused_before_any_image_is_read_and_names_the_fi
 
 def test_ollama_not_running_refusal_names_the_configured_address(monkeypatch):
     """The address tried is the configured one, so the message and the probe
-    cannot disagree about where Ollama was looked for."""
+    cannot disagree about where Ollama was looked for. One probe: the refusal
+    and its "what works" list come from the one detection run, so a port that
+    hangs costs OLLAMA_PROBE_SECONDS once, not twice; and one sentence: the
+    refusal says what the verdict (--detect-engines, the dialog) says."""
     probed: list[str] = []
 
     def answers(url=None):
@@ -215,10 +218,10 @@ def test_ollama_not_running_refusal_names_the_configured_address(monkeypatch):
     config = _cfg(model={"backend": "ollama", "ollama_url": "http://127.0.0.1:11435"})
     with pytest.raises(providers.BackendUnavailable) as err:
         providers.build_primary_backend(config)
-    assert "http://127.0.0.1:11435" in str(err.value)
-    # Probed for the backend, then again by detection for the "what works"
-    # list: every probe went to the configured address.
-    assert probed and set(probed) == {"http://127.0.0.1:11435"}
+    message = str(err.value)
+    assert "No Ollama server at http://127.0.0.1:11435" in message, message
+    assert providers.OLLAMA_INSTALL in message, message
+    assert probed == ["http://127.0.0.1:11435"], f"probed more than once: {probed}"
 
 
 def test_cli_backend_ollama_exits_3_with_the_not_running_message(
@@ -230,7 +233,7 @@ def test_cli_backend_ollama_exits_3_with_the_not_running_message(
 
     err = capsys.readouterr().err
     assert code == 3, err
-    assert "No Ollama server is answering at" in err
+    assert "No Ollama server at" in err
     assert providers.OLLAMA_INSTALL in err
     assert "cloud default" not in err, f"ollama is local; nothing was retuned for a cloud:\n{err}"
 
@@ -502,7 +505,7 @@ def test_the_refusal_names_what_detection_says_is_available(monkeypatch):
     Ollama answering, that is ollama, openai, claude, scripted, and not mlx."""
     fake_platform(monkeypatch, "win32", "AMD64")
     monkeypatch.setattr(providers, "ollama_answers", lambda url=None: True)
-    assert providers._works_here() == ("ollama", "openai", "claude", "scripted")
+    assert providers._works_here(providers.detect_engines()) == ("ollama", "openai", "claude", "scripted")
     with pytest.raises(providers.BackendUnavailable) as err:
         providers.build_primary_backend(_cfg())
     assert "ollama, openai, claude, scripted" in str(err.value)
@@ -661,7 +664,7 @@ def test_ollama_not_running_fires_before_any_image_is_read(monkeypatch, tmp_path
 
     err = capsys.readouterr().err
     assert code == 3, err
-    assert f"No Ollama server is answering at http://127.0.0.1:{port}" in err
+    assert f"No Ollama server at http://127.0.0.1:{port}" in err
     assert providers.OLLAMA_INSTALL in err
     for about_the_file in ("nowhere", "does-not-exist", "No such file", "unreadable"):
         assert about_the_file not in err, f"the image was touched before the Ollama check:\n{err}"
@@ -1228,7 +1231,7 @@ def test_ollama_probe_reports_unavailable_for_an_address_it_cannot_ask(address, 
     assert providers.ollama_answers(address) is False
     with pytest.raises(providers.BackendUnavailable) as err:
         providers.build_primary_backend(_cfg(model={"backend": "ollama", "ollama_url": address}))
-    assert f"No Ollama server is answering at {address.rstrip('/')}" in str(err.value), str(err.value)
+    assert f"No Ollama server at {address.rstrip('/')}" in str(err.value), str(err.value)
 
 
 def test_ollama_backend_bounds_what_it_reads_of_an_error_body(tmp_path):

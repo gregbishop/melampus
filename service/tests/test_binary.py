@@ -572,7 +572,7 @@ def test_executable_refuses_ollama_when_no_server_answers(
     tail = proc.stderr[-3000:]
     assert proc.returncode == 3, f"exit {proc.returncode}:\n{tail}"
     assert "invalid choice" not in tail, f"the executable does not accept ollama:\n{tail}"
-    assert f"No Ollama server is answering at http://127.0.0.1:{port}" in tail, tail
+    assert f"No Ollama server at http://127.0.0.1:{port}" in tail, tail
     assert "https://ollama.com/download" in tail, tail
     for works_here in ("claude", "openai", "scripted"):
         assert works_here in tail, f"{works_here!r} is not named as working here:\n{tail}"

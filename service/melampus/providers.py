@@ -204,9 +204,9 @@ def detect_engines(ollama_at: str | None = None) -> list[EngineVerdict]:
     ]
 
 
-def _works_here(ollama_at: str | None = None) -> tuple[str, ...]:
-    """The backends this machine can run, as detection says, plus the fake."""
-    return (*(v.engine for v in detect_engines(ollama_at) if v.available), SCRIPTED)
+def _works_here(verdicts: list[EngineVerdict]) -> tuple[str, ...]:
+    """The backends this machine can run, as the verdicts say, plus the fake."""
+    return (*(v.engine for v in verdicts if v.available), SCRIPTED)
 
 
 def default_engine(ollama_at: str | None = None) -> str:
@@ -266,28 +266,29 @@ def build_primary_backend(config: MelampusConfig) -> VLMBackend:
         if not on_apple_silicon():
             raise _refusal(
                 "The local MLX backend only runs on Apple Silicon Macs.",
-                works_here=_works_here(settings.ollama_url),
+                works_here=_works_here(detect_engines(settings.ollama_url)),
             )
         from .backend import MLXBackend
 
         return MLXBackend(settings.repo, settings.temperature)
 
     if kind == OLLAMA:
-        # The probe detection uses, run here, before any image is read: a
-        # server that is not there fails once, up front, with the fix, rather
-        # than once per frame mid-run.
-        url = ollama_url(settings.ollama_url)
-        if not ollama_answers(url):
+        # Detection, run once here, before any image is read: a server that is
+        # not there fails up front, with the fix, rather than once per frame
+        # mid-run. The refusal's sentence is the ollama verdict's own words
+        # (what --detect-engines and the dialog say), and its "what works"
+        # list comes from the same verdicts: one probe, one sentence.
+        verdicts = detect_engines(settings.ollama_url)
+        ollama = next(v for v in verdicts if v.engine == OLLAMA)
+        if not ollama.available:
             raise _refusal(
-                f"No Ollama server is answering at {url}. Start Ollama, or install "
-                f"it from {OLLAMA_INSTALL}; a server on another address is named by "
-                "[model] ollama_url.",
-                works_here=_works_here(settings.ollama_url),
+                f"{ollama.reason[0].upper()}{ollama.reason[1:]}.",
+                works_here=_works_here(verdicts),
             )
         from .backend import OllamaBackend
 
         return OllamaBackend(
-            settings.ollama_model, url,
+            settings.ollama_model, ollama_url(settings.ollama_url),
             temperature=settings.temperature, timeout=settings.timeout_seconds,
         )
 

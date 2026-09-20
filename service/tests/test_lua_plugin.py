@@ -297,7 +297,7 @@ def test_the_engine_preference_reaches_the_executable_through_the_command_the_pl
 
     assert proc.returncode == 3, f"exit {proc.returncode}: {proc.stderr[-2000:]}"
     tail = _cli_log_tail(tmp_path)
-    assert f"No Ollama server is answering at http://127.0.0.1:{port}" in tail, tail
+    assert f"No Ollama server at http://127.0.0.1:{port}" in tail, tail
     assert "invalid choice" not in tail, f"the executable does not accept ollama:\n{tail}"
 
 
