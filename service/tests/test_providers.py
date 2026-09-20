@@ -926,6 +926,32 @@ def test_cli_detect_engines_reports_ollama_when_it_answers(monkeypatch, capsys):
     assert verdicts["ollama"]["available"] is True
 
 
+def test_cli_detect_engines_reads_config_the_way_the_run_would(monkeypatch, tmp_path, capsys):
+    """`--detect-engines` describes the run the same flags would make, so it
+    reads config the same way: with `--no-local-config`, the `ollama_url` in
+    melampus.local.toml is not probed (the default address is); without it,
+    that address is the one probed. Otherwise the verdict and the run could
+    disagree about where Ollama was looked for."""
+    from melampus import config as config_module
+    from melampus.cli import main
+
+    local = tmp_path / "melampus.local.toml"
+    local.write_text('[model]\nollama_url = "http://127.0.0.1:11436"\n', encoding="utf-8")
+    monkeypatch.setattr(config_module, "_local_config", lambda: local)
+    probed: list[str] = []
+
+    def answers(url=None):
+        probed.append(url)
+        return False
+
+    monkeypatch.setattr(providers, "ollama_answers", answers)
+
+    assert main(["--detect-engines", "--no-local-config"]) == 0
+    assert probed == [providers.OLLAMA_URL], f"the local config's address was probed: {probed}"
+    assert main(["--detect-engines"]) == 0
+    assert probed == [providers.OLLAMA_URL, "http://127.0.0.1:11436"], probed
+
+
 def test_cli_still_requires_a_folder_without_detect_engines(capsys):
     from melampus.cli import main
 

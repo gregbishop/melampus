@@ -259,15 +259,6 @@ def main(argv: list[str] | None = None) -> int:
 
     args = ap.parse_args(argv)
 
-    if args.detect_engines:
-        # The address probed is the configured one, so the verdict cannot
-        # disagree with what --backend ollama would talk to.
-        ollama_at = load_config(args.config).model.ollama_url
-        print(json.dumps([asdict(v) for v in detect_engines(ollama_at)], indent=2))
-        return 0
-    if args.folder is None:
-        ap.error("the following arguments are required: folder")
-
     overrides: dict = {}
     if args.model:
         overrides.setdefault("model", {})["repo"] = args.model
@@ -288,6 +279,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.escalate_base_url:
         overrides.setdefault("escalation", {})["base_url"] = args.escalate_base_url
     config = load_config(args.config, use_local=not args.no_local_config, **overrides)
+
+    if args.detect_engines:
+        # The address probed is the configured one, read the way the run
+        # reads it (--config and --no-local-config alike), so the verdict
+        # cannot disagree with what --backend ollama would talk to.
+        print(json.dumps([asdict(v) for v in detect_engines(config.model.ollama_url)], indent=2))
+        return 0
+    if args.folder is None:
+        ap.error("the following arguments are required: folder")
 
     if "backend" not in config.model.model_fields_set:
         # Nothing named an engine: neither --backend nor [model] backend. The
