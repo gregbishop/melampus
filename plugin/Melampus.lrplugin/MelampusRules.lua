@@ -133,13 +133,14 @@ end
 -- `verdicts` is the decoded JSON of --detect-engines, a list of
 -- { engine, available, reason }. The first item leaves the choice to the
 -- executable (the unset preference); then Rules.ENGINES in order, each
--- disabled when detection said it cannot run here and, when its reason
--- names a web address, carrying the last one it names as `link`. Without
--- verdicts (no executable, or output that is not the list) nothing is greyed
--- and `problem` is the note. Returns the items and the note to show under
--- the picker: one line per unavailable engine with its reason, or the
--- problem. An item carries only what the dialog reads: title, value,
--- enabled, link.
+-- disabled when detection said it cannot run here. The ollama item alone,
+-- when disabled and its reason names a web address, carries the last one
+-- it names as `link`: where to install Ollama. Another engine's address
+-- stays text in the note. Without verdicts (no executable, or output that
+-- is not the list) nothing is greyed and `problem` is the note. Returns the
+-- items and the note to show under the picker: one line per unavailable
+-- engine with its reason, or the problem. An item carries only what the
+-- dialog reads: title, value, enabled, link.
 function Rules.engineItems(verdicts, problem)
 	local byEngine = {}
 	if type(verdicts) == 'table' then
@@ -163,11 +164,14 @@ function Rules.engineItems(verdicts, problem)
 		}
 		if not available then
 			local reason = tostring(verdict.reason or '')
-			-- The address to go to is the last one the reason names (the first
-			-- may be where a local server was looked for), without a trailing
-			-- full stop or semicolon from the sentence around it.
-			for address in string.gmatch(reason, 'https?://[^%s]+') do
-				item.link = string.match(address, '^(.-)[.,;:)]*$')
+			-- Only Ollama is something to go and install. The address to go
+			-- to is the last one the reason names (the first may be where a
+			-- local server was looked for), without a trailing full stop or
+			-- semicolon from the sentence around it.
+			if engine == 'ollama' then
+				for address in string.gmatch(reason, 'https?://[^%s]+') do
+					item.link = string.match(address, '^(.-)[.,;:)]*$')
+				end
 			end
 			lines[#lines + 1] = Rules.ENGINE_TITLES[engine] .. ': ' .. reason
 		end
