@@ -49,6 +49,7 @@ from pathlib import Path
 from types import ModuleType
 
 import pytest
+from huggingface_hub.constants import DOWNLOAD_CHUNK_SIZE
 from huggingface_hub.file_download import repo_folder_name
 
 from melampus.download import Update
@@ -219,11 +220,19 @@ def built_executable(request: pytest.FixtureRequest) -> Path:
 
 FAKE_REPO = "fake-org/fake-model"
 FAKE_COMMIT = "0123456789abcdef0123456789abcdef01234567"
-# One file larger than huggingface_hub's 10 MiB download chunk, so a cut leaves
-# a whole chunk on disk to resume from, and a small one.
+
+
+def fake_bytes(size: int) -> bytes:
+    """`size` deterministic bytes: a model file's stand-in."""
+    return (bytes(range(256)) * (size // 256 + 1))[:size]
+
+
+# One file larger than the chunk huggingface_hub's http_get iterates by (what
+# a cut leaves on disk, so there is a whole chunk to resume from), and a
+# small one.
 FAKE_FILES = {
     "config.json": b'{"model_type": "fake"}\n',
-    "model.safetensors": bytes(range(256)) * (12 * 4096),  # 12 MiB, deterministic
+    "model.safetensors": fake_bytes(DOWNLOAD_CHUNK_SIZE * 6 // 5),
 }
 FAKE_TOTAL = sum(len(data) for data in FAKE_FILES.values())
 # The repo's folder in the cache, named the way the code under test names it.

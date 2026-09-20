@@ -30,8 +30,10 @@ from conftest import (
     FakeHub,
     assert_download_completed,
     closed_port,
+    fake_bytes,
     snapshot_files,
 )
+from huggingface_hub.constants import DOWNLOAD_CHUNK_SIZE
 
 from melampus import download
 from melampus.cli import main
@@ -46,9 +48,6 @@ from melampus.download import (
 
 # What `.venv/bin/melampus-id` runs, from any interpreter that has the package.
 VENV_CLI = [sys.executable, "-m", "melampus.cli"]
-
-CHUNK = 10 * 1024 * 1024  # huggingface_hub's download chunk: what a cut leaves on disk
-
 
 def _fetch(hub: FakeHub, cache: Path, repo: str = FAKE_REPO) -> tuple[Path, list[Update]]:
     updates: list[Update] = []
@@ -147,24 +146,24 @@ def test_download_keeps_the_partial_file_when_the_connection_drops_and_resumes_i
     chunk kept in the cache's `.incomplete` blob. The next run asks the host
     for the rest (a Range request from the byte it has), and the file it
     finishes is byte-identical to the host's."""
-    fake_hub.cut_after = CHUNK + 4096
+    fake_hub.cut_after = DOWNLOAD_CHUNK_SIZE + 4096
 
     with pytest.raises(DownloadError) as failure:
         _fetch(fake_hub, tmp_path / "hub")
 
     assert "503" in str(failure.value) and "--download-model" in str(failure.value)
     (partial,) = _incomplete(tmp_path / "hub")
-    assert partial.stat().st_size == CHUNK
-    assert partial.read_bytes() == FAKE_FILES["model.safetensors"][:CHUNK]
+    assert partial.stat().st_size == DOWNLOAD_CHUNK_SIZE
+    assert partial.read_bytes() == FAKE_FILES["model.safetensors"][:DOWNLOAD_CHUNK_SIZE]
 
     fake_hub.outage = False
     fake_hub.requests.clear()
     path, updates = _fetch(fake_hub, tmp_path / "hub")
 
-    assert fake_hub.gets("model.safetensors") == [f"bytes={CHUNK}-"], "the rest was not asked for by Range"
+    assert fake_hub.gets("model.safetensors") == [f"bytes={DOWNLOAD_CHUNK_SIZE}-"], "the rest was not asked for by Range"
     assert snapshot_files(path) == FAKE_FILES
     assert not _incomplete(tmp_path / "hub")
-    assert updates[0] == Update.progress(CHUNK + len(FAKE_FILES["config.json"]), FAKE_TOTAL), (
+    assert updates[0] == Update.progress(DOWNLOAD_CHUNK_SIZE + len(FAKE_FILES["config.json"]), FAKE_TOTAL), (
         "the first update did not count what was already on disk")
     assert updates[-1] == Update.progress(FAKE_TOTAL, FAKE_TOTAL)
 
@@ -355,12 +354,12 @@ def _interrupt(proc: subprocess.Popen) -> None:
 def test_cli_cancelled_by_a_signal_keeps_the_partial_file_and_the_next_run_resumes_it(
     hub_env: dict[str, str], tmp_path: Path
 ):
-    """Done-when 2. A 40 MiB file served slowly; once the first chunk is on
+    """Done-when 2. A four-chunk file served slowly; once the first chunk is on
     disk (the second progress line) the signal arrives: the command prints
     `cancelled`, exits 4, and the chunk stays in the cache's .incomplete blob.
     Run again at full speed, the host is asked for the rest by Range and the
     file finishes byte-identical."""
-    big = bytes(range(256)) * (40 * 4096)
+    big = fake_bytes(4 * DOWNLOAD_CHUNK_SIZE)
     hub = FakeHub(files={"config.json": FAKE_FILES["config.json"], "model.safetensors": big})
     hub.throttle = (64 * 1024, 0.002)
     flags = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if sys.platform == "win32" else {}
@@ -371,7 +370,7 @@ def test_cli_cancelled_by_a_signal_keeps_the_partial_file_and_the_next_run_resum
         lines = []
         for line in proc.stdout:
             lines.append(Update.parse(line))
-            if lines[-1].state == "progress" and lines[-1].bytes_done >= CHUNK:
+            if lines[-1].state == "progress" and lines[-1].bytes_done >= DOWNLOAD_CHUNK_SIZE:
                 _interrupt(proc)
                 break
         rest = proc.stdout.read()
@@ -383,7 +382,7 @@ def test_cli_cancelled_by_a_signal_keeps_the_partial_file_and_the_next_run_resum
         assert "Traceback" not in stderr, stderr[-3000:]
         (partial,) = _incomplete(Path(hub_env["HF_HOME"]) / "hub")
         kept = partial.stat().st_size
-        assert CHUNK <= kept < len(big), "the partial file was not kept"
+        assert DOWNLOAD_CHUNK_SIZE <= kept < len(big), "the partial file was not kept"
         assert partial.read_bytes() == big[:kept]
 
         hub.requests.clear()
