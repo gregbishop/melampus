@@ -656,6 +656,7 @@ def _settings_naming_the_fake(monkeypatch, tmp_path):
     monkeypatch.setattr(providers, "OLLAMA_URL", f"http://127.0.0.1:{closed_port()}")
     return settings
 
+
 def test_ollama_not_running_fires_before_any_image_is_read(monkeypatch, tmp_path, capsys):
     """Card #406, Done-when 2, at the real boundary: nothing listening on the
     port, and the folder's one image is a link to nowhere, so opening it
