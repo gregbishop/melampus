@@ -573,6 +573,31 @@ def test_ollama_probe_timeout_is_one_second():
     assert providers.OLLAMA_PROBE_SECONDS == 1.0
 
 
+def test_hang_up_survives_the_connection_closing_between_its_reads():
+    """Security: `_hang_up` runs on the timer thread while the main thread may
+    be closing the connection (`ollama_answers`'s `finally`, or `getresponse`
+    itself when the response says close), and `HTTPConnection.close()` sets
+    `sock` to None. Given a connection whose socket is there on the first
+    read and gone on the second, `_hang_up` returns without raising, as its
+    docstring says, and the deadline is still recorded."""
+    reads = 0
+
+    class Closing:
+        def __init__(self, sock):
+            self._sock = sock
+
+        @property
+        def sock(self):
+            nonlocal reads
+            reads += 1
+            return self._sock if reads == 1 else None
+
+    expired = threading.Event()
+    with socket.socket() as sock:
+        providers._hang_up(Closing(sock), expired)
+    assert expired.is_set()
+
+
 def test_ollama_probe_stays_on_loopback_whatever_proxy_the_environment_names(monkeypatch):
     """Security: the probe is a loopback call and must stay one. urlopen's
     default opener honours `http_proxy` (and, on a Mac, the system proxy
