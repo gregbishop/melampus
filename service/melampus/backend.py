@@ -30,6 +30,12 @@ class Completion:
     refused: bool = False
 
 
+def _image_as_base64(image_path: Path) -> str:
+    """The staged image's bytes, base64 for a JSON body: the one thing every
+    HTTP backend sends of an image (no path, no filename)."""
+    return base64.standard_b64encode(Path(image_path).read_bytes()).decode("ascii")
+
+
 class VLMBackend(ABC):
     """Takes an image path and a prompt; returns text. Nothing else crosses this line."""
 
@@ -182,9 +188,7 @@ class AnthropicBackend(VLMBackend):
         return client.messages.create(**params)
 
     def complete(self, image_path: Path, prompt: str, max_tokens: int) -> Completion:
-        import base64
-
-        data = base64.standard_b64encode(Path(image_path).read_bytes()).decode("ascii")
+        data = _image_as_base64(image_path)
         blocks = [
             {
                 "type": "image",
@@ -296,9 +300,7 @@ class OpenAIBackend(VLMBackend):
             return client.chat.completions.create(**params, max_tokens=max_tokens)
 
     def complete(self, image_path: Path, prompt: str, max_tokens: int) -> Completion:
-        import base64
-
-        data = base64.standard_b64encode(Path(image_path).read_bytes()).decode("ascii")
+        data = _image_as_base64(image_path)
         blocks = [
             {"type": "text", "text": prompt},
             {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{data}"}},
@@ -378,7 +380,9 @@ class OllamaBackend(VLMBackend):
     ) -> None:
         self.name = model
         self.model = model
-        self.url = url.rstrip("/")
+        # The address as the factory hands it: providers.ollama_url has
+        # already dropped the trailing slash, so ENDPOINT appends cleanly.
+        self.url = url
         self.temperature = temperature
         self.timeout = timeout
         # Shaped like urllib.request.urlopen(request, timeout=...): the tests hand
@@ -396,7 +400,7 @@ class OllamaBackend(VLMBackend):
         ).open
 
     def _request(self, image_path: Path, prompt: str, max_tokens: int) -> urllib.request.Request:
-        image = base64.b64encode(Path(image_path).read_bytes()).decode("ascii")
+        image = _image_as_base64(image_path)
         body = {
             "model": self.model,
             "messages": [{"role": "user", "content": prompt, "images": [image]}],
