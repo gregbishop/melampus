@@ -127,7 +127,16 @@ def ollama_answers(url: str | None = None) -> bool:
     """Whether an Ollama server answers at `url` (default OLLAMA_URL):
     GET /api/version (Ollama's docs/api.md § Version) within
     OLLAMA_PROBE_SECONDS, status 200. Connection refused, a timeout, a
-    non-200: unavailable. Never raises; a probe reports. Straight to the
+    non-200: unavailable. Never raises; a probe reports. The address is
+    read the way the backend reads it for every frame (OllamaBackend
+    builds `{url}/api/chat` and hands it to urllib): the endpoint goes on
+    the end of the address as typed, so a path in front of it (a reverse
+    proxy's `/ollama`) stays; the scheme picks the connection, https
+    spoken as TLS with the certificate verified (http.client's default
+    context, as urllib's), so an https address is never asked in the clear
+    and never on port 80; the host and port are the address's own. Read
+    any other way, the probe would refuse a server every frame would reach,
+    or find one no frame would. Straight to the
     address, never through a proxy: urlopen honours http_proxy and the
     system proxy settings, which would send a loopback probe off the machine
     and let the proxy's answer stand in for Ollama's; http.client consults
@@ -140,8 +149,9 @@ def ollama_answers(url: str | None = None) -> bool:
     long as it liked; a timer hangs up at OLLAMA_PROBE_SECONDS, and whatever
     was read by then, the probe reports unavailable."""
     try:
-        address = urlsplit(ollama_url(url))
-        connection = http.client.HTTPConnection(
+        address = urlsplit(f"{ollama_url(url)}/api/version")
+        connect = {"http": http.client.HTTPConnection, "https": http.client.HTTPSConnection}
+        connection = connect[address.scheme](
             address.hostname, address.port, timeout=OLLAMA_PROBE_SECONDS
         )
     except Exception:  # noqa: BLE001 - an address that cannot be asked (no scheme, no host, a port out of range) is one nobody answers at
@@ -150,7 +160,7 @@ def ollama_answers(url: str | None = None) -> bool:
     deadline = threading.Timer(OLLAMA_PROBE_SECONDS, _hang_up, [connection, expired])
     deadline.start()
     try:
-        connection.request("GET", "/api/version")
+        connection.request("GET", address.path)
         # A timer that fired during connect() found no socket to hang up;
         # a late handshake must not start a read the deadline cannot end.
         if expired.is_set():

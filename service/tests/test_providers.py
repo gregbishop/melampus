@@ -539,11 +539,14 @@ def test_default_engine_is_always_one_detection_names_available(
 
 
 @contextlib.contextmanager
-def _ollama_served_by(monkeypatch, handler: type[QuietHandler]):
+def _ollama_served_by(monkeypatch, handler: type[QuietHandler], prefix: str = ""):
     """`handler` on 127.0.0.1 at an ephemeral port, standing in for Ollama:
-    detection is pointed at it for the block."""
+    detection is pointed at it for the block. `prefix` is a path in front of
+    the endpoints, as a reverse proxy mounts Ollama under one, and is part
+    of the address detection is pointed at."""
     with loopback_server(handler) as server:
-        monkeypatch.setattr(providers, "OLLAMA_URL", f"http://127.0.0.1:{server.server_port}")
+        monkeypatch.setattr(
+            providers, "OLLAMA_URL", f"http://127.0.0.1:{server.server_port}{prefix}")
         yield server
 
 
@@ -581,26 +584,33 @@ def _ollama_chat_reply(model: str, text: str) -> dict:
 
 
 @contextlib.contextmanager
-def _fake_ollama(monkeypatch, *, status: int = 200, delay: float = 0.0, replies: list[str] = ()):
+def _fake_ollama(
+    monkeypatch, *, status: int = 200, delay: float = 0.0, replies: list[str] = (), prefix: str = ""
+):
     """A server speaking Ollama's version and chat endpoints, standing in for
     Ollama. `status` is what GET /api/version answers; `delay` holds the
     answer that long. `replies` are the texts POST /api/chat answers with, in
     order, each wrapped in the final response object docs/api.md § Generate a
     chat completion shows; every chat request's JSON body is kept on
-    `server.chats`."""
+    `server.chats`. `prefix` mounts both endpoints under a path, the way a
+    reverse proxy does; any other path is Ollama's own 404."""
     release = threading.Event()
     pending = list(replies)
 
     class Ollama(QuietHandler):
         def do_GET(self):  # noqa: N802 - http.server's name
-            assert self.path == "/api/version", self.path
+            if self.path != f"{prefix}/api/version":
+                self._answer(404, {"error": "404 page not found"})
+                return
             if delay:
                 release.wait(delay)
             self._answer(status, {"version": "0.0.0-fake"})
 
         def do_POST(self):  # noqa: N802 - http.server's name
-            assert self.path == "/api/chat", self.path
             body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            if self.path != f"{prefix}/api/chat":
+                self._answer(404, {"error": "404 page not found"})
+                return
             self.server.chats.append(body)
             if not pending:
                 self._answer(404, {"error": f"model '{body.get('model')}' not found"})
@@ -613,7 +623,7 @@ def _fake_ollama(monkeypatch, *, status: int = 200, delay: float = 0.0, replies:
             self.end_headers()
             self.wfile.write(json.dumps(payload).encode("utf-8"))
 
-    with _ollama_served_by(monkeypatch, Ollama) as server:
+    with _ollama_served_by(monkeypatch, Ollama, prefix) as server:
         server.chats = []
         try:
             yield server
@@ -916,6 +926,77 @@ def test_ollama_probe_refuses_a_redirect_off_loopback(monkeypatch):
             answered = providers.ollama_answers()
     assert seen == [], f"the probe followed the redirect off loopback: {seen}"
     assert answered is False
+
+
+def test_ollama_probe_asks_at_the_path_the_address_carries_as_the_backend_does(
+    monkeypatch, tmp_path
+):
+    """Codex round 1 (providers.py:144): the probe read only the host and port
+    of `[model] ollama_url` and asked /api/version at the root, while the
+    backend POSTs to the address as typed plus /api/chat, so an Ollama behind
+    a reverse proxy at `http://host/ollama` was refused as not running though
+    every frame would have reached it. Given a fake Ollama mounted under
+    /ollama, answering 404 anywhere else, detection at that address finds
+    it, and the backend the factory builds from the same address posts to
+    /ollama/api/chat: one address, read one way, from the probe to the
+    frame."""
+    image = tmp_path / "image.jpg"
+    image.write_bytes(b"jpeg")
+    with _fake_ollama(monkeypatch, replies=[ID_OK], prefix="/ollama") as server:
+        address = providers.OLLAMA_URL
+        assert address.endswith("/ollama")
+        assert providers.ollama_answers(address) is True
+        backend = providers.build_primary_backend(
+            _cfg(model={"backend": "ollama", "ollama_url": address}))
+        assert backend.complete(image, "prompt", 10).text == ID_OK
+        assert len(server.chats) == 1
+
+
+def test_ollama_probe_speaks_tls_for_an_https_address(monkeypatch):
+    """Codex round 1 (providers.py:144), security: `https://host` is what a
+    user types for an Ollama behind a TLS proxy, and the backend speaks TLS
+    to it (urllib, certificate verified), but the probe dropped the scheme
+    and asked port 80 in the clear. Given a plain HTTP server on loopback
+    and an https address naming its port, the probe reports unavailable and
+    the server never receives a request: a TLS handshake is not a GET, and
+    the probe is not asking in plaintext."""
+    seen: list[str] = []
+    with loopback_server(recording_handler(seen)) as plain:
+        answered = providers.ollama_answers(f"https://127.0.0.1:{plain.server_port}")
+    assert answered is False
+    assert seen == [], f"the probe asked an https address in plaintext: {seen}"
+
+
+def test_ollama_probe_opens_a_verified_https_connection_for_an_https_address(monkeypatch):
+    """The other half of the https regression: the probe does ask over TLS
+    (not refuse https outright), at the address's host and its port as typed
+    (none, here: HTTPSConnection's own 443), with http.client's default
+    context, the one that verifies the certificate. Given HTTPSConnection
+    faked at the http.client edge to answer 200 without connecting, the
+    probe reports the server found."""
+    opened: list[tuple] = []
+
+    class FakeHTTPS:
+        sock = None
+
+        def __init__(self, host, port=None, **kwargs):
+            opened.append((host, port, kwargs))
+
+        def request(self, method, path):
+            opened.append((method, path))
+
+        def getresponse(self):
+            return types.SimpleNamespace(status=200)
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(http.client, "HTTPSConnection", FakeHTTPS)
+    assert providers.ollama_answers("https://ollama.example") is True
+    (host, port, kwargs), asked = opened
+    assert (host, port) == ("ollama.example", None)
+    assert "context" not in kwargs, "the probe must verify the certificate: no context of its own"
+    assert asked == ("GET", "/api/version")
 
 
 # ---------------------------------------------------------------------------
@@ -1283,6 +1364,23 @@ def test_ollama_backend_refuses_a_redirect_off_the_address(tmp_path):
                 backend.complete(image, "prompt", 10)
     assert "Ollama answered 302" in str(err.value), str(err.value)
     assert seen == [], f"the backend followed the redirect off the address: {seen}"
+
+
+def test_ollama_backend_speaks_tls_for_an_https_address(tmp_path):
+    """The backend's half of the https regression (Codex round 1,
+    providers.py:144): an https address is spoken over TLS, never in the
+    clear. Given a plain HTTP server on loopback and an https address naming
+    its port, the frame fails as not answering and the server never receives
+    a request."""
+    seen: list[str] = []
+    image = tmp_path / "image.jpg"
+    image.write_bytes(b"jpeg")
+    with loopback_server(recording_handler(seen)) as plain:
+        backend = OllamaBackend(
+            "qwen3-vl:8b-instruct", f"https://127.0.0.1:{plain.server_port}", timeout=5.0)
+        with pytest.raises(ConnectionError):
+            backend.complete(image, "prompt", 10)
+    assert seen == [], f"the backend asked an https address in plaintext: {seen}"
 
 
 @pytest.mark.parametrize(
