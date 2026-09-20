@@ -330,22 +330,21 @@ class OpenAIBackend(VLMBackend):
 
 
 def _hang_up(line, expired: threading.Event) -> None:
-    """The deadline, from its timer. `line` is whatever holds the exchange's
-    socket under the name `sock` (a _Deadline). Not connection.close(): the
-    response being read holds the socket's file object, and socket.close()
-    waits for that to go before it really closes, so the blocked read would
-    read on. shutdown(SHUT_RDWR) ends the stream now. And `expired`, because
-    http.client takes end-of-stream as the end of the headers: a status line
-    that arrived before the trickle would still parse as a 200, and the
-    caller must know the deadline finished the response, not the server. No
-    socket yet means the caller is still connecting: the socket timeout
-    bounds that, and the socket is hung up as soon as it is given (see
-    _Deadline.on), since a timer that fired before the socket existed had
-    nothing to hang up and the reads after a late handshake would otherwise
-    be bounded per byte only. The socket is read once: the main thread's
-    close() sets it to None at any moment, and a socket it already closed
-    raises OSError, which is suppressed; None between two reads would not
-    be."""
+    """The deadline, from its timer. `line` is the _Deadline holding the
+    exchange's socket as `sock`, handed over the moment `_Noted` makes it
+    and again, for https, as the wrapped socket before the handshake. Not
+    close(): the response being read holds the socket's file object, and
+    socket.close() waits for that to go before it really closes, so the
+    blocked read would read on. shutdown(SHUT_RDWR) ends the stream now.
+    And `expired`, because http.client takes end-of-stream as the end of
+    the headers: a status line that arrived before the trickle would still
+    parse as a 200, and the caller must know the deadline finished the
+    response, not the server. No socket yet means the caller is still
+    connecting: the socket timeout bounds that, and `_Deadline.on` hangs
+    the socket up as soon as it is given, since a timer that fired before
+    the socket existed had nothing to hang up. A socket the main thread
+    already closed (the probe's `finally`, or urllib once the headers are
+    in) raises OSError, which is suppressed."""
     expired.set()
     sock = line.sock
     if sock is not None:

@@ -40,6 +40,8 @@ from melampus.backend import (
     OllamaBackend,
     OpenAIBackend,
     ScriptedBackend,
+    _Deadline,
+    _hang_up,
 )
 from melampus.config import load_config
 
@@ -913,15 +915,17 @@ def test_ollama_probe_gives_up_at_its_deadline_when_the_handshake_stalls_after_a
 
 def test_ollama_probe_gives_up_at_its_deadline_when_it_fires_during_connect(monkeypatch):
     """Security: the deadline must bound the probe whichever side of the
-    handshake it lands on. The timer hangs up the connection's socket, and
-    there is none until connect() returns; a deadline that fires while the
-    probe is still connecting hangs up nothing, and if the handshake then
-    completes, the reads that follow are bounded per byte only, and a
-    trickling listener holds detection for as long as it likes again. The
-    kernel's handshake timing is not reproducible, so connect() is held past
-    the deadline here. Given a connect that completes just after the deadline
-    against a trickling server, the probe reports unavailable and returns
-    within the deadline plus the hold, not after the trickle."""
+    connection it lands on. The timer hangs up the socket the deadline
+    holds, and there is none while the probe is still connecting, so a
+    deadline that fires then hangs up nothing; the socket is handed to the
+    deadline the moment `_Noted` makes it, and `on()` hangs it up at once
+    when the deadline has already passed, so the reads that follow a late
+    connect never start, and a trickling listener cannot hold detection
+    through them. The kernel's connect timing is not reproducible, so
+    connect() is held past the deadline here. Given a connect that
+    completes just after the deadline against a trickling server, the
+    probe reports unavailable and returns within the deadline plus the
+    hold, not after the trickle."""
     deadline = 0.3
     hold = 0.05  # how long past the deadline connect() is held
     monkeypatch.setattr(providers, "OLLAMA_PROBE_SECONDS", deadline)
@@ -935,29 +939,33 @@ def test_ollama_probe_timeout_is_one_second():
     assert providers.OLLAMA_PROBE_SECONDS == 1.0
 
 
-def test_hang_up_survives_the_connection_closing_between_its_reads():
-    """Security: `_hang_up` runs on the timer thread while the main thread may
-    be closing the connection (`ollama_answers`'s `finally`, or `getresponse`
-    itself when the response says close), and `HTTPConnection.close()` sets
-    `sock` to None. Given a connection whose socket is there on the first
-    read and gone on the second, `_hang_up` returns without raising, as its
-    docstring says, and the deadline is still recorded."""
-    reads = 0
+def test_hang_up_records_the_deadline_and_ends_the_stream_it_holds():
+    """What `_hang_up` promises the deadline's timer, on the `_Deadline`
+    it is given: with no socket yet (the caller is still connecting), the
+    deadline is recorded as expired and nothing is touched, so `on()` can
+    hang up as soon as there is a socket; with a socket, it is recorded
+    and the stream is ended now, the other end reading end-of-stream; and
+    a socket the main thread already closed (the probe's `finally`, or
+    urllib once the headers are in) raises OSError, which is suppressed."""
+    deadline = _Deadline(60.0)
+    _hang_up(deadline, deadline.expired)
+    assert deadline.expired.is_set()
 
-    class Closing:
-        def __init__(self, sock):
-            self._sock = sock
+    deadline = _Deadline(60.0)
+    ours, theirs = socket.socketpair()
+    with ours, theirs:
+        deadline.on(ours)
+        _hang_up(deadline, deadline.expired)
+        assert deadline.expired.is_set()
+        theirs.settimeout(1.0)
+        assert theirs.recv(1) == b"", "the stream was not ended"
 
-        @property
-        def sock(self):
-            nonlocal reads
-            reads += 1
-            return self._sock if reads == 1 else None
-
-    expired = threading.Event()
-    with socket.socket() as sock:
-        providers._hang_up(Closing(sock), expired)
-    assert expired.is_set()
+    deadline = _Deadline(60.0)
+    closed = socket.socket()
+    closed.close()
+    deadline.on(closed)
+    _hang_up(deadline, deadline.expired)
+    assert deadline.expired.is_set()
 
 
 def test_ollama_probe_stays_on_loopback_whatever_proxy_the_environment_names(monkeypatch):

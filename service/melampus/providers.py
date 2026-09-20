@@ -16,10 +16,7 @@ from urllib.parse import urlsplit
 
 from pydantic import SecretStr
 
-# _hang_up is the deadline's own hang-up, written for the probe and kept in
-# its tests here; it lives in backend.py because the backend shares the
-# deadline and this module imports that one, not the reverse.
-from .backend import VLMBackend, _Deadline, _hang_up, _NotedHTTP, _NotedHTTPS  # noqa: F401
+from .backend import VLMBackend, _Deadline, _NotedHTTP, _NotedHTTPS
 from .config import MelampusConfig
 
 #: Where each provider's key is looked for, in order, when the config has none.
