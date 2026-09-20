@@ -757,7 +757,9 @@ t.test('detection runs the executable once with --detect-engines and returns the
 end)
 
 t.test('a missing executable makes detection say so, with the plugin folder and the file', function()
-	local Analyze = loadUnderMock('MelampusAnalyze')
+	-- Absent by name, as the analysis's sibling above: the mock must not look
+	-- at the disk, where the readme's install step may have put the real one.
+	local Analyze = loadUnderMock('MelampusAnalyze', { existing = { [MAC_EXECUTABLE] = false } })
 	local verdicts, problem = Analyze.detectEngines()
 	t.isNil(verdicts)
 	t.isNil(mock.state.executed, 'ran a command with no executable to run')

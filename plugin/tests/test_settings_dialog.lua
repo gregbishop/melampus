@@ -18,13 +18,14 @@ local OLLAMA_DOWNLOAD = 'https://ollama.com/download'
 
 --- Open the real Settings dialog under the mock. `options.detection` is what
 --- the executable prints for --detect-engines, from mock.detectionText (nil:
---- no executable beside the plugin); `options.onDialog` plays the user while
---- the dialog is up.
+--- no executable beside the plugin, told to the mock as absent by name, so
+--- the test holds after the readme's install step has put the real one
+--- there); `options.onDialog` plays the user while the dialog is up.
 local function openSettings(options)
 	options = options or {}
 	mock.reset({
 		prefs = mock.defaultPrefs(options.prefs),
-		existing = options.detection and { [EXECUTABLE] = true } or {},
+		existing = { [EXECUTABLE] = options.detection ~= nil },
 		passwords = options.passwords,
 		onExecute = options.detection and mock.answersDetection(options.detection) or nil,
 		onModalDialog = options.onDialog,
