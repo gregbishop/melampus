@@ -358,6 +358,14 @@ class OllamaBackend(VLMBackend):
     """
 
     ENDPOINT = "/api/chat"
+    #: The most of a reply that is read: one object, the text of at most
+    #: `num_predict` tokens and a dozen counters, so a megabyte is not an
+    #: answer, and a server that keeps sending does not fill memory.
+    MAX_REPLY_BYTES = 1 << 20
+    #: The most of a non-200's body that is read: it lands in the frame's
+    #: error record (identify.py), so in the cache and --json-out. Ollama's
+    #: own errors are one line; a proxy's error page is cut here.
+    MAX_ERROR_BYTES = 1 << 10
 
     def __init__(
         self,
@@ -405,7 +413,7 @@ class OllamaBackend(VLMBackend):
     def _send(self, request: urllib.request.Request) -> bytes:
         try:
             with self._urlopen(request, timeout=self.timeout) as response:
-                return response.read()
+                raw = response.read(self.MAX_REPLY_BYTES + 1)
         except urllib.error.HTTPError as exc:
             raise RuntimeError(
                 f"Ollama answered {exc.code}: {self._error_text(exc)}"
@@ -419,6 +427,11 @@ class OllamaBackend(VLMBackend):
             ) from exc
         except TimeoutError as exc:
             raise self._timed_out() from exc
+        if len(raw) > self.MAX_REPLY_BYTES:
+            raise RuntimeError(
+                f"Ollama's reply from {self.url} ran past {self.MAX_REPLY_BYTES} bytes"
+            )
+        return raw
 
     def _timed_out(self) -> TimeoutError:
         return TimeoutError(
@@ -426,11 +439,12 @@ class OllamaBackend(VLMBackend):
             f"{self.model} may still be loading, or raise [model] timeout_seconds"
         )
 
-    @staticmethod
-    def _error_text(exc: urllib.error.HTTPError) -> str:
+    @classmethod
+    def _error_text(cls, exc: urllib.error.HTTPError) -> str:
         """Ollama's own words when the body is its {"error": ...} object,
-        else the body as it came (a proxy's HTML, say), else the status line."""
-        body = exc.read().decode("utf-8", "replace").strip()
+        else the body as it came (a proxy's HTML, say), else the status line;
+        at most MAX_ERROR_BYTES of it."""
+        body = exc.read(cls.MAX_ERROR_BYTES).decode("utf-8", "replace").strip()
         try:
             error = json.loads(body).get("error")
         except (json.JSONDecodeError, AttributeError):

@@ -1229,3 +1229,34 @@ def test_ollama_probe_reports_unavailable_for_an_address_it_cannot_ask(address, 
     with pytest.raises(providers.BackendUnavailable) as err:
         providers.build_primary_backend(_cfg(model={"backend": "ollama", "ollama_url": address}))
     assert f"No Ollama server is answering at {address.rstrip('/')}" in str(err.value), str(err.value)
+
+
+def test_ollama_backend_bounds_what_it_reads_of_an_error_body(tmp_path):
+    """A non-200's body is the server's words, and they land in the frame's
+    error record (identify.py), so in the cache and in --json-out: a proxy's
+    error page or a squatter's megabyte must not land there whole. At most
+    OllamaBackend.MAX_ERROR_BYTES of it are read; Ollama's own errors are
+    one line."""
+    image = tmp_path / "image.jpg"
+    image.write_bytes(b"jpeg")
+    error = urllib.error.HTTPError(
+        "http://127.0.0.1:11435/api/chat", 502, "Bad Gateway", {}, io.BytesIO(b"<p>" * (1 << 20)))
+    backend = _ollama_backend(_FakeUrlopen(error=error))
+    with pytest.raises(RuntimeError) as err:
+        backend.complete(image, "prompt", 10)
+    assert "Ollama answered 502" in str(err.value)
+    assert len(str(err.value)) <= OllamaBackend.MAX_ERROR_BYTES + 40, len(str(err.value))
+
+
+def test_ollama_backend_bounds_what_it_reads_of_a_reply(tmp_path):
+    """The reply is one object read into memory whole (`stream` false); a
+    server that keeps sending must not fill it. Ollama's reply is the text of
+    at most `num_predict` tokens and a dozen counters, so one past
+    OllamaBackend.MAX_REPLY_BYTES is refused as too long, not parsed."""
+    image = tmp_path / "image.jpg"
+    image.write_bytes(b"jpeg")
+    reply = b'{"message": {"content": "' + b"a" * OllamaBackend.MAX_REPLY_BYTES + b'"}}'
+    backend = _ollama_backend(_FakeUrlopen(reply))
+    with pytest.raises(RuntimeError) as err:
+        backend.complete(image, "prompt", 10)
+    assert str(OllamaBackend.MAX_REPLY_BYTES) in str(err.value), str(err.value)
