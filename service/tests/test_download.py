@@ -168,6 +168,39 @@ def test_download_keeps_the_partial_file_when_the_connection_drops_and_resumes_i
     assert updates[-1] == Update.progress(FAKE_TOTAL, FAKE_TOTAL)
 
 
+def test_download_takes_back_the_partial_when_the_host_ignores_the_range_and_never_passes_the_total(
+    fake_hub: FakeHub, tmp_path: Path
+):
+    """Codex round 1 (download.py:239). A host that answers the Range request
+    with 200 and the whole file (a CDN that ignores Range) makes the hub
+    library's `http_get` truncate the partial and take the file from byte
+    zero; its own counter rollback reaches only a bar it reuses across its
+    retries, never the fresh one of this first call, so the partial's bytes,
+    already counted from disk, were counted a second time and `progress`
+    passed the total. Given a partial left by a cut run and a host that then
+    ignores Range, the re-run asks for the rest, takes the partial's bytes
+    back (one update steps back to what the other files hold), climbs to
+    exactly the total, never past it, and the file is byte-identical."""
+    fake_hub.cut_after = DOWNLOAD_CHUNK_SIZE + 4096
+    with pytest.raises(DownloadError):
+        _fetch(fake_hub, tmp_path / "hub")
+    (partial,) = _incomplete(tmp_path / "hub")
+    kept = partial.stat().st_size
+    assert kept == DOWNLOAD_CHUNK_SIZE
+
+    fake_hub.outage, fake_hub.ignore_range = False, True
+    fake_hub.requests.clear()
+    path, updates = _fetch(fake_hub, tmp_path / "hub")
+
+    assert fake_hub.gets("model.safetensors") == [f"bytes={kept}-"], "the rest was not asked for by Range"
+    assert snapshot_files(path) == FAKE_FILES
+    assert not _incomplete(tmp_path / "hub")
+    config = len(FAKE_FILES["config.json"])
+    assert updates[0] == Update.progress(kept + config, FAKE_TOTAL), "the first update did not count what was on disk"
+    assert updates[1] == Update.progress(config, FAKE_TOTAL), "the partial's bytes were not taken back"
+    assert max(u.bytes_done for u in updates) == FAKE_TOTAL == updates[-1].bytes_done, "progress passed the total"
+
+
 @pytest.mark.parametrize("name", ["model.safetensors", "config.json"])
 def test_download_rejects_bytes_that_do_not_match_the_hub_checksum_and_keeps_no_partial_of_them(
     fake_hub: FakeHub, tmp_path: Path, name: str

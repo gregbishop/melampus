@@ -156,9 +156,15 @@ class _Blob:
 class _Progress:
     """The bytes-done counter across files, phrased as the tqdm huggingface_hub's
     `http_get` expects so it needs no tqdm at all: it is constructed per file
-    with `initial` and `total` (already accounted for here), `update(n)` is
-    called per chunk written, and a negative `update` takes back a resume the
-    server ignored. Every update becomes one protocol line."""
+    with `initial` and `total`, and `update(n)` is called per chunk written.
+    Every update becomes one protocol line.
+
+    `initial` is what `http_get` keeps of the partial file, already counted
+    here from disk: all of it, or none when the host answered the Range
+    request with 200 and the whole file, so `http_get` truncated the partial
+    and starts over. Its own rollback of that resume reaches only a bar it
+    reuses across its retries, never the fresh one of this call, so the
+    counter takes back here what `initial` says is gone."""
 
     def __init__(self, total: int, on_update: Callable[[Update], None]) -> None:
         self.done, self.total, self.on_update = 0, total, on_update
@@ -167,12 +173,14 @@ class _Progress:
         self.done += n
         self.on_update(Update.progress(self.done, self.total))
 
-    def tqdm_class(self) -> type:
+    def tqdm_class(self, resumed: int) -> type:
+        """The counter class for one file, `resumed` bytes of it counted from disk."""
         progress = self
 
         class ChunkCounter:
-            def __init__(self, **_ignored) -> None:
-                pass
+            def __init__(self, initial: int = 0, **_ignored) -> None:
+                if initial != resumed:
+                    progress.advance(initial - resumed)
 
             def __enter__(self):
                 return self
@@ -237,10 +245,11 @@ def _fetch(blob: _Blob, progress: _Progress, headers: dict[str, str], lock_dir: 
     lock_dir.mkdir(parents=True, exist_ok=True)
     with WeakFileLock(lock_dir / f"{blob.etag}.lock", timeout=5):
         with blob.partial.open("ab") as partial:
+            resumed = partial.tell()
             http_get(
                 blob.url, partial,
-                resume_size=partial.tell(), headers=headers, expected_size=blob.size,
-                displayed_filename=blob.filename, tqdm_class=progress.tqdm_class(),
+                resume_size=resumed, headers=headers, expected_size=blob.size,
+                displayed_filename=blob.filename, tqdm_class=progress.tqdm_class(resumed),
             )
         _verify(blob)
         blob.partial.replace(blob.path)

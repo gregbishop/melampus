@@ -216,7 +216,8 @@ def built_executable(request: pytest.FixtureRequest) -> Path:
 # commit from (`GET /api/models/<repo>`). Two knobs drive the resume tests: `cut_after` drops
 # the connection once that many bytes of a file have been sent and starts an
 # outage (503 until `outage` is cleared); `throttle` slows the bytes so a cancel
-# can land mid-file. `bytes_host` is the real hub's CDN: the resolve HEAD
+# can land mid-file; `ignore_range` answers a Range request with 200 and the
+# whole file, as a CDN that ignores Range does. `bytes_host` is the real hub's CDN: the resolve HEAD
 # answers 302 to that host, as huggingface.co does for every LFS file, so the
 # bytes are fetched from a host that is not the hub. `corrupt` names files
 # served with their first byte flipped while the etag stays the true one.
@@ -285,6 +286,7 @@ class FakeHub:
         self.requests: list[HubRequest] = []
         self.cut_after: int | None = None
         self.outage = False
+        self.ignore_range = False
         self.throttle: tuple[int, float] | None = None  # (bytes per write, seconds between)
         self.bytes_host: str | None = None
         self.corrupt: set[str] = set()
@@ -364,7 +366,7 @@ class FakeHub:
                 if name in hub.corrupt:
                     data = bytes([data[0] ^ 0xFF]) + data[1:]
                 start = 0
-                if self.headers.get("Range"):
+                if self.headers.get("Range") and not hub.ignore_range:
                     start = int(self.headers["Range"].removeprefix("bytes=").partition("-")[0])
                     self.send_response(206)
                     self.send_header("Content-Range", f"bytes {start}-{len(data) - 1}/{len(data)}")
