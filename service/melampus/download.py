@@ -1026,13 +1026,19 @@ def pull_updates(model: str, lines: Iterable[bytes | str]) -> Iterator[Update]:
     raise DownloadError(f"Ollama's pull of {model} ended before it reported success; {RERUN}")
 
 
-def _lines_until_cancelled(response, marker: Path) -> Iterator[bytes]:
+def _lines_until_cancelled(response, marker: Path, url: str) -> Iterator[bytes]:
     """The response's lines, looking for the cancel marker before each one
     is handed on: its appearance raises DownloadCancelled exactly as a
     signal does, and leaving the `with` around the response closes the
     stream, which is how Ollama learns to stop (the request's context is
-    cancelled; it keeps the layers it has)."""
-    for line in response:
+    cancelled; it keeps the layers it has). A line is held whole until its
+    newline, and it is whatever listens at `url` that writes it, so each
+    is read to at most the backend's reply bound (one of Ollama's objects
+    is a few hundred bytes) and a longer one is refused by name."""
+    bound = OllamaBackend.MAX_REPLY_BYTES
+    while line := response.readline(bound + 1):
+        if len(line) > bound:
+            raise DownloadError(f"Ollama's reply from {url} ran past {bound} bytes")
         if marker.exists():
             raise DownloadCancelled(CANCEL_MARKER)
         yield line
@@ -1074,7 +1080,7 @@ def pull_model(
     )
     try:
         with (opener or ollama_opener())(request, timeout=timeout) as response:
-            for update in pull_updates(model, _lines_until_cancelled(response, marker)):
+            for update in pull_updates(model, _lines_until_cancelled(response, marker, url)):
                 # The stream's `done` proves success was seen; the entry point
                 # prints the protocol's `done` from the return, as for mlx.
                 if update.state != DONE:

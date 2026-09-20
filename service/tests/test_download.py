@@ -2681,6 +2681,35 @@ def test_the_list_reads_at_most_the_backends_reply_bound():
     assert f"ran past {OllamaBackend.MAX_REPLY_BYTES} bytes" in str(failure.value), str(failure.value)
 
 
+def test_the_pull_reads_at_most_the_backends_reply_bound_of_one_line(tmp_path: Path):
+    """Security: the pull's stream is read a line at a time, each held whole
+    until its newline, and it is whatever listens at the address that
+    writes it: a line that never ends is read into memory until it does.
+    One line is one of Ollama's objects, a few hundred bytes; the backend's
+    reply bound (OllamaBackend.MAX_REPLY_BYTES) is the one bound for what
+    Ollama writes, and a line past it is refused by name, the stream
+    closed, not read on."""
+    from conftest import QuietHandler
+
+    from melampus.backend import OllamaBackend
+
+    class Endless(QuietHandler):
+        def do_POST(self):  # noqa: N802 - http.server's name
+            self.rfile.read(int(self.headers.get("Content-Length") or 0))
+            self.send_response(200)
+            self.send_header("Content-Type", "application/x-ndjson")
+            self.end_headers()
+            self.wfile.write(b'{"status": "pulling manifest"}\n')
+            self.wfile.write(b'{"status": "' + b"x" * (OllamaBackend.MAX_REPLY_BYTES + 1) + b'"}\n')
+            self.wfile.write(b'{"status": "success"}\n')
+
+    with loopback_server(Endless) as squatter:
+        with pytest.raises(DownloadError) as failure:
+            pull_model(FAKE_MODEL, f"http://127.0.0.1:{squatter.server_port}",
+                       on_update=lambda update: None, cancel_marker=tmp_path / "download-cancel")
+    assert f"ran past {OllamaBackend.MAX_REPLY_BYTES} bytes" in str(failure.value), str(failure.value)
+
+
 # The cooperative cancel, for Ollama: the marker and the signals end the
 # pull the way they end the MLX download, exit 4 and `cancelled` through
 # one path; Ollama keeps the layers it has and the next pull resumes them.
