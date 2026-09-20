@@ -25,7 +25,9 @@ dependencies = [
     # download.py fetches the MLX model through the hub library (card #407). On
     # Apple Silicon mlx-vlm brings it anyway; declared here so the Windows
     # executable carries --download-model too.
-    "huggingface_hub>=1.26",
+    # Exact-pinned, as pyinstaller is: what download.py leans on in the hub
+    # library was read at this version.
+    "huggingface_hub==1.26.0",
 ]
 
 [project.optional-dependencies]

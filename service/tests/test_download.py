@@ -420,16 +420,20 @@ def test_download_gives_up_when_the_hub_accepts_and_never_answers(monkeypatch, t
     assert endpoint in str(failure) and "network" in str(failure)
 
 
-def test_the_hub_library_is_a_dependency_on_every_platform():
+def test_the_hub_library_is_a_dependency_on_every_platform_pinned_to_the_reviewed_version():
     """download.py imports huggingface_hub directly, and on Windows nothing
     else brings it (mlx-vlm is Apple Silicon only), so the executable built
     there carries the command only if service/pyproject.toml names it, for
-    every platform, in the core dependencies the lockfile installs."""
+    every platform, in the core dependencies the lockfile installs. Security
+    (Codex round 1, pyproject.toml:28): a new dependency is pinned exactly,
+    as pyinstaller is, so an install without the lockfile cannot pull a
+    version nobody reviewed; what download.py leans on (`http_get`'s resume,
+    `resolve_revision`, the client factory) was read at 1.26.0."""
     import tomllib
 
     pyproject = tomllib.loads((Path(__file__).resolve().parents[1] / "pyproject.toml").read_text())
     (declared,) = [d for d in pyproject["project"]["dependencies"] if d.startswith("huggingface_hub")]
-    assert ";" not in declared, f"platform-restricted: {declared}"
+    assert declared == "huggingface_hub==1.26.0", f"not the exact reviewed version: {declared}"
 
 
 # --- the command: exit codes and signals (unit) -----------------------------
