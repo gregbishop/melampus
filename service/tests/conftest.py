@@ -274,6 +274,10 @@ FAKE_FILES = {
     "model.safetensors": fake_bytes(DOWNLOAD_CHUNK_SIZE * 6 // 5),
 }
 FAKE_TOTAL = sum(len(data) for data in FAKE_FILES.values())
+# Where a resume test cuts the large file: in its second chunk, so exactly
+# one whole chunk (DOWNLOAD_CHUNK_SIZE bytes) is on disk for the next run to
+# ask for the rest from.
+CUT_IN_THE_SECOND_CHUNK = DOWNLOAD_CHUNK_SIZE + 4096
 # The repo's folder in the cache, named the way the code under test names it.
 FAKE_FOLDER = repo_folder_name(repo_id=FAKE_REPO, repo_type="model")
 

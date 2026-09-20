@@ -28,6 +28,7 @@ import httpx
 import pytest
 from conftest import (
     AGENT_HARNESS,
+    CUT_IN_THE_SECOND_CHUNK,
     FAKE_COMMIT,
     FAKE_FILES,
     FAKE_FOLDER,
@@ -187,7 +188,7 @@ def test_download_keeps_the_partial_file_when_the_connection_drops_and_resumes_i
     chunk kept in the cache's `.incomplete` blob. The next run asks the host
     for the rest (a Range request from the byte it has), and the file it
     finishes is byte-identical to the host's."""
-    fake_hub.cut_after = DOWNLOAD_CHUNK_SIZE + 4096
+    fake_hub.cut_after = CUT_IN_THE_SECOND_CHUNK
 
     with pytest.raises(DownloadError) as failure:
         _fetch(fake_hub, tmp_path / "hub")
@@ -222,7 +223,7 @@ def test_download_takes_back_the_partial_when_the_host_ignores_the_range_and_nev
     ignores Range, the re-run asks for the rest, takes the partial's bytes
     back (one update steps back to what the other files hold), climbs to
     exactly the total, never past it, and the file is byte-identical."""
-    fake_hub.cut_after = DOWNLOAD_CHUNK_SIZE + 4096
+    fake_hub.cut_after = CUT_IN_THE_SECOND_CHUNK
     with pytest.raises(DownloadError):
         _fetch(fake_hub, tmp_path / "hub")
     (partial,) = _incomplete(tmp_path / "hub")
@@ -254,7 +255,7 @@ def test_download_names_the_file_and_both_sizes_when_the_resumed_answer_is_the_w
     the hub said and the re-run, with the partial kept, and the next run,
     from a host that serves the rest, finishes the file byte-identical."""
     big = len(FAKE_FILES["model.safetensors"])
-    fake_hub.cut_after = DOWNLOAD_CHUNK_SIZE + 4096
+    fake_hub.cut_after = CUT_IN_THE_SECOND_CHUNK
     fake_hub.short_resume = 100
 
     with pytest.raises(DownloadError) as failure:
@@ -307,7 +308,7 @@ def test_download_resumes_a_blob_two_files_share_counting_its_partial_once(fake_
     """The same, cut and resumed: the partial of the shared blob is counted
     once from disk, the rest is asked for by Range once, and the re-run ends
     at the total with both files in the snapshot."""
-    fake_hub.cut_after = DOWNLOAD_CHUNK_SIZE + 4096
+    fake_hub.cut_after = CUT_IN_THE_SECOND_CHUNK
     with pytest.raises(DownloadError):
         _fetch(fake_hub, tmp_path / "hub")
     (partial,) = _incomplete(tmp_path / "hub")
@@ -888,7 +889,7 @@ def test_cli_names_the_cdn_url_on_stderr_without_its_signed_query_when_the_bytes
     connection drops after one chunk and then answers 503, stderr names the
     file's path on the CDN and neither the signature's value nor its
     parameter, and the run fails naming the re-run, exit 3."""
-    cdn, proc = _cli_with_the_bytes_on_a_signed_cdn(fake_hub, hub_env, cut_after=DOWNLOAD_CHUNK_SIZE + 4096)
+    cdn, proc = _cli_with_the_bytes_on_a_signed_cdn(fake_hub, hub_env, cut_after=CUT_IN_THE_SECOND_CHUNK)
 
     assert proc.returncode == 3, proc.stderr[-3000:]
     assert cdn.gets("model.safetensors") == [None, f"bytes={DOWNLOAD_CHUNK_SIZE}-"], "the drop was not retried by Range"
@@ -909,7 +910,7 @@ def test_cli_names_the_file_on_stderr_and_never_the_tail_of_its_signed_url_when_
     the file, the failure line on stderr names the file and the sizes, and
     stderr carries neither the signature's value nor its parameter nor the
     library's `(…)` tail; the run fails naming the re-run, exit 3."""
-    cdn, proc = _cli_with_the_bytes_on_a_signed_cdn(fake_hub, hub_env, cut_after=DOWNLOAD_CHUNK_SIZE + 4096, short_resume=100)
+    cdn, proc = _cli_with_the_bytes_on_a_signed_cdn(fake_hub, hub_env, cut_after=CUT_IN_THE_SECOND_CHUNK, short_resume=100)
 
     assert proc.returncode == 3, proc.stderr[-3000:]
     assert cdn.gets("model.safetensors") == [None, f"bytes={DOWNLOAD_CHUNK_SIZE}-"], "the drop was not retried by Range"
