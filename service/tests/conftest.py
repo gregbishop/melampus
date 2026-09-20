@@ -47,6 +47,7 @@ from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from pathlib import Path
 from types import ModuleType
+from typing import NamedTuple
 
 import pytest
 from huggingface_hub.constants import DOWNLOAD_CHUNK_SIZE
@@ -218,8 +219,8 @@ def built_executable(request: pytest.FixtureRequest) -> Path:
 # every resolve answers 403 with X-Error-Code GatedRepo, as huggingface.co
 # does until the user has accepted the repo's terms with their token. The
 # etags are the real hub's: the sha256 of an LFS file (the weights), git's blob
-# sha1 of a regular file. Every request is kept on `requests`, and the
-# Authorization header each one carried on `authorizations`.
+# sha1 of a regular file. Every request is kept on `requests`, one HubRequest
+# each: method, path, and the Range and Authorization headers it carried.
 
 FAKE_REPO = "fake-org/fake-model"
 FAKE_COMMIT = "0123456789abcdef0123456789abcdef01234567"
@@ -263,20 +264,28 @@ def assert_download_completed(stdout: str, hub_env: dict[str, str]) -> None:
     assert snapshot_files(snapshot) == FAKE_FILES
 
 
+class HubRequest(NamedTuple):
+    """One request the fake hub answered: what came in, as the test reads it."""
+
+    method: str
+    path: str
+    range: str | None
+    authorization: str | None
+
+
 class FakeHub:
     """The hub's state and its handler; `serve` puts it on loopback."""
 
     def __init__(self, files: dict[str, bytes] = FAKE_FILES, repo: str = FAKE_REPO) -> None:
         self.files, self.repo = files, repo
         self.endpoint = ""  # set while `serve` runs
-        self.requests: list[tuple[str, str, str | None]] = []
+        self.requests: list[HubRequest] = []
         self.cut_after: int | None = None
         self.outage = False
         self.throttle: tuple[int, float] | None = None  # (bytes per write, seconds between)
         self.bytes_host: str | None = None
         self.corrupt: set[str] = set()
         self.gated = False
-        self.authorizations: list[str | None] = []
         hub = self
         etags = self.etags = {
             name: hashlib.sha256(data).hexdigest() if name.endswith(".safetensors")
@@ -305,6 +314,10 @@ class FakeHub:
                 _, _, name = self.path[len(prefix):].partition("/")
                 return name if name in hub.files else None
 
+            def _record(self) -> None:
+                hub.requests.append(HubRequest(self.command, self.path, self.headers.get("Range"),
+                                               self.headers.get("Authorization")))
+
             def _unknown(self) -> None:
                 self._json(404, {"error": "Repository not found"}, {"X-Error-Code": "RepoNotFound"})
 
@@ -321,8 +334,7 @@ class FakeHub:
                 return name
 
             def do_GET(self):  # noqa: N802 - http.server's name
-                hub.requests.append(("GET", self.path, self.headers.get("Range")))
-                hub.authorizations.append(self.headers.get("Authorization"))
+                self._record()
                 path = self.path.partition("?")[0]
                 if path.startswith("/api/models/"):
                     if path.startswith(f"/api/models/{hub.repo}/tree/"):
@@ -375,8 +387,7 @@ class FakeHub:
                     self.connection.shutdown(socket.SHUT_RDWR)
 
             def do_HEAD(self):  # noqa: N802 - http.server's name
-                hub.requests.append(("HEAD", self.path, None))
-                hub.authorizations.append(self.headers.get("Authorization"))
+                self._record()
                 name = self._resolvable()
                 if name is None:
                     return
@@ -406,8 +417,8 @@ class FakeHub:
     def gets(self, name: str) -> list[str | None]:
         """The Range header of every GET for `name`'s bytes, at any revision,
         in order (None: no Range)."""
-        return [rng for method, path, rng in self.requests
-                if method == "GET" and path.startswith(f"/{self.repo}/resolve/") and path.endswith(f"/{name}")]
+        return [r.range for r in self.requests
+                if r.method == "GET" and r.path.startswith(f"/{self.repo}/resolve/") and r.path.endswith(f"/{name}")]
 
 
 @pytest.fixture()

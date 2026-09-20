@@ -118,8 +118,8 @@ def test_download_goes_only_to_the_fake_host(fake_hub: FakeHub, tmp_path: Path):
     _fetch(fake_hub, tmp_path / "hub")
 
     assert fake_hub.requests, "the fake saw nothing"
-    for method, path, _ in fake_hub.requests:
-        assert path.startswith((f"/api/models/{FAKE_REPO}", f"/{FAKE_REPO}/resolve/")), (method, path)
+    for r in fake_hub.requests:
+        assert r.path.startswith((f"/api/models/{FAKE_REPO}", f"/{FAKE_REPO}/resolve/")), (r.method, r.path)
     for name in FAKE_FILES:
         assert fake_hub.gets(name) == [None], f"{name} was not fetched whole, exactly once"
 
@@ -136,7 +136,7 @@ def test_download_of_a_complete_model_fetches_nothing_and_says_it_is_complete(
 
     assert again == path
     assert updates == [Update.progress(FAKE_TOTAL, FAKE_TOTAL)]
-    assert not [r for r in fake_hub.requests if r[0] == "GET" and "/resolve/" in r[1]], fake_hub.requests
+    assert not [r for r in fake_hub.requests if r.method == "GET" and "/resolve/" in r.path], fake_hub.requests
 
 
 def test_download_keeps_the_partial_file_when_the_connection_drops_and_resumes_it_next_run(
@@ -212,9 +212,9 @@ def test_download_sends_the_user_token_to_the_hub_and_never_to_the_host_serving_
         path, _ = _fetch(fake_hub, tmp_path / "hub")
 
     assert snapshot_files(path) == FAKE_FILES
-    assert all(a == "Bearer synthetic-token" for a in fake_hub.authorizations), fake_hub.authorizations
+    assert all(r.authorization == "Bearer synthetic-token" for r in fake_hub.requests), fake_hub.requests
     assert [name for name in FAKE_FILES if cdn.gets(name)] == list(FAKE_FILES), "the bytes did not come from the CDN"
-    assert cdn.authorizations == [None] * len(cdn.authorizations), "the token left the hub"
+    assert all(r.authorization is None for r in cdn.requests), "the token left the hub"
 
 
 def test_download_of_a_repo_the_hub_does_not_have_names_the_setting_to_fix(
