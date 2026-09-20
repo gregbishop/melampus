@@ -321,8 +321,6 @@ def test_the_detection_the_plugin_runs_reaches_the_executable_and_fills_the_pick
     link, mlx as this machine decides. No Ollama answers on a runner and
     nothing is sent anywhere; the executable's output on its own, with no
     python on the path, is test_binary.py's."""
-    from melampus import providers
-
     plugin_dir = _plugin_folder_holding(built_executable, tmp_path)
 
     listing = _plugin_under_the_mock(
