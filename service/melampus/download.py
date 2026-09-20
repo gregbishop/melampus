@@ -183,6 +183,15 @@ class _Blob:
             return self.size
         return self.partial.stat().st_size if self.partial.exists() else 0
 
+    def laid_out(self) -> bool:
+        """Whether the snapshot's pointer serves this blob: a symlink to it,
+        or, where symlinks are unavailable and the hub library copied the
+        blob instead, a copy of its size. A copy cut short is not, so a run
+        that skipped it because it existed said `done` of a corrupt model."""
+        if self.pointer.is_symlink():
+            return self.pointer.resolve() == self.path.resolve()
+        return self.pointer.is_file() and self.pointer.stat().st_size == self.size
+
 
 class _Progress:
     """The bytes-done counter across files, phrased as the tqdm huggingface_hub's
@@ -358,11 +367,21 @@ def _lay_out(storage: Path, commit: str, blobs: list[_Blob]) -> Path:
     (`refs/main`, which `resolve_revision` wrote, names the commit). Nothing
     is asked of the hub: its `snapshot_download` asked for every file's
     metadata a second time and took that answer for the blob's name, unchecked
-    and, when no such blob existed, fetched it unverified."""
+    and, when no such blob existed, fetched it unverified.
+
+    Each pointer is made under a staging name beside its own and renamed
+    into place: where symlinks are unavailable the helper copies the blob,
+    byte by byte, and a copy cut short by a cancel or a full disk must never
+    sit under the file's name for the next run to take as complete. A
+    pointer already serving its blob is kept; one that does not (a short
+    copy) is replaced."""
     for blob in blobs:
+        if blob.laid_out():
+            continue
         blob.pointer.parent.mkdir(parents=True, exist_ok=True)
-        if not blob.pointer.exists():
-            _create_symlink(str(blob.path), str(blob.pointer), new_blob=False)
+        staged = blob.pointer.with_name(f"{blob.pointer.name}.incomplete")
+        _create_symlink(str(blob.path), str(staged), new_blob=False)
+        staged.replace(blob.pointer)
     return storage / "snapshots" / commit
 
 

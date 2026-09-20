@@ -122,7 +122,12 @@ resolved once, at the start, and recorded in the cache's `refs/main`; every
 file is fetched at that commit, so a branch that moves during the run changes
 nothing. Once every file is in the cache and checked, the command lays out the
 snapshot of that commit from those checked files alone, its pointers made by
-the hub library's own helper exactly as `mlx` will look for them; the hub is
+the hub library's own helper exactly as `mlx` will look for them (where
+symlinks are unavailable, Windows without developer mode, the helper copies
+each file into the snapshot instead: the copy is made under a staging name
+and renamed into place once whole, so a cancel or a full disk mid-copy leaves
+nothing under the file's name, and a short copy an earlier run left is
+replaced, never taken as complete); the hub is
 asked nothing more, so what it answers after the plan (another etag for a
 file, say) reaches no path in the cache. A file name the listing gives that
 is a path (absolute, a drive, or traversing) is refused the same way an etag

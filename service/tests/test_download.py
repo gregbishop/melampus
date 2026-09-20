@@ -14,7 +14,9 @@ both directions: the lines the command prints, and the parse the plugin will do.
 
 from __future__ import annotations
 
+import errno
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -394,6 +396,66 @@ def test_download_lays_out_the_snapshot_from_the_verified_blobs_and_asks_the_hub
         assert fake_hub.heads(name) == 1, f"{name}'s metadata was asked for again after the plan"
         assert fake_hub.gets(name) == [None], f"{name}'s bytes were fetched outside the verified path"
     assert not _incomplete(tmp_path / "hub")
+
+
+def test_download_repairs_a_snapshot_file_that_is_a_short_copy_of_its_blob(fake_hub: FakeHub, tmp_path: Path):
+    """Codex round 3 (download.py:359). Where symlinks are unavailable
+    (Windows without developer mode) the hub library's pointer helper copies
+    the blob into the snapshot instead, and a run cut during that copy (a
+    cancel, a full disk) left a short file under the file's name; the next
+    run skipped it because it existed and said `done` of a corrupt model.
+    Given a snapshot file that is a regular file shorter than its blob, the
+    re-run replaces it with the blob's bytes, moves no bytes, and says done."""
+    path, _ = _fetch(fake_hub, tmp_path / "hub")
+    short = path / "model.safetensors"
+    short.unlink()
+    short.write_bytes(FAKE_FILES["model.safetensors"][:4096])
+    fake_hub.requests.clear()
+
+    again, updates = _fetch(fake_hub, tmp_path / "hub")
+
+    assert again == path
+    assert snapshot_files(path) == FAKE_FILES, "the short copy was kept"
+    assert updates == [Update.progress(FAKE_TOTAL, FAKE_TOTAL)]
+    assert not [r for r in fake_hub.requests if r.method == "GET" and "/resolve/" in r.path], "bytes were fetched again"
+
+
+def test_download_publishes_a_copied_snapshot_file_whole_or_not_at_all(
+    fake_hub: FakeHub, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The interrupted-copy regression: with symlinks off (the hub library's
+    own switch, HF_HUB_DISABLE_SYMLINKS) the pointer is a copy, and the disk
+    fills halfway through the large file's. The run fails naming the re-run,
+    nothing under the file's name is left in the snapshot, and the re-run
+    publishes the copy whole: the snapshot holds exactly the model's files,
+    byte for byte, as regular files, with no bytes fetched again."""
+    monkeypatch.setattr(constants, "HF_HUB_DISABLE_SYMLINKS", True)
+    real_copyfile, disk_full = shutil.copyfile, [True]
+
+    def copy_until_the_disk_fills(src, dst, *args, **kwargs):
+        if disk_full and Path(src).stat().st_size == len(FAKE_FILES["model.safetensors"]):
+            disk_full.clear()
+            Path(dst).write_bytes(Path(src).read_bytes()[:4096])
+            raise OSError(errno.ENOSPC, "No space left on device")
+        return real_copyfile(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(shutil, "copyfile", copy_until_the_disk_fills)
+    with pytest.raises(DownloadError) as failure:
+        _fetch(fake_hub, tmp_path / "hub")
+
+    assert "No space left" in str(failure.value) and "--download-model" in str(failure.value)
+    snapshot = tmp_path / "hub" / FAKE_FOLDER / "snapshots" / FAKE_COMMIT
+    assert not (snapshot / "model.safetensors").exists(), "a short copy was published under the file's name"
+    assert not disk_full, "the copy was never cut"
+
+    fake_hub.requests.clear()
+    path, updates = _fetch(fake_hub, tmp_path / "hub")
+
+    assert path == snapshot
+    assert snapshot_files(path) == FAKE_FILES, "the snapshot holds something other than the model's files"
+    assert all(not (path / name).is_symlink() for name in FAKE_FILES), "symlinks were off"
+    assert updates == [Update.progress(FAKE_TOTAL, FAKE_TOTAL)]
+    assert not [r for r in fake_hub.requests if r.method == "GET" and "/resolve/" in r.path], "bytes were fetched again"
 
 
 @pytest.mark.parametrize("fake_hub", [{**FAKE_FILES, "../../../escape": b"not a model file\n"}],
