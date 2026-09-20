@@ -38,6 +38,12 @@ local function writeFile(path, text, mode)
 	handle:close()
 end
 
+local function exists(path)
+	local handle = io.open(path, 'r')
+	if handle then handle:close() return true end
+	return false
+end
+
 --- The dialogs the mock recorded, the modal ones (the Settings dialog, with
 --- its view tree) when `modal` is true, else the messages shown over it.
 local function dialogsShown(modal)
@@ -471,6 +477,26 @@ t.test('Cancel writes the marker at the path the status named', function()
 	os.remove(CANCEL_PATH)
 end)
 
+t.test('Lightroom\'s own cancel on the progress bar writes the marker too', function()
+	-- The scope is cancelable, so the user can cancel from Lightroom's own
+	-- progress bar as well as from the row; the poller asks the scope on
+	-- each update and cancels the download the same way.
+	os.remove(CANCEL_PATH)
+	local contents = openSettings({ detection = mock.detectionText(), download = {
+		lines = { 'progress 0 18300000000', 'progress 3100000000 18300000000', 'cancelled' }, code = 4,
+	} })
+	local row, model = modelRow(contents)
+	theButton(row, model, 'Download ' .. REPO, true).action()
+	t.isFalse(exists(CANCEL_PATH), 'a marker before anything was cancelled')
+	mock.state.cancelled = true
+	mock.tick()
+	t.isTrue(exists(CANCEL_PATH), 'the progress bar\'s cancel did not write the marker at ' .. CANCEL_PATH)
+	mock.settle()
+	t.equals(model.phase, 'absent', 'a cancelled download should offer Download again')
+	t.equals(#dialogsShown(false), 0, 'a cancel is not an error')
+	os.remove(CANCEL_PATH)
+end)
+
 t.test('a failed download shows a message with the tail of the log and offers Download again', function()
 	local contents = openSettings({ detection = mock.detectionText(), download = {
 		lines = { 'progress 0 18300000000' }, code = 3,
@@ -522,12 +548,6 @@ local function append(path, text)
 	local handle = assert(io.open(path, 'a'))
 	handle:write(text)
 	handle:close()
-end
-
-local function exists(path)
-	local handle = io.open(path, 'r')
-	if handle then handle:close() return true end
-	return false
 end
 
 t.test('the download command runs the executable with stdout to the progress file and stderr to the log, on both shells', function()
