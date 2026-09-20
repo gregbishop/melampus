@@ -376,8 +376,8 @@ local function shownNow(view, model)
 	return binding.transform(model.phase)
 end
 
---- The progress scope the poller most recently opened for Lightroom's own
---- bar, asserted present.
+--- The progress scope the Download click most recently opened for
+--- Lightroom's own bar, asserted present.
 local function theScope()
 	local scope = mock.state.progressScopes[#mock.state.progressScopes]
 	t.isNotNil(scope, 'no progress scope for Lightroom\'s own bar')
