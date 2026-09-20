@@ -276,6 +276,13 @@ end)
 -- a note to show under the picker that carries their reasons.
 local verdicts = mock.detectionVerdicts
 
+--- The picker's items indexed by value, so a test can name one: byValue.ollama.
+local function itemsByValue(items)
+	local byValue = {}
+	for _, item in ipairs(items) do byValue[item.value] = item end
+	return byValue
+end
+
 t.test('the picker lists the four engines in the owner\'s order, after letting Melampus choose', function()
 	local items = Rules.engineItems(verdicts())
 	t.equals(items[1].value, '', 'the first item must be the unset preference: let the CLI choose')
@@ -292,8 +299,7 @@ t.test('unavailable engines are disabled, and the note carries the reason detect
 	-- from the note under the picker; an item carries nothing the dialog
 	-- does not read.
 	local items, note = Rules.engineItems(verdicts({ mlx = { available = false, reason = 'needs Apple Silicon' } }))
-	local byValue = {}
-	for _, item in ipairs(items) do byValue[item.value] = item end
+	local byValue = itemsByValue(items)
 	t.isFalse(byValue.mlx.enabled, 'mlx should be greyed')
 	t.isFalse(byValue.ollama.enabled, 'ollama should be greyed')
 	for _, item in ipairs(items) do
@@ -321,20 +327,19 @@ t.test('the link is the ollama item\'s alone, from the address its reason names'
 	-- Only Ollama is something to go and install (Done-when 3): another
 	-- engine's reason stays text in the note, address and all.
 	local items = Rules.engineItems(verdicts())
-	local byValue = {}
-	for _, item in ipairs(items) do byValue[item.value] = item end
+	local byValue = itemsByValue(items)
 	t.equals(byValue.ollama.link, 'https://ollama.com/download')
 	t.isNil(byValue.mlx.link, 'mlx is not ollama, so it gets no link')
 	t.isNil(byValue.openai.link, 'openai is not ollama, so it gets no link')
 	local MLX_ADDRESS = 'https://example.com/apple-silicon'
 	local note
 	items, note = Rules.engineItems(verdicts({ mlx = { available = false, reason = 'needs Apple Silicon; see ' .. MLX_ADDRESS } }))
-	for _, item in ipairs(items) do byValue[item.value] = item end
+	byValue = itemsByValue(items)
 	t.isNil(byValue.mlx.link, 'an address in the mlx reason must not become a link: only ollama\'s does')
 	t.isNotNil(string.find(note, MLX_ADDRESS, 1, true), 'the note does not carry the mlx address as text:\n' .. note)
 	local answering = verdicts({ ollama = { available = true, reason = 'Ollama is answering at http://127.0.0.1:11434' } })
 	items = Rules.engineItems(answering)
-	for _, item in ipairs(items) do byValue[item.value] = item end
+	byValue = itemsByValue(items)
 	t.isTrue(byValue.ollama.enabled)
 	t.isNil(byValue.ollama.link, 'an available engine needs no link')
 end)
