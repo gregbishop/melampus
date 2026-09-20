@@ -223,7 +223,7 @@ def _verify(blob: _Blob) -> None:
         blob.partial.unlink()
         raise DownloadError(
             f"{blob.filename} did not match the checksum the hub gave for it; "
-            f"the partial file is discarded, {RERUN} and fetches it whole"
+            "the partial file is discarded; re-run melampus-id --download-model to fetch it whole"
         )
 
 

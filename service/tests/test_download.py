@@ -184,7 +184,10 @@ def test_download_rejects_bytes_that_do_not_match_the_hub_checksum_and_keeps_no_
         _fetch(fake_hub, tmp_path / "hub")
 
     message = str(failure.value)
-    assert name in message and "checksum" in message and "--download-model" in message
+    assert message == (
+        f"{name} did not match the checksum the hub gave for it; "
+        "the partial file is discarded; re-run melampus-id --download-model to fetch it whole"
+    ), "the exit-3 message must name the file, the discarded partial and the whole re-fetch, not a resume"
     assert not _incomplete(tmp_path / "hub"), "the bad partial was kept"
     blobs = tmp_path / "hub" / FAKE_FOLDER / "blobs"
     assert not (blobs / fake_hub.etags[name]).exists(), "the bad bytes became the blob"
