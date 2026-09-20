@@ -79,7 +79,7 @@ from huggingface_hub.utils import WeakFileLock, build_hf_headers  # noqa: E402
 from huggingface_hub.utils import logging as hub_logging  # noqa: E402 - the library's own logger, where its warnings go
 from huggingface_hub.utils._http import default_client_factory  # noqa: E402 - the library's own client, not a copy of it
 
-from .config import _cache  # noqa: E402
+from .config import cache_file  # noqa: E402
 
 PROGRESS = "progress"
 DONE = "done"
@@ -97,7 +97,7 @@ CANCEL_MARKER = "download-cancel"
 
 
 def cancel_marker_path() -> Path:
-    return _cache(CANCEL_MARKER)
+    return cache_file(CANCEL_MARKER)
 
 
 # How long `--model-status` waits for the hub's file listing: the hub

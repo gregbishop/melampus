@@ -1236,7 +1236,7 @@ def test_the_cancel_marker_lives_under_the_per_user_data_directory_beside_the_ca
 
     marker = cancel_marker_path()
     assert marker.name == CANCEL_MARKER == "download-cancel"
-    assert marker == config._cache(CANCEL_MARKER)
+    assert marker == config.cache_file(CANCEL_MARKER)
     assert marker.is_relative_to(config._data_root())
 
 
