@@ -260,7 +260,8 @@ function Analyze.detectEngines()
 	local verdicts, err = Json.decode(LrFileUtils.readFile(output) or '')
 	if type(verdicts) ~= 'table' or verdicts[1] == nil then
 		return nil, 'Melampus did not understand what its analysis program said about the engines'
-			.. (err and (': ' .. tostring(err)) or '') .. '.\n\nSee the log:\n' .. output
+			.. (err and (': ' .. tostring(err)) or '') .. '.\n\nWhat it printed is in:\n' .. output
+			.. '\n\nSee the logs:\n' .. Log.path() .. '\n' .. cliLog
 	end
 	return verdicts
 end

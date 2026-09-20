@@ -754,13 +754,27 @@ t.test('an executable that fails or prints no list makes detection say so, never
 	t.isNil(verdicts, 'a failed run produced verdicts')
 	t.isNotNil(string.find(problem, 'exit 1', 1, true), 'the message does not give the exit code:\n' .. tostring(problem))
 
+	-- Exit 0 with something other than the list: what the executable printed
+	-- went to the engines file, its stderr to the CLI log. The message names
+	-- both, each as what it is; neither is "the log" on its own. The temp
+	-- directory is the one the mock made for this load.
+	local function namesBothFiles(message)
+		local temp = mock.state.tempDir
+		t.isNotNil(string.find(message, 'What it printed is in:\n' .. temp .. '/melampus-engines.json', 1, true),
+			'the message does not say what the engines file is and where:\n' .. tostring(message))
+		t.isNotNil(string.find(message, temp .. '/melampus-cli.log', 1, true),
+			'the message does not name the CLI log:\n' .. tostring(message))
+		t.isNil(string.find(message, 'See the log:', 1, true),
+			'the message calls the engines file the log:\n' .. tostring(message))
+	end
+
 	verdicts, problem = loadAnalyzeAnswering('{"not": "a list"}').detectEngines()
 	t.isNil(verdicts, 'an object is not the verdict list')
-	t.isNotNil(problem)
+	namesBothFiles(problem)
 
 	verdicts, problem = loadAnalyzeAnswering('').detectEngines()
 	t.isNil(verdicts, 'empty output is not the verdict list')
-	t.isNotNil(problem)
+	namesBothFiles(problem)
 end)
 
 t.test('on Windows detection names melampus.exe with cmd.exe quoting', function()
