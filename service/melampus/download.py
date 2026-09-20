@@ -53,6 +53,7 @@ CANCELLED = "cancelled"
 EXIT_CANCELLED = 4
 
 RERUN = "re-run melampus-id --download-model; it resumes where it stopped"
+NOT_A_HUB = "whatever answers there is not a Hugging Face hub; check HF_ENDPOINT"
 
 
 @dataclass(frozen=True)
@@ -206,6 +207,10 @@ def _plan(repo: str, endpoint: str | None, cache: Path) -> tuple[ResolvedRevisio
     api = HfApi(endpoint=endpoint)
     revision = api.resolve_revision(repo, cache_dir=cache)
     commit = revision.resolved
+    # The commit names the snapshot folder and the etag the blob and its
+    # lock: a hub's answer becomes a path only in the one shape each has.
+    if not REGEX_COMMIT_HASH.match(commit):
+        raise DownloadError(f"the hub at {endpoint} says main of {repo} is {commit!r}, not a commit hash; {NOT_A_HUB}")
     storage = cache / repo_folder_name(repo_id=repo, repo_type="model")
     blobs = []
     for entry in api.list_repo_tree(repo, recursive=True, revision=commit):
@@ -215,6 +220,11 @@ def _plan(repo: str, endpoint: str | None, cache: Path) -> tuple[ResolvedRevisio
         meta = get_hf_file_metadata(url, endpoint=endpoint)
         if meta.etag is None or meta.size is None:
             raise DownloadError(f"the hub gave no etag or size for {entry.path}; {RERUN}")
+        if not (REGEX_SHA256.match(meta.etag) or REGEX_COMMIT_HASH.match(meta.etag)):
+            raise DownloadError(
+                f"the hub at {endpoint} gave {entry.path} the etag {meta.etag!r}, "
+                f"not a sha256 or git blob checksum; {NOT_A_HUB}"
+            )
         blobs.append(_Blob(entry.path, meta.location, meta.etag, meta.size, storage / "blobs" / meta.etag))
     return revision, blobs
 
@@ -222,15 +232,14 @@ def _plan(repo: str, endpoint: str | None, cache: Path) -> tuple[ResolvedRevisio
 def _verify(blob: _Blob) -> None:
     """The finished bytes must match the checksum the hub named in the etag:
     the sha256 of an LFS file (the weights), git's blob sha1 of a regular
-    file (40 hex, the shape REGEX_COMMIT_HASH matches). Bytes that do not
-    match never become the blob, and the partial is discarded so the next run
-    fetches the file whole instead of resuming it forever."""
+    file (40 hex, the shape REGEX_COMMIT_HASH matches); `_plan` admits no
+    other etag. Bytes that do not match never become the blob, and the partial
+    is discarded so the next run fetches the file whole instead of resuming
+    it forever."""
     if REGEX_SHA256.match(blob.etag):
         digest = hashlib.sha256()
-    elif REGEX_COMMIT_HASH.match(blob.etag):
-        digest = hashlib.sha1(b"blob %d\0" % blob.size, usedforsecurity=False)
     else:
-        return
+        digest = hashlib.sha1(b"blob %d\0" % blob.size, usedforsecurity=False)
     with blob.partial.open("rb") as done:
         for chunk in iter(lambda: done.read(1 << 20), b""):
             digest.update(chunk)

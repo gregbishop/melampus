@@ -263,6 +263,55 @@ def test_download_rejects_bytes_that_do_not_match_the_hub_checksum_and_keeps_no_
     assert snapshot_files(path) == FAKE_FILES
 
 
+def _escape(tmp_path: Path) -> list[Path]:
+    """Anything named `escape` the run left, inside or outside the cache."""
+    return sorted(tmp_path.rglob("*escape*"))
+
+
+@pytest.mark.parametrize("hostile", [
+    pytest.param(lambda tmp: "../../../escape", id="relative traversal"),
+    pytest.param(lambda tmp: str(tmp / "escape"), id="absolute path"),
+    pytest.param(lambda tmp: "abc123", id="not a full digest"),
+])
+def test_download_rejects_an_etag_that_is_not_a_checksum_before_it_becomes_a_path(
+    fake_hub: FakeHub, tmp_path: Path, hostile
+):
+    """Security (Codex round 1, download.py:203). The etag the hub names for
+    a file became the blob's path and the lock's name unchecked, so a hub
+    (or whatever answers for it) naming `../../../escape` wrote outside the
+    cache; and an etag that is neither a sha256 nor a git blob sha1 passed
+    `_verify` unchecked. Given a hub whose etag for a file is a path, or is
+    not a full 64- or 40-hex digest, the run fails naming the file and the
+    etag before any byte of it is asked for, and nothing is created outside
+    the cache, nor under that name inside it."""
+    etag = hostile(tmp_path)
+    fake_hub.etags["config.json"] = etag
+
+    with pytest.raises(DownloadError) as failure:
+        _fetch(fake_hub, tmp_path / "hub")
+
+    assert "config.json" in str(failure.value) and etag in str(failure.value)
+    assert sorted(tmp_path.iterdir()) == [tmp_path / "hub"], "the run wrote outside the cache"
+    assert not _escape(tmp_path) and not list(tmp_path.rglob("abc123*")), "the etag became a path"
+    assert not fake_hub.gets("config.json"), "bytes were fetched for a file whose etag is not a checksum"
+
+
+def test_download_rejects_a_commit_that_is_not_a_hash_before_it_becomes_a_path(fake_hub: FakeHub, tmp_path: Path):
+    """Security (Codex round 1, download.py:203), the other hub value that
+    becomes a path: the commit `main` resolves to names the snapshot folder.
+    Given a hub whose `main` points at `../../../escape`, the run fails
+    naming it and nothing is created outside the cache."""
+    fake_hub.commit = "../../../escape"
+
+    with pytest.raises(DownloadError) as failure:
+        _fetch(fake_hub, tmp_path / "hub")
+
+    assert "../../../escape" in str(failure.value)
+    assert sorted(tmp_path.iterdir()) == [tmp_path / "hub"], "the run wrote outside the cache"
+    assert not _escape(tmp_path), "the commit became a path"
+    assert not [r for r in fake_hub.requests if "/resolve/" in r.path], "files were asked for at a commit that is not one"
+
+
 def test_download_sends_the_user_token_to_the_hub_and_never_to_the_host_serving_the_bytes(
     fake_hub: FakeHub, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):

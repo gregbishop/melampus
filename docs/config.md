@@ -93,7 +93,9 @@ have, so check `[model] repo` or `--model`; a gated repo, so request access to
 it on the hub and sign in with `hf auth login` or `HF_TOKEN`; the network, so
 check it and re-run;
 a file whose bytes do not match the checksum the hub names for it, so its partial
-is discarded and the re-run fetches it whole);
+is discarded and the re-run fetches it whole; a hub whose answers are not a hub's,
+an etag that is not a checksum or a commit that is not a hash, neither of which
+is let become a path in the cache, so check `HF_ENDPOINT`);
 **exit 4** when a signal cancelled it (`cancelled`). The signals are SIGINT
 (Ctrl+C), SIGTERM and, on Windows, Ctrl+Break: the download stops within the
 current chunk and leaves the partial file in the cache as the hub's
