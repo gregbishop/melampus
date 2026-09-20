@@ -32,6 +32,7 @@ from contextlib import contextmanager  # noqa: E402
 from dataclasses import dataclass  # noqa: E402
 from pathlib import Path  # noqa: E402
 from typing import Callable, Iterator  # noqa: E402
+from urllib.parse import urlparse  # noqa: E402
 
 import httpx  # noqa: E402
 from huggingface_hub import HfApi, constants, get_hf_file_metadata, hf_hub_url, snapshot_download  # noqa: E402
@@ -243,9 +244,14 @@ def download_model(
         progress = _Progress(sum(b.size for b in blobs), on_update)
         progress.advance(sum(b.on_disk() for b in blobs))
         headers = build_hf_headers()
+        # The user's token is for the hub. An LFS file's bytes come from the
+        # hub's CDN (a signed URL on another host): no token goes there, as
+        # huggingface_hub's own download strips it when the host differs.
+        no_token = {k: v for k, v in headers.items() if k.lower() != "authorization"}
         for blob in blobs:
             if not blob.path.exists():
-                _fetch(blob, progress, headers, cache / ".locks" / folder)
+                same_host = urlparse(blob.url).netloc == urlparse(endpoint).netloc
+                _fetch(blob, progress, headers if same_host else no_token, cache / ".locks" / folder)
         # Every blob is complete: the hub library lays out the snapshot, the
         # pointers and refs/main exactly as mlx-vlm will look for them, and
         # moves no bytes because every file is already in the cache.

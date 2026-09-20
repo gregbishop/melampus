@@ -201,7 +201,10 @@ def built_executable(request: pytest.FixtureRequest) -> Path:
 # commit from (`GET /api/models/<repo>`). Two knobs drive the resume tests: `cut_after` drops
 # the connection once that many bytes of a file have been sent and starts an
 # outage (503 until `outage` is cleared); `throttle` slows the bytes so a cancel
-# can land mid-file. Every request is kept on `requests`.
+# can land mid-file. `bytes_host` is the real hub's CDN: the resolve HEAD
+# answers 302 to that host, as huggingface.co does for every LFS file, so the
+# bytes are fetched from a host that is not the hub. Every request is kept on
+# `requests`, and the Authorization header each one carried on `authorizations`.
 
 FAKE_REPO = "fake-org/fake-model"
 FAKE_COMMIT = "0123456789abcdef0123456789abcdef01234567"
@@ -221,6 +224,8 @@ class FakeHub(threading.Thread):
         self.cut_after: int | None = None
         self.outage = False
         self.throttle: tuple[int, float] | None = None  # (bytes per write, seconds between)
+        self.bytes_host: str | None = None
+        self.authorizations: list[str | None] = []
         hub = self
         etags = {name: hashlib.sha256(data).hexdigest() for name, data in files.items()}
 
@@ -250,6 +255,7 @@ class FakeHub(threading.Thread):
 
             def do_GET(self):  # noqa: N802 - http.server's name
                 hub.requests.append(("GET", self.path, self.headers.get("Range")))
+                hub.authorizations.append(self.headers.get("Authorization"))
                 path = self.path.partition("?")[0]
                 if path.startswith("/api/models/"):
                     if path.startswith(f"/api/models/{hub.repo}/tree/"):
@@ -302,12 +308,19 @@ class FakeHub(threading.Thread):
 
             def do_HEAD(self):  # noqa: N802 - http.server's name
                 hub.requests.append(("HEAD", self.path, None))
+                hub.authorizations.append(self.headers.get("Authorization"))
                 name = self._resolve()
                 if name is None:
                     self._unknown()
                     return
-                self.send_response(200)
-                self.send_header("ETag", f'"{etags[name]}"')
+                if hub.bytes_host:
+                    self.send_response(302)
+                    self.send_header("Location", f"{hub.bytes_host}{self.path}")
+                    self.send_header("X-Linked-Etag", f'"{etags[name]}"')
+                    self.send_header("X-Linked-Size", str(len(hub.files[name])))
+                else:
+                    self.send_response(200)
+                    self.send_header("ETag", f'"{etags[name]}"')
                 self.send_header("X-Repo-Commit", FAKE_COMMIT)
                 self.send_header("Content-Length", str(len(hub.files[name])))
                 self.send_header("Accept-Ranges", "bytes")

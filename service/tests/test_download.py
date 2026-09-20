@@ -167,6 +167,29 @@ def test_download_keeps_the_partial_file_when_the_connection_drops_and_resumes_i
     assert updates[-1] == Update.progress(total, total)
 
 
+def test_download_sends_the_user_token_to_the_hub_and_never_to_the_host_serving_the_bytes(
+    fake_hub: FakeHub, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The hub answers the metadata HEAD of every LFS file with a redirect to
+    its CDN, a signed URL on another host. The user's token (`hf auth login`,
+    or HF_TOKEN) belongs to the hub: it goes on the hub's requests and on no
+    request to the other host, exactly as huggingface_hub's own download
+    strips it when the location's host is not the endpoint's."""
+    cdn = FakeHub()
+    cdn.start()
+    fake_hub.bytes_host = cdn.endpoint
+    monkeypatch.setenv("HF_TOKEN", "synthetic-token")
+    try:
+        path, _ = _fetch(fake_hub, tmp_path / "hub")
+    finally:
+        cdn.stop()
+
+    assert _snapshot_files(path) == FAKE_FILES
+    assert all(a == "Bearer synthetic-token" for a in fake_hub.authorizations), fake_hub.authorizations
+    assert [name for name in FAKE_FILES if cdn.gets(name)] == list(FAKE_FILES), "the bytes did not come from the CDN"
+    assert cdn.authorizations == [None] * len(cdn.authorizations), "the token left the hub"
+
+
 def test_download_of_a_repo_the_hub_does_not_have_names_the_setting_to_fix(
     fake_hub: FakeHub, tmp_path: Path
 ):
