@@ -15,10 +15,10 @@ import sys
 import threading
 import types
 import urllib.request
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler
 
 import pytest
-from conftest import PHOTO
+from conftest import PHOTO, loopback_server
 
 from melampus import providers
 from melampus.backend import AnthropicBackend, MLXBackend, OpenAIBackend, ScriptedBackend
@@ -456,18 +456,6 @@ def test_the_refusal_names_what_detection_says_is_available(monkeypatch):
     assert "ollama, openai, claude, scripted" in str(err.value)
 
 
-@contextlib.contextmanager
-def _serving(handler: type[BaseHTTPRequestHandler]):
-    """An HTTP server on 127.0.0.1 at an ephemeral port, stopped on exit."""
-    server = HTTPServer(("127.0.0.1", 0), handler)
-    threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
-    try:
-        yield server
-    finally:
-        server.shutdown()
-        server.server_close()
-
-
 def _closed_port() -> int:
     """A loopback port nothing listens on."""
     with socket.socket() as probe:
@@ -495,7 +483,7 @@ def _fake_ollama(monkeypatch, *, status: int = 200, delay: float = 0.0):
         def log_message(self, *_):
             return None
 
-    with _serving(Version) as server:
+    with loopback_server(Version) as server:
         monkeypatch.setattr(providers, "OLLAMA_URL", f"http://127.0.0.1:{server.server_port}")
         try:
             yield server
@@ -569,7 +557,7 @@ def test_ollama_probe_stays_on_loopback_whatever_proxy_the_environment_names(mon
     # urlopen builds its default opener once, reading the proxy variables then;
     # start it fresh so the environment set here is the one it would see.
     monkeypatch.setattr(urllib.request, "_opener", None)
-    with _serving(AnythingGoes) as proxy:
+    with loopback_server(AnythingGoes) as proxy:
         monkeypatch.setenv("http_proxy", f"http://127.0.0.1:{proxy.server_port}")
         assert providers.ollama_answers() is False
     assert seen == [], f"the probe left the machine through the proxy: {seen}"

@@ -25,13 +25,12 @@ from __future__ import annotations
 
 import importlib.util
 import json
-import threading
 import urllib.parse
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 
 import pytest
-from conftest import FIXTURE, PHOTO
+from conftest import FIXTURE, PHOTO, loopback_server
 from PIL import Image
 
 from melampus import cli, occurrence
@@ -280,18 +279,11 @@ def gbif_server(monkeypatch: pytest.MonkeyPatch):
     """A fake speaking the real protocol: GBIF's occurrence search on loopback,
     on an ephemeral port, with the unmodified GBIFClient pointed at it. Yields
     the server; `requests` holds every (path, query, user agent) it answered."""
-    server = HTTPServer(("127.0.0.1", 0), _GBIFOccurrenceSearch)
-    server.requests = []
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    monkeypatch.setattr(
-        occurrence, "GBIF_SEARCH", f"http://127.0.0.1:{server.server_port}/v1/occurrence/search")
-    try:
+    with loopback_server(_GBIFOccurrenceSearch) as server:
+        server.requests = []
+        monkeypatch.setattr(
+            occurrence, "GBIF_SEARCH", f"http://127.0.0.1:{server.server_port}/v1/occurrence/search")
         yield server
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=5)
 
 
 def dated_frame(folder: Path, name: str, when: str | None) -> Path:
