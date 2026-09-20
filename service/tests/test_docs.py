@@ -615,20 +615,18 @@ def test_docs_describe_the_engine_picker_and_where_the_key_lives():
     key goes: LrPasswords, never a file) instead of promising the dialog is
     yet to come, and readme.md's Lightroom section must show the dialog: the
     screenshot's reference, docs/settings-dialog.png, which the owner takes."""
-    plugin_doc = (REPO / "docs" / "plugin.md").read_text(encoding="utf-8")
-    engine = re.search(r"^## The engine\n(.*?)^---", plugin_doc, re.MULTILINE | re.DOTALL)
-    assert engine, "docs/plugin.md has no ## The engine section"
-    prose = " ".join(engine.group(1).split())
+    engine = _section(PLUGIN_DOC.read_text(encoding="utf-8"), "The engine")
+    assert engine is not None, "docs/plugin.md has no ## The engine section"
+    prose = " ".join(engine.split())
     assert "until then the preference is unset" not in prose, (
         "docs/plugin.md still says the engine has no control in Settings")
     for named in ("`--detect-engines`", "LrPasswords", "settings-dialog.png"):
         assert named in prose, f"docs/plugin.md's engine section does not name {named}"
-    readme = README.read_text(encoding="utf-8")
-    section = re.search(r"^## Reviewing in Lightroom\n(.*?)^## ", readme, re.MULTILINE | re.DOTALL)
-    assert section, "readme.md has no ## Reviewing in Lightroom section"
-    assert "docs/settings-dialog.png" in section.group(1), (
+    section = _section(README.read_text(encoding="utf-8"), "Reviewing in Lightroom")
+    assert section is not None, "readme.md has no ## Reviewing in Lightroom section"
+    assert "docs/settings-dialog.png" in section, (
         "readme.md's Lightroom section does not show the settings dialog")
     # The section is read on Windows too, which has no keychain: where the
     # key is kept is said in platform-neutral words, as the dialog says it.
-    assert "keychain" not in section.group(1).lower(), (
+    assert "keychain" not in section.lower(), (
         "readme.md's Lightroom section says keychain, which Windows has not")
