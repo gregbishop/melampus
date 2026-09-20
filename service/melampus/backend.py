@@ -393,18 +393,16 @@ class _StayPut(urllib.request.HTTPRedirectHandler):
 
 
 class _Noted:
-    """Mixed into the connection classes urllib opens: the socket goes to
-    the request's _Deadline the moment it exists, and again once connect()
-    is done. The moment it exists, because for https connect() is the TCP
-    connection and then the TLS handshake, each bounded by the socket
-    timeout on its own, so a connection that took most of the budget and
-    then a handshake that stalls would hold the frame a second whole
-    timeout before a deadline given the socket afterwards could touch it;
-    http.client makes the socket through the `_create_connection`
+    """Mixed into http.client's connection classes, for the backend (urllib
+    opens them) and the probe alike: the socket goes to a _Deadline the
+    moment it exists. The moment it exists, because connect() is the TCP
+    connection and, for https, then the TLS handshake, each bounded by the
+    socket timeout on its own, so a connection that took most of the
+    budget and then a handshake that stalls would hold the caller a second
+    whole timeout before a deadline given the socket afterwards could
+    touch it; http.client makes the socket through the `_create_connection`
     attribute it sets on itself (the seam its own tests use), so that is
-    where the socket is caught. Again after connect(), because TLS wraps
-    the socket in a new one and detaches the old, and a deadline holding
-    the old could hang up nothing. And it is the deadline that holds the
+    where the socket is caught. And it is the deadline that holds the
     socket, not the connection: urllib's do_open forgets the socket on
     the connection once the headers are in (the response's file holds it
     from then on), while the deadline outlives both. What comes before the
@@ -422,17 +420,29 @@ class _Noted:
         self.deadline.on(sock)
         return sock
 
-    def connect(self) -> None:  # noqa: D102 - http.client's
-        super().connect()
-        self.deadline.on(self.sock)
-
 
 class _NotedHTTP(_Noted, http.client.HTTPConnection):
     pass
 
 
 class _NotedHTTPS(_Noted, http.client.HTTPSConnection):
-    pass
+    """HTTPSConnection.connect wraps the socket and runs the handshake in
+    one call, and the wrap detaches the socket the deadline holds (its
+    descriptor moves to the new SSLSocket), so a hang-up during the
+    handshake would touch nothing: a connection landing just before the
+    deadline bought a stalled handshake a whole socket timeout more. So
+    connect() here wraps without the handshake, gives the deadline the
+    wrapped socket, then shakes hands, with the context HTTPSConnection
+    made (the default, verifying). The server name is the host: nothing
+    here tunnels through a proxy, so there is no other."""
+
+    def connect(self) -> None:  # noqa: D102 - http.client's
+        http.client.HTTPConnection.connect(self)
+        self.sock = self._context.wrap_socket(
+            self.sock, server_hostname=self.host, do_handshake_on_connect=False
+        )
+        self.deadline.on(self.sock)
+        self.sock.do_handshake()
 
 
 class _Bounded(urllib.request.HTTPHandler, urllib.request.HTTPSHandler):

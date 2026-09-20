@@ -852,6 +852,50 @@ def test_ollama_probe_gives_up_at_its_deadline_when_the_headers_trickle(monkeypa
     assert answered is False
 
 
+class Silent(socketserver.BaseRequestHandler):
+    """A listener that accepts the TCP connection and never speaks: a TLS
+    handshake against it waits for a ServerHello that never comes."""
+
+    def handle(self) -> None:
+        with contextlib.suppress(OSError):
+            self.request.recv(65536)
+            self.request.recv(65536)
+
+
+def _hold_connect(monkeypatch, seconds: float) -> None:
+    """The kernel's connect timing is not reproducible, so the TCP phase is
+    held `seconds` here: HTTPConnection.connect sleeps that long, then
+    connects as it would have."""
+    connect = http.client.HTTPConnection.connect
+
+    def held(connection):
+        time.sleep(seconds)
+        connect(connection)
+
+    monkeypatch.setattr(http.client.HTTPConnection, "connect", held)
+
+
+def test_ollama_probe_gives_up_at_its_deadline_when_the_handshake_stalls_after_a_slow_connect(monkeypatch):
+    """Codex round 3 (providers.py:139): the probe gave the deadline its
+    socket once `connection.request()` had returned, and for https that is
+    the TCP connection and then the TLS handshake, each bounded by the
+    socket timeout on its own; a connection that took most of
+    OLLAMA_PROBE_SECONDS, then a handshake that stalls, held detection a
+    second whole probe timeout. Given a connect that returns just before
+    the deadline (held 0.6s of 0.8s) and a listener behind an https address
+    that accepts and never completes the handshake, the probe reports
+    unavailable within its deadline."""
+    deadline = 0.8
+    monkeypatch.setattr(providers, "OLLAMA_PROBE_SECONDS", deadline)
+    _hold_connect(monkeypatch, 0.6)
+    with loopback_server(Silent) as server:
+        started = time.monotonic()
+        answered = providers.ollama_answers(f"https://127.0.0.1:{server.server_port}")
+        elapsed = time.monotonic() - started
+    assert elapsed < deadline + SCHEDULING_SLACK, f"the probe shook hands past its deadline: {elapsed:.2f}s"
+    assert answered is False
+
+
 def test_ollama_probe_gives_up_at_its_deadline_when_it_fires_during_connect(monkeypatch):
     """Security: the deadline must bound the probe whichever side of the
     handshake it lands on. The timer hangs up the connection's socket, and
@@ -998,15 +1042,15 @@ def test_ollama_probe_opens_a_verified_https_connection_for_an_https_address(mon
     """The other half of the https regression: the probe does ask over TLS
     (not refuse https outright), at the address's host and its port as typed
     (none, here: HTTPSConnection's own 443), with http.client's default
-    context, the one that verifies the certificate. Given HTTPSConnection
-    faked at the http.client edge to answer 200 without connecting, the
-    probe reports the server found."""
+    context, the one that verifies the certificate. Given the backend's
+    HTTPS connection class faked at the http.client edge to answer 200
+    without connecting, the probe reports the server found."""
     opened: list[tuple] = []
 
     class FakeHTTPS:
         sock = None
 
-        def __init__(self, host, port=None, **kwargs):
+        def __init__(self, host, port=None, *, deadline, **kwargs):
             opened.append((host, port, kwargs))
 
         def request(self, method, path):
@@ -1018,7 +1062,7 @@ def test_ollama_probe_opens_a_verified_https_connection_for_an_https_address(mon
         def close(self):
             return None
 
-    monkeypatch.setattr(http.client, "HTTPSConnection", FakeHTTPS)
+    monkeypatch.setattr(providers, "_NotedHTTPS", FakeHTTPS)
     assert providers.ollama_answers("https://ollama.example") is True
     (host, port, kwargs), asked = opened
     assert (host, port) == ("ollama.example", None)
@@ -1439,16 +1483,6 @@ def test_ollama_backend_gives_up_at_its_deadline_when_the_server_trickles(tmp_pa
     assert f"did not answer within {deadline:g}s" in str(err.value), str(err.value)
 
 
-class Silent(socketserver.BaseRequestHandler):
-    """A listener that accepts the TCP connection and never speaks: a TLS
-    handshake against it waits for a ServerHello that never comes."""
-
-    def handle(self) -> None:
-        with contextlib.suppress(OSError):
-            self.request.recv(65536)
-            self.request.recv(65536)
-
-
 def test_ollama_backend_deadline_covers_the_handshake_after_a_slow_connect(monkeypatch, tmp_path):
     """Codex round 2 (backend.py:406): `_Noted` handed the socket to the
     deadline only once connect() had returned, and for https connect() is
@@ -1463,13 +1497,7 @@ def test_ollama_backend_deadline_covers_the_handshake_after_a_slow_connect(monke
     deadline plus the hold, not a whole timeout later."""
     deadline = 0.8
     hold = 0.05  # how long past the deadline connect() is held
-    connect = http.client.HTTPConnection.connect
-
-    def held(connection):
-        time.sleep(deadline + hold)
-        connect(connection)
-
-    monkeypatch.setattr(http.client.HTTPConnection, "connect", held)
+    _hold_connect(monkeypatch, deadline + hold)
     image = tmp_path / "image.jpg"
     image.write_bytes(b"jpeg")
     with loopback_server(Silent) as server:
@@ -1480,6 +1508,32 @@ def test_ollama_backend_deadline_covers_the_handshake_after_a_slow_connect(monke
             backend.complete(image, "prompt", 10)
         elapsed = time.monotonic() - started
     assert elapsed < deadline + hold + SCHEDULING_SLACK, f"the handshake ran past the deadline: {elapsed:.2f}s"
+    assert f"did not answer within {deadline:g}s" in str(err.value), str(err.value)
+
+
+def test_ollama_backend_deadline_covers_the_handshake_when_connect_lands_just_before_it(
+    monkeypatch, tmp_path
+):
+    """Codex round 3 (backend.py:426), security: the socket the deadline was
+    given at creation is detached by SSLContext.wrap_socket (its descriptor
+    moves to the new SSLSocket) before the handshake runs inside it, so a
+    hang-up during the handshake touched nothing, and a connection landing
+    just before the deadline still bought a stalled handshake a whole
+    socket timeout more. Given a connect held 0.6s of a 0.8s timeout and a
+    listener behind an https address that accepts and never completes the
+    handshake, the frame fails as timed out within the budget."""
+    deadline = 0.8
+    _hold_connect(monkeypatch, 0.6)
+    image = tmp_path / "image.jpg"
+    image.write_bytes(b"jpeg")
+    with loopback_server(Silent) as server:
+        backend = OllamaBackend(
+            "qwen3-vl:8b-instruct", f"https://127.0.0.1:{server.server_port}", timeout=deadline)
+        started = time.monotonic()
+        with pytest.raises(TimeoutError) as err:
+            backend.complete(image, "prompt", 10)
+        elapsed = time.monotonic() - started
+    assert elapsed < deadline + SCHEDULING_SLACK, f"the handshake ran past the deadline: {elapsed:.2f}s"
     assert f"did not answer within {deadline:g}s" in str(err.value), str(err.value)
 
 

@@ -20,7 +20,7 @@ from pydantic import SecretStr
 # _hang_up is the deadline's own hang-up, written for the probe and kept in
 # its tests here; it lives in backend.py because the backend shares the
 # deadline and this module imports that one, not the reverse.
-from .backend import VLMBackend, _Deadline, _hang_up  # noqa: F401
+from .backend import VLMBackend, _Deadline, _hang_up, _NotedHTTP, _NotedHTTPS  # noqa: F401
 from .config import MelampusConfig
 
 #: Where each provider's key is looked for, in order, when the config has none.
@@ -109,10 +109,11 @@ def ollama_answers(url: str | None = None) -> bool:
     read the way the backend reads it for every frame (OllamaBackend
     builds `{url}/api/chat` and hands it to urllib): the endpoint goes on
     the end of the address as typed, so a path in front of it (a reverse
-    proxy's `/ollama`) stays; the scheme picks the connection, https
-    spoken as TLS with the certificate verified (http.client's default
-    context, as urllib's), so an https address is never asked in the clear
-    and never on port 80; the host and port are the address's own. Read
+    proxy's `/ollama`) stays; the scheme picks the connection, the
+    backend's own _Noted ones, https spoken as TLS with the certificate
+    verified (http.client's default context, as urllib's), so an https
+    address is never asked in the clear and never on port 80; the host and
+    port are the address's own. Read
     any other way, the probe would refuse a server every frame would reach,
     or find one no frame would. Straight to the
     address, never through a proxy: urlopen honours http_proxy and the
@@ -122,32 +123,32 @@ def ollama_answers(url: str | None = None) -> bool:
     http.client follows no redirect, and a 3xx is a non-200, so whatever
     listens on the port when Ollama does not cannot point the probe at another
     host and have that host's 200 stand in for Ollama's. And never past the
-    deadline: the socket timeout bounds each read, not the probe, so a
-    listener trickling headers a byte at a time could hold detection for as
-    long as it liked; a _Deadline hangs up at OLLAMA_PROBE_SECONDS, and
-    whatever was read by then, the probe reports unavailable."""
-    try:
-        address = urlsplit(f"{ollama_url(url)}/api/version")
-        connect = {"http": http.client.HTTPConnection, "https": http.client.HTTPSConnection}
-        connection = connect[address.scheme](
-            address.hostname, address.port, timeout=OLLAMA_PROBE_SECONDS
-        )
-    except Exception:  # noqa: BLE001 - an address that cannot be asked (no scheme, no host, a port out of range) is one nobody answers at
-        return False
-    try:
-        with _Deadline(OLLAMA_PROBE_SECONDS) as deadline:
+    deadline: the socket timeout bounds each operation, not the probe, so
+    a listener trickling headers a byte at a time, or a slow connection
+    and then a handshake that stalls, could hold detection for as long as
+    it liked; a _Deadline, holding the socket from the moment the
+    connection makes it, hangs up at OLLAMA_PROBE_SECONDS, and whatever
+    was read by then, the probe reports unavailable."""
+    with _Deadline(OLLAMA_PROBE_SECONDS) as deadline:
+        try:
+            address = urlsplit(f"{ollama_url(url)}/api/version")
+            connect = {"http": _NotedHTTP, "https": _NotedHTTPS}
+            connection = connect[address.scheme](
+                address.hostname, address.port, timeout=OLLAMA_PROBE_SECONDS, deadline=deadline
+            )
+        except Exception:  # noqa: BLE001 - an address that cannot be asked (no scheme, no host, a port out of range) is one nobody answers at
+            return False
+        try:
             connection.request("GET", address.path)
-            # Connected and asked: the deadline has the socket from here. One
-            # that fired during connect() hangs up now, and a late handshake
-            # must not start a read the deadline cannot end.
-            deadline.on(connection.sock)
+            # A deadline that fired before the socket existed hung it up as
+            # soon as it did; asked anyway, the answer is not the server's.
             if deadline.expired.is_set():
                 return False
             answered = connection.getresponse().status == 200
-    except Exception:  # noqa: BLE001 - every failure means the same thing: not here
-        return False
-    finally:
-        connection.close()
+        except Exception:  # noqa: BLE001 - every failure means the same thing: not here
+            return False
+        finally:
+            connection.close()
     return answered and not deadline.expired.is_set()
 
 
