@@ -809,19 +809,25 @@ def test_ollama_probe_gives_up_after_its_timeout(monkeypatch):
         assert providers.ollama_answers() is False
 
 
+def _trickle(wfile, data: bytes) -> None:
+    """`data` one byte every hundred milliseconds: each byte within the
+    socket timeout, the whole (two seconds for twenty bytes) well past a
+    sub-second deadline. Once the client hangs up, the next write raises;
+    the caller's suppress(OSError) ends the trickle there."""
+    for byte in data:
+        time.sleep(0.1)
+        wfile.write(bytes([byte]))
+
+
 class Trickling(QuietHandler):
-    """A listener that sends a valid 200 one header byte every hundred
-    milliseconds, over two seconds: each byte within the socket timeout, the
-    whole well past the probe's deadline. A POST gets the same, once its
-    body is read."""
+    """A listener that sends a valid 200 with the headers trickled: each
+    byte within the socket timeout, the whole well past the probe's
+    deadline. A POST gets the same, once its body is read."""
 
     def do_GET(self):  # noqa: N802 - http.server's name
-        # Once the probe hangs up, the next write raises; that ends the trickle.
         with contextlib.suppress(OSError):
             self.wfile.write(b"HTTP/1.1 200 OK\r\n")
-            for byte in b"Content-Length: 2\r\n\r\n":
-                time.sleep(0.1)
-                self.wfile.write(bytes([byte]))
+            _trickle(self.wfile, b"Content-Length: 2\r\n\r\n")
             self.wfile.write(b"{}")
 
     def do_POST(self):  # noqa: N802 - http.server's name
@@ -831,9 +837,9 @@ class Trickling(QuietHandler):
 
 def _trickling_body(status: int) -> type[QuietHandler]:
     """A listener that answers a POST's status line and headers at once,
-    then a `status` body one byte every hundred milliseconds, over two
-    seconds: each byte within the socket timeout, the whole well past the
-    deadline. 200 is a reply being read; 500 is an error body being read."""
+    then a `status` body trickled: each byte within the socket timeout,
+    the whole well past the deadline. 200 is a reply being read; 500 is an
+    error body being read."""
     body = b'{"error": "slowly"}'
 
     class TricklingBody(QuietHandler):
@@ -843,9 +849,7 @@ def _trickling_body(status: int) -> type[QuietHandler]:
                 self.send_response(status)
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
-                for byte in body:
-                    time.sleep(0.1)
-                    self.wfile.write(bytes([byte]))
+                _trickle(self.wfile, body)
 
     return TricklingBody
 
