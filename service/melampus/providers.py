@@ -95,9 +95,13 @@ def ollama_answers() -> bool:
     """Whether an Ollama server answers at OLLAMA_URL: GET /api/version
     (Ollama's docs/api.md § Version) within OLLAMA_PROBE_SECONDS, status 200.
     Connection refused, a timeout, a non-200: unavailable. Never raises; a
-    probe reports."""
+    probe reports. Straight to the address, never through a proxy: urlopen's
+    default honours http_proxy and the system proxy settings, which would send
+    a loopback probe off the machine and let the proxy's answer stand in for
+    Ollama's."""
+    direct = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     try:
-        with urllib.request.urlopen(
+        with direct.open(
             f"{OLLAMA_URL}/api/version", timeout=OLLAMA_PROBE_SECONDS
         ) as response:
             return response.status == 200

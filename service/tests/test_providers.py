@@ -14,6 +14,7 @@ import socket
 import sys
 import threading
 import types
+import urllib.request
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
@@ -456,6 +457,25 @@ def test_the_refusal_names_what_detection_says_is_available(monkeypatch):
 
 
 @contextlib.contextmanager
+def _serving(handler: type[BaseHTTPRequestHandler]):
+    """An HTTP server on 127.0.0.1 at an ephemeral port, stopped on exit."""
+    server = HTTPServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
+    try:
+        yield server
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def _closed_port() -> int:
+    """A loopback port nothing listens on."""
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
+@contextlib.contextmanager
 def _fake_ollama(monkeypatch, *, status: int = 200, delay: float = 0.0):
     """A server speaking Ollama's version endpoint on 127.0.0.1 at an
     ephemeral port, with detection pointed at it. `status` is what
@@ -475,16 +495,12 @@ def _fake_ollama(monkeypatch, *, status: int = 200, delay: float = 0.0):
         def log_message(self, *_):
             return None
 
-    server = HTTPServer(("127.0.0.1", 0), Version)
-    thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
-    thread.start()
-    monkeypatch.setattr(providers, "OLLAMA_URL", f"http://127.0.0.1:{server.server_port}")
-    try:
-        yield server
-    finally:
-        release.set()
-        server.shutdown()
-        server.server_close()
+    with _serving(Version) as server:
+        monkeypatch.setattr(providers, "OLLAMA_URL", f"http://127.0.0.1:{server.server_port}")
+        try:
+            yield server
+        finally:
+            release.set()
 
 
 def test_ollama_probe_finds_a_server_answering_on_localhost(monkeypatch):
@@ -499,9 +515,7 @@ def test_ollama_probe_finds_a_server_answering_on_localhost(monkeypatch):
 def test_ollama_probe_reports_a_closed_port_without_raising(monkeypatch):
     """Nothing listening: connection refused is "not installed or not
     running", never a traceback."""
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        closed_port = probe.getsockname()[1]
+    closed_port = _closed_port()
     monkeypatch.setattr(providers, "OLLAMA_URL", f"http://127.0.0.1:{closed_port}")
     assert providers.ollama_answers() is False
     verdict = _verdict("ollama")
@@ -525,6 +539,40 @@ def test_ollama_probe_gives_up_after_its_timeout(monkeypatch):
 
 def test_ollama_probe_timeout_is_one_second():
     assert providers.OLLAMA_PROBE_SECONDS == 1.0
+
+
+def test_ollama_probe_stays_on_loopback_whatever_proxy_the_environment_names(monkeypatch):
+    """Security: the probe is a loopback call and must stay one. urlopen's
+    default opener honours `http_proxy` (and, on a Mac, the system proxy
+    settings, whose default bypass list does not cover 127.0.0.1), which
+    would send the probe off the machine and let the proxy's answer stand in
+    for Ollama's: a captive portal or a corporate proxy that answers 200 to
+    anything would make detection report a server that is not there, and the
+    default engine would follow it. Given a proxy in the environment that
+    answers 200 to everything and nothing at OLLAMA_URL, the probe reports
+    unavailable and the proxy never hears from it."""
+    seen: list[str] = []
+
+    class AnythingGoes(BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802 - http.server's name
+            seen.append(self.path)
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"{}")
+
+        def log_message(self, *_):
+            return None
+
+    monkeypatch.setattr(providers, "OLLAMA_URL", f"http://127.0.0.1:{_closed_port()}")
+    for name in ("no_proxy", "NO_PROXY"):
+        monkeypatch.delenv(name, raising=False)
+    # urlopen builds its default opener once, reading the proxy variables then;
+    # start it fresh so the environment set here is the one it would see.
+    monkeypatch.setattr(urllib.request, "_opener", None)
+    with _serving(AnythingGoes) as proxy:
+        monkeypatch.setenv("http_proxy", f"http://127.0.0.1:{proxy.server_port}")
+        assert providers.ollama_answers() is False
+    assert seen == [], f"the probe left the machine through the proxy: {seen}"
 
 
 # ---------------------------------------------------------------------------
