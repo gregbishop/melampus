@@ -272,8 +272,8 @@ end)
 -- ── detection to picker items (card #405) ─────────────────────────────────
 -- The CLI decides what can run here (--detect-engines, card #404); the dialog
 -- only shows it. Rules.engineItems turns the decoded verdict list into the
--- picker's items, in the owner's order, with the unavailable ones disabled and
--- carrying their reason, and a note to show under the picker.
+-- picker's items, in the owner's order, with the unavailable ones disabled, and
+-- a note to show under the picker that carries their reasons.
 local verdicts = mock.detectionVerdicts
 
 t.test('the picker lists the four engines in the owner\'s order, after letting Melampus choose', function()
