@@ -1,6 +1,7 @@
 --[[ Settings. Everything beyond the four menu items lives here (§5.4.2):
      the results file, the safety switches, the gates, and maintenance. ]]
 local LrBinding = import 'LrBinding'
+local LrColor = import 'LrColor'
 local LrDialogs = import 'LrDialogs'
 local LrFunctionContext = import 'LrFunctionContext'
 local LrHttp = import 'LrHttp'
@@ -27,7 +28,8 @@ LrTasks.startAsyncTask(function()
 		local prefs = LrPrefs.prefsForPlugin()
 		local f = LrView.osFactory()
 		local bind = LrView.bind
-		local grey = import('LrColor')(0.4, 0.4, 0.4)
+		-- The explanatory text under a control, everywhere in the dialog.
+		local grey = LrColor(0.4, 0.4, 0.4)
 
 		-- Which engines can run here is the executable's verdict (card #404),
 		-- asked once, now, as the dialog opens. Without the executable nothing
@@ -49,7 +51,7 @@ LrTasks.startAsyncTask(function()
 				local link = item.link
 				engineViews[#engineViews + 1] = f:static_text {
 					title = link,
-					text_color = import('LrColor')(0.1, 0.3, 0.8),
+					text_color = LrColor(0.1, 0.3, 0.8),
 					mouse_down = function() LrHttp.openUrlInBrowser(link) end,
 				}
 			end
@@ -132,7 +134,7 @@ LrTasks.startAsyncTask(function()
 						.. 'the frame and checks it against range data. Sport asks what is\n'
 						.. 'happening — the movement, the equipment, the moment.',
 					height_in_lines = 3,
-					text_color = import('LrColor')(0.4, 0.4, 0.4),
+					text_color = grey,
 				},
 			},
 
@@ -146,7 +148,7 @@ LrTasks.startAsyncTask(function()
 					title = 'Keep this ticked until you have seen a preview you are happy with.\n'
 						.. 'Untick it when you want the changes actually applied.',
 					height_in_lines = 2,
-					text_color = import('LrColor')(0.4, 0.4, 0.4),
+					text_color = grey,
 				},
 				f:checkbox { title = 'Redo photos I have already done',
 					value = bind 'force' },
@@ -169,7 +171,7 @@ LrTasks.startAsyncTask(function()
 						.. 'about three minutes between updates. Cancelling keeps every\n'
 						.. 'batch that finished.',
 					height_in_lines = 5,
-					text_color = import('LrColor')(0.4, 0.4, 0.4),
+					text_color = grey,
 				},
 				f:checkbox { title = 'Keep the working previews after analysing',
 					value = bind 'keepPreviews' },
@@ -178,7 +180,7 @@ LrTasks.startAsyncTask(function()
 						.. 'photos. They never enter your catalog and are deleted when\n'
 						.. 'analysis succeeds. About 78 KB each; keep them only to debug.',
 					height_in_lines = 3,
-					text_color = import('LrColor')(0.4, 0.4, 0.4),
+					text_color = grey,
 				},
 			},
 
@@ -200,7 +202,7 @@ LrTasks.startAsyncTask(function()
 						.. 'occur near Merritt Island. Either the model is wrong, or you\n'
 						.. 'photographed something genuinely unusual.',
 					height_in_lines = 3,
-					text_color = import('LrColor')(0.4, 0.4, 0.4),
+					text_color = grey,
 				},
 				f:checkbox { title = 'Pick flags', value = bind 'writeFlags' },
 				f:checkbox { title = 'Auto-reject poor frames (off by default)',
@@ -228,7 +230,7 @@ LrTasks.startAsyncTask(function()
 				},
 				f:static_text {
 					title = 'Not sure enough? It adds "Needs ID" instead of guessing a species.',
-					text_color = import('LrColor')(0.4, 0.4, 0.4),
+					text_color = grey,
 				},
 			},
 
