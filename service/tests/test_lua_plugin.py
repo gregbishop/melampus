@@ -20,7 +20,7 @@ import pytest
 from conftest import PHOTO
 
 from melampus import providers
-from test_binary import no_python_environment, per_user_config
+from test_binary import no_python_environment, on_apple_silicon, per_user_config
 
 REPO = Path(__file__).resolve().parents[2]
 PLUGIN = REPO / "plugin" / "Melampus.lrplugin"
@@ -176,52 +176,60 @@ def _plugin_folder_holding(executable: Path, tmp_path: Path) -> Path:
     return plugin_dir
 
 
-def _command_the_plugin_builds(
-    plugin_dir: Path, previews: Path, results: Path, tmp_path: Path, *, engine: str,
-    stored_key: str = "",
-) -> str:
-    """The one shell command MelampusAnalyze.lua builds under the mock SDK for
-    the platform Lightroom reports (a fake Windows Lightroom on a Windows
-    host), with `_PLUGIN.path` at `plugin_dir` and the engine preference set
-    to `engine` ("" is the default: no preference). `stored_key` is what
-    LrPasswords holds for `engine`'s key variable (card #405); "" means
-    nothing stored.
+def _plugin_under_the_mock(plugin_dir: Path, tmp_path: Path, body: str, **env: str) -> str:
+    """Run `body`, Lua, with the mock SDK installed for `plugin_dir` (so
+    `_PLUGIN.path` is there) on the platform Lightroom reports for this host
+    (a fake Windows Lightroom on a Windows host), and MelampusRules.lua and
+    MelampusAnalyze.lua loaded fresh under it as `Rules` and `Analyze`. `env`
+    is what the body reads through os.getenv. Hands back what it wrote.
 
     The mock's temp directory: under TMPDIR on a fake macOS Lightroom, the
     Windows temp folder (TEMP, as Lightroom reports it) on a fake Windows
-    one, so the CLI log the command names lands under tmp_path either way."""
-    script = tmp_path / "command.lua"
+    one, so what a command writes there lands under tmp_path either way."""
+    script = tmp_path / "under-the-mock.lua"
     script.write_text(
         "local mock = require('lrmock')\n"
         "mock.reset()\n"
         "local Rules = dofile(os.getenv('MELAMPUS_RULES'))\n"
+        "mock.install(os.getenv('MELAMPUS_PLUGIN_DIR'),"
+        " { windows = os.getenv('MELAMPUS_WINDOWS') == '1' })\n"
+        "local Analyze = dofile(os.getenv('MELAMPUS_ANALYZE'))\n"
+        + body,
+        encoding="utf-8",
+    )
+    ran = run_lua(script, env=os.environ | {
+        "MELAMPUS_PLUGIN_DIR": str(plugin_dir),
+        "MELAMPUS_ANALYZE": str(PLUGIN / "MelampusAnalyze.lua"),
+        "MELAMPUS_RULES": str(PLUGIN / "MelampusRules.lua"),
+        "MELAMPUS_WINDOWS": "1" if WINDOWS else "0",
+        "TMPDIR": str(tmp_path),
+        "TEMP": str(tmp_path),
+    } | env)
+    assert ran.returncode == 0, ran.stdout + ran.stderr
+    return ran.stdout
+
+
+def _command_the_plugin_builds(
+    plugin_dir: Path, previews: Path, results: Path, tmp_path: Path, *, engine: str,
+    stored_key: str = "",
+) -> str:
+    """The one shell command MelampusAnalyze.lua builds under the mock SDK
+    with `_PLUGIN.path` at `plugin_dir` and the engine preference set to
+    `engine` ("" is the default: no preference). `stored_key` is what
+    LrPasswords holds for `engine`'s key variable (card #405); "" means
+    nothing stored."""
+    return _plugin_under_the_mock(
+        plugin_dir, tmp_path,
         "local variable = Rules.keyVariable(os.getenv('MELAMPUS_ENGINE'))\n"
         "if variable and os.getenv('MELAMPUS_STORED_KEY') ~= '' then\n"
         "  mock.state.passwords[variable] = os.getenv('MELAMPUS_STORED_KEY')\n"
         "end\n"
-        "mock.install(os.getenv('MELAMPUS_PLUGIN_DIR'),"
-        " { windows = os.getenv('MELAMPUS_WINDOWS') == '1' })\n"
-        "local Analyze = dofile(os.getenv('MELAMPUS_ANALYZE'))\n"
         "local ok, message = Analyze.run(os.getenv('MELAMPUS_PREVIEWS'),"
         " os.getenv('MELAMPUS_RESULTS'), 'wildlife', os.getenv('MELAMPUS_ENGINE'))\n"
         "assert(ok, message)\n"
         "io.write(mock.state.executed[1])\n",
-        encoding="utf-8",
-    )
-    built = run_lua(script, env=os.environ | {
-        "MELAMPUS_PLUGIN_DIR": str(plugin_dir),
-        "MELAMPUS_ANALYZE": str(PLUGIN / "MelampusAnalyze.lua"),
-        "MELAMPUS_RULES": str(PLUGIN / "MelampusRules.lua"),
-        "MELAMPUS_PREVIEWS": str(previews),
-        "MELAMPUS_RESULTS": str(results),
-        "MELAMPUS_ENGINE": engine,
-        "MELAMPUS_WINDOWS": "1" if WINDOWS else "0",
-        "MELAMPUS_STORED_KEY": stored_key,
-        "TMPDIR": str(tmp_path),
-        "TEMP": str(tmp_path),
-    })
-    assert built.returncode == 0, built.stdout + built.stderr
-    return built.stdout
+        MELAMPUS_PREVIEWS=str(previews), MELAMPUS_RESULTS=str(results),
+        MELAMPUS_ENGINE=engine, MELAMPUS_STORED_KEY=stored_key)
 
 
 def _cli_log_tail(tmp_path: Path) -> str:
@@ -298,6 +306,45 @@ def test_the_stored_key_reaches_the_executable_through_the_command_the_plugin_bu
         assert stored_key not in tail, f"the executable printed the key:\n{tail}"
     else:
         assert "needs an API key" in tail, tail
+
+
+def test_the_detection_the_plugin_runs_reaches_the_executable_and_fills_the_picker(
+    built_executable: Path, tmp_path: Path
+):
+    """Card #405, Done-when 1 at the real boundary. The plugin's Analyze
+    module, run under the mock SDK with `_PLUGIN.path` at a plugin folder
+    that holds the executable, builds the one `--detect-engines` line and
+    hands it to the shell LrTasks.execute hands it to on this host (sh
+    against dist/melampus, cmd.exe against dist/melampus.exe); what the
+    executable actually printed then goes through the plugin's own JSON
+    decoder and `Rules.engineItems`: five items in the owner's order, ollama
+    greyed with the download address from the executable's reason as its
+    link, mlx as this machine decides. No Ollama answers on a runner and
+    nothing is sent anywhere; the executable's output on its own, with no
+    python on the path, is test_binary.py's."""
+    from melampus import providers
+
+    plugin_dir = _plugin_folder_holding(built_executable, tmp_path)
+
+    listing = _plugin_under_the_mock(
+        plugin_dir, tmp_path,
+        "mock.state.onExecute = mock.runThroughTheShell\n"
+        "local verdicts, problem = Analyze.detectEngines()\n"
+        "assert(verdicts, problem)\n"
+        "assert(#mock.state.executed == 1, 'detection ran ' .. #mock.state.executed .. ' commands')\n"
+        "for _, item in ipairs(Rules.engineItems(verdicts, problem)) do\n"
+        "  io.write(item.value, '\\t', tostring(item.enabled), '\\t', tostring(item.link), '\\n')\n"
+        "end\n")
+
+    items = [line.split("\t") for line in listing.splitlines()]
+    assert [value for value, _, _ in items] == ["", "mlx", "ollama", "openai", "claude"], listing
+    enabled = {value: state == "true" for value, state, _ in items}
+    links = {value: link for value, _, link in items}
+    assert enabled[""] and enabled["openai"] and enabled["claude"], listing
+    assert enabled["mlx"] is on_apple_silicon(), listing
+    assert not enabled["ollama"], f"ollama greyed by nothing; an Ollama server answered?\n{listing}"
+    assert links["ollama"] == providers.OLLAMA_INSTALL, listing
+    assert all(links[value] == "nil" for value in ("", "mlx", "openai", "claude")), listing
 
 
 def test_the_command_the_plugin_builds_runs_the_executable_beside_it(

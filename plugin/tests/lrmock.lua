@@ -35,6 +35,17 @@ end
 -- quoting the mock's own shell traffic uses, and still not from the plugin's.
 M.sh = sh
 
+--- Plays the executable for real, for state.onExecute: the line goes to the
+-- host's shell the way LrTasks.execute hands it to Lightroom's (sh -c, or
+-- cmd.exe /c on a Windows host), and the exit code comes back as a number,
+-- which is what Lightroom's Lua 5.1 os.execute returns; 5.2 and later
+-- return a boolean, the word 'exit' and then the code.
+function M.runThroughTheShell(command)
+	local first, _, code = os.execute(command)
+	if type(first) == 'number' then return first end
+	return code
+end
+
 --- Remove the temp directory this run made, if it made one.
 function M.cleanUp()
 	if M.state.tempDir then
