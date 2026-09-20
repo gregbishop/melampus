@@ -306,14 +306,18 @@ t.test('the picker lists the four engines in the owner\'s order, after letting M
 	end
 end)
 
-t.test('unavailable engines are disabled and carry the reason detection gave', function()
+t.test('unavailable engines are disabled, and the note carries the reason detection gave', function()
+	-- The dialog reads enabled and link from an item and shows the reasons
+	-- from the note under the picker; an item carries nothing the dialog
+	-- does not read.
 	local items, note = Rules.engineItems(verdicts({ mlx = { available = false, reason = 'needs Apple Silicon' } }))
 	local byValue = {}
 	for _, item in ipairs(items) do byValue[item.value] = item end
 	t.isFalse(byValue.mlx.enabled, 'mlx should be greyed')
-	t.equals(byValue.mlx.reason, 'needs Apple Silicon')
 	t.isFalse(byValue.ollama.enabled, 'ollama should be greyed')
-	t.isNotNil(string.find(byValue.ollama.reason, 'no Ollama server', 1, true))
+	for _, item in ipairs(items) do
+		t.isNil(item.reason, item.value .. ' carries a reason nothing reads; the note has it')
+	end
 	t.isTrue(byValue.openai.enabled, 'openai is available')
 	t.isTrue(byValue.claude.enabled, 'claude is available')
 	t.isNotNil(string.find(note, 'needs Apple Silicon', 1, true), 'the note does not carry the mlx reason:\n' .. note)

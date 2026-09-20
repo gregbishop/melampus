@@ -134,11 +134,13 @@ end
 -- `verdicts` is the decoded JSON of --detect-engines, a list of
 -- { engine, available, reason }. The first item leaves the choice to the
 -- executable (the unset preference); then Rules.ENGINES in order, each
--- disabled when detection said it cannot run here, carrying its reason and,
--- when the reason names a web address, the last one it names as `link`.
--- Without verdicts (no executable, or output that is not the list) nothing
--- is greyed and `problem` is the note. Returns the items and the note to show
--- under the picker: one line per unavailable engine, or the problem.
+-- disabled when detection said it cannot run here and, when its reason
+-- names a web address, carrying the last one it names as `link`. Without
+-- verdicts (no executable, or output that is not the list) nothing is greyed
+-- and `problem` is the note. Returns the items and the note to show under
+-- the picker: one line per unavailable engine with its reason, or the
+-- problem. An item carries only what the dialog reads: title, value,
+-- enabled, link.
 function Rules.engineItems(verdicts, problem)
 	local byEngine = {}
 	if type(verdicts) == 'table' then
@@ -150,18 +152,18 @@ function Rules.engineItems(verdicts, problem)
 	end
 	local items = {
 		{ title = 'Let Melampus choose — the first engine that can run here',
-			value = '', enabled = true, reason = '' },
+			value = '', enabled = true },
 	}
 	local lines = {}
 	for _, engine in ipairs(Rules.ENGINES) do
 		local verdict = byEngine[engine]
 		local available = verdict == nil or verdict.available ~= false
-		local reason = verdict and tostring(verdict.reason or '') or ''
 		local item = {
 			title = Rules.ENGINE_TITLES[engine] .. (available and '' or ' (not available)'),
-			value = engine, enabled = available, reason = reason,
+			value = engine, enabled = available,
 		}
 		if not available then
+			local reason = tostring(verdict.reason or '')
 			-- The address to go to is the last one the reason names (the first
 			-- may be where a local server was looked for), without a trailing
 			-- full stop or semicolon from the sentence around it.
@@ -173,10 +175,7 @@ function Rules.engineItems(verdicts, problem)
 		items[#items + 1] = item
 	end
 	local note = table.concat(lines, '\n')
-	if note == '' and next(byEngine) == nil then
-		note = problem or ''
-		for i = 2, #items do items[i].reason = note end
-	end
+	if note == '' and next(byEngine) == nil then note = problem or '' end
 	return items, note
 end
 
