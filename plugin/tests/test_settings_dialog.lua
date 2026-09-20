@@ -12,7 +12,6 @@ local t = require('harness')
 local mock = require('lrmock')
 
 local PLUGIN = mock.PLUGIN
-local EXECUTABLE = PLUGIN .. '/melampus'
 local ENGINES = mock.loadPluginFile('MelampusRules').ENGINES
 local OLLAMA_DOWNLOAD = 'https://ollama.com/download'
 
@@ -23,17 +22,13 @@ local OLLAMA_DOWNLOAD = 'https://ollama.com/download'
 --- there); `options.onDialog` plays the user while the dialog is up.
 local function openSettings(options)
 	options = options or {}
-	mock.reset({
+	mock.loadUnderMock('MelampusSettings', {
 		prefs = mock.defaultPrefs(options.prefs),
-		existing = { [EXECUTABLE] = options.detection ~= nil },
+		existing = { [mock.EXECUTABLE] = options.detection ~= nil },
 		passwords = options.passwords,
 		onExecute = options.detection and mock.answersDetection(options.detection) or nil,
 		onModalDialog = options.onDialog,
 	})
-	mock.install(PLUGIN)
-	mock.unloadPlugin()
-	local ok, err = pcall(assert(loadfile(PLUGIN .. '/MelampusSettings.lua')))
-	t.isTrue(ok, 'the settings file raised: ' .. tostring(err))
 	local modal = {}
 	for _, dialog in ipairs(mock.state.dialogs) do
 		if dialog.modal then modal[#modal + 1] = dialog end

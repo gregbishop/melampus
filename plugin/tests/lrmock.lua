@@ -585,6 +585,10 @@ end
 
 M.PLUGIN = os.getenv('MELAMPUS_PLUGIN') or pluginPath()
 
+--- The executable beside that plugin on a macOS Lightroom, the path the
+--- plugin looks for; a suite tells the mock it is present or absent by name.
+M.EXECUTABLE = M.PLUGIN .. '/melampus'
+
 --- Drop the plugin's modules so the next load runs them fresh under the mock.
 function M.unloadPlugin()
 	for _, name in ipairs({ 'MelampusJson', 'MelampusRules', 'MelampusLog', 'MelampusAnalyze' }) do

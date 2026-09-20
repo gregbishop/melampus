@@ -361,7 +361,7 @@ end
 
 -- The executable beside this plugin, on the fake macOS Lightroom the suite
 -- runs the import under; the mock reports it present when a test says so.
-local MAC_EXECUTABLE = PLUGIN .. '/melampus'
+local MAC_EXECUTABLE = mock.EXECUTABLE
 
 -- A fake Windows Lightroom: the plugin in the per-user Modules folder, the
 -- previews in the temp folder the mock names for WIN_ENV.
