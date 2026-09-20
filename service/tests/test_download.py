@@ -740,6 +740,24 @@ def test_the_hub_library_is_a_dependency_on_every_platform_pinned_to_the_reviewe
     assert declared == "huggingface_hub==1.26.0", f"not the exact reviewed version: {declared}"
 
 
+@pytest.mark.parametrize("package", ["huggingface_hub", "filelock"])
+def test_the_libraries_the_download_imports_are_dependencies_on_every_platform(package: str):
+    """download.py imports huggingface_hub directly, and on Windows nothing
+    else brings it (mlx-vlm is Apple Silicon only), so the executable built
+    there carries the command only if service/pyproject.toml names it, for
+    every platform, in the core dependencies the lockfile installs. The same
+    for filelock (card #408: `--remove-model` catches its Timeout): it is in
+    the environment today as the hub library's own dependency, and a direct
+    import of a package only a dependency brings breaks the day that
+    dependency drops it, so it is declared, not borrowed."""
+    import tomllib
+
+    pyproject = tomllib.loads((Path(__file__).resolve().parents[1] / "pyproject.toml").read_text())
+    declared = [d for d in pyproject["project"]["dependencies"] if d.startswith(package)]
+    assert len(declared) == 1, f"{package} is not declared in service/pyproject.toml: {declared}"
+    assert ";" not in declared[0], f"platform-restricted: {declared[0]}"
+
+
 # --- the command: exit codes and signals (unit) -----------------------------
 
 

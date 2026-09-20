@@ -350,6 +350,7 @@ name = "melampus-service"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "filelock" },
     { name = "huggingface-hub" },
     { name = "mlx-vlm", marker = "platform_machine == 'arm64' and sys_platform == 'darwin'" },
     { name = "numpy" },
@@ -375,6 +376,7 @@ openai = [
 [package.metadata]
 requires-dist = [
     { name = "anthropic", marker = "extra == 'cloud'", specifier = ">=0.60" },
+    { name = "filelock", specifier = ">=3.32" },
     { name = "huggingface-hub", specifier = "==1.26.0" },
     { name = "mlx-vlm", marker = "platform_machine == 'arm64' and sys_platform == 'darwin'", specifier = ">=0.6.7" },
     { name = "numpy", specifier = ">=2" },
