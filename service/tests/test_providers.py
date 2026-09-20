@@ -798,7 +798,8 @@ def test_ollama_probe_gives_up_after_its_timeout(monkeypatch):
 class Trickling(QuietHandler):
     """A listener that sends a valid 200 one header byte every hundred
     milliseconds, over two seconds: each byte within the socket timeout, the
-    whole well past the probe's deadline."""
+    whole well past the probe's deadline. A POST gets the same, once its
+    body is read."""
 
     def do_GET(self):  # noqa: N802 - http.server's name
         # Once the probe hangs up, the next write raises; that ends the trickle.
@@ -808,6 +809,31 @@ class Trickling(QuietHandler):
                 time.sleep(0.1)
                 self.wfile.write(bytes([byte]))
             self.wfile.write(b"{}")
+
+    def do_POST(self):  # noqa: N802 - http.server's name
+        self.rfile.read(int(self.headers["Content-Length"]))
+        self.do_GET()
+
+
+def _trickling_body(status: int) -> type[QuietHandler]:
+    """A listener that answers a POST's status line and headers at once,
+    then a `status` body one byte every hundred milliseconds, over two
+    seconds: each byte within the socket timeout, the whole well past the
+    deadline. 200 is a reply being read; 500 is an error body being read."""
+    body = b'{"error": "slowly"}'
+
+    class TricklingBody(QuietHandler):
+        def do_POST(self):  # noqa: N802 - http.server's name
+            self.rfile.read(int(self.headers["Content-Length"]))
+            with contextlib.suppress(OSError):
+                self.send_response(status)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                for byte in body:
+                    time.sleep(0.1)
+                    self.wfile.write(bytes([byte]))
+
+    return TricklingBody
 
 
 def test_ollama_probe_gives_up_at_its_deadline_when_the_headers_trickle(monkeypatch):
@@ -1381,6 +1407,35 @@ def test_ollama_backend_speaks_tls_for_an_https_address(tmp_path):
         with pytest.raises(ConnectionError):
             backend.complete(image, "prompt", 10)
     assert seen == [], f"the backend asked an https address in plaintext: {seen}"
+
+
+@pytest.mark.parametrize(
+    "handler", [Trickling, _trickling_body(200), _trickling_body(500)],
+    ids=["headers", "body", "error-body"],
+)
+def test_ollama_backend_gives_up_at_its_deadline_when_the_server_trickles(tmp_path, handler):
+    """Codex round 1 (backend.py:419), security: `timeout_seconds` is
+    documented as the per-request ceiling, but urlopen's `timeout` is the
+    socket's, bounding each operation and resetting on every read, so a
+    server sending one byte within the timeout, then another, could hold a
+    frame, and the batch behind it, for as long as it liked; the byte limit
+    bounds how much, not how long. Given a server on loopback trickling a
+    valid answer over two seconds, in the headers, in a 200 body, or in a
+    500 body (the error text the backend reads for its message), and a
+    timeout of 0.3s, the frame fails as timed out within the deadline, not
+    after the trickle."""
+    deadline = 0.3
+    image = tmp_path / "image.jpg"
+    image.write_bytes(b"jpeg")
+    with loopback_server(handler) as server:
+        backend = OllamaBackend(
+            "qwen3-vl:8b-instruct", f"http://127.0.0.1:{server.server_port}", timeout=deadline)
+        started = time.monotonic()
+        with pytest.raises(TimeoutError) as err:
+            backend.complete(image, "prompt", 10)
+        elapsed = time.monotonic() - started
+    assert elapsed < deadline + SCHEDULING_SLACK, f"the frame read past its deadline: {elapsed:.2f}s"
+    assert f"did not answer within {deadline:g}s" in str(err.value), str(err.value)
 
 
 @pytest.mark.parametrize(

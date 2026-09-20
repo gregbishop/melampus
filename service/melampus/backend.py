@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import functools
+import http.client
 import json
 import socket
 import threading
@@ -329,21 +331,21 @@ class OpenAIBackend(VLMBackend):
 
 def _hang_up(line, expired: threading.Event) -> None:
     """The deadline, from its timer. `line` is whatever holds the exchange's
-    socket under the name `sock`: the probe's HTTPConnection, or a
-    _Deadline. Not connection.close(): the response
-    being read holds the socket's file object, and socket.close() waits for
-    that to go before it really closes, so the blocked read would read on.
-    shutdown(SHUT_RDWR) ends the stream now. And `expired`, because
+    socket under the name `sock` (a _Deadline). Not connection.close(): the
+    response being read holds the socket's file object, and socket.close()
+    waits for that to go before it really closes, so the blocked read would
+    read on. shutdown(SHUT_RDWR) ends the stream now. And `expired`, because
     http.client takes end-of-stream as the end of the headers: a status line
     that arrived before the trickle would still parse as a 200, and the
-    probe must know the deadline finished the response, not the server. No
-    socket yet means the probe is still connecting: the socket timeout bounds
-    that, and the probe checks `expired` once connected, since a timer that
-    fired before the socket existed had nothing to hang up and the reads
-    after a late handshake would otherwise be bounded per byte only. The
-    socket is read once: the main thread's close() sets it to None at any
-    moment, and a socket it already closed raises OSError, which is
-    suppressed; None between two reads would not be."""
+    caller must know the deadline finished the response, not the server. No
+    socket yet means the caller is still connecting: the socket timeout
+    bounds that, and the socket is hung up as soon as it is given (see
+    _Deadline.on), since a timer that fired before the socket existed had
+    nothing to hang up and the reads after a late handshake would otherwise
+    be bounded per byte only. The socket is read once: the main thread's
+    close() sets it to None at any moment, and a socket it already closed
+    raises OSError, which is suppressed; None between two reads would not
+    be."""
     expired.set()
     sock = line.sock
     if sock is not None:
@@ -388,6 +390,45 @@ class _StayPut(urllib.request.HTTPRedirectHandler):
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D102
         return None
+
+
+class _Noted:
+    """Mixed into the connection classes urllib opens: on connect, the
+    socket goes to the request's _Deadline. urllib's do_open forgets the
+    socket on the connection once the headers are in (the response's file
+    holds it from then on), so the connection itself cannot be what the
+    deadline hangs up while the body is read; the deadline outlives both."""
+
+    def __init__(self, *args, deadline: _Deadline, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.deadline = deadline
+
+    def connect(self) -> None:  # noqa: D102 - http.client's
+        super().connect()
+        self.deadline.on(self.sock)
+
+
+class _NotedHTTP(_Noted, http.client.HTTPConnection):
+    pass
+
+
+class _NotedHTTPS(_Noted, http.client.HTTPSConnection):
+    pass
+
+
+class _Bounded(urllib.request.HTTPHandler, urllib.request.HTTPSHandler):
+    """urllib's HTTP and HTTPS handlers, opening _Noted connections for the
+    request's deadline (OllamaBackend._send puts it on the request). The
+    https side keeps HTTPSHandler's context, None: http.client's default,
+    which verifies the certificate."""
+
+    def http_open(self, req):  # noqa: D102 - urllib's
+        return self.do_open(functools.partial(_NotedHTTP, deadline=req.deadline), req)
+
+    def https_open(self, req):  # noqa: D102 - urllib's
+        return self.do_open(
+            functools.partial(_NotedHTTPS, deadline=req.deadline), req, context=self._context
+        )
 
 
 class OllamaBackend(VLMBackend):
@@ -453,8 +494,11 @@ class OllamaBackend(VLMBackend):
         # whatever listens on the port when Ollama does not could point a
         # frame at another host and have that host's reply stand in for the
         # model's; _StayPut follows nothing, as the probe follows nothing.
+        # And its `timeout` is the socket's, per operation, so a server
+        # trickling bytes could hold a frame past `timeout_seconds`; _Bounded
+        # opens connections that hand their socket to the request's deadline.
         self._urlopen = client or urllib.request.build_opener(
-            urllib.request.ProxyHandler({}), _StayPut()
+            urllib.request.ProxyHandler({}), _StayPut(), _Bounded()
         ).open
 
     def _request(self, image_path: Path, prompt: str, max_tokens: int) -> urllib.request.Request:
@@ -473,9 +517,33 @@ class OllamaBackend(VLMBackend):
         )
 
     def _send(self, request: urllib.request.Request) -> bytes:
+        """The reply's bytes, within `timeout` of wall-clock time from
+        connecting to the last byte read, error bodies included: a
+        _Deadline hangs up the socket when the time is up, and whatever the
+        exchange then looks like (a body cut short, a status line that
+        never finished, a reset) is the timeout, not that shape's error."""
+        with _Deadline(self.timeout) as deadline:
+            request.deadline = deadline
+            try:
+                raw = self._exchange(request)
+            except Exception as exc:
+                if deadline.expired.is_set():
+                    raise self._timed_out() from exc
+                raise
+        if deadline.expired.is_set():
+            raise self._timed_out()
+        if len(raw) > self.MAX_REPLY_BYTES:
+            raise RuntimeError(
+                f"Ollama's reply from {self.url} ran past {self.MAX_REPLY_BYTES} bytes"
+            )
+        return raw
+
+    def _exchange(self, request: urllib.request.Request) -> bytes:
+        """One request and what came back, every failure a plain error naming
+        the address or the status."""
         try:
             with self._urlopen(request, timeout=self.timeout) as response:
-                raw = response.read(self.MAX_REPLY_BYTES + 1)
+                return response.read(self.MAX_REPLY_BYTES + 1)
         except urllib.error.HTTPError as exc:
             raise RuntimeError(
                 f"Ollama answered {exc.code}: {self._error_text(exc)}"
@@ -489,11 +557,6 @@ class OllamaBackend(VLMBackend):
             ) from exc
         except TimeoutError as exc:
             raise self._timed_out() from exc
-        if len(raw) > self.MAX_REPLY_BYTES:
-            raise RuntimeError(
-                f"Ollama's reply from {self.url} ran past {self.MAX_REPLY_BYTES} bytes"
-            )
-        return raw
 
     def _timed_out(self) -> TimeoutError:
         return TimeoutError(
