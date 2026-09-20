@@ -1183,13 +1183,28 @@ def test_ollama_backend_maps_each_failure_to_a_plain_error(tmp_path, error, expe
     assert said in str(err.value), str(err.value)
 
 
-def test_ollama_backend_reports_a_malformed_reply(tmp_path):
+@pytest.mark.parametrize(
+    "body, said",
+    [
+        (b"<html>proxy error</html>", "not JSON"),
+        (b"[]", "not a JSON object"),
+        (b'"text"', "not a JSON object"),
+        (b'{"message": "just a string"}', "not a JSON object"),
+    ],
+    ids=["html", "list", "string", "message-not-an-object"],
+)
+def test_ollama_backend_reports_a_malformed_reply(tmp_path, body, said):
+    """A 200 whose body is not JSON, is JSON but not an object, or whose
+    `message` is not one, is a plain message naming the address and what
+    came back, never an AttributeError out of `.get`; identify() records it
+    on the frame and the batch continues."""
     image = tmp_path / "image.jpg"
     image.write_bytes(b"jpeg")
-    backend = _ollama_backend(_FakeUrlopen(b"<html>proxy error</html>"))
+    backend = _ollama_backend(_FakeUrlopen(body))
     with pytest.raises(RuntimeError) as err:
         backend.complete(image, "prompt", 10)
-    assert "not JSON" in str(err.value)
+    assert said in str(err.value), str(err.value)
+    assert backend.url in str(err.value), str(err.value)
 
 
 def test_ollama_backend_stays_at_the_address_whatever_proxy_the_environment_names(

@@ -466,7 +466,12 @@ class OllamaBackend(VLMBackend):
             raise RuntimeError(
                 f"Ollama's reply from {self.url} was not JSON: {raw[:120]!r}"
             ) from exc
-        message = reply.get("message") or {}
+        message = (reply.get("message") or {}) if isinstance(reply, dict) else None
+        if not isinstance(message, dict):
+            raise RuntimeError(
+                f"Ollama's reply from {self.url} was not a JSON object with a "
+                f"message object: {raw[:120]!r}"
+            )
         return Completion(
             text=message.get("content") or "",
             seconds=elapsed,
