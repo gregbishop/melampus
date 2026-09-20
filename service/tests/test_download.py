@@ -342,9 +342,7 @@ def _cli(args: list[str], env: dict[str, str], **kwargs) -> subprocess.Completed
                           capture_output=True, text=True, timeout=300, **kwargs)
 
 
-def test_cli_downloads_the_model_reporting_progress_and_exits_0_on_done(
-    fake_hub: FakeHub, hub_env: dict[str, str], tmp_path: Path
-):
+def test_cli_downloads_the_model_reporting_progress_and_exits_0_on_done(hub_env: dict[str, str]):
     """Done-when 1 through the entry point: every stdout line is a protocol
     line, progress climbs to the total, the last line is `done <path>` and
     that path holds the model, byte for byte."""
@@ -354,7 +352,7 @@ def test_cli_downloads_the_model_reporting_progress_and_exits_0_on_done(
     assert_download_completed(proc.stdout, hub_env)
 
 
-def test_cli_exits_3_naming_the_fix_when_the_repo_is_not_on_the_hub(fake_hub: FakeHub, hub_env: dict[str, str]):
+def test_cli_exits_3_naming_the_fix_when_the_repo_is_not_on_the_hub(hub_env: dict[str, str]):
     proc = _cli(["--download-model", "--model", "fake-org/no-such-model"], hub_env)
     assert proc.returncode == 3, proc.stderr[-3000:]
     assert proc.stdout == "", "an error must not be spoken in the protocol"
@@ -374,7 +372,7 @@ def _interrupt(proc: subprocess.Popen) -> None:
     indirect=True, ids=["four-chunk model"],
 )
 def test_cli_cancelled_by_a_signal_keeps_the_partial_file_and_the_next_run_resumes_it(
-    fake_hub: FakeHub, hub_env: dict[str, str], tmp_path: Path
+    fake_hub: FakeHub, hub_env: dict[str, str]
 ):
     """Done-when 2. A four-chunk file served slowly; once the first chunk is on
     disk (the second progress line) the signal arrives: the command prints

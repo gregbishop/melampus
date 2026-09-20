@@ -65,7 +65,6 @@ from conftest import (
     FAKE_REPO,
     PHOTO,
     VENV_CLI,
-    FakeHub,
     assert_download_completed,
     closed_port,
     fake_platform,
@@ -681,7 +680,7 @@ def test_executable_detects_engines_as_json_with_no_python_on_the_path(
 
 
 def test_executable_downloads_the_model_from_the_hub_with_no_python_on_the_path(
-    built_executable: Path, fake_hub: FakeHub, hub_env: dict[str, str], tmp_path: Path
+    built_executable: Path, hub_env: dict[str, str], tmp_path: Path
 ):
     """Card #407, from the executable alone, on whichever platform built it:
     the hub library is in the bundle (on Windows only because pyproject names
