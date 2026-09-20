@@ -44,6 +44,23 @@ local function exists(path)
 	return false
 end
 
+--- The fake executable playing --download-model, as the onExecute the mock
+--- calls with the command: `lines` land in the progress file (the command's
+--- stdout redirect) one per tick, each after the poller has had its turn,
+--- `stderr` in the log (its stderr redirect), and it exits `code`.
+local function fakeDownload(lines, code, stderr)
+	return function(command)
+		local target = string.match(command, ">'([^']+)'")
+		local log = string.match(command, "2>'([^']+)'")
+		for _, line in ipairs(lines) do
+			mock.yield()
+			writeFile(target, line .. '\n', 'a')
+		end
+		if stderr then writeFile(log, stderr, 'a') end
+		return code
+	end
+end
+
 --- The dialogs the mock recorded, the modal ones (the Settings dialog, with
 --- its view tree) when `modal` is true, else the messages shown over it.
 local function dialogsShown(modal)
@@ -80,13 +97,7 @@ local function openSettings(options)
 				return options.statusCode or 0
 			elseif string.find(command, '--download-model', 1, true) and target then
 				local download = options.download or { lines = {}, code = 0 }
-				local log = string.match(command, "2>'([^']+)'")
-				for _, line in ipairs(download.lines) do
-					mock.yield()
-					writeFile(target, line .. '\n', 'a')
-				end
-				if download.stderr then writeFile(log, download.stderr, 'a') end
-				return download.code
+				return fakeDownload(download.lines, download.code, download.stderr)(command)
 			elseif string.find(command, '--remove-model', 1, true) then
 				return options.removeCode or 0
 			end
@@ -598,16 +609,7 @@ end)
 --- the progress file one per tick, `stderr` to the log, and exits `code`.
 local function startDownload(lines, code, stderr)
 	local Analyze = loadAnalyze({ existing = { [mock.EXECUTABLE] = true } })
-	local progressFile, logFile = Analyze.downloadFiles()
-	mock.state.onExecute = function(command)
-		-- One line per tick, each after the poller has had its turn.
-		for _, line in ipairs(lines) do
-			mock.yield()
-			writeFile(progressFile, line .. '\n', 'a')
-		end
-		if stderr then writeFile(logFile, stderr, 'a') end
-		return code
-	end
+	mock.state.onExecute = fakeDownload(lines, code, stderr)
 	local seen, finished = {}, nil
 	local handle, err = Analyze.downloadModel(CANCEL_PATH,
 		function(update) seen[#seen + 1] = update end,
