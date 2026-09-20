@@ -27,6 +27,7 @@ from conftest import (
     FAKE_FOLDER,
     FAKE_REPO,
     FAKE_TOTAL,
+    VENV_CLI,
     FakeHub,
     assert_download_completed,
     closed_port,
@@ -46,9 +47,6 @@ from melampus.download import (
     cancel_on_signals,
     download_model,
 )
-
-# What `.venv/bin/melampus-id` runs, from any interpreter that has the package.
-VENV_CLI = [sys.executable, "-m", "melampus.cli"]
 
 
 def _fetch(hub: FakeHub, cache: Path, repo: str = FAKE_REPO) -> tuple[Path, list[Update]]:

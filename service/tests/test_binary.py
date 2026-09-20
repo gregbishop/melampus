@@ -61,7 +61,15 @@ import types
 from pathlib import Path
 
 import pytest
-from conftest import FAKE_REPO, PHOTO, FakeHub, assert_download_completed, closed_port, fake_platform
+from conftest import (
+    FAKE_REPO,
+    PHOTO,
+    VENV_CLI,
+    FakeHub,
+    assert_download_completed,
+    closed_port,
+    fake_platform,
+)
 
 from melampus import config
 from melampus.backend import ScriptedBackend
@@ -70,9 +78,6 @@ from melampus.identify import Identifier
 from melampus.providers import on_apple_silicon
 
 CONFTEST = Path(__file__).with_name("conftest.py")
-# What `.venv/bin/melampus-id` runs, spelled so it works from any interpreter
-# that has the package installed (CI has no root .venv).
-VENV_CLI = [sys.executable, "-m", "melampus.cli"]
 
 
 def no_python_environment(tmp_path: Path) -> dict[str, str]:

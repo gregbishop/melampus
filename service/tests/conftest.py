@@ -155,6 +155,11 @@ def recording_handler(seen: list[str]) -> type[QuietHandler]:
     return Recording
 
 
+# What `.venv/bin/melampus-id` runs, spelled so it works from any interpreter
+# that has the package installed (CI has no root .venv).
+VENV_CLI = [sys.executable, "-m", "melampus.cli"]
+
+
 def closed_port() -> int:
     """A loopback port nothing listens on: where a test puts the Ollama address
     so a developer's running server cannot answer for it."""
