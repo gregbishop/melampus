@@ -49,6 +49,7 @@ from pathlib import Path
 from types import ModuleType
 
 import pytest
+from huggingface_hub.file_download import repo_folder_name
 
 from melampus.download import Update
 
@@ -224,6 +225,9 @@ FAKE_FILES = {
     "config.json": b'{"model_type": "fake"}\n',
     "model.safetensors": bytes(range(256)) * (12 * 4096),  # 12 MiB, deterministic
 }
+FAKE_TOTAL = sum(len(data) for data in FAKE_FILES.values())
+# The repo's folder in the cache, named the way the code under test names it.
+FAKE_FOLDER = repo_folder_name(repo_id=FAKE_REPO, repo_type="model")
 
 
 
@@ -239,9 +243,8 @@ def assert_download_completed(stdout: str, hub_env: dict[str, str]) -> None:
     from the first, progress reaches it, the last line is `done <path>`, and
     that path, under HF_HOME, holds the fake host's files byte for byte."""
     updates = [Update.parse(line) for line in stdout.splitlines()]
-    total = sum(len(data) for data in FAKE_FILES.values())
-    assert updates[0] == Update.progress(0, total)
-    assert updates[-2] == Update.progress(total, total)
+    assert updates[0] == Update.progress(0, FAKE_TOTAL)
+    assert updates[-2] == Update.progress(FAKE_TOTAL, FAKE_TOTAL)
     assert updates[-1].state == "done"
     snapshot = Path(updates[-1].path)
     assert snapshot.is_relative_to(hub_env["HF_HOME"]), "the model went outside HF_HOME"

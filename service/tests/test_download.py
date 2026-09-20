@@ -21,7 +21,17 @@ import sys
 from pathlib import Path
 
 import pytest
-from conftest import FAKE_COMMIT, FAKE_FILES, FAKE_REPO, FakeHub, assert_download_completed, closed_port, snapshot_files
+from conftest import (
+    FAKE_COMMIT,
+    FAKE_FILES,
+    FAKE_FOLDER,
+    FAKE_REPO,
+    FAKE_TOTAL,
+    FakeHub,
+    assert_download_completed,
+    closed_port,
+    snapshot_files,
+)
 
 from melampus import download
 from melampus.cli import main
@@ -47,7 +57,7 @@ def _fetch(hub: FakeHub, cache: Path, repo: str = FAKE_REPO) -> tuple[Path, list
 
 
 def _incomplete(cache: Path) -> list[Path]:
-    return sorted((cache / f"models--{FAKE_REPO.replace('/', '--')}" / "blobs").glob("*.incomplete"))
+    return sorted((cache / FAKE_FOLDER / "blobs").glob("*.incomplete"))
 
 
 @pytest.mark.parametrize(
@@ -88,18 +98,16 @@ def test_download_fetches_every_file_from_the_hub_and_reports_bytes_done_of_tota
     huggingface_hub lays it out (mlx-vlm reads it from there), and every update
     says how many bytes of the whole model are done: the total is known from
     the first update, bytes done never go backwards and end at the total."""
-    total = sum(len(data) for data in FAKE_FILES.values())
-
     path, updates = _fetch(fake_hub, tmp_path / "hub")
 
     assert snapshot_files(path) == FAKE_FILES
-    assert path == tmp_path / "hub" / f"models--{FAKE_REPO.replace('/', '--')}" / "snapshots" / FAKE_COMMIT
+    assert path == tmp_path / "hub" / FAKE_FOLDER / "snapshots" / FAKE_COMMIT
     assert (path.parent.parent / "refs" / "main").read_text() == FAKE_COMMIT, "no ref for mlx-vlm to load offline"
     assert [u.state for u in updates] == ["progress"] * len(updates)
-    assert updates[0] == Update.progress(0, total), "the total is known before any byte arrives"
+    assert updates[0] == Update.progress(0, FAKE_TOTAL), "the total is known before any byte arrives"
     counts = [u.bytes_done for u in updates]
-    assert counts == sorted(counts) and counts[-1] == total
-    assert all(u.bytes_total == total for u in updates)
+    assert counts == sorted(counts) and counts[-1] == FAKE_TOTAL
+    assert all(u.bytes_total == FAKE_TOTAL for u in updates)
     assert not _incomplete(tmp_path / "hub")
 
 
@@ -127,8 +135,7 @@ def test_download_of_a_complete_model_fetches_nothing_and_says_it_is_complete(
     again, updates = _fetch(fake_hub, tmp_path / "hub")
 
     assert again == path
-    total = sum(len(data) for data in FAKE_FILES.values())
-    assert updates == [Update.progress(total, total)]
+    assert updates == [Update.progress(FAKE_TOTAL, FAKE_TOTAL)]
     assert not [r for r in fake_hub.requests if r[0] == "GET" and "/resolve/" in r[1]], fake_hub.requests
 
 
@@ -157,10 +164,9 @@ def test_download_keeps_the_partial_file_when_the_connection_drops_and_resumes_i
     assert fake_hub.gets("model.safetensors") == [f"bytes={CHUNK}-"], "the rest was not asked for by Range"
     assert snapshot_files(path) == FAKE_FILES
     assert not _incomplete(tmp_path / "hub")
-    total = sum(len(data) for data in FAKE_FILES.values())
-    assert updates[0] == Update.progress(CHUNK + len(FAKE_FILES["config.json"]), total), (
+    assert updates[0] == Update.progress(CHUNK + len(FAKE_FILES["config.json"]), FAKE_TOTAL), (
         "the first update did not count what was already on disk")
-    assert updates[-1] == Update.progress(total, total)
+    assert updates[-1] == Update.progress(FAKE_TOTAL, FAKE_TOTAL)
 
 
 @pytest.mark.parametrize("name", ["model.safetensors", "config.json"])
@@ -181,7 +187,7 @@ def test_download_rejects_bytes_that_do_not_match_the_hub_checksum_and_keeps_no_
     message = str(failure.value)
     assert name in message and "checksum" in message and "--download-model" in message
     assert not _incomplete(tmp_path / "hub"), "the bad partial was kept"
-    blobs = tmp_path / "hub" / f"models--{FAKE_REPO.replace('/', '--')}" / "blobs"
+    blobs = tmp_path / "hub" / FAKE_FOLDER / "blobs"
     assert not (blobs / fake_hub.etags[name]).exists(), "the bad bytes became the blob"
 
     fake_hub.corrupt = set()
