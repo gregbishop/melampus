@@ -104,11 +104,14 @@ def _hang_up(connection: http.client.HTTPConnection, expired: threading.Event) -
     that arrived before the trickle would still parse as a 200, and the
     probe must know the deadline finished the response, not the server. No
     socket yet means the probe is still connecting, and the socket timeout
-    bounds that."""
+    bounds that. The socket is read once: the main thread's close() sets it
+    to None at any moment, and a socket it already closed raises OSError,
+    which is suppressed; None between two reads would not be."""
     expired.set()
-    if connection.sock is not None:
+    sock = connection.sock
+    if sock is not None:
         with contextlib.suppress(OSError):
-            connection.sock.shutdown(socket.SHUT_RDWR)
+            sock.shutdown(socket.SHUT_RDWR)
 
 
 def ollama_answers() -> bool:
