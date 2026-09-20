@@ -4,9 +4,13 @@ Every setting, with the reasoning behind its default. Config is data, never code
 nothing in the Python hardcodes a model name, threshold or weight.
 
 Settings load from an optional TOML file passed with `--config`, layered over the
-built-in defaults. A user file need only contain the keys it changes. Programmatic
-callers can also pass overrides directly to `load_config(...)`, which is how the HTTP
-service in Stage 3 will accept per-request configuration.
+built-in defaults and the git-ignored `melampus.local.toml`. A user file need only
+contain the keys it changes. `--no-local-config` leaves `melampus.local.toml`
+unread, so `--config` alone, over the defaults, is the whole configuration: the
+executable smoke tests use it to hand the CLI and the executable one synthetic
+file, so a developer's own settings never decide whether the two agree.
+Programmatic callers can also pass overrides directly to `load_config(...)`, which
+is how the HTTP service in Stage 3 will accept per-request configuration.
 
 ```bash
 melampus-id fixtures/ --config my-settings.toml
@@ -21,13 +25,20 @@ repo = "mlx-community/Qwen3-VL-32B-Instruct-8bit"
 max_edge = 1280
 ```
 
+`<repo>` in the defaults below is the checkout root. Inside the shipped
+executable (readme.md § Building the executable) it is two places: `prompts/`
+ships in the bundle and is read from the unpack directory, while the caches
+and `melampus.local.toml` live beside the executable — `dist/.melampus_cache/`
+and `dist/melampus.local.toml` for a fresh build — because the unpack directory
+is deleted at exit.
+
 ---
 
 ## `[model]`
 
 | Key | Default | Why |
 |---|---|---|
-| `backend` | `mlx` | Which engine answers: `mlx` (local, Apple Silicon only — the local-first default), `anthropic`, or `openai`. CLAUDE.md §3 built the backend seam; making it a setting is what lets the same repo run on a machine with no local runtime at all (Windows). A cloud primary bills **every** frame, not just an escalated tail, so three guards apply: the CLI prints an estimate and asks before spending (`--yes` skips the question for non-interactive callers such as the plugin), `max_images` hard-caps the run regardless, and results go to their own cache file (`identifications-cloud.jsonl`) so a later local pass cannot silently overwrite answers that were paid for. When a cloud backend is selected, MLX-shaped defaults you have not overridden are retuned: `max_edge` 2048, no fallback ladder, `max_tokens` 1200, `routing_max_tokens` 900 — the same treatment escalation applies, for the same reasons. The estimate is priced by `escalation.input_usd_per_mtok` / `output_usd_per_mtok`; set them to your model's rates or the number is confidently wrong. |
+| `backend` | `mlx` | Which engine answers: `mlx` (local, Apple Silicon only — the local-first default), `anthropic`, `openai`, or `scripted` (the test fake: answers nothing, needs no weights; it exists so the shipped executable can be smoke-tested — see readme.md § Building the executable). CLAUDE.md §3 built the backend seam; making it a setting is what lets the same repo run on a machine with no local runtime at all (Windows). A cloud primary bills **every** frame, not just an escalated tail, so three guards apply: the CLI prints an estimate and asks before spending (`--yes` skips the question for non-interactive callers such as the plugin), `max_images` hard-caps the run regardless, and results go to their own cache file (`identifications-cloud.jsonl`) so a later local pass cannot silently overwrite answers that were paid for. When a cloud backend is selected, MLX-shaped defaults you have not overridden are retuned: `max_edge` 2048, no fallback ladder, `max_tokens` 1200, `routing_max_tokens` 900 — the same treatment escalation applies, for the same reasons. The estimate is priced by `escalation.input_usd_per_mtok` / `output_usd_per_mtok`; set them to your model's rates or the number is confidently wrong. |
 | `repo` | `mlx-community/Qwen3-VL-30B-A3B-Instruct-4bit` | CLAUDE.md §3 requires the model be a setting, not a hardcode. This is the MoE build named in the spec: 18.3 GB with roughly 3B active parameters, so it runs far faster than a dense model of similar quality. 128 GB of unified memory allows going considerably larger — see the table in the README. Used by the `mlx` backend only. |
 | `name` | *(provider default)* | Cloud model name, for `backend = "anthropic"` or `"openai"`. Unset means the provider's default (`providers.DEFAULT_MODELS`) — vision model names age quickly, so treat that as a starting point. |
 | `base_url` | *(unset)* | OpenAI-compatible endpoint override: OpenRouter, LM Studio, vLLM, a proxy. Turns the `openai` backend into a general escape hatch rather than one vendor's client. |

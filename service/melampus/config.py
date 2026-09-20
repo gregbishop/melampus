@@ -2,13 +2,52 @@
 
 from __future__ import annotations
 
+import sys
 import tomllib
 from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+
+# The checkout root: two levels up from this file. Both roots below are it
+# unless the program is running frozen.
+_CHECKOUT = Path(__file__).resolve().parents[2]
+
+
+def _bundle() -> Path | None:
+    """PyInstaller's unpack directory when running inside the executable
+    (tools/build_binary.py); None in a checkout. The bootloader sets
+    sys._MEIPASS before the package runs."""
+    bundle = getattr(sys, "_MEIPASS", None)
+    return Path(bundle) if bundle else None
+
+
+def _repo_root() -> Path:
+    """Where prompts/ sits relative to the code: what ships with the program.
+
+    In a checkout, the checkout root. Inside the executable, the unpack
+    directory, which the build lays out the same way: prompts/ at its top
+    level. Nothing the user owns belongs here: the directory is deleted when
+    the process exits. That is `_data_root()`.
+    """
+    return _bundle() or _CHECKOUT
+
+
+def _data_root() -> Path:
+    """Where the caches and melampus.local.toml sit: what the user owns.
+
+    In a checkout, the checkout root, as before. Inside the executable, the
+    directory the executable is in, which outlives the process; the unpack
+    directory does not, so a cache written there is thrown away at exit and a
+    local config there is never read. Beside the executable mirrors the
+    checkout layout and needs no per-platform decision.
+    """
+    return Path(sys.executable).resolve().parent if _bundle() else _CHECKOUT
+
+
+def _cache(name: str) -> Path:
+    return _data_root() / ".melampus_cache" / name
 
 
 class _Base(BaseModel):
@@ -166,7 +205,7 @@ class OccurrenceConfig(_Base):
     # 50 km comfortably covers a refuge and its surroundings without reaching into
     # a different faunal region.
     radius_km: float = 50.0
-    cache_path: Path = REPO_ROOT / ".melampus_cache" / "occurrence.json"
+    cache_path: Path = Field(default_factory=lambda: _cache("occurrence.json"))
     # Below this many regional records a species is present but scarce: demote
     # gently and mark notable, rather than treating it as absent.
     notable_threshold: int = 25
@@ -243,7 +282,7 @@ class EscalationConfig(_Base):
     # Cloud answers live in their own file. Merging them into the local cache would
     # give them a foreign run fingerprint, and the next local pass would decide they
     # were stale and quietly overwrite work that was paid for.
-    cache_path: Path = REPO_ROOT / ".melampus_cache" / "escalations.jsonl"
+    cache_path: Path = Field(default_factory=lambda: _cache("escalations.jsonl"))
 
 
 class RunConfig(_Base):
@@ -253,8 +292,8 @@ class RunConfig(_Base):
     # species, and keeps each prompt short enough to stay under the runtime's
     # token ceiling.
     profile: str = "wildlife"
-    prompts_dir: Path = REPO_ROOT / "prompts"
-    cache_path: Path = REPO_ROOT / ".melampus_cache" / "identifications.jsonl"
+    prompts_dir: Path = Field(default_factory=lambda: _repo_root() / "prompts")
+    cache_path: Path = Field(default_factory=lambda: _cache("identifications.jsonl"))
     # One corrective retry on schema-validation failure, per CLAUDE.md §4.2.
     max_retries: int = 1
 
@@ -278,7 +317,8 @@ def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any
     return merged
 
 
-LOCAL_CONFIG = REPO_ROOT / "melampus.local.toml"
+def _local_config() -> Path:
+    return _data_root() / "melampus.local.toml"
 
 
 def _secrets_from_environment() -> dict[str, Any]:
@@ -310,8 +350,9 @@ def load_config(
     anyone who follows the documentation and puts their API key there.
     """
     data: dict[str, Any] = {}
-    if use_local and LOCAL_CONFIG.is_file():
-        with LOCAL_CONFIG.open("rb") as handle:
+    local = _local_config()
+    if use_local and local.is_file():
+        with local.open("rb") as handle:
             data = _deep_merge(data, tomllib.load(handle))
     if path is not None:
         file = Path(path).expanduser()

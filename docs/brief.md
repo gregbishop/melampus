@@ -20,10 +20,14 @@ every session.
 ## stack contract
 
 - stack: python
-- build: none
-- test: `.venv/bin/python -m pytest` — from the repo root, locally
-- test in CI: `uv sync --locked --extra dev && uv run pytest -q` — from `service/`, in
-  `.github/workflows/ci.yml`; this is the run that gates merges
+- build: `.venv/bin/python tools/build_binary.py` — from the repo root, on Apple
+  Silicon; writes `dist/melampus`, the one-file executable (needs the `build`
+  extra, see readme.md § Building the executable)
+- test: `.venv/bin/python -m pytest` — from the repo root, locally; add
+  `--build-binary` to build the executable first and smoke-test it
+- test in CI: `uv sync --locked --extra dev --extra build && uv run pytest -q --build-binary`
+  — from `service/`, in `.github/workflows/ci.yml`; this is the run that gates
+  merges, so it builds the executable and smoke-tests it on every run
 - lint: none adopted
 - run: the service half, per `docs/architecture.md`
 
@@ -35,12 +39,14 @@ Two things here differ from every other python repo, both deliberately:
   it is `.venv/bin/python -m pytest` from the repo root: `pytest.ini` pins
   `testpaths = service/tests` and excludes `_old/`, whose stale `melampus`
   package would otherwise shadow the real one on `sys.path`. CI runs
-  `uv sync --locked --extra dev && uv run pytest -q` from `service/`, where
-  `service/pyproject.toml` pins the same `tests/` path, because the runner
-  has no `.venv` and `uv sync --locked` builds one from `service/uv.lock`
-  (installing exactly the lockfile, and failing if it has drifted from
-  `service/pyproject.toml`). The counts differ only in skips: locally 2
-  skip (`test_escalation.py`, the anthropic and
+  `uv sync --locked --extra dev --extra build && uv run pytest -q --build-binary`
+  from `service/`, where `service/pyproject.toml` pins the same `tests/` path,
+  because the runner has no `.venv` and `uv sync --locked` builds one from
+  `service/uv.lock` (installing exactly the lockfile, and failing if it has
+  drifted from `service/pyproject.toml`). CI always passes `--build-binary`,
+  so the executable is built and smoke-tested on the run that gates merges;
+  locally it is opt-in because the build takes a minute. The counts differ
+  only in skips: locally 2 skip (`test_escalation.py`, the anthropic and
   openai SDKs are not installed); in CI 14 skip (those two, plus the 11
   corpus-backed tests in `test_quality.py`, because `fixtures/` is gitignored
   and absent on the runner, plus the installed-checkout test in `test_docs.py`,

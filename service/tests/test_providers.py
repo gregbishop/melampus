@@ -8,14 +8,16 @@ retuned for a cloud primary without ever overriding an explicit setting.
 
 from __future__ import annotations
 
+import json
 import platform
 import sys
 import types
 
 import pytest
+from conftest import PHOTO
 
 from melampus import providers
-from melampus.backend import AnthropicBackend, MLXBackend, OpenAIBackend
+from melampus.backend import AnthropicBackend, MLXBackend, OpenAIBackend, ScriptedBackend
 from melampus.config import load_config
 
 ALL_KEY_VARIABLES = [name for names in providers.KEY_VARIABLES.values() for name in names]
@@ -159,3 +161,35 @@ def test_registry_is_shared_with_escalation():
 
     assert escalate.DEFAULT_MODELS is providers.DEFAULT_MODELS
     assert escalate._KEY_VARIABLES is providers.KEY_VARIABLES
+
+
+def test_scripted_backend_is_selectable_and_local():
+    """Card #399: the shipped executable must be smoke-testable on a machine with
+    no weights, so the fake the unit tests use is reachable from the same
+    `[model] backend` setting as the real ones. It answers nothing useful, and
+    it is local: no cloud retuning, no cost prompt, no cloud cache file."""
+    config = _cfg(model={"backend": "scripted"})
+    assert not providers.is_cloud_primary(config)
+    backend = providers.build_primary_backend(config)
+    assert isinstance(backend, ScriptedBackend)
+    assert backend.name == "scripted"
+
+
+def test_cli_backend_scripted_writes_a_result_without_weights(photos, tmp_path, capsys):
+    """`melampus-id FOLDER --backend scripted --json-out FILE` runs the whole
+    pipeline (staging, prompts, retry, cache, export) and writes one result per
+    image, attributed to the scripted backend."""
+    from melampus.cli import main
+
+    out = tmp_path / "results.json"
+
+    code = main([
+        str(photos), "--backend", "scripted",
+        "--cache", str(tmp_path / "cache.jsonl"), "--json-out", str(out),
+    ])
+
+    assert code == 0, capsys.readouterr().err
+    results = json.loads(out.read_text(encoding="utf-8"))
+    assert [r["file"] for r in results] == [PHOTO]
+    assert results[0]["model"] == "scripted"
+    assert results[0]["status"] == "unprocessed"

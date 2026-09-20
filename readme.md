@@ -305,6 +305,43 @@ parsing, validation, retry, caching, the downscale ladder and the no-leak guaran
 all verifiable in under a second. The plugin's Lua suites run from the same command,
 skipping cleanly if no Lua interpreter is installed.
 
+The executable's smoke tests (`service/tests/test_binary.py`) run against
+`dist/melampus` when it exists and skip when it does not. To build it first and
+run everything, which takes about a minute (CI always does this):
+
+```bash
+.venv/bin/python -m pytest -q --build-binary
+```
+
+---
+
+## Building the executable
+
+The service ships to users as one file, `dist/melampus`, so they install neither
+Python nor uv. It carries the Python runtime, the service, the prompts and the MLX
+runtime; model weights are not bundled and come from the HuggingFace cache as
+before. Apple Silicon only, like MLX.
+
+```bash
+# once: the pinned PyInstaller, from the same lockfile as everything else
+VIRTUAL_ENV=.venv uv sync --project service --locked --extra dev --extra build --active
+.venv/bin/python tools/build_binary.py    # writes dist/melampus, ~200 MB, about a minute
+```
+
+The build is a PyInstaller one-file bundle, which unpacks itself to a temporary
+directory at every launch (a few seconds). `dist/` and `build/` are git-ignored.
+Try it without any Python on the path — the scripted backend needs no weights:
+
+```bash
+env -i PATH=/nonexistent HOME="$HOME" dist/melampus fixtures/ --backend scripted --limit 1
+```
+
+The executable keeps its results and reads its local config beside itself:
+`dist/.melampus_cache/` and `dist/melampus.local.toml`, the same layout as the
+checkout, so a run's identifications survive the unpack directory being
+deleted at exit. `--cache` and `--config` override both, as they do for the CLI,
+and `--no-local-config` leaves the local file unread (docs/config.md).
+
 ---
 
 ## Reviewing in Lightroom
