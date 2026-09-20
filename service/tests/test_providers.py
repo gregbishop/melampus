@@ -574,6 +574,46 @@ def test_ollama_probe_stays_on_loopback_whatever_proxy_the_environment_names(mon
     assert seen == [], f"the probe left the machine through the proxy: {seen}"
 
 
+def test_ollama_probe_refuses_a_redirect_off_loopback(monkeypatch):
+    """Security: the probe asks one address and takes only that address's
+    answer. build_opener installs HTTPRedirectHandler by default, so whatever
+    listens on port 11434 (any local process can bind it when Ollama is not
+    running) could answer 3xx with a Location anywhere, and the probe would
+    make an outbound request there and let that server's 200 stand in for
+    Ollama's. Given a server at OLLAMA_URL answering 302 towards a second
+    server that records every request, the probe reports unavailable and the
+    redirected destination never hears from it."""
+    seen: list[str] = []
+
+    class Destination(BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802 - http.server's name
+            seen.append(self.path)
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"{}")
+
+        def log_message(self, *_):
+            return None
+
+    with loopback_server(Destination) as destination:
+        elsewhere = f"http://127.0.0.1:{destination.server_port}/api/version"
+
+        class Redirecting(BaseHTTPRequestHandler):
+            def do_GET(self):  # noqa: N802 - http.server's name
+                self.send_response(302)
+                self.send_header("Location", elsewhere)
+                self.end_headers()
+
+            def log_message(self, *_):
+                return None
+
+        with loopback_server(Redirecting) as ollama:
+            monkeypatch.setattr(providers, "OLLAMA_URL", f"http://127.0.0.1:{ollama.server_port}")
+            answered = providers.ollama_answers()
+    assert seen == [], f"the probe followed the redirect off loopback: {seen}"
+    assert answered is False
+
+
 # ---------------------------------------------------------------------------
 # Card #404 through the CLI: `--detect-engines`, and the default engine.
 
