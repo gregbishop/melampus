@@ -431,9 +431,11 @@ class _NotedHTTPS(_Noted, http.client.HTTPSConnection):
     handshake would touch nothing: a connection landing just before the
     deadline bought a stalled handshake a whole socket timeout more. So
     connect() here wraps without the handshake, gives the deadline the
-    wrapped socket, then shakes hands, with the context HTTPSConnection
-    made (the default, verifying). The server name is the host: nothing
-    here tunnels through a proxy, so there is no other."""
+    wrapped socket, then shakes hands, with the verifying context the
+    connection has: the one `_Bounded` passed in for the backend, or the
+    one HTTPSConnection makes for itself when given none, for the probe.
+    The server name is the host: nothing here tunnels through a proxy, so
+    there is no other."""
 
     def connect(self) -> None:  # noqa: D102 - http.client's
         http.client.HTTPConnection.connect(self)
@@ -447,8 +449,9 @@ class _NotedHTTPS(_Noted, http.client.HTTPSConnection):
 class _Bounded(urllib.request.HTTPHandler, urllib.request.HTTPSHandler):
     """urllib's HTTP and HTTPS handlers, opening _Noted connections for the
     request's deadline (OllamaBackend._send puts it on the request). The
-    https side keeps HTTPSHandler's context, None: http.client's default,
-    which verifies the certificate."""
+    https side keeps HTTPSHandler's default context, the verifying one it
+    builds when given none, and passes it to _NotedHTTPS as HTTPSHandler
+    would to HTTPSConnection."""
 
     def http_open(self, req):  # noqa: D102 - urllib's
         return self.do_open(functools.partial(_NotedHTTP, deadline=req.deadline), req)

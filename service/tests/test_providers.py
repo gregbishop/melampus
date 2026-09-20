@@ -15,6 +15,7 @@ import io
 import json
 import socket
 import socketserver
+import ssl
 import sys
 import threading
 import time
@@ -40,7 +41,9 @@ from melampus.backend import (
     OllamaBackend,
     OpenAIBackend,
     ScriptedBackend,
+    _Bounded,
     _Deadline,
+    _NotedHTTPS,
     _hang_up,
 )
 from melampus.config import load_config
@@ -1452,6 +1455,19 @@ def test_ollama_backend_refuses_a_redirect_off_the_address(tmp_path):
                 backend.complete(image, "prompt", 10)
     assert "Ollama answered 302" in str(err.value), str(err.value)
     assert seen == [], f"the backend followed the redirect off the address: {seen}"
+
+
+def test_https_contexts_verify_the_certificate_for_the_backend_and_the_probe():
+    """The two verifying contexts the docstrings name, as they are: the
+    backend's is urllib's HTTPSHandler's default, which `_Bounded` keeps and
+    passes to `_NotedHTTPS`; the probe's is http.client's, which
+    `_NotedHTTPS` makes for itself when given none. Both require the
+    certificate and check the host name."""
+    backend_context = _Bounded()._context
+    probe_context = _NotedHTTPS("127.0.0.1", deadline=_Deadline(1.0))._context
+    for context in (backend_context, probe_context):
+        assert context.verify_mode == ssl.CERT_REQUIRED
+        assert context.check_hostname is True
 
 
 def test_ollama_backend_speaks_tls_for_an_https_address(tmp_path):
