@@ -13,9 +13,11 @@ hub library does everything but the bytes: the commit `main` points at
 (resolved once, and recorded in the cache's `refs/main`, by its
 `resolve_revision`) and the file list at it from its API, each file's etag,
 size and URL from its metadata call, the Range request and consistency check
-in its `http_get`, the per-file lock, and the cache layout and pointers of
-that commit from its `snapshot_download` once every blob is complete. What
-this module adds is the one thing it lacks: the bytes go to the cache's
+in its `http_get`, the per-file lock, and the pointer of each file in the
+snapshot folder of that commit from its `_create_symlink`, made here from the
+verified blobs alone once every one is complete (its `snapshot_download`
+would ask the hub for every file's metadata again and trust that answer).
+What this module adds is the one thing it lacks: the bytes go to the cache's
 `<etag>.incomplete` blob, appended to across runs.
 
 `HF_HUB_DISABLE_XET=1` is set before the library is imported, as readme.md
@@ -44,11 +46,18 @@ from huggingface_hub import (  # noqa: E402
     get_hf_file_metadata,
     hf_hub_url,
     set_client_factory,
-    snapshot_download,
 )
+from huggingface_hub._local_folder import _validate_relative_filename  # noqa: E402 - the library's own check
 from huggingface_hub.errors import GatedRepoError, RepositoryNotFoundError, RevisionResolutionError  # noqa: E402
-from huggingface_hub.file_download import REGEX_COMMIT_HASH, REGEX_SHA256, http_get, repo_folder_name  # noqa: E402
-from huggingface_hub.hf_api import RepoFile, ResolvedRevision  # noqa: E402
+from huggingface_hub.file_download import (  # noqa: E402
+    REGEX_COMMIT_HASH,
+    REGEX_SHA256,
+    _create_symlink,
+    _get_pointer_path,
+    http_get,
+    repo_folder_name,
+)
+from huggingface_hub.hf_api import RepoFile  # noqa: E402
 from huggingface_hub.utils import WeakFileLock, build_hf_headers  # noqa: E402
 from huggingface_hub.utils._http import default_client_factory  # noqa: E402 - the library's own client, not a copy of it
 
@@ -152,6 +161,7 @@ class _Blob:
     etag: str
     size: int
     path: Path  # blobs/<etag>; the partial file is `<etag>.incomplete` beside it
+    pointer: Path  # snapshots/<commit>/<filename>, pointing at the blob once complete
 
     @property
     def partial(self) -> Path:
@@ -225,7 +235,7 @@ def _bounded_client() -> httpx.Client:
     return client
 
 
-def _plan(repo: str, endpoint: str | None, cache: Path) -> tuple[ResolvedRevision, list[_Blob]]:
+def _plan(repo: str, endpoint: str | None, cache: Path) -> tuple[str, list[_Blob]]:
     """The commit `main` points at and every file of the repo at it, as the
     hub describes them: the tree listing for the names, the metadata call for
     each file's etag (its blob name in the cache), size and URL. `main` is
@@ -233,10 +243,13 @@ def _plan(repo: str, endpoint: str | None, cache: Path) -> tuple[ResolvedRevisio
     writes the cache's `refs/main`; everything after, the snapshot included,
     is at that commit, so a branch that moves during the run changes nothing."""
     api = HfApi(endpoint=endpoint)
-    revision = api.resolve_revision(repo, cache_dir=cache)
-    commit = revision.resolved
-    # The commit names the snapshot folder and the etag the blob and its
-    # lock: a hub's answer becomes a path only in the one shape each has.
+    commit = api.resolve_revision(repo, cache_dir=cache).resolved
+    # The commit names the snapshot folder, the filename the pointer under
+    # it, and the etag the blob and its lock: a hub's answer becomes a path
+    # only in the one shape each has, checked here before any byte is asked
+    # for. The filename checks are the hub library's own (its download made
+    # them): a name that is absolute, a drive or UNC path, or traverses is
+    # refused, and the pointer must land under the snapshot folder.
     if not REGEX_COMMIT_HASH.match(commit):
         raise DownloadError(f"the hub at {endpoint} says main of {repo} is {commit!r}, not a commit hash; {NOT_A_HUB}")
     storage = cache / repo_folder_name(repo_id=repo, repo_type="model")
@@ -244,6 +257,13 @@ def _plan(repo: str, endpoint: str | None, cache: Path) -> tuple[ResolvedRevisio
     for entry in api.list_repo_tree(repo, recursive=True, revision=commit):
         if not isinstance(entry, RepoFile):
             continue
+        try:
+            _validate_relative_filename(entry.path)
+            pointer = _get_pointer_path(str(storage), commit, os.path.join(*entry.path.split("/")))
+        except ValueError as exc:
+            raise DownloadError(
+                f"the hub at {endpoint} lists {entry.path!r} in {repo}, which is a path, not a file name; {NOT_A_HUB}"
+            ) from exc
         url = hf_hub_url(repo, entry.path, revision=commit, endpoint=endpoint)
         meta = get_hf_file_metadata(url, endpoint=endpoint)
         if meta.etag is None or meta.size is None:
@@ -253,8 +273,9 @@ def _plan(repo: str, endpoint: str | None, cache: Path) -> tuple[ResolvedRevisio
                 f"the hub at {endpoint} gave {entry.path} the etag {meta.etag!r}, "
                 f"not a sha256 or git blob checksum; {NOT_A_HUB}"
             )
-        blobs.append(_Blob(entry.path, meta.location, meta.etag, meta.size, storage / "blobs" / meta.etag))
-    return revision, blobs
+        blobs.append(_Blob(entry.path, meta.location, meta.etag, meta.size,
+                           storage / "blobs" / meta.etag, Path(pointer)))
+    return commit, blobs
 
 
 def _verify(blob: _Blob) -> None:
@@ -308,6 +329,21 @@ def _fetch(blob: _Blob, progress: _Progress, headers: dict[str, str], lock_dir: 
         blob.partial.replace(blob.path)
 
 
+def _lay_out(storage: Path, commit: str, blobs: list[_Blob]) -> Path:
+    """The snapshot folder of the planned commit: `snapshots/<commit>/<filename>`
+    pointing at each verified blob, made by the hub library's own pointer
+    helper exactly as its download lays them out, so mlx-vlm finds them
+    (`refs/main`, which `resolve_revision` wrote, names the commit). Nothing
+    is asked of the hub: its `snapshot_download` asked for every file's
+    metadata a second time and took that answer for the blob's name, unchecked
+    and, when no such blob existed, fetched it unverified."""
+    for blob in blobs:
+        blob.pointer.parent.mkdir(parents=True, exist_ok=True)
+        if not blob.pointer.exists():
+            _create_symlink(str(blob.path), str(blob.pointer), new_blob=False)
+    return storage / "snapshots" / commit
+
+
 def download_model(
     repo: str,
     *,
@@ -329,7 +365,7 @@ def download_model(
     folder = repo_folder_name(repo_id=repo, repo_type="model")
     set_client_factory(_bounded_client)
     try:
-        revision, blobs = _plan(repo, endpoint, cache)
+        commit, blobs = _plan(repo, endpoint, cache)
         progress = _Progress(sum(b.size for b in blobs), on_update)
         progress.advance(sum(b.on_disk() for b in blobs))
         headers = build_hf_headers()
@@ -342,11 +378,9 @@ def download_model(
             if not blob.path.exists():
                 _fetch(blob, progress, headers if _same_origin(blob.url, endpoint) else no_token,
                        cache / ".locks" / folder)
-        # Every blob is complete: the hub library lays out the snapshot and
-        # the pointers of the planned commit exactly as mlx-vlm will look for
-        # them (refs/main already names it), and moves no bytes because
-        # every file is already in the cache.
-        return Path(snapshot_download(repo, revision=revision, cache_dir=cache, endpoint=endpoint))
+        # Every blob is complete and verified: the snapshot of the planned
+        # commit points at those blobs and nothing else.
+        return _lay_out(cache / folder, commit, blobs)
     except GatedRepoError as exc:
         # A GatedRepoError is a RepositoryNotFoundError, but the repo exists:
         # what is missing is the user's access to it.

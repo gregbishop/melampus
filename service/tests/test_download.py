@@ -318,6 +318,55 @@ def test_download_rejects_a_commit_that_is_not_a_hash_before_it_becomes_a_path(f
     assert not [r for r in fake_hub.requests if "/resolve/" in r.path], "files were asked for at a commit that is not one"
 
 
+def test_download_lays_out_the_snapshot_from_the_verified_blobs_and_asks_the_hub_nothing_more(
+    fake_hub: FakeHub, tmp_path: Path
+):
+    """Security (Codex round 2, download.py:349). Once every blob was fetched
+    and verified, `snapshot_download` laid out the pointers by asking the hub
+    for each file's metadata a second time and trusting that answer: an etag
+    it named became a blob path unchecked (`../../../escape` wrote outside the
+    cache) and a blob it named that was not in the cache was fetched, outside
+    `_verify` and the progress protocol. Given a hub whose answer to every
+    HEAD after a file's first is a traversal etag, the snapshot is laid out
+    from the blobs this module verified: the pointers hold the files byte for
+    byte, `refs/main` names the commit, each file's metadata was asked for
+    once and its bytes once, and nothing is written outside the cache."""
+    fake_hub.later_etag = "../../../escape"
+
+    path, updates = _fetch(fake_hub, tmp_path / "hub")
+
+    assert path == tmp_path / "hub" / FAKE_FOLDER / "snapshots" / FAKE_COMMIT
+    assert snapshot_files(path) == FAKE_FILES
+    assert (path.parent.parent / "refs" / "main").read_text() == FAKE_COMMIT
+    assert updates[-1] == Update.progress(FAKE_TOTAL, FAKE_TOTAL)
+    assert sorted(tmp_path.iterdir()) == [tmp_path / "hub"], "the run wrote outside the cache"
+    assert not _escape(tmp_path), "the second etag became a path"
+    for name in FAKE_FILES:
+        assert fake_hub.heads(name) == 1, f"{name}'s metadata was asked for again after the plan"
+        assert fake_hub.gets(name) == [None], f"{name}'s bytes were fetched outside the verified path"
+    assert not _incomplete(tmp_path / "hub")
+
+
+@pytest.mark.parametrize("fake_hub", [{**FAKE_FILES, "../../../escape": b"not a model file\n"}],
+                         indirect=True, ids=["a listing naming a path"])
+def test_download_rejects_a_filename_that_is_a_path_before_any_byte_of_it_is_asked_for(
+    fake_hub: FakeHub, tmp_path: Path
+):
+    """The other hub value that becomes a path in the snapshot: a file's name
+    from the tree listing, joined under `snapshots/<commit>/`. The hub
+    library's own download refused one that traverses; now that the snapshot
+    is laid out here, the plan refuses it, naming the file, before any byte is
+    asked for, and nothing is written outside the cache."""
+    with pytest.raises(DownloadError) as failure:
+        _fetch(fake_hub, tmp_path / "hub")
+
+    assert "../../../escape" in str(failure.value)
+    assert sorted(tmp_path.iterdir()) == [tmp_path / "hub"], "the run wrote outside the cache"
+    assert not _escape(tmp_path), "the filename became a path"
+    assert not [r for r in fake_hub.requests if r.method == "GET" and "/resolve/" in r.path], (
+        "bytes were fetched for a listing that names a path")
+
+
 def test_download_sends_the_user_token_to_the_hub_and_never_to_the_host_serving_the_bytes(
     fake_hub: FakeHub, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):

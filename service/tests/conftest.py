@@ -240,8 +240,10 @@ def built_executable(request: pytest.FixtureRequest) -> Path:
 # does until the user has accepted the repo's terms with their token. `commit`
 # is what `main` points at: a test moves the branch mid-run by setting it. The
 # etags are the real hub's: the sha256 of an LFS file (the weights), git's blob
-# sha1 of a regular file. Every request is kept on `requests`, one HubRequest
-# each: method, path, and the Range and Authorization headers it carried.
+# sha1 of a regular file; `later_etag` is what every HEAD after a file's first
+# answers instead, a hub that changes its story once the run has planned. Every
+# request is kept on `requests`, one HubRequest each: method, path, and the
+# Range and Authorization headers it carried.
 
 FAKE_REPO = "fake-org/fake-model"
 FAKE_COMMIT = "0123456789abcdef0123456789abcdef01234567"
@@ -307,6 +309,7 @@ class FakeHub:
         self.corrupt: set[str] = set()
         self.gated = False
         self.commit = FAKE_COMMIT  # what `main` points at; a test moves the branch by setting it
+        self.later_etag: str | None = None  # the etag of every HEAD after a file's first
         hub = self
         etags = self.etags = {
             name: hashlib.sha256(data).hexdigest() if name.endswith(".safetensors")
@@ -416,14 +419,17 @@ class FakeHub:
                 name = self._resolvable()
                 if name is None:
                     return
+                etag = etags[name]
+                if hub.later_etag is not None and hub.heads(name) > 1:
+                    etag = hub.later_etag
                 if hub.bytes_host:
                     self.send_response(302)
                     self.send_header("Location", f"{hub.bytes_host}{self.path}")
-                    self.send_header("X-Linked-Etag", f'"{etags[name]}"')
+                    self.send_header("X-Linked-Etag", f'"{etag}"')
                     self.send_header("X-Linked-Size", str(len(hub.files[name])))
                 else:
                     self.send_response(200)
-                    self.send_header("ETag", f'"{etags[name]}"')
+                    self.send_header("ETag", f'"{etag}"')
                 self.send_header("X-Repo-Commit", self.commit)
                 self.send_header("Content-Length", str(len(hub.files[name])))
                 self.send_header("Accept-Ranges", "bytes")
@@ -439,11 +445,18 @@ class FakeHub:
             self.endpoint = f"http://127.0.0.1:{server.server_port}"
             yield self
 
+    def _resolves(self, method: str, name: str) -> list[HubRequest]:
+        return [r for r in self.requests
+                if r.method == method and r.path.startswith(f"/{self.repo}/resolve/") and r.path.endswith(f"/{name}")]
+
     def gets(self, name: str) -> list[str | None]:
         """The Range header of every GET for `name`'s bytes, at any revision,
         in order (None: no Range)."""
-        return [r.range for r in self.requests
-                if r.method == "GET" and r.path.startswith(f"/{self.repo}/resolve/") and r.path.endswith(f"/{name}")]
+        return [r.range for r in self._resolves("GET", name)]
+
+    def heads(self, name: str) -> int:
+        """How many times `name`'s metadata was asked for, at any revision."""
+        return len(self._resolves("HEAD", name))
 
 
 @pytest.fixture()

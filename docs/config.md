@@ -114,8 +114,13 @@ transfer that stalls on some networks (docs/troubleshooting.md); the command
 sets `HF_HUB_DISABLE_XET=1` for itself. The commit `main` points at is
 resolved once, at the start, and recorded in the cache's `refs/main`; every
 file is fetched at that commit, so a branch that moves during the run changes
-nothing. Once every file is in the cache the hub library lays out the snapshot
-and the pointers of that commit exactly as `mlx` will look for them.
+nothing. Once every file is in the cache and checked, the command lays out the
+snapshot of that commit from those checked files alone, its pointers made by
+the hub library's own helper exactly as `mlx` will look for them; the hub is
+asked nothing more, so what it answers after the plan (another etag for a
+file, say) reaches no path in the cache. A file name the listing gives that
+is a path (absolute, a drive, or traversing) is refused the same way an etag
+that is not a checksum is.
 `HF_ENDPOINT` points the command at another hub,
 which is how the tests prove it against a fake on 127.0.0.1 without ever
 fetching real weights.
