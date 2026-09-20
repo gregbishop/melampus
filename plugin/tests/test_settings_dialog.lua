@@ -376,6 +376,14 @@ local function shownNow(view, model)
 	return binding.transform(model.phase)
 end
 
+--- The progress scope the poller most recently opened for Lightroom's own
+--- bar, asserted present.
+local function theScope()
+	local scope = mock.state.progressScopes[#mock.state.progressScopes]
+	t.isNotNil(scope, 'no progress scope for Lightroom\'s own bar')
+	return scope
+end
+
 local function theButton(row, model, prefix, expectShown)
 	local found = buttonsTitled(row, prefix)
 	t.equals(#found, 1, 'expected one button titled ' .. prefix)
@@ -467,8 +475,7 @@ t.test('clicking Download runs the executable with stdout redirected, the progre
 	mock.tick()
 	mock.tick()
 	t.equals(model.progress, '3.1 GB of 18.3 GB')
-	local scope = mock.state.progressScopes[#mock.state.progressScopes]
-	t.isNotNil(scope, 'no progress scope for Lightroom\'s own bar')
+	local scope = theScope()
 	t.isTrue(math.abs(scope.portions[#scope.portions] - 3100000000 / 18300000000) < 1e-9)
 	mock.settle()
 	t.equals(model.phase, 'installed')
@@ -536,8 +543,7 @@ t.test('a download that cannot start, the executable gone since the dialog opene
 	theButton(row, model, 'Download ' .. REPO, true).action()
 	t.equals(commandsRun('--download-model'), 0, 'ran a download with no executable to run it')
 	t.equals(model.phase, 'absent', 'a download that could not start should offer Download again')
-	local scope = mock.state.progressScopes[#mock.state.progressScopes]
-	t.isNotNil(scope, 'no progress scope for Lightroom\'s own bar')
+	local scope = theScope()
 	t.isTrue(scope.isDone, 'the progress bar was left up with nothing to download')
 	t.equals(#dialogsShown(false), 1, 'expected one message for a download that could not start')
 	t.isNotNil(string.find(dialogsShown(false)[1].body, 'a file named melampus:', 1, true),
