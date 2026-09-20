@@ -154,9 +154,10 @@ def _works_here() -> tuple[str, ...]:
 
 def default_engine() -> str:
     """What runs when nothing names an engine: the first detection says is
-    available, in the owner's order. Were none available, mlx, whose refusal
-    already says what to do."""
-    return next((v.engine for v in detect_engines() if v.available), "mlx")
+    available, in the owner's order. There is always one, because the cloud
+    engines are available everywhere; no fallback, so if the list ever
+    changes that invariant breaks loudly here rather than naming mlx."""
+    return next(v.engine for v in detect_engines() if v.available)
 
 
 def normalise_provider(provider: str | None) -> str:

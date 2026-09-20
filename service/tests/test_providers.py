@@ -463,6 +463,24 @@ def _closed_port() -> int:
         return probe.getsockname()[1]
 
 
+def test_default_engine_is_always_one_detection_names_available(
+    monkeypatch, no_ambient_keys, no_ambient_ollama
+):
+    """`default_engine()` is the first verdict that is available, in the
+    owner's order, and nothing else: the cloud engines are available
+    everywhere, so there is always one, and there is no fallback that could
+    quietly name an engine detection did not. Were the list ever to change so
+    that nothing is available, the call raises rather than inventing mlx."""
+    _fake_platform(monkeypatch, "linux", "x86_64")
+    verdicts = providers.detect_engines()
+    assert providers.default_engine() == next(v.engine for v in verdicts if v.available) == "openai"
+
+    nothing_available = [providers.EngineVerdict(v.engine, False, v.reason) for v in verdicts]
+    monkeypatch.setattr(providers, "detect_engines", lambda: nothing_available)
+    with pytest.raises(StopIteration):
+        providers.default_engine()
+
+
 @contextlib.contextmanager
 def _fake_ollama(monkeypatch, *, status: int = 200, delay: float = 0.0):
     """A server speaking Ollama's version endpoint on 127.0.0.1 at an
