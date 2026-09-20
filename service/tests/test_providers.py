@@ -13,6 +13,7 @@ import json
 import socket
 import sys
 import threading
+import time
 import types
 import urllib.request
 from http.server import BaseHTTPRequestHandler
@@ -534,6 +535,38 @@ def test_ollama_probe_gives_up_after_its_timeout(monkeypatch):
     monkeypatch.setattr(providers, "OLLAMA_PROBE_SECONDS", 0.2)
     with _fake_ollama(monkeypatch, delay=5.0):
         assert providers.ollama_answers() is False
+
+
+def test_ollama_probe_gives_up_at_its_deadline_when_the_headers_trickle(monkeypatch):
+    """Security: OLLAMA_PROBE_SECONDS is a deadline on the whole probe, not on
+    each read. A socket timeout is per operation, so whatever listens on the
+    port when Ollama does not could send the status line and then one header
+    byte every hundred milliseconds, each within the timeout, and hold
+    detection, and the CLI's startup behind it, for as long as it liked. Given
+    a server that trickles a valid 200 over two seconds, the probe reports
+    unavailable and returns within its deadline."""
+    monkeypatch.setattr(providers, "OLLAMA_PROBE_SECONDS", 0.3)
+
+    class Trickling(BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802 - http.server's name
+            # Once the probe hangs up, the next write raises; that ends the trickle.
+            with contextlib.suppress(OSError):
+                self.wfile.write(b"HTTP/1.1 200 OK\r\n")
+                for byte in b"Content-Length: 2\r\n\r\n":
+                    time.sleep(0.1)
+                    self.wfile.write(bytes([byte]))
+                self.wfile.write(b"{}")
+
+        def log_message(self, *_):
+            return None
+
+    with loopback_server(Trickling) as ollama:
+        monkeypatch.setattr(providers, "OLLAMA_URL", f"http://127.0.0.1:{ollama.server_port}")
+        started = time.monotonic()
+        answered = providers.ollama_answers()
+        elapsed = time.monotonic() - started
+    assert elapsed < 1.0, f"the probe read past its deadline: {elapsed:.2f}s"
+    assert answered is False
 
 
 def test_ollama_probe_timeout_is_one_second():
