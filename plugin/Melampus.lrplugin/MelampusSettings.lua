@@ -36,8 +36,9 @@ LrTasks.startAsyncTask(function()
 		-- is greyed and the note says what is missing.
 		local engineItems, engineNote = Rules.engineItems(Analyze.detectEngines())
 
-		-- The picker, the reasons for whatever is greyed, and a link for each
-		-- greyed engine whose reason names where to get it.
+		-- The picker, the reasons for whatever is greyed, and one link: Ollama's
+		-- alone, where to install it, taken from the executable's reason when
+		-- Ollama is unavailable.
 		local engineViews = {
 			f:popup_menu { value = bind 'engine', items = engineItems },
 		}
