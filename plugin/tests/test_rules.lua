@@ -276,13 +276,6 @@ end)
 -- carrying their reason, and a note to show under the picker.
 local verdicts = mock.detectionVerdicts
 
---- The items' values after the first, which lets the CLI choose.
-local function engineValues(items)
-	local values = {}
-	for i = 2, #items do values[#values + 1] = items[i].value end
-	return values
-end
-
 t.test('the picker lists the four engines in the owner\'s order, after letting Melampus choose', function()
 	local items = Rules.engineItems(verdicts())
 	t.equals(items[1].value, '', 'the first item must be the unset preference: let the CLI choose')
