@@ -177,7 +177,7 @@ def test_download_of_a_complete_model_fetches_nothing_and_says_it_is_complete(
 
     assert again == path
     assert updates == [Update.progress(FAKE_TOTAL, FAKE_TOTAL)]
-    assert not [r for r in fake_hub.requests if r.method == "GET" and "/resolve/" in r.path], fake_hub.requests
+    assert not fake_hub.gets(), fake_hub.requests
 
 
 def test_download_keeps_the_partial_file_when_the_connection_drops_and_resumes_it_next_run(
@@ -455,7 +455,7 @@ def test_download_repairs_a_snapshot_file_that_is_a_short_copy_of_its_blob(fake_
     assert again == path
     assert snapshot_files(path) == FAKE_FILES, "the short copy was kept"
     assert updates == [Update.progress(FAKE_TOTAL, FAKE_TOTAL)]
-    assert not [r for r in fake_hub.requests if r.method == "GET" and "/resolve/" in r.path], "bytes were fetched again"
+    assert not fake_hub.gets(), "bytes were fetched again"
 
 
 def test_download_publishes_a_copied_snapshot_file_whole_or_not_at_all(
@@ -493,7 +493,7 @@ def test_download_publishes_a_copied_snapshot_file_whole_or_not_at_all(
     assert snapshot_files(path) == FAKE_FILES, "the snapshot holds something other than the model's files"
     assert all(not (path / name).is_symlink() for name in FAKE_FILES), "symlinks were off"
     assert updates == [Update.progress(FAKE_TOTAL, FAKE_TOTAL)]
-    assert not [r for r in fake_hub.requests if r.method == "GET" and "/resolve/" in r.path], "bytes were fetched again"
+    assert not fake_hub.gets(), "bytes were fetched again"
 
 
 @pytest.mark.parametrize("fake_hub", [{**FAKE_FILES, "../../../escape": b"not a model file\n"}],
@@ -512,7 +512,7 @@ def test_download_rejects_a_filename_that_is_a_path_before_any_byte_of_it_is_ask
     assert "../../../escape" in str(failure.value)
     assert sorted(tmp_path.iterdir()) == [tmp_path / "hub"], "the run wrote outside the cache"
     assert not _escape(tmp_path), "the filename became a path"
-    assert not [r for r in fake_hub.requests if r.method == "GET" and "/resolve/" in r.path], (
+    assert not fake_hub.gets(), (
         "bytes were fetched for a listing that names a path")
 
 

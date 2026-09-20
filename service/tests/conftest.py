@@ -470,13 +470,17 @@ class FakeHub:
             self.endpoint = f"http://127.0.0.1:{server.server_port}"
             yield self
 
-    def _resolves(self, method: str, name: str) -> list[HubRequest]:
+    def _resolves(self, method: str, name: str | None) -> list[HubRequest]:
+        """Every `method` request for `name`'s bytes or metadata (any file's
+        when `name` is None), at any revision, in order."""
         return [r for r in self.requests if r.method == method
-                and r.path.startswith(f"/{self.repo}/resolve/") and r.path.partition("?")[0].endswith(f"/{name}")]
+                and r.path.startswith(f"/{self.repo}/resolve/")
+                and (name is None or r.path.partition("?")[0].endswith(f"/{name}"))]
 
-    def gets(self, name: str) -> list[str | None]:
+    def gets(self, name: str | None = None) -> list[str | None]:
         """The Range header of every GET for `name`'s bytes, at any revision,
-        in order (None: no Range)."""
+        in order (None: no Range); with no name, of every GET for any file's
+        bytes, so `not hub.gets()` says no bytes were fetched."""
         return [r.range for r in self._resolves("GET", name)]
 
     def heads(self, name: str) -> int:
