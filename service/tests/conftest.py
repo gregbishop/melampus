@@ -397,8 +397,11 @@ class FakeHub:
 
 
 @pytest.fixture()
-def fake_hub() -> Iterator[FakeHub]:
-    with FakeHub().serve() as hub:
+def fake_hub(request: pytest.FixtureRequest) -> Iterator[FakeHub]:
+    """The hub, serving FAKE_FILES, or the files a test names by parametrizing
+    this fixture indirectly (`indirect=True`), so `hub_env` points at that
+    one hub."""
+    with FakeHub(files=getattr(request, "param", FAKE_FILES)).serve() as hub:
         yield hub
 
 

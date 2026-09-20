@@ -351,45 +351,47 @@ def _interrupt(proc: subprocess.Popen) -> None:
         proc.send_signal(signal.SIGINT)
 
 
+@pytest.mark.parametrize(
+    "fake_hub",
+    [{"config.json": FAKE_FILES["config.json"], "model.safetensors": fake_bytes(4 * DOWNLOAD_CHUNK_SIZE)}],
+    indirect=True, ids=["four-chunk model"],
+)
 def test_cli_cancelled_by_a_signal_keeps_the_partial_file_and_the_next_run_resumes_it(
-    hub_env: dict[str, str], tmp_path: Path
+    fake_hub: FakeHub, hub_env: dict[str, str], tmp_path: Path
 ):
     """Done-when 2. A four-chunk file served slowly; once the first chunk is on
     disk (the second progress line) the signal arrives: the command prints
     `cancelled`, exits 4, and the chunk stays in the cache's .incomplete blob.
     Run again at full speed, the host is asked for the rest by Range and the
     file finishes byte-identical."""
-    big = fake_bytes(4 * DOWNLOAD_CHUNK_SIZE)
-    hub = FakeHub(files={"config.json": FAKE_FILES["config.json"], "model.safetensors": big})
-    hub.throttle = (64 * 1024, 0.002)
+    big = fake_hub.files["model.safetensors"]
+    fake_hub.throttle = (64 * 1024, 0.002)
     flags = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if sys.platform == "win32" else {}
-    with hub.serve():
-        env = {**os.environ, **hub_env, "HF_ENDPOINT": hub.endpoint}
-        proc = subprocess.Popen([*VENV_CLI, "--download-model", "--model", FAKE_REPO], env=env,
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, **flags)
-        lines = []
-        for line in proc.stdout:
-            lines.append(Update.parse(line))
-            if lines[-1].state == "progress" and lines[-1].bytes_done >= DOWNLOAD_CHUNK_SIZE:
-                _interrupt(proc)
-                break
-        rest = proc.stdout.read()
-        stderr = proc.stderr.read()
-        code = proc.wait(timeout=60)
-        hub.throttle = None
-        assert code == EXIT_CANCELLED, (code, stderr[-3000:])
-        assert rest.splitlines() == ["cancelled"], rest
-        assert "Traceback" not in stderr, stderr[-3000:]
-        (partial,) = _incomplete(Path(hub_env["HF_HOME"]) / "hub")
-        kept = partial.stat().st_size
-        assert DOWNLOAD_CHUNK_SIZE <= kept < len(big), "the partial file was not kept"
-        assert partial.read_bytes() == big[:kept]
+    proc = subprocess.Popen([*VENV_CLI, "--download-model", "--model", FAKE_REPO], env={**os.environ, **hub_env},
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, **flags)
+    lines = []
+    for line in proc.stdout:
+        lines.append(Update.parse(line))
+        if lines[-1].state == "progress" and lines[-1].bytes_done >= DOWNLOAD_CHUNK_SIZE:
+            _interrupt(proc)
+            break
+    rest = proc.stdout.read()
+    stderr = proc.stderr.read()
+    code = proc.wait(timeout=60)
+    fake_hub.throttle = None
+    assert code == EXIT_CANCELLED, (code, stderr[-3000:])
+    assert rest.splitlines() == ["cancelled"], rest
+    assert "Traceback" not in stderr, stderr[-3000:]
+    (partial,) = _incomplete(Path(hub_env["HF_HOME"]) / "hub")
+    kept = partial.stat().st_size
+    assert DOWNLOAD_CHUNK_SIZE <= kept < len(big), "the partial file was not kept"
+    assert partial.read_bytes() == big[:kept]
 
-        hub.requests.clear()
-        proc = _cli(["--download-model", "--model", FAKE_REPO], {**hub_env, "HF_ENDPOINT": hub.endpoint})
-        assert proc.returncode == 0, proc.stderr[-3000:]
-        assert hub.gets("model.safetensors") == [f"bytes={kept}-"], "the rest was not asked for by Range"
-        updates = [Update.parse(line) for line in proc.stdout.splitlines()]
-        assert updates[0].bytes_done == kept + len(FAKE_FILES["config.json"])
-        assert snapshot_files(Path(updates[-1].path))["model.safetensors"] == big
-        assert not _incomplete(Path(hub_env["HF_HOME"]) / "hub")
+    fake_hub.requests.clear()
+    proc = _cli(["--download-model", "--model", FAKE_REPO], hub_env)
+    assert proc.returncode == 0, proc.stderr[-3000:]
+    assert fake_hub.gets("model.safetensors") == [f"bytes={kept}-"], "the rest was not asked for by Range"
+    updates = [Update.parse(line) for line in proc.stdout.splitlines()]
+    assert updates[0].bytes_done == kept + len(FAKE_FILES["config.json"])
+    assert snapshot_files(Path(updates[-1].path))["model.safetensors"] == big
+    assert not _incomplete(Path(hub_env["HF_HOME"]) / "hub")
