@@ -31,6 +31,13 @@ def _cfg(**overrides):
     return load_config(use_local=False, **overrides)
 
 
+def _fake_platform(monkeypatch, platform_name: str, machine: str) -> None:
+    """The machine as `on_apple_silicon` sees it: sys.platform and
+    platform.machine(), faked together, the only way the suite fakes them."""
+    monkeypatch.setattr(providers.sys, "platform", platform_name)
+    monkeypatch.setattr(providers.platform, "machine", lambda: machine)
+
+
 @pytest.fixture()
 def no_ambient_keys(monkeypatch):
     """A developer's real keys must not decide what these tests assert."""
@@ -61,7 +68,7 @@ def test_default_backend_is_local_mlx():
 
 
 def test_mlx_is_refused_on_windows_with_directions(monkeypatch, no_ambient_ollama):
-    monkeypatch.setattr(providers.sys, "platform", "win32")
+    _fake_platform(monkeypatch, "win32", "AMD64")
     with pytest.raises(providers.BackendUnavailable) as err:
         providers.build_primary_backend(_cfg())
     message = str(err.value)
@@ -72,8 +79,7 @@ def test_mlx_is_refused_on_intel_mac(monkeypatch, no_ambient_ollama):
     """darwin alone is not enough — the pyproject marker also requires arm64,
     so an Intel Mac must get the helpful refusal, not a ModuleNotFoundError
     at warmup."""
-    monkeypatch.setattr(providers.sys, "platform", "darwin")
-    monkeypatch.setattr(providers.platform, "machine", lambda: "x86_64")
+    _fake_platform(monkeypatch, "darwin", "x86_64")
     with pytest.raises(providers.BackendUnavailable):
         providers.build_primary_backend(_cfg())
 
@@ -230,7 +236,7 @@ def test_mlx_refusal_does_not_name_ollama_as_working(monkeypatch, no_ambient_oll
     """Off Apple Silicon the mlx refusal lists what works here; with no Ollama
     server answering (card #404's detection decides), ollama stays off that
     list."""
-    monkeypatch.setattr(providers.sys, "platform", "win32")
+    _fake_platform(monkeypatch, "win32", "AMD64")
     with pytest.raises(providers.BackendUnavailable) as err:
         providers.build_primary_backend(_cfg())
     assert "ollama" not in str(err.value)
@@ -352,8 +358,7 @@ def test_cli_backend_mlx_on_windows_names_apple_silicon_and_the_backends_that_wo
     is not built yet (card #403)."""
     from melampus.cli import main
 
-    monkeypatch.setattr(providers.sys, "platform", "win32")
-    monkeypatch.setattr(providers.platform, "machine", lambda: "AMD64")
+    _fake_platform(monkeypatch, "win32", "AMD64")
 
     code = main([str(photos), "--backend", "mlx", "--cache", str(tmp_path / "cache.jsonl")])
 
@@ -373,11 +378,6 @@ def test_cli_backend_mlx_on_windows_names_apple_silicon_and_the_backends_that_wo
 def no_ambient_ollama(monkeypatch):
     """A developer's running Ollama must not decide what these tests assert."""
     monkeypatch.setattr(providers, "ollama_answers", lambda: False)
-
-
-def _fake_platform(monkeypatch, platform_name: str, machine: str) -> None:
-    monkeypatch.setattr(providers.sys, "platform", platform_name)
-    monkeypatch.setattr(providers.platform, "machine", lambda: machine)
 
 
 def _verdict(engine: str) -> providers.EngineVerdict:
