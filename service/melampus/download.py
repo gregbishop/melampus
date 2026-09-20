@@ -40,6 +40,7 @@ import hashlib  # noqa: E402 - after the environment the hub reads at import
 import ipaddress  # noqa: E402
 import logging  # noqa: E402
 import re  # noqa: E402
+import shutil  # noqa: E402
 import signal  # noqa: E402
 from contextlib import contextmanager  # noqa: E402
 from dataclasses import dataclass  # noqa: E402
@@ -439,20 +440,29 @@ def _lay_out(storage: Path, commit: str, blobs: list[_Blob]) -> Path:
     metadata a second time and took that answer for the blob's name, unchecked
     and, when no such blob existed, fetched it unverified.
 
-    Each pointer is made under a staging name beside its own and renamed
-    into place: where symlinks are unavailable the helper copies the blob,
-    byte by byte, and a copy cut short by a cancel or a full disk must never
-    sit under the file's name for the next run to take as complete. A
-    pointer already serving its blob is kept; one that does not (a short
-    copy) is replaced."""
+    Each pointer is made under a staging folder and renamed into place:
+    where symlinks are unavailable the helper copies the blob, byte by byte,
+    and a copy cut short by a cancel or a full disk must never sit under the
+    file's name for the next run to take as complete. The staging folder is
+    `snapshots/<commit>.incomplete/`, beside the snapshot folder and at its
+    depth, so the relative link the helper makes holds once renamed, and it
+    is no path of the repo's: a staging name beside the pointer's own was
+    one (`config.json.incomplete` is a valid repo filename) and, laid out
+    first, was destroyed by the other file's staging. The folder is removed
+    once every pointer is in place. A pointer already serving its blob is
+    kept; one that does not (a short copy) is replaced."""
+    snapshot = storage / "snapshots" / commit
+    staging = snapshot.with_name(f"{commit}.incomplete")
     for blob in blobs:
         if blob.laid_out():
             continue
-        blob.pointer.parent.mkdir(parents=True, exist_ok=True)
-        staged = blob.pointer.with_name(f"{blob.pointer.name}.incomplete")
+        staged = staging / blob.pointer.relative_to(snapshot)
+        for folder in (staged.parent, blob.pointer.parent):
+            folder.mkdir(parents=True, exist_ok=True)
         _create_symlink(str(blob.path), str(staged), new_blob=False)
         staged.replace(blob.pointer)
-    return storage / "snapshots" / commit
+    shutil.rmtree(staging, ignore_errors=True)
+    return snapshot
 
 
 def download_model(

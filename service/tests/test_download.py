@@ -496,6 +496,30 @@ def test_download_publishes_a_copied_snapshot_file_whole_or_not_at_all(
     assert not fake_hub.gets(), "bytes were fetched again"
 
 
+# A repo holding a file named like another file's staging name: any name is
+# a valid repo path. Served in each order, since the listing's order decided
+# which of the two survived.
+TWIN_FILES = {**FAKE_FILES, "config.json.incomplete": b'{"model_type": "twin"}\n'}
+
+
+@pytest.mark.parametrize(
+    "fake_hub", [TWIN_FILES, dict(reversed(TWIN_FILES.items()))], indirect=True,
+    ids=["config.json listed first", "config.json.incomplete listed first"],
+)
+def test_download_lays_out_a_file_named_like_another_files_staging_name(fake_hub: FakeHub, tmp_path: Path):
+    """Codex round 7 (download.py:452). Each pointer was staged beside its
+    own as `<filename>.incomplete`, a name the repo may legitimately hold:
+    listed before `config.json`, the repo's `config.json.incomplete` was laid
+    out and then destroyed by `config.json`'s staging, the run saying `done`
+    of a snapshot missing a file. Given a repo with both files, in either
+    listing order, the snapshot holds exactly the files served, each with its
+    own bytes, and nothing else."""
+    path, _ = _fetch(fake_hub, tmp_path / "hub")
+
+    assert snapshot_files(path) == fake_hub.files, "a file of the repo is missing from the snapshot, or a stale one is in it"
+    assert not _incomplete(tmp_path / "hub")
+
+
 @pytest.mark.parametrize("fake_hub", [{**FAKE_FILES, "../../../escape": b"not a model file\n"}],
                          indirect=True, ids=["a listing naming a path"])
 def test_download_rejects_a_filename_that_is_a_path_before_any_byte_of_it_is_asked_for(
