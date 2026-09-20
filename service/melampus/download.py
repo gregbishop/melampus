@@ -53,7 +53,12 @@ from huggingface_hub import (  # noqa: E402
     set_client_factory,
 )
 from huggingface_hub._local_folder import _validate_relative_filename  # noqa: E402 - the library's own check
-from huggingface_hub.errors import GatedRepoError, RepositoryNotFoundError, RevisionResolutionError  # noqa: E402
+from huggingface_hub.errors import (  # noqa: E402
+    GatedRepoError,
+    HFValidationError,
+    RepositoryNotFoundError,
+    RevisionResolutionError,
+)
 from huggingface_hub.file_download import (  # noqa: E402
     REGEX_COMMIT_HASH,
     REGEX_SHA256,
@@ -379,9 +384,11 @@ def download_model(
     """
     endpoint = endpoint or constants.ENDPOINT
     cache = Path(cache_dir or constants.HF_HUB_CACHE)
-    folder = repo_folder_name(repo_id=repo, repo_type="model")
     set_client_factory(lambda: _hub_client(endpoint))
     try:
+        # The hub library's own check of the id (`namespace/name`, no URL,
+        # no path under it), before the hub is asked anything.
+        folder = repo_folder_name(repo_id=repo, repo_type="model")
         commit, blobs = _plan(repo, endpoint, cache)
         progress = _Progress(sum(b.size for b in blobs), on_update)
         progress.advance(sum(b.on_disk() for b in blobs))
@@ -400,6 +407,11 @@ def download_model(
         raise DownloadError(
             f"the model repo {repo} on the hub at {endpoint} is gated: request access to it "
             f"on the hub, sign in with `hf auth login` (or set HF_TOKEN), then {RERUN} ({exc})"
+        ) from exc
+    except HFValidationError as exc:
+        raise DownloadError(
+            f"{repo} is not a model repo id (the hub's form is namespace/name, not a URL or a path): "
+            f"check [model] repo in config, or --model ({exc})"
         ) from exc
     except RepositoryNotFoundError as exc:
         raise DownloadError(

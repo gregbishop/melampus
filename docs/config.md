@@ -89,7 +89,8 @@ a protocol, defined once in `download.py` (`Update`) and stable:
 Nothing else goes to stdout; errors and the hub library's own warnings go to
 stderr. Exit codes: **exit 0** once the model is complete (`done`); **exit 3**
 on a failure, with a message on stderr naming the fix (the repo the hub does not
-have, so check `[model] repo` or `--model`; a gated repo, so request access to
+have, or an id that is not a repo id at all, a pasted hub URL say, so check
+`[model] repo` or `--model`; a gated repo, so request access to
 it on the hub and sign in with `hf auth login` or `HF_TOKEN`; the network, so
 check it and re-run, a hub that accepts the connection and never answers
 included, since every request to it is bounded by the hub library's own

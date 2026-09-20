@@ -439,6 +439,25 @@ def test_download_of_a_repo_the_hub_does_not_have_names_the_setting_to_fix(
     assert "[model] repo" in message and "--model" in message
 
 
+@pytest.mark.parametrize("repo", ["https://huggingface.co/fake-org/fake-model", "fake-org/fake-model/extra"],
+                         ids=["a pasted hub URL", "a path under the repo"])
+def test_download_of_a_repo_id_that_is_not_one_names_the_setting_to_fix_before_asking_the_hub(
+    fake_hub: FakeHub, tmp_path: Path, repo: str
+):
+    """Codex round 3 (download.py:382). A repo id that is not one (a pasted
+    hub URL, a path under the repo) failed the hub library's own validation
+    before the error handler was reached, so the command printed a traceback
+    and exited 1, not 3. Given such an id, the run fails as the missing-repo
+    case does: the message names the id and the setting to fix, and the hub
+    is asked nothing."""
+    with pytest.raises(DownloadError) as failure:
+        _fetch(fake_hub, tmp_path / "hub", repo=repo)
+
+    message = str(failure.value)
+    assert repo in message and "[model] repo" in message and "--model" in message
+    assert not fake_hub.requests, "the hub was asked about an id that is not a repo's"
+
+
 def test_download_of_a_gated_repo_names_the_access_to_request_not_a_missing_repo(
     fake_hub: FakeHub, tmp_path: Path
 ):
@@ -648,6 +667,17 @@ def test_cli_exits_3_naming_the_fix_when_the_repo_is_not_on_the_hub(hub_env: dic
     assert proc.returncode == 3, proc.stderr[-3000:]
     assert proc.stdout == "", "an error must not be spoken in the protocol"
     assert "fake-org/no-such-model" in proc.stderr and "--model" in proc.stderr
+
+
+def test_cli_exits_3_naming_the_fix_when_the_repo_id_is_a_pasted_url(hub_env: dict[str, str]):
+    """Codex round 3 (download.py:382), at the boundary: exit 3 with the
+    fix on stderr and nothing in the protocol, not a traceback and exit 1."""
+    proc = _cli(["--download-model", "--model", "https://huggingface.co/fake-org/fake-model"], hub_env)
+    assert proc.returncode == 3, proc.stderr[-3000:]
+    assert proc.stdout == "", "an error must not be spoken in the protocol"
+    assert "Traceback" not in proc.stderr, proc.stderr[-3000:]
+    assert "https://huggingface.co/fake-org/fake-model" in proc.stderr
+    assert "[model] repo" in proc.stderr and "--model" in proc.stderr
 
 
 def _interrupt(proc: subprocess.Popen) -> None:
