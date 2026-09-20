@@ -910,13 +910,7 @@ def test_ollama_probe_gives_up_at_its_deadline_when_it_fires_during_connect(monk
     deadline = 0.3
     hold = 0.05  # how long past the deadline connect() is held
     monkeypatch.setattr(providers, "OLLAMA_PROBE_SECONDS", deadline)
-    connect = http.client.HTTPConnection.connect
-
-    def held(connection):
-        time.sleep(deadline + hold)
-        connect(connection)
-
-    monkeypatch.setattr(http.client.HTTPConnection, "connect", held)
+    _hold_connect(monkeypatch, deadline + hold)
     answered, elapsed = _timed_probe(monkeypatch, Trickling)
     assert elapsed < deadline + hold + SCHEDULING_SLACK, f"the probe read past its deadline: {elapsed:.2f}s"
     assert answered is False
