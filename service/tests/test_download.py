@@ -37,6 +37,7 @@ from huggingface_hub.constants import DOWNLOAD_CHUNK_SIZE
 
 from melampus import download
 from melampus.cli import main
+from melampus.config import ModelConfig
 from melampus.download import (
     EXIT_CANCELLED,
     DownloadCancelled,
@@ -282,7 +283,8 @@ def test_a_signal_inside_cancel_on_signals_raises_cancelled_and_the_handler_is_r
 
 def test_download_model_flag_needs_no_folder_and_passes_the_configured_repo(monkeypatch, capsys, tmp_path):
     """Exit 0 with the `done <path>` line once the model is complete. The repo
-    is [model] repo, or --model."""
+    is [model] repo, or --model. `--no-local-config` keeps a developer's own
+    `[model] repo` in melampus.local.toml out of the assertion (load_config)."""
     asked = []
 
     def fake_download(repo, *, on_update, **_):
@@ -291,10 +293,10 @@ def test_download_model_flag_needs_no_folder_and_passes_the_configured_repo(monk
         return tmp_path / "snapshots" / "abc"
 
     monkeypatch.setattr(download, "download_model", fake_download)
-    assert main(["--download-model"]) == 0
-    assert main(["--download-model", "--model", "fake-org/other"]) == 0
+    assert main(["--download-model", "--no-local-config"]) == 0
+    assert main(["--download-model", "--no-local-config", "--model", "fake-org/other"]) == 0
     out = capsys.readouterr().out
-    assert asked == ["mlx-community/Qwen3-VL-30B-A3B-Instruct-4bit", "fake-org/other"]
+    assert asked == [ModelConfig().repo, "fake-org/other"]
     assert out.splitlines() == ["progress 1 2", f"done {tmp_path / 'snapshots' / 'abc'}"] * 2
 
 
@@ -304,7 +306,7 @@ def test_download_model_flag_exits_4_with_the_cancelled_line_when_a_signal_stops
         raise DownloadCancelled("SIGINT")
 
     monkeypatch.setattr(download, "download_model", fake_download)
-    assert main(["--download-model"]) == EXIT_CANCELLED == 4
+    assert main(["--download-model", "--no-local-config"]) == EXIT_CANCELLED == 4
     assert capsys.readouterr().out.splitlines() == ["progress 5 9", "cancelled"]
 
 
@@ -313,7 +315,7 @@ def test_download_model_flag_exits_3_with_the_fix_on_stderr_when_it_fails(monkey
         raise DownloadError("could not reach the hub: check the network")
 
     monkeypatch.setattr(download, "download_model", fake_download)
-    assert main(["--download-model"]) == 3
+    assert main(["--download-model", "--no-local-config"]) == 3
     out, err = capsys.readouterr()
     assert out == ""
     assert "could not reach the hub: check the network" in err
