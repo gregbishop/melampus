@@ -51,7 +51,7 @@ from typing import NamedTuple
 
 import pytest
 from huggingface_hub.constants import DOWNLOAD_CHUNK_SIZE
-from huggingface_hub.file_download import repo_folder_name
+from huggingface_hub.file_download import REGEX_COMMIT_HASH, repo_folder_name
 
 from melampus.download import Update
 
@@ -223,7 +223,8 @@ def built_executable(request: pytest.FixtureRequest) -> Path:
 # served with their first byte flipped while the etag stays the true one.
 # `gated` makes the repo one the user has no access to: it is listed, but
 # every resolve answers 403 with X-Error-Code GatedRepo, as huggingface.co
-# does until the user has accepted the repo's terms with their token. The
+# does until the user has accepted the repo's terms with their token. `commit`
+# is what `main` points at: a test moves the branch mid-run by setting it. The
 # etags are the real hub's: the sha256 of an LFS file (the weights), git's blob
 # sha1 of a regular file. Every request is kept on `requests`, one HubRequest
 # each: method, path, and the Range and Authorization headers it carried.
@@ -291,6 +292,7 @@ class FakeHub:
         self.bytes_host: str | None = None
         self.corrupt: set[str] = set()
         self.gated = False
+        self.commit = FAKE_COMMIT  # what `main` points at; a test moves the branch by setting it
         hub = self
         etags = self.etags = {
             name: hashlib.sha256(data).hexdigest() if name.endswith(".safetensors")
@@ -312,11 +314,15 @@ class FakeHub:
                 self.wfile.write(body)
 
             def _resolve(self) -> str | None:
-                """The file a /<repo>/resolve/<revision>/<file> path names, else None."""
+                """The file a /<repo>/resolve/<revision>/<file> path names, else
+                None; `commit` is what the revision resolves to, as the real
+                hub answers X-Repo-Commit: the commit hash itself, or what the
+                branch points at now."""
                 prefix = f"/{hub.repo}/resolve/"
                 if not self.path.startswith(prefix):
                     return None
-                _, _, name = self.path[len(prefix):].partition("/")
+                revision, _, name = self.path[len(prefix):].partition("/")
+                self.commit = revision if REGEX_COMMIT_HASH.match(revision) else hub.commit
                 return name if name in hub.files else None
 
             def _record(self) -> None:
@@ -349,7 +355,7 @@ class FakeHub:
                             for name, data in hub.files.items()
                         ])
                     elif path.removeprefix(f"/api/models/{hub.repo}") in ("", "/revision/main"):
-                        self._json(200, {"id": hub.repo, "sha": FAKE_COMMIT,
+                        self._json(200, {"id": hub.repo, "sha": hub.commit,
                                          "siblings": [{"rfilename": name} for name in hub.files]})
                     else:
                         self._unknown()
@@ -404,7 +410,7 @@ class FakeHub:
                 else:
                     self.send_response(200)
                     self.send_header("ETag", f'"{etags[name]}"')
-                self.send_header("X-Repo-Commit", FAKE_COMMIT)
+                self.send_header("X-Repo-Commit", self.commit)
                 self.send_header("Content-Length", str(len(hub.files[name])))
                 self.send_header("Accept-Ranges", "bytes")
                 self.end_headers()

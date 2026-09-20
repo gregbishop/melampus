@@ -123,6 +123,36 @@ def test_download_goes_only_to_the_fake_host(fake_hub: FakeHub, tmp_path: Path):
         assert fake_hub.gets(name) == [None], f"{name} was not fetched whole, exactly once"
 
 
+def test_download_lays_out_the_commit_it_planned_when_the_branch_moves_during_the_run(
+    fake_hub: FakeHub, tmp_path: Path
+):
+    """Codex round 1, both reviewers (download.py:284). The plan resolves
+    `main` to a commit and fetches and verifies that commit's files; then
+    `snapshot_download` resolved `main` a second time, so a branch that moved
+    in between had the hub library fetch another revision's files outside
+    this module's progress, checksum and resume. Given a branch that moves
+    once the plan is made (on the first update, before any byte), the
+    snapshot laid out is the planned commit's, `refs/main` names it, no
+    other snapshot appears, and the hub is asked what `main` is once."""
+    cache = tmp_path / "hub"
+    moved = "fedcba9876543210fedcba9876543210fedcba98"
+    updates: list[Update] = []
+
+    def move_the_branch(update: Update) -> None:
+        updates.append(update)
+        fake_hub.commit = moved
+
+    path = download_model(FAKE_REPO, endpoint=fake_hub.endpoint, cache_dir=cache, on_update=move_the_branch)
+
+    assert path == cache / FAKE_FOLDER / "snapshots" / FAKE_COMMIT, "the snapshot is not the planned commit's"
+    assert snapshot_files(path) == FAKE_FILES
+    assert (cache / FAKE_FOLDER / "refs" / "main").read_text() == FAKE_COMMIT
+    assert sorted(p.name for p in (cache / FAKE_FOLDER / "snapshots").iterdir()) == [FAKE_COMMIT]
+    resolved = [r for r in fake_hub.requests if r.path.partition("?")[0] == f"/api/models/{FAKE_REPO}"]
+    assert len(resolved) == 1, f"`main` was resolved {len(resolved)} times: {resolved}"
+    assert updates[-1] == Update.progress(FAKE_TOTAL, FAKE_TOTAL)
+
+
 def test_download_of_a_complete_model_fetches_nothing_and_says_it_is_complete(
     fake_hub: FakeHub, tmp_path: Path
 ):

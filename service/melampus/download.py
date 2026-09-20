@@ -9,12 +9,14 @@ Why the bytes are fetched here and not by `snapshot_download`: huggingface_hub
 and deletes it when the run fails, so nothing survives an interrupted run for
 the next one to resume (its Range resume exists only inside one process's
 retries). Done-when 1 and 2 need the partial file kept and resumed. So the
-hub library does everything but the bytes: the commit and file list from its
-API, each file's etag, size and URL from its metadata call, the Range request
-and consistency check in its `http_get`, the per-file lock, and the cache
-layout, pointers and `refs/main` from its `snapshot_download` once every
-blob is complete. What this module adds is the one thing it lacks: the
-bytes go to the cache's `<etag>.incomplete` blob, appended to across runs.
+hub library does everything but the bytes: the commit `main` points at
+(resolved once, and recorded in the cache's `refs/main`, by its
+`resolve_revision`) and the file list at it from its API, each file's etag,
+size and URL from its metadata call, the Range request and consistency check
+in its `http_get`, the per-file lock, and the cache layout and pointers of
+that commit from its `snapshot_download` once every blob is complete. What
+this module adds is the one thing it lacks: the bytes go to the cache's
+`<etag>.incomplete` blob, appended to across runs.
 
 `HF_HUB_DISABLE_XET=1` is set before the library is imported, as readme.md
 § Install requires (the Xet transfer stalls on some networks,
@@ -37,9 +39,9 @@ from urllib.parse import urlparse  # noqa: E402
 
 import httpx  # noqa: E402
 from huggingface_hub import HfApi, constants, get_hf_file_metadata, hf_hub_url, snapshot_download  # noqa: E402
-from huggingface_hub.errors import GatedRepoError, RepositoryNotFoundError  # noqa: E402
+from huggingface_hub.errors import GatedRepoError, RepositoryNotFoundError, RevisionResolutionError  # noqa: E402
 from huggingface_hub.file_download import REGEX_COMMIT_HASH, REGEX_SHA256, http_get, repo_folder_name  # noqa: E402
-from huggingface_hub.hf_api import RepoFile  # noqa: E402
+from huggingface_hub.hf_api import RepoFile, ResolvedRevision  # noqa: E402
 from huggingface_hub.utils import WeakFileLock, build_hf_headers  # noqa: E402
 
 PROGRESS = "progress"
@@ -194,12 +196,17 @@ class _Progress:
         return ChunkCounter
 
 
-def _plan(repo: str, endpoint: str | None, storage: Path) -> tuple[str, list[_Blob]]:
+def _plan(repo: str, endpoint: str | None, cache: Path) -> tuple[ResolvedRevision, list[_Blob]]:
     """The commit `main` points at and every file of the repo at it, as the
     hub describes them: the tree listing for the names, the metadata call for
-    each file's etag (its blob name in the cache), size and URL."""
+    each file's etag (its blob name in the cache), size and URL. `main` is
+    resolved once, by the hub library's own `resolve_revision`, which also
+    writes the cache's `refs/main`; everything after, the snapshot included,
+    is at that commit, so a branch that moves during the run changes nothing."""
     api = HfApi(endpoint=endpoint)
-    commit = api.repo_info(repo).sha
+    revision = api.resolve_revision(repo, cache_dir=cache)
+    commit = revision.resolved
+    storage = cache / repo_folder_name(repo_id=repo, repo_type="model")
     blobs = []
     for entry in api.list_repo_tree(repo, recursive=True, revision=commit):
         if not isinstance(entry, RepoFile):
@@ -209,7 +216,7 @@ def _plan(repo: str, endpoint: str | None, storage: Path) -> tuple[str, list[_Bl
         if meta.etag is None or meta.size is None:
             raise DownloadError(f"the hub gave no etag or size for {entry.path}; {RERUN}")
         blobs.append(_Blob(entry.path, meta.location, meta.etag, meta.size, storage / "blobs" / meta.etag))
-    return commit, blobs
+    return revision, blobs
 
 
 def _verify(blob: _Blob) -> None:
@@ -275,7 +282,7 @@ def download_model(
     cache = Path(cache_dir or constants.HF_HUB_CACHE)
     folder = repo_folder_name(repo_id=repo, repo_type="model")
     try:
-        commit, blobs = _plan(repo, endpoint, cache / folder)
+        revision, blobs = _plan(repo, endpoint, cache)
         progress = _Progress(sum(b.size for b in blobs), on_update)
         progress.advance(sum(b.on_disk() for b in blobs))
         headers = build_hf_headers()
@@ -287,10 +294,11 @@ def download_model(
             if not blob.path.exists():
                 same_host = urlparse(blob.url).netloc == urlparse(endpoint).netloc
                 _fetch(blob, progress, headers if same_host else no_token, cache / ".locks" / folder)
-        # Every blob is complete: the hub library lays out the snapshot, the
-        # pointers and refs/main exactly as mlx-vlm will look for them, and
-        # moves no bytes because every file is already in the cache.
-        return Path(snapshot_download(repo, cache_dir=cache, endpoint=endpoint))
+        # Every blob is complete: the hub library lays out the snapshot and
+        # the pointers of the planned commit exactly as mlx-vlm will look for
+        # them (refs/main already names it), and moves no bytes because
+        # every file is already in the cache.
+        return Path(snapshot_download(repo, revision=revision, cache_dir=cache, endpoint=endpoint))
     except GatedRepoError as exc:
         # A GatedRepoError is a RepositoryNotFoundError, but the repo exists:
         # what is missing is the user's access to it.
@@ -303,7 +311,9 @@ def download_model(
             f"the hub at {endpoint} has no model repo named {repo}: "
             f"check [model] repo in config, or --model ({exc})"
         ) from exc
-    except httpx.TransportError as exc:
+    except (httpx.TransportError, RevisionResolutionError) as exc:
+        # RevisionResolutionError: the hub could not be reached to resolve
+        # `main` and the cache has no refs/main to fall back on.
         raise DownloadError(
             f"could not reach the hub at {endpoint} ({type(exc).__name__}: {exc}): "
             f"check the network, then {RERUN}"

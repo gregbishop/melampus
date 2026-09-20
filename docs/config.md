@@ -107,9 +107,12 @@ is checked against the checksum the hub names in its etag (the sha256 of a
 weights file, git's blob sha1 of a regular one) before it becomes a blob in
 the cache, never through the Xet
 transfer that stalls on some networks (docs/troubleshooting.md); the command
-sets `HF_HUB_DISABLE_XET=1` for itself. Once every file is in the cache the hub
-library lays out the snapshot, the pointers and `refs/main` exactly as
-`mlx` will look for them. `HF_ENDPOINT` points the command at another hub,
+sets `HF_HUB_DISABLE_XET=1` for itself. The commit `main` points at is
+resolved once, at the start, and recorded in the cache's `refs/main`; every
+file is fetched at that commit, so a branch that moves during the run changes
+nothing. Once every file is in the cache the hub library lays out the snapshot
+and the pointers of that commit exactly as `mlx` will look for them.
+`HF_ENDPOINT` points the command at another hub,
 which is how the tests prove it against a fake on 127.0.0.1 without ever
 fetching real weights.
 
