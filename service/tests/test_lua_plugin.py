@@ -205,9 +205,10 @@ def _plugin_folder_holding(executable: Path, tmp_path: Path) -> Path:
 def _plugin_under_the_mock(plugin_dir: Path, tmp_path: Path, body: str, **env: str) -> str:
     """Run `body`, Lua, with the mock SDK installed for `plugin_dir` (so
     `_PLUGIN.path` is there) on the platform Lightroom reports for this host
-    (a fake Windows Lightroom on a Windows host), and MelampusRules.lua and
-    MelampusAnalyze.lua loaded fresh under it as `Rules` and `Analyze`. `env`
-    is what the body reads through os.getenv. Hands back what it wrote.
+    (a fake Windows Lightroom on a Windows host), and MelampusAnalyze.lua
+    loaded fresh under it through the mock's own loader as `Analyze`, with
+    the MelampusRules.lua instance it uses as `Rules`. `env` is what the body
+    reads through os.getenv. Hands back what it wrote.
 
     The mock's temp directory: under TMPDIR on a fake macOS Lightroom, the
     Windows temp folder (TEMP, as Lightroom reports it) on a fake Windows
@@ -215,18 +216,15 @@ def _plugin_under_the_mock(plugin_dir: Path, tmp_path: Path, body: str, **env: s
     script = tmp_path / "under-the-mock.lua"
     script.write_text(
         "local mock = require('lrmock')\n"
-        "mock.reset()\n"
-        "local Rules = dofile(os.getenv('MELAMPUS_RULES'))\n"
-        "mock.install(os.getenv('MELAMPUS_PLUGIN_DIR'),"
+        "local Analyze = mock.loadUnderMock('MelampusAnalyze', nil,"
+        " os.getenv('MELAMPUS_PLUGIN_DIR'),"
         " { windows = os.getenv('MELAMPUS_WINDOWS') == '1' })\n"
-        "local Analyze = dofile(os.getenv('MELAMPUS_ANALYZE'))\n"
+        "local Rules = require('MelampusRules')\n"
         + body,
         encoding="utf-8",
     )
     ran = run_lua(script, env=os.environ | {
         "MELAMPUS_PLUGIN_DIR": str(plugin_dir),
-        "MELAMPUS_ANALYZE": str(PLUGIN / "MelampusAnalyze.lua"),
-        "MELAMPUS_RULES": str(PLUGIN / "MelampusRules.lua"),
         "MELAMPUS_WINDOWS": "1" if WINDOWS else "0",
         "TMPDIR": str(tmp_path),
         "TEMP": str(tmp_path),
