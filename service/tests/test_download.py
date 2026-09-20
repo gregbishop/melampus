@@ -24,6 +24,7 @@ import threading
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
+import httpx
 import pytest
 from conftest import (
     AGENT_HARNESS,
@@ -52,7 +53,8 @@ from melampus.download import (
     DownloadCancelled,
     DownloadError,
     Update,
-    _same_origin,
+    _hub_client,
+    _token_may_go,
     cancel_on_signals,
     download_model,
 )
@@ -523,20 +525,45 @@ def test_download_sends_the_user_token_to_the_hub_and_never_to_a_host_the_listin
 
 @pytest.mark.parametrize(("url", "endpoint", "trusted"), [
     ("http://127.0.0.1:8/fake-org/fake-model/resolve/abc/config.json", "http://127.0.0.1:8", True),
+    ("http://localhost:8/x", "http://localhost:8", True),
+    ("http://[::1]:8/x", "http://[::1]:8", True),
     ("https://huggingface.co/x/resolve/abc/config.json", "https://huggingface.co", True),
     ("http://huggingface.co/x/resolve/abc/config.json", "https://huggingface.co", False),
     ("https://cdn-lfs.hf.co/x", "https://huggingface.co", False),
     ("https://huggingface.co:8443/x", "https://huggingface.co", False),
-], ids=["fake hub", "the hub itself", "https downgraded to http", "the CDN", "another port"])
-def test_the_token_goes_only_to_the_endpoints_own_origin(url: str, endpoint: str, trusted: bool):
+    ("http://hub.example:8080/x/resolve/abc/config.json", "http://hub.example:8080", False),
+    ("http://10.0.0.5/x", "http://10.0.0.5", False),
+], ids=["fake hub", "localhost", "ipv6 loopback", "the hub itself", "https downgraded to http", "the CDN",
+        "another port", "a remote http hub", "a remote http hub by address"])
+def test_the_token_goes_only_to_the_endpoints_own_origin_over_https_or_loopback(url: str, endpoint: str, trusted: bool):
     """Security (Codex round 1, download.py:279). Whether the token goes with
     a file's bytes was decided on the host alone, so an `https://` hub
     naming an `http://` download URL on the same host would have had the
     token sent in cleartext. The decision is the whole origin, scheme
-    included: a downgrade is another host, and gets no token. The fake hub
-    cannot serve two schemes on one host and port, so this is the decision
-    on its own; the boundary is proven by the CDN test above."""
-    assert _same_origin(url, endpoint) is trusted
+    included: a downgrade is another host, and gets no token. Security
+    (Codex round 3, download.py:248): the hub's own origin was trusted
+    whatever its scheme, so a configured `http://` hub on another machine
+    received the token in cleartext. It goes only where cleartext cannot
+    leave the machine or there is none: an `https://` hub, or a loopback
+    host (127.0.0.1, ::1, localhost), the fake hub of these tests. The fake
+    hub cannot serve two schemes on one host and port, so this is the
+    decision on its own; the boundary is proven by the CDN test above."""
+    assert _token_may_go(url, endpoint) is trusted
+
+
+@pytest.mark.parametrize(("endpoint", "carried"), [
+    ("http://127.0.0.1:8", True), ("https://hub.example", True), ("http://hub.example:8080", False),
+], ids=["loopback http", "remote https", "remote http"])
+def test_the_hub_client_strips_the_token_from_a_request_to_a_remote_http_hub(endpoint: str, carried: bool):
+    """The decision wired into the client every hub request goes through:
+    the request the library makes to the endpoint itself, with the user's
+    token, keeps it on a loopback or https hub and loses it on a remote
+    http one."""
+    client = _hub_client(endpoint)
+    request = httpx.Request("GET", f"{endpoint}/api/models/{FAKE_REPO}", headers={"authorization": "Bearer synthetic"})
+    for hook in client.event_hooks["request"]:
+        hook(request)
+    assert ("authorization" in request.headers) is carried, dict(request.headers)
 
 
 def test_download_of_a_repo_the_hub_does_not_have_names_the_setting_to_fix(

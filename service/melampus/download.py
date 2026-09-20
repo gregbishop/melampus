@@ -37,6 +37,7 @@ os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
 
 import hashlib  # noqa: E402 - after the environment the hub reads at import
+import ipaddress  # noqa: E402
 import signal  # noqa: E402
 from contextlib import contextmanager  # noqa: E402
 from dataclasses import dataclass  # noqa: E402
@@ -244,13 +245,15 @@ def _hub_client(endpoint: str) -> httpx.Client:
     the connection and never answers held the command for good. Requests
     that name a timeout (the bytes, the metadata HEAD) keep theirs.
 
-    The user's token goes only to the hub's own origin. The library sends
-    the token on every request it makes with the user's headers: the bytes
-    of an LFS file, which the hub redirects to its CDN (a signed URL on
-    another host), and each further page of the tree listing, at whatever
-    URL the hub's `Link: rel="next"` names. Any request whose origin is not
-    the endpoint's, another host or an `http://` downgrade of the hub's own,
-    goes without it."""
+    The user's token goes only to the hub's own origin, and only where it
+    cannot cross the wire in cleartext. The library sends the token on
+    every request it makes with the user's headers: the bytes of an LFS
+    file, which the hub redirects to its CDN (a signed URL on another
+    host), and each further page of the tree listing, at whatever URL the
+    hub's `Link: rel="next"` names. Any request whose origin is not the
+    endpoint's, another host or an `http://` downgrade of the hub's own,
+    goes without it; so does every request to an `http://` hub that is not
+    on loopback (`_token_may_go`)."""
     client = default_client_factory()
 
     def bound(request: httpx.Request) -> None:
@@ -259,7 +262,7 @@ def _hub_client(endpoint: str) -> httpx.Client:
             phase: constants.HF_HUB_ETAG_TIMEOUT if timeout.get(phase) is None else timeout[phase]
             for phase in ("connect", "read", "write", "pool")
         }
-        if not _same_origin(str(request.url), endpoint):
+        if not _token_may_go(str(request.url), endpoint):
             request.headers.pop("authorization", None)
 
     client.event_hooks["request"].append(bound)
@@ -331,13 +334,22 @@ def _verify(blob: _Blob) -> None:
         )
 
 
-def _same_origin(url: str, endpoint: str) -> bool:
-    """Whether a request goes to the hub itself, so the user's token may go
-    with it: the whole origin, scheme and host, must match. An `http://` URL
-    on an `https://` hub's host is another origin, or the token would go in
-    cleartext."""
+def _token_may_go(url: str, endpoint: str) -> bool:
+    """Whether the user's token may go on a request: it goes to the hub
+    itself, the whole origin, scheme and host (an `http://` URL on an
+    `https://` hub's host is another origin), and that origin keeps it out
+    of cleartext on the wire: `https://`, or a loopback host (127.0.0.1,
+    ::1, localhost), where plain HTTP never leaves the machine. A hub
+    configured as `http://` on another machine gets no token."""
     ours, theirs = urlparse(url), urlparse(endpoint)
-    return (ours.scheme, ours.netloc) == (theirs.scheme, theirs.netloc)
+    if (ours.scheme, ours.netloc) != (theirs.scheme, theirs.netloc):
+        return False
+    if theirs.scheme == "https":
+        return True
+    try:
+        return ipaddress.ip_address(theirs.hostname or "").is_loopback
+    except ValueError:
+        return theirs.hostname == "localhost"
 
 
 def _fetch(blob: _Blob, progress: _Progress, headers: dict[str, str], lock_dir: Path) -> None:

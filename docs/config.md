@@ -134,7 +134,10 @@ is a path (absolute, a drive, or traversing) is refused the same way an etag
 that is not a checksum is.
 `HF_ENDPOINT` points the command at another hub,
 which is how the tests prove it against a fake on 127.0.0.1 without ever
-fetching real weights.
+fetching real weights. The user's hub token (`hf auth login`, or `HF_TOKEN`)
+goes only to that hub's own origin, and only over `https://` or to a loopback
+host (127.0.0.1, ::1, localhost): an `http://` hub on another machine gets
+every request without it, rather than the token in cleartext on the wire.
 
 ---
 
