@@ -1132,8 +1132,8 @@ def test_the_download_watches_the_documented_marker_by_default(monkeypatch, tmp_
 # under tmp_path, never the real one.
 
 
-def _status(hub: FakeHub | None, cache: Path, repo: str = FAKE_REPO) -> Status:
-    return model_status(repo, endpoint=hub.endpoint if hub else None, cache_dir=cache)
+def _status(hub: FakeHub, cache: Path) -> Status:
+    return model_status(FAKE_REPO, endpoint=hub.endpoint, cache_dir=cache)
 
 
 def test_status_of_an_absent_model_reports_not_installed_with_the_size_from_the_hub(
