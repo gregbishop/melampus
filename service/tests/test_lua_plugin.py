@@ -151,6 +151,33 @@ def test_the_plugin_names_the_engines_the_cli_accepts(tmp_path: Path):
     assert proc.stdout.split("\n") == engines
 
 
+def test_the_plugin_stores_each_key_under_the_variable_the_executable_reads(tmp_path: Path):
+    """Card #405, Done-when 2: the variable a cloud engine's key travels in is
+    spelled once per language, in `Rules.KEY_VARIABLES` for the plugin and
+    `providers.KEY_VARIABLES` for the executable, and this is what binds
+    them, the way the #403 test above binds the engine names: the plugin's
+    table, read through lua for every engine it names, is the first variable
+    the executable looks in for each cloud engine, and nothing for the rest.
+    A rename on either side fails here rather than as a stored key the
+    executable never sees."""
+    script = tmp_path / "keys.lua"
+    script.write_text(
+        "local Rules = require('MelampusRules')\n"
+        "for _, engine in ipairs(Rules.ENGINES) do\n"
+        "  io.write(engine, '\\t', tostring(Rules.keyVariable(engine)), '\\n')\n"
+        "end\n",
+        encoding="utf-8",
+    )
+    proc = run_lua(script)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+    rows = [line.split("\t") for line in proc.stdout.splitlines()]
+    plugin_variables = {engine: variable for engine, variable in rows if variable != "nil"}
+    executable_variables = {
+        engine: variables[0] for engine, variables in providers.KEY_VARIABLES.items()}
+    assert plugin_variables == executable_variables, proc.stdout
+
+
 def test_every_plugin_file_compiles():
     """luac -p on the whole plugin, so a syntax error never reaches Lightroom."""
     if shutil.which("luac") is None:
