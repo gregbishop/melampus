@@ -476,10 +476,34 @@ def test_default_engine_is_always_one_detection_names_available(
 
 
 @contextlib.contextmanager
+def _ollama_served_by(monkeypatch, handler: type[QuietHandler]):
+    """`handler` on 127.0.0.1 at an ephemeral port, standing in for Ollama:
+    detection is pointed at it for the block."""
+    with loopback_server(handler) as server:
+        monkeypatch.setattr(providers, "OLLAMA_URL", f"http://127.0.0.1:{server.server_port}")
+        yield server
+
+
+# Slack for thread scheduling in the deadline tests: the timer thread fires and
+# the main thread's read returns some tens of milliseconds after the deadline,
+# while waiting out the trickle takes over two seconds.
+SCHEDULING_SLACK = 0.5
+
+
+def _timed_probe(monkeypatch, handler: type[QuietHandler]) -> tuple[bool, float]:
+    """The probe against `handler` standing in for Ollama: what it answered
+    and how many seconds it took."""
+    with _ollama_served_by(monkeypatch, handler):
+        started = time.monotonic()
+        answered = providers.ollama_answers()
+        return answered, time.monotonic() - started
+
+
+@contextlib.contextmanager
 def _fake_ollama(monkeypatch, *, status: int = 200, delay: float = 0.0):
-    """A server speaking Ollama's version endpoint on 127.0.0.1 at an
-    ephemeral port, with detection pointed at it. `status` is what
-    GET /api/version answers; `delay` holds the answer that long."""
+    """A server speaking Ollama's version endpoint, standing in for Ollama.
+    `status` is what GET /api/version answers; `delay` holds the answer that
+    long."""
     release = threading.Event()
 
     class Version(QuietHandler):
@@ -492,8 +516,7 @@ def _fake_ollama(monkeypatch, *, status: int = 200, delay: float = 0.0):
             self.end_headers()
             self.wfile.write(b'{"version": "0.0.0-fake"}')
 
-    with loopback_server(Version) as server:
-        monkeypatch.setattr(providers, "OLLAMA_URL", f"http://127.0.0.1:{server.server_port}")
+    with _ollama_served_by(monkeypatch, Version) as server:
         try:
             yield server
         finally:
@@ -559,16 +582,8 @@ def test_ollama_probe_gives_up_at_its_deadline_when_the_headers_trickle(monkeypa
     unavailable and returns within its deadline, not after the trickle."""
     deadline = 0.3
     monkeypatch.setattr(providers, "OLLAMA_PROBE_SECONDS", deadline)
-
-    with loopback_server(Trickling) as ollama:
-        monkeypatch.setattr(providers, "OLLAMA_URL", f"http://127.0.0.1:{ollama.server_port}")
-        started = time.monotonic()
-        answered = providers.ollama_answers()
-        elapsed = time.monotonic() - started
-    # Half a second of slack for thread scheduling: the timer thread fires and
-    # the main thread's read returns some tens of milliseconds after the
-    # deadline, while waiting out the trickle takes over two seconds.
-    assert elapsed < deadline + 0.5, f"the probe read past its deadline: {elapsed:.2f}s"
+    answered, elapsed = _timed_probe(monkeypatch, Trickling)
+    assert elapsed < deadline + SCHEDULING_SLACK, f"the probe read past its deadline: {elapsed:.2f}s"
     assert answered is False
 
 
@@ -593,16 +608,8 @@ def test_ollama_probe_gives_up_at_its_deadline_when_it_fires_during_connect(monk
         connect(connection)
 
     monkeypatch.setattr(http.client.HTTPConnection, "connect", held)
-
-    with loopback_server(Trickling) as ollama:
-        monkeypatch.setattr(providers, "OLLAMA_URL", f"http://127.0.0.1:{ollama.server_port}")
-        started = time.monotonic()
-        answered = providers.ollama_answers()
-        elapsed = time.monotonic() - started
-    # The same half a second of slack for thread scheduling as the trickle
-    # test: the probe returns some tens of milliseconds after the held
-    # connect, while waiting out the trickle takes over two seconds.
-    assert elapsed < deadline + hold + 0.5, f"the probe read past its deadline: {elapsed:.2f}s"
+    answered, elapsed = _timed_probe(monkeypatch, Trickling)
+    assert elapsed < deadline + hold + SCHEDULING_SLACK, f"the probe read past its deadline: {elapsed:.2f}s"
     assert answered is False
 
 
@@ -677,8 +684,7 @@ def test_ollama_probe_refuses_a_redirect_off_loopback(monkeypatch):
                 self.send_header("Location", elsewhere)
                 self.end_headers()
 
-        with loopback_server(Redirecting) as ollama:
-            monkeypatch.setattr(providers, "OLLAMA_URL", f"http://127.0.0.1:{ollama.server_port}")
+        with _ollama_served_by(monkeypatch, Redirecting):
             answered = providers.ollama_answers()
     assert seen == [], f"the probe followed the redirect off loopback: {seen}"
     assert answered is False
