@@ -585,15 +585,6 @@ def test_ollama_probe_stays_on_loopback_whatever_proxy_the_environment_names(mon
 # Card #404 through the CLI: `--detect-engines`, and the default engine.
 
 
-@pytest.fixture()
-def no_local_config(monkeypatch, tmp_path):
-    """The developer's melampus.local.toml must not set the engine under a
-    test about what happens when nothing sets it."""
-    import melampus.config
-
-    monkeypatch.setattr(melampus.config, "_local_config", lambda: tmp_path / "absent.toml")
-
-
 def test_cli_detect_engines_prints_the_verdicts_as_json_in_order(
     monkeypatch, capsys, no_ambient_keys, no_ambient_ollama
 ):
@@ -642,7 +633,9 @@ def test_cli_still_requires_a_folder_without_detect_engines(capsys):
 
 def _chosen_engine(monkeypatch, argv: list[str]) -> str:
     """Run the CLI to the backend seam and answer which engine it chose there;
-    the seam refuses, so nothing loads or runs."""
+    the seam refuses, so nothing loads or runs. `--no-local-config` keeps the
+    developer's melampus.local.toml from setting the engine under a test about
+    what happens when nothing sets it."""
     import melampus.cli
 
     chosen: list[str] = []
@@ -652,13 +645,13 @@ def _chosen_engine(monkeypatch, argv: list[str]) -> str:
         raise providers.BackendUnavailable("stopped at the seam")
 
     monkeypatch.setattr(melampus.cli, "build_primary_backend", refuse)
-    assert melampus.cli.main(argv) == 3
+    assert melampus.cli.main([*argv, "--no-local-config"]) == 3
     (engine,) = chosen
     return engine
 
 
 def test_cli_default_engine_is_the_first_that_can_run_here(
-    monkeypatch, photos, tmp_path, capsys, no_ambient_keys, no_local_config
+    monkeypatch, photos, tmp_path, capsys, no_ambient_keys
 ):
     """No `--backend` and no `[model] backend`: the CLI picks the first engine
     detection says is available, in the owner's order. Off Apple Silicon with
@@ -674,7 +667,7 @@ def test_cli_default_engine_is_the_first_that_can_run_here(
 
 
 def test_cli_default_engine_is_mlx_on_apple_silicon_and_openai_with_nothing_local(
-    monkeypatch, photos, tmp_path, no_ambient_keys, no_local_config, no_ambient_ollama
+    monkeypatch, photos, tmp_path, no_ambient_keys, no_ambient_ollama
 ):
     argv = [str(photos), "--cache", str(tmp_path / "cache.jsonl")]
     _fake_platform(monkeypatch, "darwin", "arm64")
@@ -684,7 +677,7 @@ def test_cli_default_engine_is_mlx_on_apple_silicon_and_openai_with_nothing_loca
 
 
 def test_cli_detection_never_overrides_a_chosen_engine(
-    monkeypatch, photos, tmp_path, no_ambient_keys, no_local_config
+    monkeypatch, photos, tmp_path, no_ambient_keys
 ):
     """`--backend` and `[model] backend` are the user's word; detection only
     fills the blank. Faked so detection would say ollama."""
