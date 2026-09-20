@@ -9,18 +9,18 @@ live here and both callers import them.
 
 from __future__ import annotations
 
-import contextlib
 import http.client
 import platform
-import socket
 import sys
-import threading
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
 from pydantic import SecretStr
 
-from .backend import VLMBackend
+# _hang_up is the deadline's own hang-up, written for the probe and kept in
+# its tests here; it lives in backend.py because the backend shares the
+# deadline and this module imports that one, not the reverse.
+from .backend import VLMBackend, _Deadline, _hang_up  # noqa: F401
 from .config import MelampusConfig
 
 #: Where each provider's key is looked for, in order, when the config has none.
@@ -95,28 +95,6 @@ def _refusal(reason: str, *, works_here: tuple[str, ...]) -> BackendUnavailable:
     )
 
 
-def _hang_up(connection: http.client.HTTPConnection, expired: threading.Event) -> None:
-    """The deadline, from its timer. Not connection.close(): the response
-    being read holds the socket's file object, and socket.close() waits for
-    that to go before it really closes, so the blocked read would read on.
-    shutdown(SHUT_RDWR) ends the stream now. And `expired`, because
-    http.client takes end-of-stream as the end of the headers: a status line
-    that arrived before the trickle would still parse as a 200, and the
-    probe must know the deadline finished the response, not the server. No
-    socket yet means the probe is still connecting: the socket timeout bounds
-    that, and the probe checks `expired` once connected, since a timer that
-    fired before the socket existed had nothing to hang up and the reads
-    after a late handshake would otherwise be bounded per byte only. The
-    socket is read once: the main thread's close() sets it to None at any
-    moment, and a socket it already closed raises OSError, which is
-    suppressed; None between two reads would not be."""
-    expired.set()
-    sock = connection.sock
-    if sock is not None:
-        with contextlib.suppress(OSError):
-            sock.shutdown(socket.SHUT_RDWR)
-
-
 def ollama_url(configured: str | None = None) -> str:
     """The address Ollama is looked for at: `[model] ollama_url` when set,
     else OLLAMA_URL. Trailing slash dropped so the endpoints append cleanly."""
@@ -146,8 +124,8 @@ def ollama_answers(url: str | None = None) -> bool:
     host and have that host's 200 stand in for Ollama's. And never past the
     deadline: the socket timeout bounds each read, not the probe, so a
     listener trickling headers a byte at a time could hold detection for as
-    long as it liked; a timer hangs up at OLLAMA_PROBE_SECONDS, and whatever
-    was read by then, the probe reports unavailable."""
+    long as it liked; a _Deadline hangs up at OLLAMA_PROBE_SECONDS, and
+    whatever was read by then, the probe reports unavailable."""
     try:
         address = urlsplit(f"{ollama_url(url)}/api/version")
         connect = {"http": http.client.HTTPConnection, "https": http.client.HTTPSConnection}
@@ -156,22 +134,21 @@ def ollama_answers(url: str | None = None) -> bool:
         )
     except Exception:  # noqa: BLE001 - an address that cannot be asked (no scheme, no host, a port out of range) is one nobody answers at
         return False
-    expired = threading.Event()
-    deadline = threading.Timer(OLLAMA_PROBE_SECONDS, _hang_up, [connection, expired])
-    deadline.start()
     try:
-        connection.request("GET", address.path)
-        # A timer that fired during connect() found no socket to hang up;
-        # a late handshake must not start a read the deadline cannot end.
-        if expired.is_set():
-            return False
-        answered = connection.getresponse().status == 200
+        with _Deadline(OLLAMA_PROBE_SECONDS) as deadline:
+            connection.request("GET", address.path)
+            # Connected and asked: the deadline has the socket from here. One
+            # that fired during connect() hangs up now, and a late handshake
+            # must not start a read the deadline cannot end.
+            deadline.on(connection.sock)
+            if deadline.expired.is_set():
+                return False
+            answered = connection.getresponse().status == 200
     except Exception:  # noqa: BLE001 - every failure means the same thing: not here
         return False
     finally:
-        deadline.cancel()
         connection.close()
-    return answered and not expired.is_set()
+    return answered and not deadline.expired.is_set()
 
 
 @dataclass(frozen=True, slots=True)

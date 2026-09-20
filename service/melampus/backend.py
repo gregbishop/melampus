@@ -8,7 +8,10 @@ one class here and changing nothing else.
 from __future__ import annotations
 
 import base64
+import contextlib
 import json
+import socket
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -322,6 +325,61 @@ class OpenAIBackend(VLMBackend):
             generated_tokens=getattr(usage, "completion_tokens", None),
             refused=finish == "content_filter",
         )
+
+
+def _hang_up(line, expired: threading.Event) -> None:
+    """The deadline, from its timer. `line` is whatever holds the exchange's
+    socket under the name `sock`: the probe's HTTPConnection, or a
+    _Deadline. Not connection.close(): the response
+    being read holds the socket's file object, and socket.close() waits for
+    that to go before it really closes, so the blocked read would read on.
+    shutdown(SHUT_RDWR) ends the stream now. And `expired`, because
+    http.client takes end-of-stream as the end of the headers: a status line
+    that arrived before the trickle would still parse as a 200, and the
+    probe must know the deadline finished the response, not the server. No
+    socket yet means the probe is still connecting: the socket timeout bounds
+    that, and the probe checks `expired` once connected, since a timer that
+    fired before the socket existed had nothing to hang up and the reads
+    after a late handshake would otherwise be bounded per byte only. The
+    socket is read once: the main thread's close() sets it to None at any
+    moment, and a socket it already closed raises OSError, which is
+    suppressed; None between two reads would not be."""
+    expired.set()
+    sock = line.sock
+    if sock is not None:
+        with contextlib.suppress(OSError):
+            sock.shutdown(socket.SHUT_RDWR)
+
+
+class _Deadline:
+    """A wall-clock bound on one HTTP exchange, as a context manager. A
+    socket timeout bounds each operation, not the exchange, so a server
+    trickling a byte at a time, each within the timeout, could hold the
+    caller for as long as it liked. Inside the block a timer counts
+    `seconds`; when it fires, `_hang_up` ends the stream on `sock` and sets
+    `expired`, which the caller reads after the exchange, since whatever
+    arrived by then is not the server's answer. `sock` is the socket the
+    exchange is on, given by `on()` once there is one: a deadline that
+    fired while the caller was still connecting found nothing to hang up,
+    so `on()` hangs up then, and the reads after a late handshake are not
+    left bounded per byte only. Leaving the block cancels the timer."""
+
+    def __init__(self, seconds: float) -> None:
+        self.sock: socket.socket | None = None
+        self.expired = threading.Event()
+        self._timer = threading.Timer(seconds, _hang_up, [self, self.expired])
+
+    def __enter__(self) -> _Deadline:
+        self._timer.start()
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        self._timer.cancel()
+
+    def on(self, sock: socket.socket | None) -> None:
+        self.sock = sock
+        if self.expired.is_set():
+            _hang_up(self, self.expired)
 
 
 class _StayPut(urllib.request.HTTPRedirectHandler):
