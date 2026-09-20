@@ -38,11 +38,19 @@ from typing import Callable, Iterator  # noqa: E402
 from urllib.parse import urlparse  # noqa: E402
 
 import httpx  # noqa: E402
-from huggingface_hub import HfApi, constants, get_hf_file_metadata, hf_hub_url, snapshot_download  # noqa: E402
+from huggingface_hub import (  # noqa: E402
+    HfApi,
+    constants,
+    get_hf_file_metadata,
+    hf_hub_url,
+    set_client_factory,
+    snapshot_download,
+)
 from huggingface_hub.errors import GatedRepoError, RepositoryNotFoundError, RevisionResolutionError  # noqa: E402
 from huggingface_hub.file_download import REGEX_COMMIT_HASH, REGEX_SHA256, http_get, repo_folder_name  # noqa: E402
 from huggingface_hub.hf_api import RepoFile, ResolvedRevision  # noqa: E402
 from huggingface_hub.utils import WeakFileLock, build_hf_headers  # noqa: E402
+from huggingface_hub.utils._http import default_client_factory  # noqa: E402 - the library's own client, not a copy of it
 
 PROGRESS = "progress"
 DONE = "done"
@@ -197,6 +205,26 @@ class _Progress:
         return ChunkCounter
 
 
+def _bounded_client() -> httpx.Client:
+    """The hub library's own httpx client, with every request it sends
+    without a timeout bounded by its own metadata timeout,
+    HF_HUB_ETAG_TIMEOUT. Its repo info and tree listing (each page) name
+    none, and httpx reads none as wait forever, so a hub that accepts the
+    connection and never answers held the command for good. Requests that
+    name a timeout (the bytes, the metadata HEAD) keep theirs."""
+    client = default_client_factory()
+
+    def bound(request: httpx.Request) -> None:
+        timeout = request.extensions.get("timeout") or {}
+        request.extensions["timeout"] = {
+            phase: constants.HF_HUB_ETAG_TIMEOUT if timeout.get(phase) is None else timeout[phase]
+            for phase in ("connect", "read", "write", "pool")
+        }
+
+    client.event_hooks["request"].append(bound)
+    return client
+
+
 def _plan(repo: str, endpoint: str | None, cache: Path) -> tuple[ResolvedRevision, list[_Blob]]:
     """The commit `main` points at and every file of the repo at it, as the
     hub describes them: the tree listing for the names, the metadata call for
@@ -299,6 +327,7 @@ def download_model(
     endpoint = endpoint or constants.ENDPOINT
     cache = Path(cache_dir or constants.HF_HUB_CACHE)
     folder = repo_folder_name(repo_id=repo, repo_type="model")
+    set_client_factory(_bounded_client)
     try:
         revision, blobs = _plan(repo, endpoint, cache)
         progress = _Progress(sum(b.size for b in blobs), on_update)

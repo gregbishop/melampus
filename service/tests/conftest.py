@@ -19,7 +19,8 @@ speaking the real protocol, served on 127.0.0.1 at an ephemeral port. Every
 handler derives from `QuietHandler`, which keeps http.server's request log
 out of pytest's output, and `recording_handler` is the one that answers 200
 to anything and remembers what it was asked, for the assertion "this server
-never heard from the client".
+never heard from the client". `Silent` accepts and never answers, for the
+deadline tests.
 
 `fake_platform` is the one way the suite fakes the machine `on_apple_silicon`
 reads (sys.platform and platform.machine(), together), whether the caller is
@@ -39,6 +40,7 @@ import json
 import platform
 import shutil
 import socket
+import socketserver
 import subprocess
 import sys
 import threading
@@ -153,6 +155,18 @@ def recording_handler(seen: list[str]) -> type[QuietHandler]:
             self.do_GET()
 
     return Recording
+
+
+class Silent(socketserver.BaseRequestHandler):
+    """A listener that accepts the TCP connection and never speaks: a TLS
+    handshake against it waits for a ServerHello that never comes, an HTTP
+    request for a status line that never comes. Served threaded, it does not
+    hold `loopback_server`'s shutdown while a client is still waiting."""
+
+    def handle(self) -> None:
+        with contextlib.suppress(OSError):
+            self.request.recv(65536)
+            self.request.recv(65536)
 
 
 # What `.venv/bin/melampus-id` runs, spelled so it works from any interpreter

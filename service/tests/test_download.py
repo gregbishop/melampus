@@ -18,6 +18,8 @@ import os
 import signal
 import subprocess
 import sys
+import threading
+from http.server import ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
@@ -29,11 +31,14 @@ from conftest import (
     FAKE_TOTAL,
     VENV_CLI,
     FakeHub,
+    Silent,
     assert_download_completed,
     closed_port,
     fake_bytes,
+    loopback_server,
     snapshot_files,
 )
+from huggingface_hub import constants
 from huggingface_hub.constants import DOWNLOAD_CHUNK_SIZE
 
 from melampus import download
@@ -383,6 +388,36 @@ def test_download_with_no_host_answering_names_the_network(tmp_path: Path):
                        on_update=lambda update: None)
     message = str(failure.value)
     assert f"http://127.0.0.1:{port}" in message and "network" in message
+
+
+def test_download_gives_up_when_the_hub_accepts_and_never_answers(monkeypatch, tmp_path: Path):
+    """Security (Codex round 1, download.py:194). The hub library's repo info
+    and tree listing name no timeout and its httpx client is built with
+    none, so a hub that accepts the connection and never answers held the
+    command forever. Given a listener that accepts and never speaks, the run
+    fails naming the network within the library's own metadata timeout,
+    HF_HUB_ETAG_TIMEOUT (shortened here), rather than never. The run is on a
+    thread so the failure is a bound not met, never a hung suite."""
+    monkeypatch.setattr(constants, "HF_HUB_ETAG_TIMEOUT", 0.3)
+    outcome: list[BaseException] = []
+
+    with loopback_server(Silent, ThreadingHTTPServer) as server:
+        endpoint = f"http://127.0.0.1:{server.server_port}"
+
+        def run() -> None:
+            try:
+                download_model(FAKE_REPO, endpoint=endpoint, cache_dir=tmp_path / "hub", on_update=lambda u: None)
+            except BaseException as exc:  # noqa: BLE001 - whatever it raised is the evidence
+                outcome.append(exc)
+
+        thread = threading.Thread(target=run, daemon=True)
+        thread.start()
+        thread.join(timeout=5)
+        assert not thread.is_alive(), "the download hung on a hub that accepts and never answers"
+
+    (failure,) = outcome
+    assert isinstance(failure, DownloadError), failure
+    assert endpoint in str(failure) and "network" in str(failure)
 
 
 def test_the_hub_library_is_a_dependency_on_every_platform():
