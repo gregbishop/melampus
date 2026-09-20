@@ -315,7 +315,7 @@ function Analyze.run(previewFolder, resultsPath, profile, engine)
 	-- only for the engine the user picked. It is never an argument and never
 	-- logged; the log carries the line with the key blanked.
 	local logged = line
-	local variable = Rules.keyVariable(engine)
+	local variable = Rules.keyVariable(chosen)
 	local key = variable and LrPasswords.retrieve(variable)
 	if key and key ~= '' then
 		local keyRefusal = windowsKeyRefusal(key)
