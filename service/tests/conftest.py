@@ -213,7 +213,10 @@ def built_executable(request: pytest.FixtureRequest) -> Path:
 # can land mid-file. `bytes_host` is the real hub's CDN: the resolve HEAD
 # answers 302 to that host, as huggingface.co does for every LFS file, so the
 # bytes are fetched from a host that is not the hub. `corrupt` names files
-# served with their first byte flipped while the etag stays the true one. The
+# served with their first byte flipped while the etag stays the true one.
+# `gated` makes the repo one the user has no access to: it is listed, but
+# every resolve answers 403 with X-Error-Code GatedRepo, as huggingface.co
+# does until the user has accepted the repo's terms with their token. The
 # etags are the real hub's: the sha256 of an LFS file (the weights), git's blob
 # sha1 of a regular file. Every request is kept on `requests`, and the
 # Authorization header each one carried on `authorizations`.
@@ -272,6 +275,7 @@ class FakeHub:
         self.throttle: tuple[int, float] | None = None  # (bytes per write, seconds between)
         self.bytes_host: str | None = None
         self.corrupt: set[str] = set()
+        self.gated = False
         self.authorizations: list[str | None] = []
         hub = self
         etags = self.etags = {
@@ -304,6 +308,18 @@ class FakeHub:
             def _unknown(self) -> None:
                 self._json(404, {"error": "Repository not found"}, {"X-Error-Code": "RepoNotFound"})
 
+            def _resolvable(self) -> str | None:
+                """The file a resolve path names once the repo's gate is
+                passed; None with the error already sent."""
+                name = self._resolve()
+                if name is None:
+                    self._unknown()
+                elif hub.gated:
+                    self._json(403, {"error": "Access to this repo is restricted"},
+                               {"X-Error-Code": "GatedRepo"})
+                    return None
+                return name
+
             def do_GET(self):  # noqa: N802 - http.server's name
                 hub.requests.append(("GET", self.path, self.headers.get("Range")))
                 hub.authorizations.append(self.headers.get("Authorization"))
@@ -321,9 +337,8 @@ class FakeHub:
                     else:
                         self._unknown()
                     return
-                name = self._resolve()
+                name = self._resolvable()
                 if name is None:
-                    self._unknown()
                     return
                 if hub.outage:
                     self.send_response(503)
@@ -362,9 +377,8 @@ class FakeHub:
             def do_HEAD(self):  # noqa: N802 - http.server's name
                 hub.requests.append(("HEAD", self.path, None))
                 hub.authorizations.append(self.headers.get("Authorization"))
-                name = self._resolve()
+                name = self._resolvable()
                 if name is None:
-                    self._unknown()
                     return
                 if hub.bytes_host:
                     self.send_response(302)

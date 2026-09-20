@@ -226,6 +226,22 @@ def test_download_of_a_repo_the_hub_does_not_have_names_the_setting_to_fix(
     assert "[model] repo" in message and "--model" in message
 
 
+def test_download_of_a_gated_repo_names_the_access_to_request_not_a_missing_repo(
+    fake_hub: FakeHub, tmp_path: Path
+):
+    """A gated repo is on the hub; what is missing is the user's access to
+    it: accepting its terms on the hub, signed in with a token. huggingface_hub
+    raises GatedRepoError, a RepositoryNotFoundError, so the message must not
+    send the user to the repo setting, which is right."""
+    fake_hub.gated = True
+    with pytest.raises(DownloadError) as failure:
+        _fetch(fake_hub, tmp_path / "hub")
+    message = str(failure.value)
+    assert FAKE_REPO in message and "gated" in message and "access" in message
+    assert "hf auth login" in message and "HF_TOKEN" in message
+    assert "[model] repo" not in message and "--model" not in message
+
+
 def test_download_with_no_host_answering_names_the_network(tmp_path: Path):
     port = closed_port()
     with pytest.raises(DownloadError) as failure:

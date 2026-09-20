@@ -37,7 +37,7 @@ from urllib.parse import urlparse  # noqa: E402
 
 import httpx  # noqa: E402
 from huggingface_hub import HfApi, constants, get_hf_file_metadata, hf_hub_url, snapshot_download  # noqa: E402
-from huggingface_hub.errors import RepositoryNotFoundError  # noqa: E402
+from huggingface_hub.errors import GatedRepoError, RepositoryNotFoundError  # noqa: E402
 from huggingface_hub.file_download import REGEX_COMMIT_HASH, REGEX_SHA256, http_get, repo_folder_name  # noqa: E402
 from huggingface_hub.hf_api import RepoFile  # noqa: E402
 from huggingface_hub.utils import WeakFileLock, build_hf_headers  # noqa: E402
@@ -282,6 +282,13 @@ def download_model(
         # pointers and refs/main exactly as mlx-vlm will look for them, and
         # moves no bytes because every file is already in the cache.
         return Path(snapshot_download(repo, cache_dir=cache, endpoint=endpoint))
+    except GatedRepoError as exc:
+        # A GatedRepoError is a RepositoryNotFoundError, but the repo exists:
+        # what is missing is the user's access to it.
+        raise DownloadError(
+            f"the model repo {repo} on the hub at {endpoint} is gated: request access to it "
+            f"on the hub, sign in with `hf auth login` (or set HF_TOKEN), then {RERUN} ({exc})"
+        ) from exc
     except RepositoryNotFoundError as exc:
         raise DownloadError(
             f"the hub at {endpoint} has no model repo named {repo}: "
