@@ -89,7 +89,11 @@ in the executable's environment for the picked engine only: `LrTasks.execute`
 takes one shell line and nothing else, so the line begins `VAR='key'` (sh) or
 `set "VAR=key" &&` (cmd.exe) ahead of the executable, and the log carries the
 line with the value blanked. The key is not an argument of the executable, but
-the shell line is the child's command line for the run's duration.
+the shell line is the child's command line for the run's duration. On Windows a
+stored key holding `"` or `%` is refused before anything runs, the way a path
+holding `%` is: cmd.exe would rewrite either inside `set "VAR=key"`, and
+neither can be escaped there; the message says to enter the key again in
+Settings and shows no part of it.
 
 When the preference is set, `MelampusAnalyze.lua` passes it to the executable
 as `--backend <engine>`, and the executable's own rules apply: `ollama` is

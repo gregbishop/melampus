@@ -193,6 +193,22 @@ local function environmentPrefix(name, value)
 	return name .. '=' .. quote(value) .. ' '
 end
 
+--- Why the key must not go to cmd.exe, or nil when it may. Inside
+-- `set "VAR=value"` a double quote ends the quoted text and what follows is
+-- command text to cmd.exe, and %NAME% is expanded even inside quotes (see
+-- windowsPathRefusal); neither can be escaped on a cmd.exe command line.
+-- sh gets the key through quote(), where nothing needs refusing. The
+-- message never shows the key.
+local function windowsKeyRefusal(key)
+	if not WIN_ENV then return nil end
+	if string.find(key, '["%%]') then
+		return 'The API key kept for this engine contains a character the Windows '
+			.. 'shell rewrites (" or %), so Melampus will not hand it to its analysis '
+			.. 'program.\n\nOpen Settings and enter the key again.'
+	end
+	return nil
+end
+
 --- Where the CLI's own output goes. Not the null device: the cloud-primary
 -- cost estimate (and any refusal, e.g. the model.max_images ceiling) prints to
 -- stderr, and a non-interactive caller that discards it has erased the only
@@ -294,6 +310,8 @@ function Analyze.run(previewFolder, resultsPath, profile, engine)
 	local variable = Rules.keyVariable(engine)
 	local key = variable and LrPasswords.retrieve(variable)
 	if key and key ~= '' then
+		local keyRefusal = windowsKeyRefusal(key)
+		if keyRefusal then return false, keyRefusal end
 		line = environmentPrefix(variable, key) .. line
 		logged = environmentPrefix(variable, '') .. logged
 	end

@@ -721,6 +721,38 @@ t.test('on Windows the key is set for cmd.exe before the executable, once', func
 	end
 end)
 
+t.test('on Windows a stored key holding a character cmd.exe rewrites is refused before anything runs', function()
+	-- Inside `set "VAR=value"` a double quote ends the quoted text and what
+	-- follows is command text to cmd.exe, and %NAME% is expanded even inside
+	-- quotes: the same rewriting the paths are refused for. There is no way
+	-- to escape either on a cmd.exe command line, so the key is refused, the
+	-- way to fix it named, and the key itself shown nowhere.
+	for _, key in ipairs({ 'sk-not-a-real-key" & calc & "', 'sk-not-a-real-key-%TEMP%' }) do
+		local Analyze = loadUnderMock('MelampusAnalyze',
+			{ existing = { [WIN_EXECUTABLE] = true }, passwords = { MELAMPUS_OPENAI_KEY = key } },
+			WIN_PLUGIN, { windows = true })
+		local ok, message = Analyze.run(WIN_PREVIEWS, WIN_PREVIEWS .. '\\results.json', 'wildlife', 'openai')
+		t.isFalse(ok, 'ran with a key cmd.exe would rewrite: ' .. key)
+		t.isNil(mock.state.executed, 'a command carrying the key reached cmd.exe: ' .. key)
+		t.isNotNil(string.find(message, 'Settings', 1, true),
+			'the message does not say where to enter the key again:\n' .. tostring(message))
+		t.isNil(string.find(message, key, 1, true), 'the message shows the key:\n' .. message)
+		for _, line in ipairs(mock.state.logLines) do
+			t.isNil(string.find(line, key, 1, true), 'the key was logged: ' .. line)
+		end
+	end
+end)
+
+t.test('on macOS a key holding shell characters travels intact, single-quoted for sh', function()
+	-- sh gets the key through quote(): an apostrophe closed, escaped and
+	-- reopened; a double quote, a percent sign and a dollar mean nothing
+	-- inside single quotes. So nothing is refused there.
+	local key = "sk-not-a-real-key-o'brien\"%TEMP%$HOME"
+	local command = commandWithKeys('openai', { MELAMPUS_OPENAI_KEY = key })
+	t.equals(command, macCommand('openai', 'MELAMPUS_OPENAI_KEY', key),
+		'not the command with the key single-quoted for sh')
+end)
+
 -- ── asking the executable which engines can run here (card #405) ───────────
 -- The dialog's picker shows what `melampus --detect-engines` says. The plugin
 -- runs the executable beside it once, reads the JSON it printed, and hands the
