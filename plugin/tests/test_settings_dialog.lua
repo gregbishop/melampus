@@ -254,7 +254,7 @@ t.test('with no executable beside the plugin the dialog still opens, nothing gre
 	t.isTrue(#titlesMatching(contents, PLUGIN) > 0, 'the missing-executable message does not name the plugin folder')
 	-- The file as the message says it, not the bare word: the folder's own path
 	-- holds "melampus" wherever the repository lives, so the word alone is
-	-- satisfied by the folder line that :259 already checks.
+	-- satisfied by the folder assertion just above.
 	t.isTrue(#titlesMatching(contents, 'a file named melampus:') > 0, 'the missing-executable message does not name the file')
 end)
 
