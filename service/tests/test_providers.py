@@ -695,7 +695,10 @@ def test_cli_backend_ollama_writes_a_json_result_from_the_configured_address(
     the fake server's address as `[model] ollama_url` in a config file, on the
     committed fixture, runs the whole pipeline and writes a JSON result with
     the candidates, attributed to the model. The address comes from the
-    config: detection's default is pointed at a closed port to prove it."""
+    config: detection's default is pointed at a closed port to prove it.
+    `--no-local-config` keeps a developer's own `[model]` keys in
+    melampus.local.toml (an `ollama_model`, say) out of what is asserted:
+    `--config` overrides that file key by key, not whole (Done-when 3)."""
     from melampus.cli import main
 
     out = tmp_path / "results.json"
@@ -703,6 +706,7 @@ def test_cli_backend_ollama_writes_a_json_result_from_the_configured_address(
         settings = _settings_naming_the_fake(monkeypatch, tmp_path)
         code = main([
             str(photos), "--backend", "ollama", "--config", str(settings),
+            "--no-local-config",
             "--cache", str(tmp_path / "cache.jsonl"), "--json-out", str(out),
         ])
 
@@ -719,12 +723,16 @@ def test_cli_backend_ollama_writes_a_json_result_from_the_configured_address(
 
 def test_cli_detection_probes_the_configured_ollama_address(monkeypatch, tmp_path, capsys, no_ambient_keys):
     """One source for the address: `[model] ollama_url` is what the default
-    engine and `--detect-engines` probe too, not only the backend."""
+    engine and `--detect-engines` probe too, not only the backend.
+    `--no-local-config` says the intent: the config file, not a developer's
+    melampus.local.toml, is the one source here (Done-when 3)."""
     from melampus.cli import main
 
     with _fake_ollama(monkeypatch) as server:
         settings = _settings_naming_the_fake(monkeypatch, tmp_path)
-        assert main(["--detect-engines", "--config", str(settings)]) == 0
+        assert main([
+            "--detect-engines", "--config", str(settings), "--no-local-config",
+        ]) == 0
     verdicts = {v["engine"]: v for v in json.loads(capsys.readouterr().out)}
     assert verdicts["ollama"]["available"] is True
     assert f"127.0.0.1:{server.server_port}" in verdicts["ollama"]["reason"]
