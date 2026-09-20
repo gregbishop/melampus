@@ -651,7 +651,9 @@ def test_ollama_not_running_fires_before_any_image_is_read(monkeypatch, tmp_path
     port, and the folder's one image is a link to nowhere, so opening it
     would fail loudly. The CLI exits 3 on the not-running message, naming the
     address tried and the install pointer, and never mentions the file: the
-    check ran before any image was read."""
+    check ran before any image was read. `--no-local-config` keeps a
+    developer's own `[model] ollama_url` in melampus.local.toml from being
+    the address probed (Done-when 3)."""
     from melampus.cli import main
 
     port = closed_port()
@@ -660,7 +662,10 @@ def test_ollama_not_running_fires_before_any_image_is_read(monkeypatch, tmp_path
     folder.mkdir()
     (folder / "nowhere.jpg").symlink_to(tmp_path / "does-not-exist.jpg")
 
-    code = main([str(folder), "--backend", "ollama", "--cache", str(tmp_path / "cache.jsonl")])
+    code = main([
+        str(folder), "--backend", "ollama", "--no-local-config",
+        "--cache", str(tmp_path / "cache.jsonl"),
+    ])
 
     err = capsys.readouterr().err
     assert code == 3, err
@@ -918,10 +923,13 @@ def test_cli_detect_engines_prints_the_verdicts_as_json_in_order(
 
 
 def test_cli_detect_engines_reports_ollama_when_it_answers(monkeypatch, capsys):
+    """The fake at the default address is what `--detect-engines` finds;
+    `--no-local-config` keeps a developer's own `[model] ollama_url` in
+    melampus.local.toml from being the address probed instead (Done-when 3)."""
     from melampus.cli import main
 
     with _fake_ollama(monkeypatch):
-        assert main(["--detect-engines"]) == 0
+        assert main(["--detect-engines", "--no-local-config"]) == 0
     verdicts = {v["engine"]: v for v in json.loads(capsys.readouterr().out)}
     assert verdicts["ollama"]["available"] is True
 
