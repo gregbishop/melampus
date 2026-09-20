@@ -557,13 +557,26 @@ def _ollama_served_by(monkeypatch, handler: type[QuietHandler], prefix: str = ""
 SCHEDULING_SLACK = 0.5
 
 
+@contextlib.contextmanager
+def _timed():
+    """How long the block took, as `seconds` on the object yielded, read
+    after the block: the one clock for every deadline assertion, whether
+    the call inside returns or raises (a `pytest.raises` nested inside it
+    swallows the raise before the clock stops)."""
+    took = types.SimpleNamespace(seconds=None)
+    started = time.monotonic()
+    try:
+        yield took
+    finally:
+        took.seconds = time.monotonic() - started
+
+
 def _timed_probe(monkeypatch, handler: type[QuietHandler]) -> tuple[bool, float]:
     """The probe against `handler` standing in for Ollama: what it answered
     and how many seconds it took."""
-    with _ollama_served_by(monkeypatch, handler):
-        started = time.monotonic()
+    with _ollama_served_by(monkeypatch, handler), _timed() as took:
         answered = providers.ollama_answers()
-        return answered, time.monotonic() - started
+    return answered, took.seconds
 
 
 def _ollama_chat_reply(model: str, text: str) -> dict:
@@ -888,11 +901,9 @@ def test_ollama_probe_gives_up_at_its_deadline_when_the_handshake_stalls_after_a
     deadline = 0.8
     monkeypatch.setattr(providers, "OLLAMA_PROBE_SECONDS", deadline)
     _hold_connect(monkeypatch, 0.6)
-    with loopback_server(Silent) as server:
-        started = time.monotonic()
+    with loopback_server(Silent) as server, _timed() as took:
         answered = providers.ollama_answers(f"https://127.0.0.1:{server.server_port}")
-        elapsed = time.monotonic() - started
-    assert elapsed < deadline + SCHEDULING_SLACK, f"the probe shook hands past its deadline: {elapsed:.2f}s"
+    assert took.seconds < deadline + SCHEDULING_SLACK, f"the probe shook hands past its deadline: {took.seconds:.2f}s"
     assert answered is False
 
 
@@ -1469,65 +1480,45 @@ def test_ollama_backend_gives_up_at_its_deadline_when_the_server_trickles(tmp_pa
     with loopback_server(handler) as server:
         backend = OllamaBackend(
             "qwen3-vl:8b-instruct", f"http://127.0.0.1:{server.server_port}", timeout=deadline)
-        started = time.monotonic()
-        with pytest.raises(TimeoutError) as err:
+        with _timed() as took, pytest.raises(TimeoutError) as err:
             backend.complete(image, "prompt", 10)
-        elapsed = time.monotonic() - started
-    assert elapsed < deadline + SCHEDULING_SLACK, f"the frame read past its deadline: {elapsed:.2f}s"
+    assert took.seconds < deadline + SCHEDULING_SLACK, f"the frame read past its deadline: {took.seconds:.2f}s"
     assert f"did not answer within {deadline:g}s" in str(err.value), str(err.value)
 
 
-def test_ollama_backend_deadline_covers_the_handshake_after_a_slow_connect(monkeypatch, tmp_path):
-    """Codex round 2 (backend.py:406): `_Noted` handed the socket to the
-    deadline only once connect() had returned, and for https connect() is
-    the TCP connection and then the TLS handshake, each bounded by the
-    socket timeout on its own; a connection that took most of the budget
-    followed by a handshake that stalls held the frame for a second whole
-    `timeout_seconds` before the deadline could touch it. The kernel's
-    connect timing is not reproducible, so the TCP phase is held past the
-    deadline here, as the probe's test does. Given a connect that returns
-    just after the deadline, and a listener that accepts and never
-    completes the handshake, the frame fails as timed out within the
-    deadline plus the hold, not a whole timeout later."""
-    deadline = 0.8
-    hold = 0.05  # how long past the deadline connect() is held
-    _hold_connect(monkeypatch, deadline + hold)
-    image = tmp_path / "image.jpg"
-    image.write_bytes(b"jpeg")
-    with loopback_server(Silent) as server:
-        backend = OllamaBackend(
-            "qwen3-vl:8b-instruct", f"https://127.0.0.1:{server.server_port}", timeout=deadline)
-        started = time.monotonic()
-        with pytest.raises(TimeoutError) as err:
-            backend.complete(image, "prompt", 10)
-        elapsed = time.monotonic() - started
-    assert elapsed < deadline + hold + SCHEDULING_SLACK, f"the handshake ran past the deadline: {elapsed:.2f}s"
-    assert f"did not answer within {deadline:g}s" in str(err.value), str(err.value)
-
-
-def test_ollama_backend_deadline_covers_the_handshake_when_connect_lands_just_before_it(
-    monkeypatch, tmp_path
+@pytest.mark.parametrize(
+    ("hold", "ceiling"),
+    [(0.85, 0.85), (0.6, 0.8)],
+    ids=["connect-after-deadline", "connect-just-before"],
+)
+def test_ollama_backend_deadline_covers_the_handshake_whenever_connect_lands(
+    monkeypatch, tmp_path, hold, ceiling
 ):
-    """Codex round 3 (backend.py:426), security: the socket the deadline was
-    given at creation is detached by SSLContext.wrap_socket (its descriptor
-    moves to the new SSLSocket) before the handshake runs inside it, so a
-    hang-up during the handshake touched nothing, and a connection landing
-    just before the deadline still bought a stalled handshake a whole
-    socket timeout more. Given a connect held 0.6s of a 0.8s timeout and a
-    listener behind an https address that accepts and never completes the
-    handshake, the frame fails as timed out within the budget."""
+    """Codex round 2 (backend.py:406) and round 3 (backend.py:426), security:
+    for https connect() is the TCP connection and then the TLS handshake,
+    each bounded by the socket timeout on its own, and the deadline could
+    not touch the handshake: first because `_Noted` handed the socket over
+    only once connect() had returned, then because SSLContext.wrap_socket
+    detaches the socket it was handed (its descriptor moves to the new
+    SSLSocket) before the handshake runs inside it. Either way a
+    connection that took most of the budget, or landed just after it, and
+    then a handshake that stalls, held the frame a whole socket timeout
+    more. The kernel's connect timing is not reproducible, so the TCP phase
+    is held here, as the probe's tests hold it. Given a 0.8s timeout, a
+    connect held `hold` seconds (just past the deadline, or 0.6s of it) and
+    a listener behind an https address that accepts and never completes
+    the handshake, the frame fails as timed out by `ceiling` (the deadline,
+    or the late connect's own moment), not a whole timeout later."""
     deadline = 0.8
-    _hold_connect(monkeypatch, 0.6)
+    _hold_connect(monkeypatch, hold)
     image = tmp_path / "image.jpg"
     image.write_bytes(b"jpeg")
     with loopback_server(Silent) as server:
         backend = OllamaBackend(
             "qwen3-vl:8b-instruct", f"https://127.0.0.1:{server.server_port}", timeout=deadline)
-        started = time.monotonic()
-        with pytest.raises(TimeoutError) as err:
+        with _timed() as took, pytest.raises(TimeoutError) as err:
             backend.complete(image, "prompt", 10)
-        elapsed = time.monotonic() - started
-    assert elapsed < deadline + SCHEDULING_SLACK, f"the handshake ran past the deadline: {elapsed:.2f}s"
+    assert took.seconds < ceiling + SCHEDULING_SLACK, f"the handshake ran past the deadline: {took.seconds:.2f}s"
     assert f"did not answer within {deadline:g}s" in str(err.value), str(err.value)
 
 
