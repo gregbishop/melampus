@@ -526,6 +526,17 @@ def _lay_out(storage: Path, commit: str, blobs: list[_Blob]) -> Path:
     return snapshot
 
 
+def _cache_paths(repo: str, cache_dir: Path | None) -> tuple[Path, Path, Path]:
+    """Where `repo` lives in the Hugging Face cache (`HF_HOME`'s, or
+    `cache_dir`), said once for the download, the status and the removal:
+    the cache, the repo's storage folder in it (the hub library's own
+    layout, `models--org--name`), and the `.locks` folder holding the
+    per-file locks `_fetch` takes and `_download_running` tries."""
+    cache = Path(cache_dir or constants.HF_HUB_CACHE)
+    folder = repo_folder_name(repo_id=repo, repo_type="model")
+    return cache, cache / folder, cache / ".locks" / folder
+
+
 def download_model(
     repo: str,
     *,
@@ -548,17 +559,15 @@ def download_model(
     file's is the CDN's signature for it.
     """
     endpoint = endpoint or constants.ENDPOINT
-    cache = Path(cache_dir or constants.HF_HUB_CACHE)
     marker = cancel_marker or cancel_marker_path()
     marker.unlink(missing_ok=True)
     set_client_factory(lambda: _hub_client(endpoint))
     with _hub_warnings_redacted():
         try:
             # The hub library's own check of the id (`namespace/name`, no URL,
-            # no path under it), before the hub is asked anything; the folder
-            # it names is the repo's in the cache and beside it, in `.locks`.
-            folder = repo_folder_name(repo_id=repo, repo_type="model")
-            storage = cache / folder
+            # no path under it), before the hub is asked anything; the folders
+            # it names are the repo's in the cache and beside it, in `.locks`.
+            cache, storage, locks = _cache_paths(repo, cache_dir)
             commit, blobs = _plan(repo, endpoint, cache, storage)
             # Files with the same bytes share one etag, so one blob in the cache:
             # its bytes move once and count once, in the total and from disk.
@@ -572,7 +581,7 @@ def download_model(
             headers = build_hf_headers()
             for blob in distinct.values():
                 if not blob.path.exists():
-                    _fetch(blob, progress, headers, cache / ".locks" / folder)
+                    _fetch(blob, progress, headers, locks)
             # Every blob is complete and verified: the snapshot of the planned
             # commit points at those blobs and nothing else.
             return _lay_out(storage, commit, blobs)
@@ -635,8 +644,7 @@ def model_status(repo: str, *, endpoint: str | None = None, cache_dir: Path | No
     does not within that time, `bytes_total` is None: the status never fails
     for the network being down."""
     endpoint = endpoint or constants.ENDPOINT
-    cache = Path(cache_dir or constants.HF_HUB_CACHE)
-    storage = cache / repo_folder_name(repo_id=repo, repo_type="model")
+    cache, storage, _ = _cache_paths(repo, cache_dir)
     _, cached = _cached(repo, cache)
     main = next((r for r in cached.revisions if "main" in r.refs), None) if cached else None
     installed, path = main is not None, str(main.snapshot_path) if main else None
@@ -665,12 +673,11 @@ def remove_model(repo: str, *, cache_dir: Path | None = None) -> Path:
     (every revision, so the whole repo folder goes) and return that folder.
     Raises DownloadError when nothing is installed or a download of it is
     running."""
-    cache = Path(cache_dir or constants.HF_HUB_CACHE)
-    folder = repo_folder_name(repo_id=repo, repo_type="model")
+    cache, _, locks = _cache_paths(repo, cache_dir)
     info, cached = _cached(repo, cache)
     if cached is None:
         raise DownloadError(f"{repo} is not in the cache at {cache}: nothing to remove")
-    if _download_running(cache / ".locks" / folder):
+    if _download_running(locks):
         raise DownloadError(f"a download of {repo} is running; cancel it first, then remove")
     info.delete_revisions(*(r.commit_hash for r in cached.revisions)).execute()
     return cached.repo_path
