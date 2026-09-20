@@ -124,9 +124,9 @@ class QuietHandler(BaseHTTPRequestHandler):
 
 
 def recording_handler(seen: list[str]) -> type[QuietHandler]:
-    """A handler that answers 200 `{}` to any GET and appends the path it was
-    asked to `seen`: the server a test stands up to prove the client under
-    test never reached it (a proxy, a redirect's destination)."""
+    """A handler that answers 200 `{}` to any GET or POST and appends the path
+    it was asked to `seen`: the server a test stands up to prove the client
+    under test never reached it (a proxy, a redirect's destination)."""
 
     class Recording(QuietHandler):
         def do_GET(self) -> None:  # noqa: N802 - http.server's name
@@ -134,6 +134,10 @@ def recording_handler(seen: list[str]) -> type[QuietHandler]:
             self.send_response(200)
             self.end_headers()
             self.wfile.write(b"{}")
+
+        def do_POST(self) -> None:  # noqa: N802 - http.server's name
+            self.rfile.read(int(self.headers.get("Content-Length") or 0))
+            self.do_GET()
 
     return Recording
 

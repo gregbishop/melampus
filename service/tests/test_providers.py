@@ -1153,3 +1153,32 @@ def test_ollama_backend_reports_a_malformed_reply(tmp_path):
     with pytest.raises(RuntimeError) as err:
         backend.complete(image, "prompt", 10)
     assert "not JSON" in str(err.value)
+
+
+def test_ollama_backend_stays_at_the_address_whatever_proxy_the_environment_names(
+    monkeypatch, tmp_path
+):
+    """Security: readme.md § Windows promises that through Ollama nothing
+    leaves the machine, and the probe (card #404) keeps that promise by
+    consulting no proxy. The backend must keep it too: urlopen's default
+    opener honours `http_proxy` (and, on a Mac, the system proxy settings,
+    whose default bypass list does not cover 127.0.0.1), which would send
+    every frame's bytes to the proxy and let the proxy's answer stand in for
+    the model's. Given a proxy in the environment that answers 200 to
+    everything and nothing at the address, the frame fails as not-running
+    and the proxy never hears from it."""
+    seen: list[str] = []
+    for name in ("no_proxy", "NO_PROXY"):
+        monkeypatch.delenv(name, raising=False)
+    # urlopen builds its default opener once, reading the proxy variables then;
+    # start it fresh so the environment set here is the one it would see.
+    monkeypatch.setattr(urllib.request, "_opener", None)
+    image = tmp_path / "image.jpg"
+    image.write_bytes(b"jpeg")
+    with loopback_server(recording_handler(seen)) as proxy:
+        monkeypatch.setenv("http_proxy", f"http://127.0.0.1:{proxy.server_port}")
+        backend = OllamaBackend(
+            "qwen3-vl:8b-instruct", f"http://127.0.0.1:{_closed_port()}", timeout=5.0)
+        with pytest.raises(ConnectionError):
+            backend.complete(image, "prompt", 10)
+    assert seen == [], f"the frame left the machine through the proxy: {seen}"

@@ -366,8 +366,15 @@ class OllamaBackend(VLMBackend):
         self.temperature = temperature
         self.timeout = timeout
         # Shaped like urllib.request.urlopen(request, timeout=...): the tests hand
-        # in a fake at this edge, the way the cloud backends take a client.
-        self._urlopen = client or urllib.request.urlopen
+        # in a fake at this edge, the way the cloud backends take a client. Not
+        # urlopen itself: its opener honours http_proxy and the system proxy
+        # settings, which would send every frame's bytes off the machine and
+        # let the proxy's answer stand in for the model's (the probe in
+        # providers.ollama_answers keeps off the proxy for the same reason);
+        # ProxyHandler({}) consults neither.
+        self._urlopen = client or urllib.request.build_opener(
+            urllib.request.ProxyHandler({})
+        ).open
 
     def _request(self, image_path: Path, prompt: str, max_tokens: int) -> urllib.request.Request:
         image = base64.b64encode(Path(image_path).read_bytes()).decode("ascii")
