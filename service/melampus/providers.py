@@ -91,6 +91,14 @@ def _refusal(reason: str, *, works_here: tuple[str, ...]) -> BackendUnavailable:
     )
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Refuses every redirect: returning None makes urllib raise the 3xx as an
+    HTTPError instead of following its Location."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: PLR0913 - urllib's signature
+        return None
+
+
 def ollama_answers() -> bool:
     """Whether an Ollama server answers at OLLAMA_URL: GET /api/version
     (Ollama's docs/api.md § Version) within OLLAMA_PROBE_SECONDS, status 200.
@@ -98,8 +106,11 @@ def ollama_answers() -> bool:
     probe reports. Straight to the address, never through a proxy: urlopen's
     default honours http_proxy and the system proxy settings, which would send
     a loopback probe off the machine and let the proxy's answer stand in for
-    Ollama's."""
-    direct = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    Ollama's. And never past the address: redirects are refused, because
+    build_opener follows them by default, and whatever listens on the port
+    when Ollama does not could point the probe at any host and have that
+    host's 200 stand in for Ollama's. A 3xx is a non-200: unavailable."""
+    direct = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect)
     try:
         with direct.open(
             f"{OLLAMA_URL}/api/version", timeout=OLLAMA_PROBE_SECONDS
