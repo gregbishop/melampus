@@ -390,12 +390,17 @@ def download_model(
         # no path under it), before the hub is asked anything.
         folder = repo_folder_name(repo_id=repo, repo_type="model")
         commit, blobs = _plan(repo, endpoint, cache)
-        progress = _Progress(sum(b.size for b in blobs), on_update)
-        progress.advance(sum(b.on_disk() for b in blobs))
+        # Files with the same bytes share one etag, so one blob in the cache:
+        # its bytes move once and count once, in the total and from disk.
+        distinct: dict[str, _Blob] = {}
+        for blob in blobs:
+            distinct.setdefault(blob.etag, blob)
+        progress = _Progress(sum(b.size for b in distinct.values()), on_update)
+        progress.advance(sum(b.on_disk() for b in distinct.values()))
         # The user's token is for the hub: `_hub_client` keeps it off any
         # request to another origin, an LFS file's bytes from the CDN included.
         headers = build_hf_headers()
-        for blob in blobs:
+        for blob in distinct.values():
             if not blob.path.exists():
                 _fetch(blob, progress, headers, cache / ".locks" / folder)
         # Every blob is complete and verified: the snapshot of the planned

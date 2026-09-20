@@ -82,7 +82,7 @@ a protocol, defined once in `download.py` (`Update`) and stable:
 
 | Line | When |
 |---|---|
-| `progress <bytes_done> <bytes_total>` | One per chunk received (the hub library's 10 MiB), and one before any byte moves so the total is known at once. `bytes_total` is the whole model; `bytes_done` counts what the cache already holds, complete files and the partial one being resumed included, so a re-run of a finished model prints one line with both equal. `bytes_done` never exceeds `bytes_total`: when a host answers the resume's Range request with the whole file instead, one update steps back by the partial's bytes before the file is counted from byte zero. |
+| `progress <bytes_done> <bytes_total>` | One per chunk received (the hub library's 10 MiB), and one before any byte moves so the total is known at once. `bytes_total` is the whole model as the hub serves it: two files with the same bytes share one etag, so one blob in the cache, counted once; `bytes_done` counts what the cache already holds, complete files and the partial one being resumed included, so a re-run of a finished model prints one line with both equal. `bytes_done` never exceeds `bytes_total`: when a host answers the resume's Range request with the whole file instead, one update steps back by the partial's bytes before the file is counted from byte zero. |
 | `done <path>` | Last line on success: the snapshot folder in the cache. The path is the rest of the line; it may hold spaces. |
 | `cancelled` | Last line when a signal stopped it. |
 

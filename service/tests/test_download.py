@@ -238,6 +238,54 @@ def test_download_takes_back_the_partial_when_the_host_ignores_the_range_and_nev
     assert max(u.bytes_done for u in updates) == FAKE_TOTAL == updates[-1].bytes_done, "progress passed the total"
 
 
+# Two weight files with the same bytes: the hub names one etag for both, so
+# the cache holds one blob that two pointers share.
+SHARED_FILES = {
+    "config.json": FAKE_FILES["config.json"],
+    "model-00001.safetensors": FAKE_FILES["model.safetensors"],
+    "model-00002.safetensors": FAKE_FILES["model.safetensors"],
+}
+SHARED_TOTAL = len(SHARED_FILES["config.json"]) + len(SHARED_FILES["model-00001.safetensors"])
+
+
+@pytest.mark.parametrize("fake_hub", [SHARED_FILES], indirect=True, ids=["two files, one blob"])
+def test_download_counts_a_blob_two_files_share_once_and_ends_at_the_total(fake_hub: FakeHub, tmp_path: Path):
+    """Codex round 3 (download.py:386). Two files with identical bytes share
+    one etag, so one blob, fetched once; the total counted every file, so a
+    fresh run ended `done` with bytes_done below bytes_total. The total is
+    the bytes that move, each blob once: the run climbs to exactly it, the
+    shared blob's bytes are fetched once, and both files are in the snapshot."""
+    path, updates = _fetch(fake_hub, tmp_path / "hub")
+
+    assert snapshot_files(path) == SHARED_FILES
+    assert updates[0] == Update.progress(0, SHARED_TOTAL), "the total counted the shared blob twice"
+    assert updates[-1] == Update.progress(SHARED_TOTAL, SHARED_TOTAL), "the run ended below the total"
+    assert fake_hub.gets("model-00001.safetensors") == [None] and fake_hub.gets("model-00002.safetensors") == []
+
+
+@pytest.mark.parametrize("fake_hub", [SHARED_FILES], indirect=True, ids=["two files, one blob"])
+def test_download_resumes_a_blob_two_files_share_counting_its_partial_once(fake_hub: FakeHub, tmp_path: Path):
+    """The same, cut and resumed: the partial of the shared blob is counted
+    once from disk, the rest is asked for by Range once, and the re-run ends
+    at the total with both files in the snapshot."""
+    fake_hub.cut_after = DOWNLOAD_CHUNK_SIZE + 4096
+    with pytest.raises(DownloadError):
+        _fetch(fake_hub, tmp_path / "hub")
+    (partial,) = _incomplete(tmp_path / "hub")
+    kept = partial.stat().st_size
+
+    fake_hub.outage = False
+    fake_hub.requests.clear()
+    path, updates = _fetch(fake_hub, tmp_path / "hub")
+
+    assert snapshot_files(path) == SHARED_FILES
+    assert updates[0] == Update.progress(kept + len(SHARED_FILES["config.json"]), SHARED_TOTAL), (
+        "the partial was not counted exactly once")
+    assert updates[-1] == Update.progress(SHARED_TOTAL, SHARED_TOTAL), "the re-run ended below the total"
+    assert fake_hub.gets("model-00001.safetensors") == [f"bytes={kept}-"] and fake_hub.gets("model-00002.safetensors") == []
+    assert not _incomplete(tmp_path / "hub")
+
+
 @pytest.mark.parametrize("name", ["model.safetensors", "config.json"])
 def test_download_rejects_bytes_that_do_not_match_the_hub_checksum_and_keeps_no_partial_of_them(
     fake_hub: FakeHub, tmp_path: Path, name: str
