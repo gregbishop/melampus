@@ -9,6 +9,7 @@ retuned for a cloud primary without ever overriding an explicit setting.
 from __future__ import annotations
 
 import contextlib
+import http.client
 import json
 import socket
 import sys
@@ -533,6 +534,21 @@ def test_ollama_probe_gives_up_after_its_timeout(monkeypatch):
         assert providers.ollama_answers() is False
 
 
+class Trickling(QuietHandler):
+    """A listener that sends a valid 200 one header byte every hundred
+    milliseconds, over two seconds: each byte within the socket timeout, the
+    whole well past the probe's deadline."""
+
+    def do_GET(self):  # noqa: N802 - http.server's name
+        # Once the probe hangs up, the next write raises; that ends the trickle.
+        with contextlib.suppress(OSError):
+            self.wfile.write(b"HTTP/1.1 200 OK\r\n")
+            for byte in b"Content-Length: 2\r\n\r\n":
+                time.sleep(0.1)
+                self.wfile.write(bytes([byte]))
+            self.wfile.write(b"{}")
+
+
 def test_ollama_probe_gives_up_at_its_deadline_when_the_headers_trickle(monkeypatch):
     """Security: OLLAMA_PROBE_SECONDS is a deadline on the whole probe, not on
     each read. A socket timeout is per operation, so whatever listens on the
@@ -544,16 +560,6 @@ def test_ollama_probe_gives_up_at_its_deadline_when_the_headers_trickle(monkeypa
     deadline = 0.3
     monkeypatch.setattr(providers, "OLLAMA_PROBE_SECONDS", deadline)
 
-    class Trickling(QuietHandler):
-        def do_GET(self):  # noqa: N802 - http.server's name
-            # Once the probe hangs up, the next write raises; that ends the trickle.
-            with contextlib.suppress(OSError):
-                self.wfile.write(b"HTTP/1.1 200 OK\r\n")
-                for byte in b"Content-Length: 2\r\n\r\n":
-                    time.sleep(0.1)
-                    self.wfile.write(bytes([byte]))
-                self.wfile.write(b"{}")
-
     with loopback_server(Trickling) as ollama:
         monkeypatch.setattr(providers, "OLLAMA_URL", f"http://127.0.0.1:{ollama.server_port}")
         started = time.monotonic()
@@ -563,6 +569,40 @@ def test_ollama_probe_gives_up_at_its_deadline_when_the_headers_trickle(monkeypa
     # the main thread's read returns some tens of milliseconds after the
     # deadline, while waiting out the trickle takes over two seconds.
     assert elapsed < deadline + 0.5, f"the probe read past its deadline: {elapsed:.2f}s"
+    assert answered is False
+
+
+def test_ollama_probe_gives_up_at_its_deadline_when_it_fires_during_connect(monkeypatch):
+    """Security: the deadline must bound the probe whichever side of the
+    handshake it lands on. The timer hangs up the connection's socket, and
+    there is none until connect() returns; a deadline that fires while the
+    probe is still connecting hangs up nothing, and if the handshake then
+    completes, the reads that follow are bounded per byte only, and a
+    trickling listener holds detection for as long as it likes again. The
+    kernel's handshake timing is not reproducible, so connect() is held past
+    the deadline here. Given a connect that completes just after the deadline
+    against a trickling server, the probe reports unavailable and returns
+    within the deadline plus the hold, not after the trickle."""
+    deadline = 0.3
+    hold = deadline + 0.05
+    monkeypatch.setattr(providers, "OLLAMA_PROBE_SECONDS", deadline)
+    connect = http.client.HTTPConnection.connect
+
+    def held(connection):
+        time.sleep(hold)
+        connect(connection)
+
+    monkeypatch.setattr(http.client.HTTPConnection, "connect", held)
+
+    with loopback_server(Trickling) as ollama:
+        monkeypatch.setattr(providers, "OLLAMA_URL", f"http://127.0.0.1:{ollama.server_port}")
+        started = time.monotonic()
+        answered = providers.ollama_answers()
+        elapsed = time.monotonic() - started
+    # The same half a second of slack for thread scheduling as the trickle
+    # test: the probe returns some tens of milliseconds after the held
+    # connect, while waiting out the trickle takes over two seconds.
+    assert elapsed < deadline + hold + 0.5, f"the probe read past its deadline: {elapsed:.2f}s"
     assert answered is False
 
 
