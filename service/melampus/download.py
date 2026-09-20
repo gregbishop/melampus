@@ -309,13 +309,15 @@ def _hub_client(endpoint: str) -> httpx.Client:
     return client
 
 
-def _plan(repo: str, endpoint: str | None, cache: Path) -> tuple[str, list[_Blob]]:
+def _plan(repo: str, endpoint: str | None, cache: Path, storage: Path) -> tuple[str, list[_Blob]]:
     """The commit `main` points at and every file of the repo at it, as the
     hub describes them: the tree listing for the names, the metadata call for
     each file's etag (its blob name in the cache), size and URL. `main` is
     resolved once, by the hub library's own `resolve_revision`, which also
     writes the cache's `refs/main`; everything after, the snapshot included,
-    is at that commit, so a branch that moves during the run changes nothing."""
+    is at that commit, so a branch that moves during the run changes nothing.
+    `storage` is the repo's own folder under `cache`, where its blobs and
+    snapshots go."""
     api = HfApi(endpoint=endpoint)
     commit = api.resolve_revision(repo, cache_dir=cache).resolved
     # The commit names the snapshot folder, the filename the pointer under
@@ -326,7 +328,6 @@ def _plan(repo: str, endpoint: str | None, cache: Path) -> tuple[str, list[_Blob
     # refused, and the pointer must land under the snapshot folder.
     if not REGEX_COMMIT_HASH.match(commit):
         raise DownloadError(f"the hub at {endpoint} says main of {repo} is {commit!r}, not a commit hash; {NOT_A_HUB}")
-    storage = cache / repo_folder_name(repo_id=repo, repo_type="model")
     blobs = []
     for entry in api.list_repo_tree(repo, recursive=True, revision=commit):
         if not isinstance(entry, RepoFile):
@@ -475,9 +476,11 @@ def download_model(
     with _hub_warnings_redacted():
         try:
             # The hub library's own check of the id (`namespace/name`, no URL,
-            # no path under it), before the hub is asked anything.
+            # no path under it), before the hub is asked anything; the folder
+            # it names is the repo's in the cache and beside it, in `.locks`.
             folder = repo_folder_name(repo_id=repo, repo_type="model")
-            commit, blobs = _plan(repo, endpoint, cache)
+            storage = cache / folder
+            commit, blobs = _plan(repo, endpoint, cache, storage)
             # Files with the same bytes share one etag, so one blob in the cache:
             # its bytes move once and count once, in the total and from disk.
             distinct: dict[str, _Blob] = {}
@@ -493,7 +496,7 @@ def download_model(
                     _fetch(blob, progress, headers, cache / ".locks" / folder)
             # Every blob is complete and verified: the snapshot of the planned
             # commit points at those blobs and nothing else.
-            return _lay_out(cache / folder, commit, blobs)
+            return _lay_out(storage, commit, blobs)
         except GatedRepoError as exc:
             # A GatedRepoError is a RepositoryNotFoundError, but the repo exists:
             # what is missing is the user's access to it.
