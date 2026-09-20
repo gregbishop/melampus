@@ -77,7 +77,9 @@ with their reason under the picker, and when the reason names a web address
 `Rules.engineItems` turns the executable's JSON into those items, so the
 dialog holds no engine knowledge of its own and the rules tests cover it
 without Lightroom. Without the executable nothing is greyed and the note is
-the missing-executable message; the dialog never fails to open.
+the missing-executable message; on Windows, when the plugin folder or the
+temp folder path holds `%`, it is the same refusal a run gives, naming the
+path and the fix; the dialog never fails to open.
 
 `openai` and `claude` need an API key. Picking one shows a password field for
 it. The key is kept through the SDK's `LrPasswords` (`store` / `retrieve` by
