@@ -334,23 +334,9 @@ function Analyze.removeModel()
 	if not code then return false, target end
 	if code ~= 0 then
 		return false, 'Melampus could not remove the model (exit ' .. tostring(code) .. ').\n\n'
-			.. Analyze.tail(LrFileUtils.readFile(cliLog))
+			.. Rules.tail(LrFileUtils.readFile(cliLog))
 	end
 	return true
-end
-
---- The last lines of a log, for a message.
-function Analyze.tail(text, lines)
-	text = text or ''
-	local kept, count = #text, 0
-	for i = #text, 1, -1 do
-		if string.sub(text, i, i) == '\n' then
-			count = count + 1
-			if count > (lines or 8) then break end
-		end
-		kept = i
-	end
-	return string.sub(text, kept)
 end
 
 -- ── the model download (card #408) ─────────────────────────────────────────
@@ -414,7 +400,7 @@ function Analyze.downloadModel(cancelPath, onProgress, onFinish)
 		end
 		local update = Rules.latestDownloadUpdate(LrFileUtils.readFile(progressFile))
 		Log.info('download exit ' .. tostring(code) .. ': ' .. tostring(update and update.state))
-		onFinish(code, update, Analyze.tail(LrFileUtils.readFile(logFile)))
+		onFinish(code, update, Rules.tail(LrFileUtils.readFile(logFile)))
 	end)
 	return {
 		cancel = function()

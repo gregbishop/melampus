@@ -272,6 +272,29 @@ function Rules.downloadProgress(update)
 	return Rules.formatBytes(done) .. ' of ' .. Rules.formatBytes(total), portion
 end
 
+--- The last lines of a log, for a failure message: enough to name the
+-- cause, not the whole run. A trailing line break ends the last line; it
+-- does not start another. Fewer lines pass through whole; nil (no file
+-- yet) is empty.
+local TAIL_LINES = 8
+
+function Rules.tail(text)
+	text = text or ''
+	local last = #text
+	if string.sub(text, last, last) == '\n' then last = last - 1 end
+	local start, count = 1, 0
+	for i = last, 1, -1 do
+		if string.sub(text, i, i) == '\n' then
+			count = count + 1
+			if count == TAIL_LINES then
+				start = i + 1
+				break
+			end
+		end
+	end
+	return string.sub(text, start)
+end
+
 -- Keyword hierarchy uses '>' as its separator, so a species name containing one
 -- would silently create extra levels. Strip anything structural.
 local function sanitise(text)

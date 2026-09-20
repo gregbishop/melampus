@@ -460,6 +460,25 @@ t.test('progress reads as bytes of the total and a portion between 0 and 1', fun
 	t.equals(portion, 0, 'no division by zero before the total is known')
 end)
 
+t.test('the tail of a log is its last eight lines; a shorter one passes through whole', function()
+	-- What a failure message shows of the CLI log: enough to name the
+	-- cause, not the whole run.
+	local lines = {}
+	for i = 1, 20 do lines[i] = 'line ' .. i end
+	local text = table.concat(lines, '\n') .. '\n'
+	local kept = {}
+	for line in string.gmatch(Rules.tail(text), '[^\n]+') do kept[#kept + 1] = line end
+	t.equals(#kept, 8, 'lines kept')
+	t.equals(kept[1], 'line 13')
+	t.equals(kept[8], 'line 20')
+	t.equals(Rules.tail(table.concat(lines, '\n')) .. '\n', Rules.tail(text),
+		'a log cut off mid-line keeps the same eight lines as one ending in a line break')
+	t.equals(Rules.tail('one\ntwo\nthree\n'), 'one\ntwo\nthree\n', 'fewer lines pass through whole')
+	t.equals(Rules.tail('no newline at the end'), 'no newline at the end')
+	t.equals(Rules.tail(''), '')
+	t.equals(Rules.tail(nil), '', 'no log file yet')
+end)
+
 t.test('the engine the picker resolves to is the picked one, else the first detection says can run', function()
 	t.equals(Rules.resolvedEngine('ollama', verdicts()), 'ollama')
 	t.equals(Rules.resolvedEngine('', verdicts()), 'mlx', 'the default on an Apple Silicon Mac is mlx')
