@@ -20,9 +20,13 @@ would ask the hub for every file's metadata again and trust that answer).
 What this module adds is the one thing it lacks: the bytes go to the cache's
 `<etag>.incomplete` blob, appended to across runs.
 
-`HF_HUB_DISABLE_XET=1` is set before the library is imported, as readme.md
-§ Install requires (the Xet transfer stalls on some networks,
-docs/troubleshooting.md); the bytes here go over plain HTTP regardless.
+Two settings the library reads at import are set before it is imported,
+unless the user set them: `HF_HUB_DISABLE_XET=1`, as readme.md § Install
+requires (the Xet transfer stalls on some networks, docs/troubleshooting.md;
+the bytes here go over plain HTTP regardless), and `HF_HUB_DISABLE_TELEMETRY=1`,
+because runtime code sends no telemetry: with it unset the library fetches the
+hub's registry of AI coding agents and names the agent it runs under, and the
+torch version, in the User-Agent of every request.
 """
 
 from __future__ import annotations
@@ -30,6 +34,7 @@ from __future__ import annotations
 import os
 
 os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
+os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
 
 import hashlib  # noqa: E402 - after the environment the hub reads at import
 import signal  # noqa: E402

@@ -111,7 +111,12 @@ is checked against the checksum the hub names in its etag (the sha256 of a
 weights file, git's blob sha1 of a regular one) before it becomes a blob in
 the cache, never through the Xet
 transfer that stalls on some networks (docs/troubleshooting.md); the command
-sets `HF_HUB_DISABLE_XET=1` for itself. The commit `main` points at is
+sets `HF_HUB_DISABLE_XET=1` for itself. It also sets
+`HF_HUB_DISABLE_TELEMETRY=1` for itself (a value you set, or `DO_NOT_TRACK`,
+stands): the hub library would otherwise ask the hub which AI coding agents
+exist and name the one it runs under, and the torch version, in every
+request; the command sends the hub nothing about the machine but the
+requests the download needs. The commit `main` points at is
 resolved once, at the start, and recorded in the cache's `refs/main`; every
 file is fetched at that commit, so a branch that moves during the run changes
 nothing. Once every file is in the cache and checked, the command lays out the

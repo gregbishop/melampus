@@ -24,6 +24,7 @@ from pathlib import Path
 
 import pytest
 from conftest import (
+    AGENT_HARNESS,
     FAKE_COMMIT,
     FAKE_FILES,
     FAKE_FOLDER,
@@ -566,25 +567,50 @@ def test_download_model_flag_exits_3_with_the_fix_on_stderr_when_it_fails(monkey
     assert "could not reach the hub: check the network" in err
 
 
+TELEMETRY_SWITCHES = ("HF_HUB_DISABLE_TELEMETRY", "DISABLE_TELEMETRY", "DO_NOT_TRACK")
+
+
+def _without(*names: str) -> dict[str, str]:
+    """This process's environment less `names`: what a user who has set
+    nothing runs the command in."""
+    return {k: v for k, v in os.environ.items() if k not in names}
+
+
+def _setting_at_import(name: str) -> list[str]:
+    """What `os.environ[name]` and the hub library's constant of that name
+    hold in a fresh interpreter that imported melampus.download with `name`
+    (and the telemetry switches) unset."""
+    proc = subprocess.run(
+        [sys.executable, "-c",
+         f"import melampus.download; from huggingface_hub import constants; "
+         f"import os; print(os.environ[{name!r}], constants.{name})"],
+        env=_without(name, *TELEMETRY_SWITCHES), capture_output=True, text=True, check=True,
+    )
+    return proc.stdout.split()
+
+
 def test_importing_the_download_module_disables_the_xet_transfer_as_the_readme_requires():
     """readme.md § Install: HF_HUB_DISABLE_XET=1 is not optional on some
     networks (docs/troubleshooting.md). The command sets it itself, before
     the hub library reads it, so the user need not know."""
-    env = {k: v for k, v in os.environ.items() if k != "HF_HUB_DISABLE_XET"}
-    proc = subprocess.run(
-        [sys.executable, "-c",
-         "import melampus.download; from huggingface_hub import constants; "
-         "import os; print(os.environ['HF_HUB_DISABLE_XET'], constants.HF_HUB_DISABLE_XET)"],
-        env=env, capture_output=True, text=True, check=True,
-    )
-    assert proc.stdout.split() == ["1", "True"]
+    assert _setting_at_import("HF_HUB_DISABLE_XET") == ["1", "True"]
+
+
+def test_importing_the_download_module_disables_the_hub_library_telemetry():
+    """Security (Codex round 2, download.py:27). Rule 11: runtime code sends
+    no telemetry. With HF_HUB_DISABLE_TELEMETRY unset the hub library fetches
+    the hub's registry of AI coding agents and names the agent it runs under,
+    and the torch version, in the User-Agent of every request. The command
+    sets the switch itself, before the library reads it, as it does the Xet
+    one; a user who set it, or DO_NOT_TRACK, keeps their own value."""
+    assert _setting_at_import("HF_HUB_DISABLE_TELEMETRY") == ["1", "True"]
 
 
 # --- the command, driven the way the plugin will (acceptance) --------------
 
 
-def _cli(args: list[str], env: dict[str, str], **kwargs) -> subprocess.CompletedProcess[str]:
-    return subprocess.run([*VENV_CLI, *args], env={**os.environ, **env},
+def _cli(args: list[str], env: dict[str, str], env_base: dict[str, str] = os.environ, **kwargs) -> subprocess.CompletedProcess[str]:
+    return subprocess.run([*VENV_CLI, *args], env={**env_base, **env},
                           capture_output=True, text=True, timeout=300, **kwargs)
 
 
@@ -596,6 +622,25 @@ def test_cli_downloads_the_model_reporting_progress_and_exits_0_on_done(hub_env:
 
     assert proc.returncode == 0, proc.stderr[-3000:]
     assert_download_completed(proc.stdout, hub_env)
+
+
+def test_cli_asks_the_hub_which_agent_it_runs_under_never_and_names_none_in_its_requests(
+    fake_hub: FakeHub, hub_env: dict[str, str]
+):
+    """Security (Codex round 2, download.py:27), at the boundary. Given a
+    user who has set no telemetry switch and runs the command under an AI
+    coding agent the hub's registry names, the hub is never asked for that
+    registry (`/api/agent-harnesses`) and no request's User-Agent names the
+    agent or the packages installed; the download completes."""
+    proc = _cli(["--download-model", "--model", FAKE_REPO], {**hub_env, "AGENT_HARNESS": "1"},
+                env_base=_without(*TELEMETRY_SWITCHES))
+
+    assert proc.returncode == 0, proc.stderr[-3000:]
+    assert_download_completed(proc.stdout, hub_env)
+    assert not [r for r in fake_hub.requests if r.path.startswith("/api/agent-harnesses")], "the registry was fetched"
+    for r in fake_hub.requests:
+        assert r.user_agent and "agent/" not in r.user_agent and "torch/" not in r.user_agent, (r.path, r.user_agent)
+        assert AGENT_HARNESS not in r.user_agent
 
 
 def test_cli_exits_3_naming_the_fix_when_the_repo_is_not_on_the_hub(hub_env: dict[str, str]):

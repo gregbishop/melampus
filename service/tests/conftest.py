@@ -244,11 +244,16 @@ def built_executable(request: pytest.FixtureRequest) -> Path:
 # answers instead, a hub that changes its story once the run has planned.
 # `next_page` is a URL the tree listing names in its `Link: rel="next"`
 # header, as the real hub paginates a long listing and huggingface_hub
-# follows. Every request is kept on `requests`, one HubRequest each: method,
-# path, and the Range and Authorization headers it carried.
+# follows. `/api/agent-harnesses` is the hub's registry of AI coding agents,
+# which huggingface_hub fetches to name the agent it runs under in its
+# User-Agent unless telemetry is off: the fake's names one, AGENT_HARNESS,
+# matched by the environment variable of that name. Every request is kept on
+# `requests`, one HubRequest each: method, path, and the Range, Authorization
+# and User-Agent headers it carried.
 
 FAKE_REPO = "fake-org/fake-model"
 FAKE_COMMIT = "0123456789abcdef0123456789abcdef01234567"
+AGENT_HARNESS = "fake-agent"
 
 
 def fake_bytes(size: int) -> bytes:
@@ -294,6 +299,7 @@ class HubRequest(NamedTuple):
     path: str
     range: str | None
     authorization: str | None
+    user_agent: str | None
 
 
 class FakeHub:
@@ -347,7 +353,7 @@ class FakeHub:
 
             def _record(self) -> None:
                 hub.requests.append(HubRequest(self.command, self.path, self.headers.get("Range"),
-                                               self.headers.get("Authorization")))
+                                               self.headers.get("Authorization"), self.headers.get("User-Agent")))
 
             def _unknown(self) -> None:
                 self._json(404, {"error": "Repository not found"}, {"X-Error-Code": "RepoNotFound"})
@@ -367,6 +373,10 @@ class FakeHub:
             def do_GET(self):  # noqa: N802 - http.server's name
                 self._record()
                 path = self.path.partition("?")[0]
+                if path == "/api/agent-harnesses":
+                    self._json(200, {"standardEnvVars": ["AI_AGENT"],
+                                     "harnesses": {AGENT_HARNESS: {"envVars": {"AGENT_HARNESS": "*"}}}})
+                    return
                 if path.startswith("/api/models/"):
                     if path.startswith(f"/api/models/{hub.repo}/tree/"):
                         self._json(200, [
