@@ -34,8 +34,11 @@ accept every one of them; `--backend ollama` is refused as not built yet
 (card #406) with the backends that do work here, exit 3.
 
 Card #404: `--detect-engines` from the executable prints, as JSON, which of
-the four can run on this machine and why or why not. On a runner nothing
-answers at Ollama's address, and mlx's verdict is this platform's.
+the four can run on this machine and why or why not. The executable's mlx and
+ollama verdicts are checked against the same two questions asked from the
+test process (is this Apple Silicon; does a server answer at OLLAMA_URL over
+loopback), so a developer's running Ollama decides nothing the test did not
+measure too.
 
 Nothing here downloads a model: the MLX check stops at the point where the
 executable goes looking for weights.
