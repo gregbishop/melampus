@@ -273,6 +273,24 @@ def test_cache_is_keyed_on_content_not_path(tmp_path: Path, config):
     assert again.skipped == 1, "renaming a file forced needless reprocessing"
 
 
+def test_the_cache_exports_the_records_it_holds_as_one_list_of_dicts(tmp_path: Path, config):
+    """--json-out and --plugin-out read the cache through one method, so a
+    record looks the same in both files."""
+    photo = tmp_path / "a.jpg"
+    Image.new("RGB", (400, 300), (10, 20, 30)).save(photo)
+    cache = ResultCache(config.run.cache_path)
+    run_batch([photo], Identifier(ScriptedBackend([ROUTING_OK, ID_OK]), config), cache,
+              log=lambda _: None)
+    out = tmp_path / "out.json"
+
+    cache.export_json(out)
+
+    records = cache.records()
+    assert records == json.loads(out.read_text(encoding="utf-8"))
+    assert [r["file"] for r in records] == ["a.jpg"]
+    assert records[0]["identification"]["candidates"][0]["common_name"] == "Tricolored Heron"
+
+
 def test_batch_survives_a_bad_file(tmp_path: Path, config):
     folder = tmp_path / "imgs"
     folder.mkdir()

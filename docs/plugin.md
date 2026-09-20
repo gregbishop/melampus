@@ -12,10 +12,14 @@ Developed against **Lightroom Classic 15.4.1**.
 ## Install
 
 ```bash
-# 1. Produce results the plugin can read
-.venv/bin/python tools/make_plugin_results.py fixtures_full stage1_full_results.json \
-    plugin_results.json --occurrence
+# 1. Produce results the plugin can read: identification and the enrichment
+#    (burst agreement, range flag, encounter, quality) in one run
+.venv/bin/melampus-id fixtures_full --plugin-out plugin_results.json
 ```
+
+(`tools/make_plugin_results.py` still produces the same file from an existing
+`--json-out` — it is a thin caller of `melampus.plugin_results`, kept for the
+plugin's Analyze command until it is rewired to pass `--plugin-out`.)
 
 2. In Lightroom: **File → Plug-in Manager… → Add**, and select
    `plugin/Melampus.lrplugin`. It should report *Installed and running*.
