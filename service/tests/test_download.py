@@ -22,6 +22,7 @@ import signal
 import subprocess
 import sys
 import threading
+import tomllib
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
@@ -724,6 +725,13 @@ def test_download_gives_up_when_the_hub_accepts_and_never_answers(monkeypatch, t
     assert endpoint in str(failure) and "network" in str(failure)
 
 
+def declared_dependency(package: str) -> list[str]:
+    """The entries of service/pyproject.toml's core dependencies (the ones
+    the lockfile installs on every platform) that name `package`."""
+    pyproject = tomllib.loads((Path(__file__).resolve().parents[1] / "pyproject.toml").read_text())
+    return [d for d in pyproject["project"]["dependencies"] if d.startswith(package)]
+
+
 def test_the_hub_library_is_a_dependency_on_every_platform_pinned_to_the_reviewed_version():
     """download.py imports huggingface_hub directly, and on Windows nothing
     else brings it (mlx-vlm is Apple Silicon only), so the executable built
@@ -733,10 +741,7 @@ def test_the_hub_library_is_a_dependency_on_every_platform_pinned_to_the_reviewe
     as pyinstaller is, so an install without the lockfile cannot pull a
     version nobody reviewed; what download.py leans on (`http_get`'s resume,
     `resolve_revision`, the client factory) was read at 1.26.0."""
-    import tomllib
-
-    pyproject = tomllib.loads((Path(__file__).resolve().parents[1] / "pyproject.toml").read_text())
-    (declared,) = [d for d in pyproject["project"]["dependencies"] if d.startswith("huggingface_hub")]
+    (declared,) = declared_dependency("huggingface_hub")
     assert declared == "huggingface_hub==1.26.0", f"not the exact reviewed version: {declared}"
 
 
@@ -750,10 +755,7 @@ def test_the_libraries_the_download_imports_are_dependencies_on_every_platform(p
     the environment today as the hub library's own dependency, and a direct
     import of a package only a dependency brings breaks the day that
     dependency drops it, so it is declared, not borrowed."""
-    import tomllib
-
-    pyproject = tomllib.loads((Path(__file__).resolve().parents[1] / "pyproject.toml").read_text())
-    declared = [d for d in pyproject["project"]["dependencies"] if d.startswith(package)]
+    declared = declared_dependency(package)
     assert len(declared) == 1, f"{package} is not declared in service/pyproject.toml: {declared}"
     assert ";" not in declared[0], f"platform-restricted: {declared[0]}"
 
@@ -765,10 +767,7 @@ def test_filelock_is_pinned_to_the_reviewed_version():
     a version nobody reviewed. `--remove-model` leans on filelock's Timeout
     being what WeakFileLock raises; that was read at 3.32.2, the version the
     lockfile resolves."""
-    import tomllib
-
-    pyproject = tomllib.loads((Path(__file__).resolve().parents[1] / "pyproject.toml").read_text())
-    (declared,) = [d for d in pyproject["project"]["dependencies"] if d.startswith("filelock")]
+    (declared,) = declared_dependency("filelock")
     assert declared == "filelock==3.32.2", f"not the exact reviewed version: {declared}"
 
 
