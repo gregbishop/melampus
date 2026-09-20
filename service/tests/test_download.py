@@ -758,6 +758,20 @@ def test_the_libraries_the_download_imports_are_dependencies_on_every_platform(p
     assert ";" not in declared[0], f"platform-restricted: {declared[0]}"
 
 
+def test_filelock_is_pinned_to_the_reviewed_version():
+    """Security (round 2, pyproject.toml:32): a new dependency is pinned
+    exactly, as pyinstaller is and as the hub library is on the base branch
+    (its own security round), so an install without the lockfile cannot pull
+    a version nobody reviewed. `--remove-model` leans on filelock's Timeout
+    being what WeakFileLock raises; that was read at 3.32.2, the version the
+    lockfile resolves."""
+    import tomllib
+
+    pyproject = tomllib.loads((Path(__file__).resolve().parents[1] / "pyproject.toml").read_text())
+    (declared,) = [d for d in pyproject["project"]["dependencies"] if d.startswith("filelock")]
+    assert declared == "filelock==3.32.2", f"not the exact reviewed version: {declared}"
+
+
 # --- the command: exit codes and signals (unit) -----------------------------
 
 
