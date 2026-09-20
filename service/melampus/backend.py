@@ -393,15 +393,34 @@ class _StayPut(urllib.request.HTTPRedirectHandler):
 
 
 class _Noted:
-    """Mixed into the connection classes urllib opens: on connect, the
-    socket goes to the request's _Deadline. urllib's do_open forgets the
-    socket on the connection once the headers are in (the response's file
-    holds it from then on), so the connection itself cannot be what the
-    deadline hangs up while the body is read; the deadline outlives both."""
+    """Mixed into the connection classes urllib opens: the socket goes to
+    the request's _Deadline the moment it exists, and again once connect()
+    is done. The moment it exists, because for https connect() is the TCP
+    connection and then the TLS handshake, each bounded by the socket
+    timeout on its own, so a connection that took most of the budget and
+    then a handshake that stalls would hold the frame a second whole
+    timeout before a deadline given the socket afterwards could touch it;
+    http.client makes the socket through the `_create_connection`
+    attribute it sets on itself (the seam its own tests use), so that is
+    where the socket is caught. Again after connect(), because TLS wraps
+    the socket in a new one and detaches the old, and a deadline holding
+    the old could hang up nothing. And it is the deadline that holds the
+    socket, not the connection: urllib's do_open forgets the socket on
+    the connection once the headers are in (the response's file holds it
+    from then on), while the deadline outlives both. What comes before the
+    socket, resolving a hostname, has no timeout to give it: the resolver's
+    own applies, and `ollama_url` is an IP literal unless a user names a
+    host."""
 
     def __init__(self, *args, deadline: _Deadline, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.deadline = deadline
+        self._create_connection = self._connect
+
+    def _connect(self, address, timeout, source_address) -> socket.socket:
+        sock = socket.create_connection(address, timeout, source_address)
+        self.deadline.on(sock)
+        return sock
 
     def connect(self) -> None:  # noqa: D102 - http.client's
         super().connect()
