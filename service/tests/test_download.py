@@ -1157,6 +1157,40 @@ def test_status_with_no_host_answering_says_the_size_is_unknown_and_never_fails(
                             path=None, cancel_path=str(cancel_marker_path()))
 
 
+def test_status_gives_up_on_a_hub_that_accepts_the_connection_and_never_answers(monkeypatch, tmp_path: Path):
+    """The Settings dialog runs the status as it opens and waits for the exit
+    code, so a hub that takes the connection and then says nothing (a stalled
+    network, a captive portal) must end the request, not hang the dialog: the
+    listing is waited for at most STATUS_TIMEOUT, the hub library's own
+    request timeout, and then the size is unknown as when nothing answers."""
+    import threading
+    import time
+    from http.server import ThreadingHTTPServer
+
+    from conftest import QuietHandler, loopback_server
+
+    released = threading.Event()
+
+    class Stalled(QuietHandler):
+        def do_GET(self):  # noqa: N802 - http.server's name
+            released.wait(timeout=8)
+
+    assert download.STATUS_TIMEOUT == 10, "the default is the hub library's DEFAULT_REQUEST_TIMEOUT"
+    monkeypatch.setattr(download, "STATUS_TIMEOUT", 0.5)
+    try:
+        with loopback_server(Stalled, ThreadingHTTPServer) as server:
+            started = time.monotonic()
+            status = model_status(FAKE_REPO, endpoint=f"http://127.0.0.1:{server.server_port}",
+                                  cache_dir=tmp_path / "hub")
+            waited = time.monotonic() - started
+    finally:
+        released.set()
+
+    assert waited < 5, f"the status waited {waited:.1f}s on a hub that never answered"
+    assert status == Status(FAKE_REPO, installed=False, bytes_total=None, bytes_done=0,
+                            path=None, cancel_path=str(cancel_marker_path()))
+
+
 def test_the_cancel_marker_lives_under_the_per_user_data_directory_beside_the_caches():
     """The plugin writes this file to cancel (docs/config.md § Downloading the
     model); it is named once here and the status carries it, so the plugin

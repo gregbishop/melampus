@@ -100,6 +100,12 @@ def cancel_marker_path() -> Path:
     return _cache(CANCEL_MARKER)
 
 
+# How long `--model-status` waits for the hub's file listing: the hub
+# library's own request timeout. The Settings dialog runs the status as it
+# opens and waits for the exit code, so a connection the hub takes and never
+# answers must end here, not hang the dialog.
+STATUS_TIMEOUT: float = constants.DEFAULT_REQUEST_TIMEOUT
+
 RERUN = "re-run melampus-id --download-model; it resumes where it stopped"
 NOT_A_HUB = "whatever answers there is not a Hugging Face hub; check HF_ENDPOINT"
 
@@ -624,8 +630,10 @@ def _bytes_in_cache(storage: Path) -> int:
 def model_status(repo: str, *, endpoint: str | None = None, cache_dir: Path | None = None) -> Status:
     """Whether `repo` is in the cache, its size on disk, and its whole size from
     the hub. The cache is read without the network; the hub is asked once
-    for the file listing and, when it cannot answer, `bytes_total` is None:
-    the status never fails for the network being down."""
+    for the file listing (the repo's info with file metadata, the one listing
+    call that takes a timeout: STATUS_TIMEOUT) and, when it cannot answer or
+    does not within that time, `bytes_total` is None: the status never fails
+    for the network being down."""
     endpoint = endpoint or constants.ENDPOINT
     cache = Path(cache_dir or constants.HF_HUB_CACHE)
     storage = cache / repo_folder_name(repo_id=repo, repo_type="model")
@@ -633,7 +641,8 @@ def model_status(repo: str, *, endpoint: str | None = None, cache_dir: Path | No
     main = next((r for r in cached.revisions if "main" in r.refs), None) if cached else None
     installed, path = main is not None, str(main.snapshot_path) if main else None
     try:
-        total: int | None = sum(f.size or 0 for f in _files(HfApi(endpoint=endpoint), repo))
+        info = HfApi(endpoint=endpoint).model_info(repo, files_metadata=True, timeout=STATUS_TIMEOUT)
+        total: int | None = sum(f.size or 0 for f in info.siblings or [])
     except (RepositoryNotFoundError, httpx.HTTPError, OSError):
         total = None
     return Status(repo, installed, total, _bytes_in_cache(storage), path, str(cancel_marker_path()))

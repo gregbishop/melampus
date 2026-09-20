@@ -397,8 +397,12 @@ class FakeHub:
                             for name, data in hub.files.items()
                         ], {"Link": f'<{hub.next_page}>; rel="next"'} if hub.next_page else {})
                     elif path.removeprefix(f"/api/models/{hub.repo}") in ("", "/revision/main"):
-                        self._json(200, {"id": hub.repo, "sha": hub.commit,
-                                         "siblings": [{"rfilename": name} for name in hub.files]})
+                        # The real hub names the files only, and their sizes
+                        # too when asked with blobs=true (files_metadata).
+                        with_sizes = "blobs=true" in self.path.partition("?")[2].lower()
+                        self._json(200, {"id": hub.repo, "sha": hub.commit, "siblings": [
+                            {"rfilename": name, "size": len(data)} if with_sizes else {"rfilename": name}
+                            for name, data in hub.files.items()]})
                     else:
                         self._unknown()
                     return
