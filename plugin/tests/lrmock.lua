@@ -339,6 +339,47 @@ namespaces.LrDialogs = {
 	end,
 }
 
+-- ── reading a recorded dialog ──────────────────────────────────────────────
+-- One walk of the view tree a dialog was presented with, for every suite that
+-- reads one: children are the array part of each view, attributes the rest
+-- (see LrView below).
+
+--- Every view under `root`, the root first, in the order the plugin built
+--- them, each as { view, parent, group }: `parent` the view holding it,
+--- `group` the nearest group_box around it (itself, when it is one).
+function M.views(root)
+	local found = {}
+	local function walk(node, parent, group)
+		if type(node) ~= 'table' then return end
+		if node.kind == 'group_box' then group = node end
+		found[#found + 1] = { view = node, parent = parent, group = group }
+		for _, child in ipairs(node) do walk(child, node, group) end
+	end
+	walk(root, nil, nil)
+	return found
+end
+
+--- The first view whose value is bound to `key` (a `bind 'key'` is the key
+--- itself under this mock), and the group box that holds it.
+function M.viewBoundTo(root, key)
+	for _, entry in ipairs(M.views(root)) do
+		if entry.view.value == key then return entry.view, entry.group end
+	end
+	return nil
+end
+
+--- Every string a dialog shows: titles (static text, group boxes, checkboxes,
+--- buttons) and tooltips, in order.
+function M.dialogStrings(root)
+	local out = {}
+	for _, entry in ipairs(M.views(root)) do
+		for _, key in ipairs({ 'title', 'tooltip' }) do
+			if type(entry.view[key]) == 'string' then out[#out + 1] = entry.view[key] end
+		end
+	end
+	return out
+end
+
 --- Stored and retrieved by key string; the real one keeps them in the OS
 -- keychain on macOS, which is exactly why a test must see them land here and
 -- nowhere else.

@@ -42,15 +42,13 @@ local function openSettings(options)
 	return modal[1].contents
 end
 
---- Every view of one kind in the tree, in order, each with its parent.
+--- Every view of one kind in the tree, in order, each with its parent, from
+--- the mock's walk of the recorded dialog.
 local function viewsOfKind(root, kind)
 	local found = {}
-	local function walk(node, parent)
-		if type(node) ~= 'table' then return end
-		if node.kind == kind then found[#found + 1] = { view = node, parent = parent } end
-		for _, child in ipairs(node) do walk(child, node) end
+	for _, entry in ipairs(mock.views(root)) do
+		if entry.view.kind == kind then found[#found + 1] = entry end
 	end
-	walk(root, nil)
 	return found
 end
 
@@ -61,12 +59,10 @@ end
 
 --- The one popup_menu bound to prefs.engine.
 local function enginePicker(contents)
-	for _, entry in ipairs(viewsOfKind(contents, 'popup_menu')) do
-		if bindingKey(entry.view.value) == 'engine' then return entry.view end
-	end
-	return nil
+	return (mock.viewBoundTo(contents, 'engine'))
 end
 
+--- The static texts whose title contains `needle`.
 local function titlesMatching(contents, needle)
 	local out = {}
 	for _, entry in ipairs(viewsOfKind(contents, 'static_text')) do
