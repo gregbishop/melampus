@@ -322,6 +322,14 @@ class OpenAIBackend(VLMBackend):
         )
 
 
+class _StayPut(urllib.request.HTTPRedirectHandler):
+    """Follows no redirect: a 3xx from the configured address is an answer
+    from the wrong place, surfaced as the status it is."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D102
+        return None
+
+
 class OllamaBackend(VLMBackend):
     """A local Ollama server behind the same interface (card #406): local
     inference on Windows and Linux, and on Macs that prefer it, through the
@@ -371,9 +379,12 @@ class OllamaBackend(VLMBackend):
         # settings, which would send every frame's bytes off the machine and
         # let the proxy's answer stand in for the model's (the probe in
         # providers.ollama_answers keeps off the proxy for the same reason);
-        # ProxyHandler({}) consults neither.
+        # ProxyHandler({}) consults neither. And it follows a 3xx, so
+        # whatever listens on the port when Ollama does not could point a
+        # frame at another host and have that host's reply stand in for the
+        # model's; _StayPut follows nothing, as the probe follows nothing.
         self._urlopen = client or urllib.request.build_opener(
-            urllib.request.ProxyHandler({})
+            urllib.request.ProxyHandler({}), _StayPut()
         ).open
 
     def _request(self, image_path: Path, prompt: str, max_tokens: int) -> urllib.request.Request:

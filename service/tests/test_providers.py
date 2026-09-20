@@ -1182,3 +1182,33 @@ def test_ollama_backend_stays_at_the_address_whatever_proxy_the_environment_name
         with pytest.raises(ConnectionError):
             backend.complete(image, "prompt", 10)
     assert seen == [], f"the frame left the machine through the proxy: {seen}"
+
+
+def test_ollama_backend_refuses_a_redirect_off_the_address(tmp_path):
+    """Security: the backend asks one address and takes only that address's
+    answer, as the probe does. urlopen's default opener follows a 3xx, so
+    whatever listens on the port when Ollama does not (any local process can
+    bind it) could answer 302 with a Location anywhere, and the reply from
+    there would stand in for the model's. Given a server at the address
+    answering 302 towards a second server that records every request, the
+    frame fails on the status and the destination never hears from it."""
+    seen: list[str] = []
+    image = tmp_path / "image.jpg"
+    image.write_bytes(b"jpeg")
+    with loopback_server(recording_handler(seen)) as destination:
+        elsewhere = f"http://127.0.0.1:{destination.server_port}/api/chat"
+
+        class Redirecting(QuietHandler):
+            def do_POST(self):  # noqa: N802 - http.server's name
+                self.rfile.read(int(self.headers["Content-Length"]))
+                self.send_response(302)
+                self.send_header("Location", elsewhere)
+                self.end_headers()
+
+        with loopback_server(Redirecting) as squatter:
+            backend = OllamaBackend(
+                "qwen3-vl:8b-instruct", f"http://127.0.0.1:{squatter.server_port}", timeout=5.0)
+            with pytest.raises(RuntimeError) as err:
+                backend.complete(image, "prompt", 10)
+    assert "Ollama answered 302" in str(err.value), str(err.value)
+    assert seen == [], f"the backend followed the redirect off the address: {seen}"
