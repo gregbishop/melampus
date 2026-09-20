@@ -203,8 +203,11 @@ def built_executable(request: pytest.FixtureRequest) -> Path:
 # outage (503 until `outage` is cleared); `throttle` slows the bytes so a cancel
 # can land mid-file. `bytes_host` is the real hub's CDN: the resolve HEAD
 # answers 302 to that host, as huggingface.co does for every LFS file, so the
-# bytes are fetched from a host that is not the hub. Every request is kept on
-# `requests`, and the Authorization header each one carried on `authorizations`.
+# bytes are fetched from a host that is not the hub. `corrupt` names files
+# served with their first byte flipped while the etag stays the true one. The
+# etags are the real hub's: the sha256 of an LFS file (the weights), git's blob
+# sha1 of a regular file. Every request is kept on `requests`, and the
+# Authorization header each one carried on `authorizations`.
 
 FAKE_REPO = "fake-org/fake-model"
 FAKE_COMMIT = "0123456789abcdef0123456789abcdef01234567"
@@ -225,9 +228,14 @@ class FakeHub(threading.Thread):
         self.outage = False
         self.throttle: tuple[int, float] | None = None  # (bytes per write, seconds between)
         self.bytes_host: str | None = None
+        self.corrupt: set[str] = set()
         self.authorizations: list[str | None] = []
         hub = self
-        etags = {name: hashlib.sha256(data).hexdigest() for name, data in files.items()}
+        etags = self.etags = {
+            name: hashlib.sha256(data).hexdigest() if name.endswith(".safetensors")
+            else hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
+            for name, data in files.items()
+        }
 
         class Handler(QuietHandler):
             protocol_version = "HTTP/1.1"
@@ -280,6 +288,8 @@ class FakeHub(threading.Thread):
                     self.end_headers()
                     return
                 data = hub.files[name]
+                if name in hub.corrupt:
+                    data = bytes([data[0] ^ 0xFF]) + data[1:]
                 start = 0
                 if self.headers.get("Range"):
                     start = int(self.headers["Range"].removeprefix("bytes=").partition("-")[0])

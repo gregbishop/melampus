@@ -167,6 +167,35 @@ def test_download_keeps_the_partial_file_when_the_connection_drops_and_resumes_i
     assert updates[-1] == Update.progress(total, total)
 
 
+@pytest.mark.parametrize("name", ["model.safetensors", "config.json"])
+def test_download_rejects_bytes_that_do_not_match_the_hub_checksum_and_keeps_no_partial_of_them(
+    fake_hub: FakeHub, tmp_path: Path, name: str
+):
+    """The hub names every file's checksum in its etag: the sha256 of an LFS
+    file (the weights), git's blob sha1 of a regular one. A finished file whose
+    bytes do not match (corrupted or substituted in transit, or stitched onto
+    a bad partial from an earlier run) never becomes a blob: the run fails
+    naming the file and the re-run, the partial is discarded rather than
+    resumed forever, and the next run fetches the file whole and completes."""
+    fake_hub.corrupt = {name}
+
+    with pytest.raises(DownloadError) as failure:
+        _fetch(fake_hub, tmp_path / "hub")
+
+    message = str(failure.value)
+    assert name in message and "checksum" in message and "--download-model" in message
+    assert not _incomplete(tmp_path / "hub"), "the bad partial was kept"
+    blobs = tmp_path / "hub" / f"models--{FAKE_REPO.replace('/', '--')}" / "blobs"
+    assert not (blobs / fake_hub.etags[name]).exists(), "the bad bytes became the blob"
+
+    fake_hub.corrupt = set()
+    fake_hub.requests.clear()
+    path, _ = _fetch(fake_hub, tmp_path / "hub")
+
+    assert fake_hub.gets(name) == [None], "the next run resumed the discarded partial instead of fetching whole"
+    assert _snapshot_files(path) == FAKE_FILES
+
+
 def test_download_sends_the_user_token_to_the_hub_and_never_to_the_host_serving_the_bytes(
     fake_hub: FakeHub, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):

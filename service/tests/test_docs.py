@@ -666,7 +666,7 @@ def test_docs_name_the_download_command_where_the_model_and_the_protocol_are_des
     section = re.search(r"^## Downloading the model\n(.*?)(?:^## |\Z)", config_doc, re.MULTILINE | re.DOTALL)
     assert section, "docs/config.md has no `## Downloading the model` section"
     for promise in ("`--download-model`", f"`{PROGRESS} <bytes_done> <bytes_total>`", f"`{DONE} <path>`",
-                    f"`{CANCELLED}`", f"exit {EXIT_CANCELLED}", "exit 3", "exit 0", "stderr", "resume"):
+                    f"`{CANCELLED}`", f"exit {EXIT_CANCELLED}", "exit 3", "exit 0", "stderr", "resume", "checksum"):
         assert promise in section.group(1), f"docs/config.md § Downloading the model does not say {promise}"
 
     architecture = (REPO / "docs" / "architecture.md").read_text(encoding="utf-8")

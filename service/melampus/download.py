@@ -27,7 +27,8 @@ import os
 
 os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 
-import signal  # noqa: E402 - after the environment the hub reads at import
+import hashlib  # noqa: E402 - after the environment the hub reads at import
+import signal  # noqa: E402
 from contextlib import contextmanager  # noqa: E402
 from dataclasses import dataclass  # noqa: E402
 from pathlib import Path  # noqa: E402
@@ -37,7 +38,7 @@ from urllib.parse import urlparse  # noqa: E402
 import httpx  # noqa: E402
 from huggingface_hub import HfApi, constants, get_hf_file_metadata, hf_hub_url, snapshot_download  # noqa: E402
 from huggingface_hub.errors import RepositoryNotFoundError  # noqa: E402
-from huggingface_hub.file_download import http_get, repo_folder_name  # noqa: E402
+from huggingface_hub.file_download import REGEX_COMMIT_HASH, REGEX_SHA256, http_get, repo_folder_name  # noqa: E402
 from huggingface_hub.hf_api import RepoFile  # noqa: E402
 from huggingface_hub.utils import WeakFileLock, build_hf_headers  # noqa: E402
 
@@ -203,11 +204,35 @@ def _plan(repo: str, endpoint: str | None, storage: Path) -> tuple[str, list[_Bl
     return commit, blobs
 
 
+def _verify(blob: _Blob) -> None:
+    """The finished bytes must match the checksum the hub named in the etag:
+    the sha256 of an LFS file (the weights), git's blob sha1 of a regular
+    file (40 hex, the shape REGEX_COMMIT_HASH matches). Bytes that do not
+    match never become the blob, and the partial is discarded so the next run
+    fetches the file whole instead of resuming it forever."""
+    if REGEX_SHA256.match(blob.etag):
+        digest = hashlib.sha256()
+    elif REGEX_COMMIT_HASH.match(blob.etag):
+        digest = hashlib.sha1(b"blob %d\0" % blob.size, usedforsecurity=False)
+    else:
+        return
+    with blob.partial.open("rb") as done:
+        for chunk in iter(lambda: done.read(1 << 20), b""):
+            digest.update(chunk)
+    if digest.hexdigest() != blob.etag:
+        blob.partial.unlink()
+        raise DownloadError(
+            f"{blob.filename} did not match the checksum the hub gave for it; "
+            f"the partial file is discarded, {RERUN} and fetches it whole"
+        )
+
+
 def _fetch(blob: _Blob, progress: _Progress, headers: dict[str, str], lock_dir: Path) -> None:
     """Append the rest of one file to its `.incomplete` blob and, once the
-    size checks out, make it the blob. huggingface_hub's own `http_get` asks
-    for the rest by Range and verifies the size; the lock is the one it takes
-    for the same blob, so two runs cannot append to the same file."""
+    size and the checksum check out, make it the blob. huggingface_hub's own
+    `http_get` asks for the rest by Range and verifies the size; the lock is
+    the one it takes for the same blob, so two runs cannot append to the same
+    file."""
     blob.partial.parent.mkdir(parents=True, exist_ok=True)
     lock_dir.mkdir(parents=True, exist_ok=True)
     with WeakFileLock(lock_dir / f"{blob.etag}.lock", timeout=5):
@@ -217,6 +242,7 @@ def _fetch(blob: _Blob, progress: _Progress, headers: dict[str, str], lock_dir: 
                 resume_size=partial.tell(), headers=headers, expected_size=blob.size,
                 displayed_filename=blob.filename, tqdm_class=progress.tqdm_class(),
             )
+        _verify(blob)
         blob.partial.replace(blob.path)
 
 

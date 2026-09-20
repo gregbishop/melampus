@@ -89,7 +89,9 @@ a protocol, defined once in `download.py` (`Update`) and stable:
 Nothing else goes to stdout; errors and the hub library's own warnings go to
 stderr. Exit codes: **exit 0** once the model is complete (`done`); **exit 3**
 on a failure, with a message on stderr naming the fix (the repo the hub does not
-have, so check `[model] repo` or `--model`; the network, so check it and re-run);
+have, so check `[model] repo` or `--model`; the network, so check it and re-run;
+a file whose bytes do not match the checksum the hub names for it, so its partial
+is discarded and the re-run fetches it whole);
 **exit 4** when a signal cancelled it (`cancelled`). The signals are SIGINT
 (Ctrl+C), SIGTERM and, on Windows, Ctrl+Break: the download stops within the
 current chunk and leaves the partial file in the cache as the hub's
@@ -98,7 +100,10 @@ the rest by Range from the byte it has. A failed run leaves the same partial
 file, so re-running after a network drop resumes too.
 
 The bytes move over plain HTTP, through the hub library's own file download
-(its Range request, its size check, its per-file lock), never through the Xet
+(its Range request, its size check, its per-file lock), and every finished file
+is checked against the checksum the hub names in its etag (the sha256 of a
+weights file, git's blob sha1 of a regular one) before it becomes a blob in
+the cache, never through the Xet
 transfer that stalls on some networks (docs/troubleshooting.md); the command
 sets `HF_HUB_DISABLE_XET=1` for itself. Once every file is in the cache the hub
 library lays out the snapshot, the pointers and `refs/main` exactly as
