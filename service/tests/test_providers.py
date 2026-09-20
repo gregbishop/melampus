@@ -646,6 +646,16 @@ def test_ollama_backend_returns_candidates_in_the_same_shape_as_mlx_on_the_fixtu
     assert PHOTO.split(".")[0] not in json.dumps(server.chats), "the filename travelled"
 
 
+def _settings_naming_the_fake(monkeypatch, tmp_path):
+    """Inside `_fake_ollama`: a settings file whose `[model] ollama_url` is the
+    fake's address, with the default pointed at a closed port, so a test that
+    passes the file proves the address came from it and not the default."""
+    settings = tmp_path / "settings.toml"
+    settings.write_text(
+        f'[model]\nollama_url = "{providers.OLLAMA_URL}"\n', encoding="utf-8")
+    monkeypatch.setattr(providers, "OLLAMA_URL", f"http://127.0.0.1:{closed_port()}")
+    return settings
+
 def test_ollama_not_running_fires_before_any_image_is_read(monkeypatch, tmp_path, capsys):
     """Card #406, Done-when 2, at the real boundary: nothing listening on the
     port, and the folder's one image is a link to nowhere, so opening it
@@ -686,11 +696,8 @@ def test_cli_backend_ollama_writes_a_json_result_from_the_configured_address(
     from melampus.cli import main
 
     out = tmp_path / "results.json"
-    settings = tmp_path / "settings.toml"
     with _fake_ollama(monkeypatch, replies=[ROUTING_OK, ID_OK]):
-        settings.write_text(
-            f'[model]\nollama_url = "{providers.OLLAMA_URL}"\n', encoding="utf-8")
-        monkeypatch.setattr(providers, "OLLAMA_URL", f"http://127.0.0.1:{closed_port()}")
+        settings = _settings_naming_the_fake(monkeypatch, tmp_path)
         code = main([
             str(photos), "--backend", "ollama", "--config", str(settings),
             "--cache", str(tmp_path / "cache.jsonl"), "--json-out", str(out),
@@ -712,11 +719,8 @@ def test_cli_detection_probes_the_configured_ollama_address(monkeypatch, tmp_pat
     engine and `--detect-engines` probe too, not only the backend."""
     from melampus.cli import main
 
-    settings = tmp_path / "settings.toml"
     with _fake_ollama(monkeypatch) as server:
-        settings.write_text(
-            f'[model]\nollama_url = "{providers.OLLAMA_URL}"\n', encoding="utf-8")
-        monkeypatch.setattr(providers, "OLLAMA_URL", f"http://127.0.0.1:{closed_port()}")
+        settings = _settings_naming_the_fake(monkeypatch, tmp_path)
         assert main(["--detect-engines", "--config", str(settings)]) == 0
     verdicts = {v["engine"]: v for v in json.loads(capsys.readouterr().out)}
     assert verdicts["ollama"]["available"] is True
