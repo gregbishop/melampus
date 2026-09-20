@@ -32,6 +32,7 @@ import contextlib
 import importlib.util
 import platform
 import shutil
+import socket
 import subprocess
 import sys
 import threading
@@ -140,6 +141,14 @@ def recording_handler(seen: list[str]) -> type[QuietHandler]:
             self.do_GET()
 
     return Recording
+
+
+def closed_port() -> int:
+    """A loopback port nothing listens on: where a test puts the Ollama address
+    so a developer's running server cannot answer for it."""
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
 
 
 @contextlib.contextmanager

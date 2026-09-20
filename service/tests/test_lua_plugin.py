@@ -17,7 +17,7 @@ import sys
 from pathlib import Path
 
 import pytest
-from conftest import PHOTO
+from conftest import PHOTO, closed_port
 
 from melampus import providers
 from test_binary import per_user_config
@@ -280,12 +280,8 @@ def test_the_engine_preference_reaches_the_executable_through_the_command_the_pl
     HOME points it at a closed port, so a developer's Ollama cannot answer),
     exit 3, written to the CLI log the plugin points a failed run at. Nothing
     is sent anywhere and no weights are read."""
-    import socket
-
     plugin_dir = _plugin_folder_holding(built_executable, tmp_path)
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        port = probe.getsockname()[1]
+    port = closed_port()
     env = per_user_config(tmp_path, f'[model]\nollama_url = "http://127.0.0.1:{port}"\n')
 
     command = _command_the_plugin_builds(

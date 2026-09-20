@@ -57,7 +57,7 @@ import types
 from pathlib import Path
 
 import pytest
-from conftest import PHOTO, fake_platform
+from conftest import PHOTO, closed_port, fake_platform
 
 from melampus import config
 from melampus.backend import ScriptedBackend
@@ -561,11 +561,7 @@ def test_executable_refuses_ollama_when_no_server_answers(
     cannot answer), `--backend ollama` exits 3 on the not-running message,
     naming the address tried and where to install Ollama, and the backends
     that do work here."""
-    import socket
-
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        port = probe.getsockname()[1]
+    port = closed_port()
     settings = tmp_path / "settings.toml"
     settings.write_text(f'[model]\nollama_url = "http://127.0.0.1:{port}"\n', encoding="utf-8")
     proc = _request_backend(built_executable, photos, tmp_path, "ollama", "--config", str(settings))

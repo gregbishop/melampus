@@ -22,7 +22,14 @@ import urllib.error
 import urllib.request
 
 import pytest
-from conftest import PHOTO, QuietHandler, fake_platform, loopback_server, recording_handler
+from conftest import (
+    PHOTO,
+    QuietHandler,
+    closed_port,
+    fake_platform,
+    loopback_server,
+    recording_handler,
+)
 from test_pipeline import ID_OK, ROUTING_OK
 
 from melampus import providers
@@ -511,13 +518,6 @@ def test_the_refusal_names_what_detection_says_is_available(monkeypatch):
     assert "ollama, openai, claude, scripted" in str(err.value)
 
 
-def _closed_port() -> int:
-    """A loopback port nothing listens on."""
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        return probe.getsockname()[1]
-
-
 def test_default_engine_is_always_one_detection_names_available(
     monkeypatch, no_ambient_keys, no_ambient_ollama
 ):
@@ -654,7 +654,7 @@ def test_ollama_not_running_fires_before_any_image_is_read(monkeypatch, tmp_path
     check ran before any image was read."""
     from melampus.cli import main
 
-    port = _closed_port()
+    port = closed_port()
     monkeypatch.setattr(providers, "OLLAMA_URL", f"http://127.0.0.1:{port}")
     folder = tmp_path / "photos"
     folder.mkdir()
@@ -685,7 +685,7 @@ def test_cli_backend_ollama_writes_a_json_result_from_the_configured_address(
     with _fake_ollama(monkeypatch, replies=[ROUTING_OK, ID_OK]):
         settings.write_text(
             f'[model]\nollama_url = "{providers.OLLAMA_URL}"\n', encoding="utf-8")
-        monkeypatch.setattr(providers, "OLLAMA_URL", f"http://127.0.0.1:{_closed_port()}")
+        monkeypatch.setattr(providers, "OLLAMA_URL", f"http://127.0.0.1:{closed_port()}")
         code = main([
             str(photos), "--backend", "ollama", "--config", str(settings),
             "--cache", str(tmp_path / "cache.jsonl"), "--json-out", str(out),
@@ -711,7 +711,7 @@ def test_cli_detection_probes_the_configured_ollama_address(monkeypatch, tmp_pat
     with _fake_ollama(monkeypatch) as server:
         settings.write_text(
             f'[model]\nollama_url = "{providers.OLLAMA_URL}"\n', encoding="utf-8")
-        monkeypatch.setattr(providers, "OLLAMA_URL", f"http://127.0.0.1:{_closed_port()}")
+        monkeypatch.setattr(providers, "OLLAMA_URL", f"http://127.0.0.1:{closed_port()}")
         assert main(["--detect-engines", "--config", str(settings)]) == 0
     verdicts = {v["engine"]: v for v in json.loads(capsys.readouterr().out)}
     assert verdicts["ollama"]["available"] is True
@@ -730,12 +730,12 @@ def test_ollama_probe_finds_a_server_answering_on_localhost(monkeypatch):
 def test_ollama_probe_reports_a_closed_port_without_raising(monkeypatch):
     """Nothing listening: connection refused is "not installed or not
     running", never a traceback."""
-    closed_port = _closed_port()
-    monkeypatch.setattr(providers, "OLLAMA_URL", f"http://127.0.0.1:{closed_port}")
+    port = closed_port()
+    monkeypatch.setattr(providers, "OLLAMA_URL", f"http://127.0.0.1:{port}")
     assert providers.ollama_answers() is False
     verdict = _verdict("ollama")
     assert not verdict.available
-    assert f"127.0.0.1:{closed_port}" in verdict.reason
+    assert f"127.0.0.1:{port}" in verdict.reason
 
 
 def test_ollama_probe_treats_a_non_200_as_unavailable(monkeypatch):
@@ -848,7 +848,7 @@ def test_ollama_probe_stays_on_loopback_whatever_proxy_the_environment_names(mon
     answers 200 to everything and nothing at OLLAMA_URL, the probe reports
     unavailable and the proxy never hears from it."""
     seen: list[str] = []
-    monkeypatch.setattr(providers, "OLLAMA_URL", f"http://127.0.0.1:{_closed_port()}")
+    monkeypatch.setattr(providers, "OLLAMA_URL", f"http://127.0.0.1:{closed_port()}")
     for name in ("no_proxy", "NO_PROXY"):
         monkeypatch.delenv(name, raising=False)
     # urlopen builds its default opener once, reading the proxy variables then;
@@ -1181,7 +1181,7 @@ def test_ollama_backend_stays_at_the_address_whatever_proxy_the_environment_name
     with loopback_server(recording_handler(seen)) as proxy:
         monkeypatch.setenv("http_proxy", f"http://127.0.0.1:{proxy.server_port}")
         backend = OllamaBackend(
-            "qwen3-vl:8b-instruct", f"http://127.0.0.1:{_closed_port()}", timeout=5.0)
+            "qwen3-vl:8b-instruct", f"http://127.0.0.1:{closed_port()}", timeout=5.0)
         with pytest.raises(ConnectionError):
             backend.complete(image, "prompt", 10)
     assert seen == [], f"the frame left the machine through the proxy: {seen}"
