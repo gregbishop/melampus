@@ -485,5 +485,51 @@ function M.install(pluginPath, options)
 	_G.LOC = function(text) return text end
 end
 
+-- ── loading the plugin under the mock ──────────────────────────────────────
+-- Shared by the suites that execute the real plugin files, so the plugin's
+-- location, its module list and its defaults are spelled once.
+
+--- The plugin folder, relative to this file, so a suite runs from a clone at
+--- any path and from any working directory. MELAMPUS_PLUGIN overrides it.
+local function pluginPath()
+	local here = debug.getinfo(1, 'S').source:match('^@(.*)[/\\]') or '.'
+	return here .. '/../Melampus.lrplugin'
+end
+
+M.PLUGIN = os.getenv('MELAMPUS_PLUGIN') or pluginPath()
+
+--- Drop the plugin's modules so the next load runs them fresh under the mock.
+function M.unloadPlugin()
+	for _, name in ipairs({ 'MelampusJson', 'MelampusRules', 'MelampusLog', 'MelampusAnalyze' }) do
+		package.loaded[name] = nil
+	end
+end
+
+--- Load one plugin file fresh, dropping the modules first, and hand back what
+--- it returns.
+function M.loadPluginFile(name)
+	M.unloadPlugin()
+	return dofile(M.PLUGIN .. '/' .. name .. '.lua')
+end
+
+--- Reset the mock, install it for a plugin folder (this one by default), and
+--- load one plugin file fresh under it: the shape every load outside a whole
+--- import takes.
+function M.loadUnderMock(name, resetOptions, folder, installOptions)
+	M.reset(resetOptions)
+	M.install(folder or M.PLUGIN, installOptions)
+	return M.loadPluginFile(name)
+end
+
+--- The plugin's default settings, from MelampusRules.lua loaded fresh, with
+--- each table of overrides applied in turn (a nil one is skipped).
+function M.defaultPrefs(...)
+	local prefs = M.loadPluginFile('MelampusRules').defaultSettings()
+	for i = 1, select('#', ...) do
+		for k, v in pairs(select(i, ...) or {}) do prefs[k] = v end
+	end
+	return prefs
+end
+
 M.catalog = catalog
 return M

@@ -11,14 +11,9 @@ in the preferences, a file, or the log.
 local t = require('harness')
 local mock = require('lrmock')
 
-local function pluginPath()
-	local here = debug.getinfo(1, 'S').source:match('^@(.*)[/\\]') or '.'
-	return here .. '/../Melampus.lrplugin'
-end
-
-local PLUGIN = os.getenv('MELAMPUS_PLUGIN') or pluginPath()
+local PLUGIN = mock.PLUGIN
 local EXECUTABLE = PLUGIN .. '/melampus'
-local ENGINES = { 'mlx', 'ollama', 'openai', 'claude' }
+local ENGINES = mock.loadPluginFile('MelampusRules').ENGINES
 local OLLAMA_DOWNLOAD = 'https://ollama.com/download'
 
 local function verdict(engine, available, reason)
@@ -41,20 +36,13 @@ local function detection(overrides)
 	return '[' .. table.concat(parts, ', ') .. ']'
 end
 
-local function defaultPrefs(extra)
-	package.loaded['MelampusRules'] = nil
-	local prefs = dofile(PLUGIN .. '/MelampusRules.lua').defaultSettings()
-	for k, v in pairs(extra or {}) do prefs[k] = v end
-	return prefs
-end
-
 --- Open the real Settings dialog under the mock. `options.detection` is what
 --- the executable prints for --detect-engines (nil: no executable beside the
 --- plugin); `options.onDialog` plays the user while the dialog is up.
 local function openSettings(options)
 	options = options or {}
 	mock.reset({
-		prefs = defaultPrefs(options.prefs),
+		prefs = mock.defaultPrefs(options.prefs),
 		existing = options.detection and { [EXECUTABLE] = true } or {},
 		passwords = options.passwords,
 		onExecute = function(command)
@@ -69,9 +57,7 @@ local function openSettings(options)
 		onModalDialog = options.onDialog,
 	})
 	mock.install(PLUGIN)
-	for _, name in ipairs({ 'MelampusJson', 'MelampusRules', 'MelampusLog', 'MelampusAnalyze' }) do
-		package.loaded[name] = nil
-	end
+	mock.unloadPlugin()
 	local ok, err = pcall(assert(loadfile(PLUGIN .. '/MelampusSettings.lua')))
 	t.isTrue(ok, 'the settings file raised: ' .. tostring(err))
 	local modal = {}
@@ -233,7 +219,7 @@ end)
 --- Every file under the plugin folder, read whole.
 local function pluginFiles()
 	local files = {}
-	local listing = io.popen('ls -1 "' .. PLUGIN .. '"')
+	local listing = io.popen('ls -1 ' .. mock.sh(PLUGIN))
 	for name in listing:lines() do
 		local handle = io.open(PLUGIN .. '/' .. name, 'rb')
 		if handle then

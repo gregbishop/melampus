@@ -15,14 +15,7 @@ failing to attach, and a counter reporting success for photos that got nothing.
 local t = require('harness')
 local mock = require('lrmock')
 
---- Locate the plugin relative to this file, so the suite runs from a clone at any
---- path and from any working directory. MELAMPUS_PLUGIN overrides it.
-local function pluginPath()
-	local here = debug.getinfo(1, 'S').source:match('^@(.*)[/\\]') or '.'
-	return here .. '/../Melampus.lrplugin'
-end
-
-local PLUGIN = os.getenv('MELAMPUS_PLUGIN') or pluginPath()
+local PLUGIN = mock.PLUGIN
 
 local function writeResults(path, records)
 	local parts = {}
@@ -51,28 +44,7 @@ end
 -- os.tmpname() creates the file; the suite writes it and removes it at the end.
 local RESULTS = os.tmpname()
 
---- Drop the plugin's modules so the next load runs them fresh under the mock.
-local function unloadPlugin()
-	for _, name in ipairs({ 'MelampusJson', 'MelampusRules', 'MelampusLog', 'MelampusAnalyze' }) do
-		package.loaded[name] = nil
-	end
-end
-
---- Load one plugin file fresh, dropping the modules first, and hand back what
---- it returns.
-local function loadPluginFile(name)
-	unloadPlugin()
-	return dofile(PLUGIN .. '/' .. name .. '.lua')
-end
-
---- Reset the mock, install it for a plugin folder (this one by default), and
---- load one plugin file fresh under it: the shape every load outside runImport
---- takes.
-local function loadUnderMock(name, resetOptions, folder, installOptions)
-	mock.reset(resetOptions)
-	mock.install(folder or PLUGIN, installOptions)
-	return loadPluginFile(name)
-end
+local loadPluginFile, loadUnderMock = mock.loadPluginFile, mock.loadUnderMock
 
 --- Run the real import file end to end and hand back the resulting state.
 -- `records` is what the results file holds, or nil for no results file
@@ -94,18 +66,16 @@ local function runImport(records, photos, prefs, options)
 		for k, v in pairs(spec[3] or {}) do photo._plugin[k] = v end
 	end
 	mock.install(PLUGIN)
-	unloadPlugin()
+	mock.unloadPlugin()
 	local ok, err = pcall(assert(loadfile(PLUGIN .. '/MelampusImport.lua')))
 	if not ok then error('import raised: ' .. tostring(err), 2) end
 	return true
 end
 
+--- The defaults with dry run off, so the writes this suite asserts on land,
+--- and `extra` over that.
 local function defaultPrefs(extra)
-	local Rules = loadPluginFile('MelampusRules')
-	local prefs = Rules.defaultSettings()
-	prefs.dryRun = false
-	for k, v in pairs(extra or {}) do prefs[k] = v end
-	return prefs
+	return mock.defaultPrefs({ dryRun = false }, extra)
 end
 
 -- ── the plugin actually runs ───────────────────────────────────────────────
@@ -537,7 +507,7 @@ end)
 -- openai, claude, when the plugin builds the CLI command, then the CLI
 -- receives it. Done-when 2: given no preference, the plugin passes no
 -- --backend and the CLI's default applies.
-local ENGINES = { 'mlx', 'ollama', 'openai', 'claude' }
+local ENGINES = loadPluginFile('MelampusRules').ENGINES
 
 t.test('each engine preference reaches the command line as --backend', function()
 	for _, engine in ipairs(ENGINES) do
