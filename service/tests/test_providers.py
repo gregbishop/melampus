@@ -1262,8 +1262,8 @@ class _FakeUrlopen:
     """Stands in for urllib.request.urlopen at the backend's HTTP edge: records
     every request, then answers with `reply` or raises `error`."""
 
-    def __init__(self, reply: bytes = b"{}", error: Exception | None = None, status: int = 200):
-        self.reply, self.error, self.status = reply, error, status
+    def __init__(self, reply: bytes = b"{}", error: Exception | None = None):
+        self.reply, self.error = reply, error
         self.requests: list[tuple[urllib.request.Request, float]] = []
 
     def __call__(self, request, timeout):
