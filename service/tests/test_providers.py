@@ -490,7 +490,9 @@ def test_detection_ollama_points_to_the_install_when_nothing_answers(no_ambient_
 
 def test_ollama_address_is_one_constant_on_the_documented_default():
     """docs/faq.mdx in Ollama's repo: "Ollama binds 127.0.0.1 port 11434 by
-    default." One constant, so card #406 can turn it into a config value."""
+    default." One constant, the one place the documented default is written:
+    the default of `[model] ollama_url` (card #406), shared by the probe and
+    the backend until a user names another address."""
     assert providers.OLLAMA_URL == "http://127.0.0.1:11434"
 
 
