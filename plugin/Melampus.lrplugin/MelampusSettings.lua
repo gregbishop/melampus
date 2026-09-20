@@ -105,7 +105,7 @@ LrTasks.startAsyncTask(function()
 			model.phase = status.installed == true and 'installed' or 'absent'
 			model.progress = ''
 			local function inPhase(name)
-				return bind { key = 'phase', object = model, transform = function(value) return value == name end }
+				return bind { key = 'phase', bind_to_object = model, transform = function(value) return value == name end }
 			end
 			local download = nil
 
@@ -156,7 +156,7 @@ LrTasks.startAsyncTask(function()
 
 			engineViews[#engineViews + 1] = f:row {
 				visible = bind {
-					key = 'engine', object = prefs,
+					key = 'engine', bind_to_object = prefs,
 					transform = function(value) return Rules.resolvedEngine(value, verdicts) == 'mlx' end,
 				},
 				bind_to_object = model,

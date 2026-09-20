@@ -364,11 +364,13 @@ local function buttonsTitled(row, prefix)
 end
 
 --- Whether a view of the row shows in the model's current phase, through its
---- visible binding's transform.
+--- visible binding's transform. The binding names the model table with the
+--- SDK's own spelling (`bind_to_object`; anything else the SDK ignores).
 local function shownNow(view, model)
 	local binding = view.visible
 	t.isNotNil(binding, 'no visible binding on ' .. tostring(view.title))
 	t.equals(bindingKey(binding), 'phase')
+	t.isTrue(binding.bind_to_object == model, 'the visible binding does not name the model as bind_to_object')
 	return binding.transform(model.phase)
 end
 
@@ -430,11 +432,10 @@ end)
 t.test('the row shows when the picked engine is mlx, or the unset preference resolves to it', function()
 	local contents = openSettings({ detection = mock.detectionText() })
 	local row = modelRow(contents)
-	t.equals(bindingKey(row.visible), 'engine', 'the row is not shown by the engine')
-	t.isTrue(row.visible.transform('mlx'))
-	t.isTrue(row.visible.transform(''), 'the default on this Mac is mlx')
+	t.isTrue(visibleFor({ view = row }, 'mlx'))
+	t.isTrue(visibleFor({ view = row }, ''), 'the default on this Mac is mlx')
 	for _, engine in ipairs({ 'ollama', 'openai', 'claude' }) do
-		t.isFalse(row.visible.transform(engine), 'the row shows for ' .. engine)
+		t.isFalse(visibleFor({ view = row }, engine), 'the row shows for ' .. engine)
 	end
 end)
 
