@@ -527,6 +527,23 @@ t.test('a failed download shows a message with the tail of the log and offers Do
 	t.isNotNil(string.find(dialogsShown(false)[1].body, 'exit 3', 1, true))
 end)
 
+t.test('a download that cannot start, the executable gone since the dialog opened, says so once and offers Download again', function()
+	local contents = openSettings({ detection = mock.detectionText() })
+	local row, model = modelRow(contents)
+	-- The executable was beside the plugin when the dialog opened; by the
+	-- click it is gone. Absent by name, so the disk is not consulted.
+	mock.state.existing[mock.EXECUTABLE] = false
+	theButton(row, model, 'Download ' .. REPO, true).action()
+	t.equals(commandsRun('--download-model'), 0, 'ran a download with no executable to run it')
+	t.equals(model.phase, 'absent', 'a download that could not start should offer Download again')
+	local scope = mock.state.progressScopes[#mock.state.progressScopes]
+	t.isNotNil(scope, 'no progress scope for Lightroom\'s own bar')
+	t.isTrue(scope.isDone, 'the progress bar was left up with nothing to download')
+	t.equals(#dialogsShown(false), 1, 'expected one message for a download that could not start')
+	t.isNotNil(string.find(dialogsShown(false)[1].body, 'a file named melampus:', 1, true),
+		'the message does not name the executable: ' .. tostring(dialogsShown(false)[1].body))
+end)
+
 -- ── a command that fails ───────────────────────────────────────────────────
 t.test('when the status exits non-zero the dialog says it could not ask about the model, and there is no row', function()
 	local contents = openSettings({ detection = mock.detectionText(), statusCode = 1 })
