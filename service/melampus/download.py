@@ -86,7 +86,7 @@ from huggingface_hub.utils import WeakFileLock, build_hf_headers, filter_repo_ob
 from huggingface_hub.utils import logging as hub_logging  # noqa: E402 - the library's own logger, where its warnings go
 from huggingface_hub.utils._http import default_client_factory  # noqa: E402 - the library's own client, not a copy of it
 
-from .backend import OllamaBackend, ollama_not_running  # noqa: E402
+from .backend import OllamaBackend, ollama_not_running, ollama_opener  # noqa: E402
 from .config import cache_file  # noqa: E402
 
 PROGRESS = "progress"
@@ -1052,7 +1052,9 @@ def pull_model(
     objects mapped by `pull_updates`), handing `on_update` each progress
     update, and return the model's name: what `done` prints, and what
     `--model-status` reports as the path, since the model lives in Ollama
-    under that name. The stream is read with `timeout` per line.
+    under that name. The stream is read with `timeout` per line, through
+    the backend's opener (`ollama_opener`: straight to the address, never
+    through a proxy, never past a redirect), as every frame is sent.
 
     Raises DownloadError with the fix in the message: the backend's own
     not-running words when nothing answers at `url`, Ollama's words for a
@@ -1071,14 +1073,16 @@ def pull_model(
         method="POST",
     )
     try:
-        with (opener or urllib.request.urlopen)(request, timeout=timeout) as response:
+        with (opener or ollama_opener())(request, timeout=timeout) as response:
             for update in pull_updates(model, _lines_until_cancelled(response, marker)):
                 # The stream's `done` proves success was seen; the entry point
                 # prints the protocol's `done` from the return, as for mlx.
                 if update.state != DONE:
                     on_update(update)
     except urllib.error.HTTPError as exc:
-        raise _pull_error(model, OllamaBackend._error_text(exc)) from exc
+        # The status with the words, as the backend names one: a 3xx from
+        # the address is an answer from the wrong place, and says so.
+        raise _pull_error(model, f"{exc.code} {OllamaBackend._error_text(exc)}") from exc
     except urllib.error.URLError as exc:
         raise DownloadError(ollama_not_running(url, exc.reason)) from exc
     except (OSError, TimeoutError) as exc:
@@ -1088,27 +1092,29 @@ def pull_model(
     return model
 
 
-def _ollama_request(url: str, path: str, body: dict | None = None, *, method: str = "POST",
-                    timeout: float = 10.0) -> dict:
+def _ollama_request(model: str, url: str, path: str, body: dict | None = None, *,
+                    method: str = "POST", timeout: float = 10.0) -> dict:
     """One JSON answer from the Ollama server at `url`: `body` sent as JSON
-    when given, the reply decoded. Raises DownloadError with the backend's
-    not-running words when nothing answers, Ollama's words for an HTTP
-    error."""
+    when given, the reply decoded. Sent as the backend sends a frame for
+    `model`, through `OllamaBackend._send`: straight to the address (no
+    proxy, no redirect), the whole exchange within `timeout` of wall-clock
+    time, at most `MAX_REPLY_BYTES` of the reply read. Raises DownloadError
+    with the backend's words: not-running when nothing answers, the
+    timeout, `Ollama answered <status>: <its words>` for an HTTP error, a
+    reply that ran past the bound or was not HTTP."""
+    address = url.rstrip("/")
     request = urllib.request.Request(
-        f"{url.rstrip('/')}{path}",
+        f"{address}{path}",
         data=json.dumps(body).encode("utf-8") if body is not None else None,
         headers={"Content-Type": "application/json"} if body is not None else {},
         method=method,
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            raw = response.read()
-    except urllib.error.HTTPError as exc:
-        raise DownloadError(f"Ollama answered {exc.code}: {OllamaBackend._error_text(exc)}") from exc
-    except urllib.error.URLError as exc:
-        raise DownloadError(ollama_not_running(url, exc.reason)) from exc
-    except (OSError, TimeoutError) as exc:
-        raise DownloadError(ollama_not_running(url, exc)) from exc
+        raw = OllamaBackend(model, address, timeout=timeout)._send(request)
+    except (RuntimeError, ConnectionError, TimeoutError) as exc:
+        raise DownloadError(str(exc)) from exc
+    except OSError as exc:
+        raise DownloadError(ollama_not_running(address, exc)) from exc
     try:
         return json.loads(raw or b"{}")
     except json.JSONDecodeError as exc:
@@ -1121,7 +1127,7 @@ def _held(model: str, url: str) -> dict | None:
     None when it is not held. A name without a tag is `<name>:latest`
     there (§ Model names: the tag defaults to `latest`)."""
     names = {model, model if ":" in model else f"{model}:latest"}
-    for entry in _ollama_request(url, OLLAMA_TAGS, method="GET").get("models") or []:
+    for entry in _ollama_request(model, url, OLLAMA_TAGS, method="GET").get("models") or []:
         if isinstance(entry, dict) and (entry.get("name") in names or entry.get("model") in names):
             return entry
     return None
@@ -1151,7 +1157,7 @@ def remove_ollama_model(model: str, url: str) -> str:
     DownloadError naming the model when nothing is held, the backend's
     not-running words when no server answers."""
     try:
-        _ollama_request(url, OLLAMA_DELETE, {"model": model}, method="DELETE")
+        _ollama_request(model, url, OLLAMA_DELETE, {"model": model}, method="DELETE")
     except DownloadError as exc:
         if "Ollama answered 404" in str(exc):
             raise DownloadError(f"{model} is not in Ollama at {url}: nothing to remove ({exc})") from exc

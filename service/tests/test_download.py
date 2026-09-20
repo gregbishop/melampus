@@ -23,8 +23,10 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 import tomllib
 import types
+import urllib.request
 from collections.abc import Iterator
 from http.server import ThreadingHTTPServer
 from pathlib import Path
@@ -2533,6 +2535,150 @@ def test_pull_refused_before_any_content_carries_ollamas_words(fake_ollama: Fake
     with pytest.raises(DownloadError) as failure:
         _pull(fake_ollama, model="")
     assert "invalid model name" in str(failure.value)
+
+
+# Security review (PR #19): the pull, the list and the delete reach the
+# Ollama address the way every frame does (PR #11's review of the backend):
+# straight to it, never through a proxy, never past a redirect, the one-shot
+# calls within a deadline and a bounded reply. One mechanism, the backend's.
+
+
+def _through(ollama_call: str, url: str, tmp_path: Path):
+    """One of the three Ollama calls against `url`, as the flags make it:
+    what it returns, or the DownloadError it raised."""
+    try:
+        if ollama_call == "pull":
+            return pull_model(FAKE_MODEL, url, on_update=lambda update: None,
+                              cancel_marker=tmp_path / "download-cancel", timeout=5.0)
+        if ollama_call == "status":
+            return ollama_status(FAKE_MODEL, url)
+        return remove_ollama_model(FAKE_MODEL, url)
+    except DownloadError as exc:
+        return exc
+
+
+@pytest.mark.parametrize("ollama_call", ["pull", "status", "remove"])
+def test_the_ollama_calls_stay_at_the_address_whatever_proxy_the_environment_names(
+    monkeypatch, tmp_path: Path, ollama_call: str
+):
+    """Security: readme.md § Windows promises that through Ollama nothing
+    leaves the machine, and the probe and the backend keep it by consulting
+    no proxy. The pull, the list and the delete must keep it too: urlopen's
+    default opener honours `http_proxy` (and, on a Mac, the system proxy
+    settings, whose default bypass list does not cover 127.0.0.1), which
+    would send the model's name off the machine and let the proxy's answer
+    stand in for Ollama's: its stream for the pull, its list for
+    `--model-status`. Given a proxy in the environment that answers 200 to
+    everything and nothing at the address, each call fails as not-running
+    (the status reads absent) and the proxy never hears from it."""
+    from conftest import recording_handler
+
+    seen: list[str] = []
+    for name in ("no_proxy", "NO_PROXY"):
+        monkeypatch.delenv(name, raising=False)
+    # urlopen builds its default opener once, reading the proxy variables then;
+    # start it fresh so the environment set here is the one it would see.
+    monkeypatch.setattr(urllib.request, "_opener", None)
+    with loopback_server(recording_handler(seen)) as proxy:
+        monkeypatch.setenv("http_proxy", f"http://127.0.0.1:{proxy.server_port}")
+        outcome = _through(ollama_call, f"http://127.0.0.1:{closed_port()}", tmp_path)
+    assert seen == [], f"the {ollama_call} left the machine through the proxy: {seen}"
+    if ollama_call == "status":
+        assert outcome.installed is False
+    else:
+        assert "no Ollama server answering" in str(outcome), outcome
+
+
+@pytest.mark.parametrize("ollama_call", ["pull", "status", "remove"])
+def test_the_ollama_calls_refuse_a_redirect_off_the_address(tmp_path: Path, ollama_call: str):
+    """Security: the backend asks one address and takes only that address's
+    answer, as the probe does. urlopen's default opener follows a 3xx (a
+    POST's as a GET), so whatever listens on the port when Ollama does not
+    (any local process can bind it) could answer 302 with a Location
+    anywhere, and the reply from there would stand in for Ollama's: a
+    `success` line for the pull, a list holding the model for
+    `--model-status`. Given a server at the address answering 302 towards a
+    second server that records every request, each call fails on the
+    status (the status reads absent) and the destination never hears from
+    it."""
+    from conftest import QuietHandler, recording_handler
+
+    seen: list[str] = []
+    with loopback_server(recording_handler(seen)) as destination:
+        elsewhere = f"http://127.0.0.1:{destination.server_port}"
+
+        class Redirecting(QuietHandler):
+            def do_GET(self):  # noqa: N802 - http.server's name
+                self.rfile.read(int(self.headers.get("Content-Length") or 0))
+                self.send_response(302)
+                self.send_header("Location", f"{elsewhere}{self.path}")
+                self.end_headers()
+
+            do_POST = do_DELETE = do_GET  # noqa: N815 - http.server's names
+
+        with loopback_server(Redirecting) as squatter:
+            outcome = _through(ollama_call, f"http://127.0.0.1:{squatter.server_port}", tmp_path)
+    assert seen == [], f"the {ollama_call} followed the redirect off the address: {seen}"
+    if ollama_call == "status":
+        assert outcome.installed is False
+    else:
+        assert "302" in str(outcome), outcome
+
+
+def test_the_list_gives_up_on_an_ollama_that_answers_and_never_finishes():
+    """Security: `--model-status` is what the Settings dialog waits on when
+    it opens, and its socket timeout bounds each read, not the call, so a
+    listener trickling the list a byte at a time could hold the dialog for
+    as long as it liked. The backend bounds a frame with a deadline
+    (_Deadline) for that reason; the list is one exchange like it. Given a
+    server that writes a byte every tenth of a second for longer than the
+    timeout, the call is over within it and says so."""
+    from conftest import QuietHandler
+
+    class Trickling(QuietHandler):
+        def do_GET(self):  # noqa: N802 - http.server's name
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            for _ in range(40):
+                self.wfile.write(b" ")
+                self.wfile.flush()
+                time.sleep(0.1)
+            self.wfile.write(b'{"models": []}')
+
+    with loopback_server(Trickling, ThreadingHTTPServer) as trickler:
+        started = time.monotonic()
+        with pytest.raises(DownloadError) as failure:
+            download._ollama_request(FAKE_MODEL, f"http://127.0.0.1:{trickler.server_port}",
+                                     download.OLLAMA_TAGS, method="GET", timeout=1.0)
+        took = time.monotonic() - started
+    assert took < 3.0, f"the list ran past its timeout: {took:.1f}s"
+    assert "did not answer within 1s" in str(failure.value), str(failure.value)
+
+
+def test_the_list_reads_at_most_the_backends_reply_bound():
+    """Security: the list is read whole into memory before it is parsed, and
+    it is whatever listens at the address that writes it. The backend reads
+    at most OllamaBackend.MAX_REPLY_BYTES of a reply and refuses a longer
+    one by name; the list, one reply like it, keeps the same bound. Given a
+    server answering the list with more than that, the call refuses it
+    naming the bound, not the parser's complaint about what it read."""
+    from conftest import QuietHandler
+
+    from melampus.backend import OllamaBackend
+
+    class Endless(QuietHandler):
+        def do_GET(self):  # noqa: N802 - http.server's name
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"models": [' + b" " * (OllamaBackend.MAX_REPLY_BYTES + 1) + b"]}")
+
+    with loopback_server(Endless) as squatter:
+        with pytest.raises(DownloadError) as failure:
+            download._ollama_request(FAKE_MODEL, f"http://127.0.0.1:{squatter.server_port}",
+                                     download.OLLAMA_TAGS, method="GET", timeout=5.0)
+    assert f"ran past {OllamaBackend.MAX_REPLY_BYTES} bytes" in str(failure.value), str(failure.value)
 
 
 # The cooperative cancel, for Ollama: the marker and the signals end the

@@ -468,6 +468,24 @@ class _Bounded(urllib.request.HTTPHandler, urllib.request.HTTPSHandler):
         )
 
 
+def ollama_opener(*handlers: urllib.request.BaseHandler) -> Callable:
+    """urllib's `open` for every request to the Ollama address, the backend's
+    frames and the model pull alike (card #409): straight to the address,
+    never past it. Not urlopen itself: its opener honours http_proxy and
+    the system proxy settings, which would send the bytes off the machine
+    and let the proxy's answer stand in for Ollama's (the probe in
+    providers.ollama_answers keeps off the proxy for the same reason);
+    ProxyHandler({}) consults neither. And it follows a 3xx, so whatever
+    listens on the port when Ollama does not could point a request at
+    another host and have that host's reply stand in for Ollama's;
+    _StayPut follows nothing, as the probe follows nothing. `handlers` add
+    to those two: the backend passes _Bounded, whose connections hand their
+    socket to the request's deadline."""
+    return urllib.request.build_opener(
+        urllib.request.ProxyHandler({}), _StayPut(), *handlers
+    ).open
+
+
 def ollama_not_running(url: str, reason: object) -> str:
     """The one message for a request Ollama did not answer at `url`: the
     backend's mid-run failure and the model pull (card #409) say the same
@@ -533,20 +551,11 @@ class OllamaBackend(VLMBackend):
         self.timeout = timeout
         # Shaped like urllib.request.urlopen(request, timeout=...): the tests hand
         # in a fake at this edge, the way the cloud backends take a client. Not
-        # urlopen itself: its opener honours http_proxy and the system proxy
-        # settings, which would send every frame's bytes off the machine and
-        # let the proxy's answer stand in for the model's (the probe in
-        # providers.ollama_answers keeps off the proxy for the same reason);
-        # ProxyHandler({}) consults neither. And it follows a 3xx, so
-        # whatever listens on the port when Ollama does not could point a
-        # frame at another host and have that host's reply stand in for the
-        # model's; _StayPut follows nothing, as the probe follows nothing.
-        # And its `timeout` is the socket's, per operation, so a server
+        # urlopen itself: ollama_opener says why (no proxy, no redirect). And
+        # urlopen's `timeout` is the socket's, per operation, so a server
         # trickling bytes could hold a frame past `timeout_seconds`; _Bounded
         # opens connections that hand their socket to the request's deadline.
-        self._urlopen = client or urllib.request.build_opener(
-            urllib.request.ProxyHandler({}), _StayPut(), _Bounded()
-        ).open
+        self._urlopen = client or ollama_opener(_Bounded())
 
     def _request(self, image_path: Path, prompt: str, max_tokens: int) -> urllib.request.Request:
         image = _image_as_base64(image_path)
