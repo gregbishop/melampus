@@ -1212,3 +1212,20 @@ def test_ollama_backend_refuses_a_redirect_off_the_address(tmp_path):
                 backend.complete(image, "prompt", 10)
     assert "Ollama answered 302" in str(err.value), str(err.value)
     assert seen == [], f"the backend followed the redirect off the address: {seen}"
+
+
+@pytest.mark.parametrize(
+    "address", ["localhost:11434", "http://", "not an address", "http://127.0.0.1:99999"],
+    ids=["no-scheme", "no-host", "not-a-url", "port-out-of-range"],
+)
+def test_ollama_probe_reports_unavailable_for_an_address_it_cannot_ask(address, no_ambient_keys):
+    """`[model] ollama_url` is the user's typing, and the probe promises never
+    to raise: a scheme left off, a host left out, a port out of range is an
+    address no server answers at, reported as such, not a traceback out of
+    detection, the default engine or `--detect-engines`. Asked for the
+    backend there, the refusal names the address as typed (trailing slashes
+    dropped, as providers.ollama_url documents)."""
+    assert providers.ollama_answers(address) is False
+    with pytest.raises(providers.BackendUnavailable) as err:
+        providers.build_primary_backend(_cfg(model={"backend": "ollama", "ollama_url": address}))
+    assert f"No Ollama server is answering at {address.rstrip('/')}" in str(err.value), str(err.value)

@@ -139,10 +139,13 @@ def ollama_answers(url: str | None = None) -> bool:
     listener trickling headers a byte at a time could hold detection for as
     long as it liked; a timer hangs up at OLLAMA_PROBE_SECONDS, and whatever
     was read by then, the probe reports unavailable."""
-    address = urlsplit(ollama_url(url))
-    connection = http.client.HTTPConnection(
-        address.hostname, address.port, timeout=OLLAMA_PROBE_SECONDS
-    )
+    try:
+        address = urlsplit(ollama_url(url))
+        connection = http.client.HTTPConnection(
+            address.hostname, address.port, timeout=OLLAMA_PROBE_SECONDS
+        )
+    except Exception:  # noqa: BLE001 - an address that cannot be asked (no scheme, no host, a port out of range) is one nobody answers at
+        return False
     expired = threading.Event()
     deadline = threading.Timer(OLLAMA_PROBE_SECONDS, _hang_up, [connection, expired])
     deadline.start()
