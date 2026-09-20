@@ -562,6 +562,24 @@ def _timed_probe(monkeypatch, handler: type[QuietHandler]) -> tuple[bool, float]
         return answered, time.monotonic() - started
 
 
+def _ollama_chat_reply(model: str, text: str) -> dict:
+    """The final response object POST /api/chat answers with when `stream` is
+    false (Ollama's docs/api.md § Generate a chat completion): the text is
+    `message.content`, the counts `prompt_eval_count` and `eval_count`, the
+    other fields as the docs show them. The one shape every fake Ollama in
+    this file answers with, at the HTTP boundary and at the `urlopen` edge."""
+    return {
+        "model": model,
+        "created_at": "2026-09-18T00:00:00Z",
+        "message": {"role": "assistant", "content": text},
+        "done_reason": "stop",
+        "done": True,
+        "total_duration": 1668506709,
+        "prompt_eval_count": 26,
+        "eval_count": 83,
+    }
+
+
 @contextlib.contextmanager
 def _fake_ollama(monkeypatch, *, status: int = 200, delay: float = 0.0, replies: list[str] = ()):
     """A server speaking Ollama's version and chat endpoints, standing in for
@@ -587,12 +605,7 @@ def _fake_ollama(monkeypatch, *, status: int = 200, delay: float = 0.0, replies:
             if not pending:
                 self._answer(404, {"error": f"model '{body.get('model')}' not found"})
                 return
-            self._answer(200, {
-                "model": body["model"], "created_at": "2026-09-18T00:00:00Z",
-                "message": {"role": "assistant", "content": pending.pop(0)},
-                "done_reason": "stop", "done": True, "total_duration": 1668506709,
-                "prompt_eval_count": 26, "eval_count": 83,
-            })
+            self._answer(200, _ollama_chat_reply(body["model"], pending.pop(0)))
 
         def _answer(self, code: int, payload: dict) -> None:
             self.send_response(code)
@@ -1091,16 +1104,7 @@ class _FakeUrlopen:
         return io.BytesIO(self.reply)
 
 
-OLLAMA_REPLY = json.dumps({
-    "model": "qwen3-vl:8b-instruct",
-    "created_at": "2026-09-18T00:00:00Z",
-    "message": {"role": "assistant", "content": ID_OK},
-    "done_reason": "stop",
-    "done": True,
-    "total_duration": 1668506709,
-    "prompt_eval_count": 26,
-    "eval_count": 83,
-}).encode("utf-8")
+OLLAMA_REPLY = json.dumps(_ollama_chat_reply("qwen3-vl:8b-instruct", ID_OK)).encode("utf-8")
 
 
 def _ollama_backend(client: _FakeUrlopen, **kwargs) -> OllamaBackend:
