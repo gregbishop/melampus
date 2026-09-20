@@ -540,8 +540,9 @@ def test_ollama_probe_gives_up_at_its_deadline_when_the_headers_trickle(monkeypa
     byte every hundred milliseconds, each within the timeout, and hold
     detection, and the CLI's startup behind it, for as long as it liked. Given
     a server that trickles a valid 200 over two seconds, the probe reports
-    unavailable and returns within its deadline."""
-    monkeypatch.setattr(providers, "OLLAMA_PROBE_SECONDS", 0.3)
+    unavailable and returns within its deadline, not after the trickle."""
+    deadline = 0.3
+    monkeypatch.setattr(providers, "OLLAMA_PROBE_SECONDS", deadline)
 
     class Trickling(QuietHandler):
         def do_GET(self):  # noqa: N802 - http.server's name
@@ -558,7 +559,10 @@ def test_ollama_probe_gives_up_at_its_deadline_when_the_headers_trickle(monkeypa
         started = time.monotonic()
         answered = providers.ollama_answers()
         elapsed = time.monotonic() - started
-    assert elapsed < 1.0, f"the probe read past its deadline: {elapsed:.2f}s"
+    # Half a second of slack for thread scheduling: the timer thread fires and
+    # the main thread's read returns some tens of milliseconds after the
+    # deadline, while waiting out the trickle takes over two seconds.
+    assert elapsed < deadline + 0.5, f"the probe read past its deadline: {elapsed:.2f}s"
     assert answered is False
 
 
