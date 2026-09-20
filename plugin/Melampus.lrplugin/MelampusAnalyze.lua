@@ -191,16 +191,17 @@ end
 
 --- Why the key must not go to cmd.exe, or nil when it may. Inside
 -- `set "VAR=value"` a double quote ends the quoted text and what follows is
--- command text to cmd.exe, and %NAME% is expanded even inside quotes (see
--- windowsPathRefusal); neither can be escaped on a cmd.exe command line.
--- sh gets the key through quote(), where nothing needs refusing. The
--- message never shows the key.
+-- command text to cmd.exe, %NAME% is expanded even inside quotes (see
+-- windowsPathRefusal), a line feed ends the line so what follows it is not
+-- the line the plugin built, and a carriage return is dropped; none of them
+-- can be escaped on a cmd.exe command line. sh gets the key through
+-- quote(), where nothing needs refusing. The message never shows the key.
 local function windowsKeyRefusal(key)
 	if not WIN_ENV then return nil end
-	if string.find(key, '["%%]') then
+	if string.find(key, '["%%\r\n]') then
 		return 'The API key kept for this engine contains a character the Windows '
-			.. 'shell rewrites (" or %), so Melampus will not hand it to its analysis '
-			.. 'program.\n\nOpen Settings and enter the key again.'
+			.. 'shell rewrites (", % or a line break), so Melampus will not hand it '
+			.. 'to its analysis program.\n\nOpen Settings and enter the key again.'
 	end
 	return nil
 end

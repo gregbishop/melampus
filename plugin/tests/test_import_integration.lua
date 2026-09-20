@@ -671,10 +671,15 @@ end)
 t.test('on Windows a stored key holding a character cmd.exe rewrites is refused before anything runs', function()
 	-- Inside `set "VAR=value"` a double quote ends the quoted text and what
 	-- follows is command text to cmd.exe, and %NAME% is expanded even inside
-	-- quotes: the same rewriting the paths are refused for. There is no way
-	-- to escape either on a cmd.exe command line, so the key is refused, the
-	-- way to fix it named, and the key itself shown nowhere.
-	for _, key in ipairs({ 'sk-not-a-real-key" & calc & "', 'sk-not-a-real-key-%TEMP%' }) do
+	-- quotes: the same rewriting the paths are refused for. A line feed ends
+	-- the line itself, so what follows it is not the line the plugin built,
+	-- and a carriage return is dropped. There is no way to escape any of
+	-- them on a cmd.exe command line, so the key is refused, the way to fix
+	-- it named, and the key itself shown nowhere.
+	for _, key in ipairs({
+		'sk-not-a-real-key" & calc & "', 'sk-not-a-real-key-%TEMP%',
+		'sk-not-a-real-key\ncalc', 'sk-not-a-real-key\r',
+	}) do
 		local Analyze = loadUnderMock('MelampusAnalyze',
 			{ existing = { [WIN_EXECUTABLE] = true }, passwords = { MELAMPUS_OPENAI_KEY = key } },
 			WIN_PLUGIN, { windows = true })
