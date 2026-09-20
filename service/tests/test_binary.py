@@ -45,7 +45,6 @@ from __future__ import annotations
 
 import json
 import os
-import platform
 import shutil
 import subprocess
 import sys
@@ -54,7 +53,7 @@ import types
 from pathlib import Path
 
 import pytest
-from conftest import PHOTO
+from conftest import PHOTO, fake_platform
 
 from melampus import config
 from melampus.backend import ScriptedBackend
@@ -135,8 +134,7 @@ def build(build_script: types.ModuleType, monkeypatch: pytest.MonkeyPatch, tmp_p
     Apple Silicon."""
     monkeypatch.setattr(build_script, "DIST", tmp_path / "dist")
     monkeypatch.setattr(build_script, "WORK", tmp_path / "build" / "pyinstaller")
-    monkeypatch.setattr(sys, "platform", "darwin")
-    monkeypatch.setattr(platform, "machine", lambda: "arm64")
+    fake_platform(monkeypatch, "darwin", "arm64")
     return build_script
 
 
@@ -356,8 +354,7 @@ def test_build_plan_on_windows_names_the_exe_and_leaves_mlx_out(
     dist/melampus.exe and not ask PyInstaller to collect mlx (there is no such
     package there, and PyInstaller refuses to collect a package it cannot
     find)."""
-    monkeypatch.setattr(sys, "platform", "win32")
-    monkeypatch.setattr(platform, "machine", lambda: "AMD64")
+    fake_platform(monkeypatch, "win32", "AMD64")
     assert build_script.executable_path() == repo / "dist" / "melampus.exe"
     arguments = build_script.pyinstaller_arguments(Path("entry.py"))
     assert "--collect-all" not in arguments

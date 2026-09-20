@@ -16,12 +16,17 @@ the executable and from the CLI alike.
 `loopback_server` is the one fake-server plumbing for tests at a real HTTP
 boundary (GBIF's occurrence search, Ollama's version endpoint): a handler
 speaking the real protocol, served on 127.0.0.1 at an ephemeral port.
+
+`fake_platform` is the one way the suite fakes the machine `on_apple_silicon`
+reads (sys.platform and platform.machine(), together), whether the caller is
+a providers test or the build plan.
 """
 
 from __future__ import annotations
 
 import contextlib
 import importlib.util
+import platform
 import shutil
 import subprocess
 import sys
@@ -97,6 +102,13 @@ def photos(tmp_path: Path) -> Path:
     folder.mkdir()
     shutil.copy(FIXTURE, folder / PHOTO)
     return folder
+
+
+def fake_platform(monkeypatch: pytest.MonkeyPatch, platform_name: str, machine: str) -> None:
+    """The machine as `on_apple_silicon` sees it: sys.platform and
+    platform.machine(), faked together, the only way the suite fakes them."""
+    monkeypatch.setattr(sys, "platform", platform_name)
+    monkeypatch.setattr(platform, "machine", lambda: machine)
 
 
 @contextlib.contextmanager

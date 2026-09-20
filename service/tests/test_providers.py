@@ -18,7 +18,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler
 
 import pytest
-from conftest import PHOTO, loopback_server
+from conftest import PHOTO, fake_platform, loopback_server
 
 from melampus import providers
 from melampus.backend import AnthropicBackend, MLXBackend, OpenAIBackend, ScriptedBackend
@@ -29,13 +29,6 @@ ALL_KEY_VARIABLES = [name for names in providers.KEY_VARIABLES.values() for name
 
 def _cfg(**overrides):
     return load_config(use_local=False, **overrides)
-
-
-def _fake_platform(monkeypatch, platform_name: str, machine: str) -> None:
-    """The machine as `on_apple_silicon` sees it: sys.platform and
-    platform.machine(), faked together, the only way the suite fakes them."""
-    monkeypatch.setattr(providers.sys, "platform", platform_name)
-    monkeypatch.setattr(providers.platform, "machine", lambda: machine)
 
 
 @pytest.fixture()
@@ -68,7 +61,7 @@ def test_default_backend_is_local_mlx():
 
 
 def test_mlx_is_refused_on_windows_with_directions(monkeypatch, no_ambient_ollama):
-    _fake_platform(monkeypatch, "win32", "AMD64")
+    fake_platform(monkeypatch, "win32", "AMD64")
     with pytest.raises(providers.BackendUnavailable) as err:
         providers.build_primary_backend(_cfg())
     message = str(err.value)
@@ -79,7 +72,7 @@ def test_mlx_is_refused_on_intel_mac(monkeypatch, no_ambient_ollama):
     """darwin alone is not enough — the pyproject marker also requires arm64,
     so an Intel Mac must get the helpful refusal, not a ModuleNotFoundError
     at warmup."""
-    _fake_platform(monkeypatch, "darwin", "x86_64")
+    fake_platform(monkeypatch, "darwin", "x86_64")
     with pytest.raises(providers.BackendUnavailable):
         providers.build_primary_backend(_cfg())
 
@@ -236,7 +229,7 @@ def test_mlx_refusal_does_not_name_ollama_as_working(monkeypatch, no_ambient_oll
     """Off Apple Silicon the mlx refusal lists what works here; with no Ollama
     server answering (card #404's detection decides), ollama stays off that
     list."""
-    _fake_platform(monkeypatch, "win32", "AMD64")
+    fake_platform(monkeypatch, "win32", "AMD64")
     with pytest.raises(providers.BackendUnavailable) as err:
         providers.build_primary_backend(_cfg())
     assert "ollama" not in str(err.value)
@@ -358,7 +351,7 @@ def test_cli_backend_mlx_on_windows_names_apple_silicon_and_the_backends_that_wo
     is not built yet (card #403)."""
     from melampus.cli import main
 
-    _fake_platform(monkeypatch, "win32", "AMD64")
+    fake_platform(monkeypatch, "win32", "AMD64")
 
     code = main([str(photos), "--backend", "mlx", "--cache", str(tmp_path / "cache.jsonl")])
 
@@ -397,7 +390,7 @@ def test_detection_lists_the_four_engines_in_the_owners_order(no_ambient_keys, n
 
 def test_detection_mlx_is_available_on_apple_silicon(monkeypatch, no_ambient_ollama):
     """Done-when 1: given Apple Silicon, when detection runs, then mlx is available."""
-    _fake_platform(monkeypatch, "darwin", "arm64")
+    fake_platform(monkeypatch, "darwin", "arm64")
     assert _verdict("mlx").available
 
 
@@ -405,7 +398,7 @@ def test_detection_mlx_is_available_on_apple_silicon(monkeypatch, no_ambient_oll
 def test_detection_mlx_needs_apple_silicon_anywhere_else(monkeypatch, no_ambient_ollama, platform_name, machine):
     """Done-when 1: given anything else, then mlx is unavailable with the
     reason "needs Apple Silicon"."""
-    _fake_platform(monkeypatch, platform_name, machine)
+    fake_platform(monkeypatch, platform_name, machine)
     verdict = _verdict("mlx")
     assert not verdict.available
     assert verdict.reason == "needs Apple Silicon"
@@ -448,7 +441,7 @@ def test_the_refusal_names_what_detection_says_is_available(monkeypatch):
     """One truth: the backends the refusal names as working here are the ones
     detection says are available, plus the test fake. Off Apple Silicon with
     Ollama answering, that is ollama, openai, claude, scripted, and not mlx."""
-    _fake_platform(monkeypatch, "win32", "AMD64")
+    fake_platform(monkeypatch, "win32", "AMD64")
     monkeypatch.setattr(providers, "ollama_answers", lambda: True)
     assert providers._works_here() == ("ollama", "openai", "claude", "scripted")
     with pytest.raises(providers.BackendUnavailable) as err:
@@ -471,7 +464,7 @@ def test_default_engine_is_always_one_detection_names_available(
     everywhere, so there is always one, and there is no fallback that could
     quietly name an engine detection did not. Were the list ever to change so
     that nothing is available, the call raises rather than inventing mlx."""
-    _fake_platform(monkeypatch, "linux", "x86_64")
+    fake_platform(monkeypatch, "linux", "x86_64")
     verdicts = providers.detect_engines()
     assert providers.default_engine() == next(v.engine for v in verdicts if v.available) == "openai"
 
@@ -594,7 +587,7 @@ def test_cli_detect_engines_prints_the_verdicts_as_json_in_order(
     Ollama: mlx and ollama say why not, the cloud engines say which key."""
     from melampus.cli import main
 
-    _fake_platform(monkeypatch, "win32", "AMD64")
+    fake_platform(monkeypatch, "win32", "AMD64")
 
     code = main(["--detect-engines"])
 
@@ -656,7 +649,7 @@ def test_cli_default_engine_is_the_first_that_can_run_here(
     """No `--backend` and no `[model] backend`: the CLI picks the first engine
     detection says is available, in the owner's order. Off Apple Silicon with
     Ollama answering, that is ollama; the log line says so and how to choose."""
-    _fake_platform(monkeypatch, "win32", "AMD64")
+    fake_platform(monkeypatch, "win32", "AMD64")
     monkeypatch.setattr(providers, "ollama_answers", lambda: True)
 
     engine = _chosen_engine(monkeypatch, [str(photos), "--cache", str(tmp_path / "cache.jsonl")])
@@ -670,9 +663,9 @@ def test_cli_default_engine_is_mlx_on_apple_silicon_and_openai_with_nothing_loca
     monkeypatch, photos, tmp_path, no_ambient_keys, no_ambient_ollama
 ):
     argv = [str(photos), "--cache", str(tmp_path / "cache.jsonl")]
-    _fake_platform(monkeypatch, "darwin", "arm64")
+    fake_platform(monkeypatch, "darwin", "arm64")
     assert _chosen_engine(monkeypatch, argv) == "mlx"
-    _fake_platform(monkeypatch, "linux", "x86_64")
+    fake_platform(monkeypatch, "linux", "x86_64")
     assert _chosen_engine(monkeypatch, argv) == "openai"
 
 
@@ -681,7 +674,7 @@ def test_cli_detection_never_overrides_a_chosen_engine(
 ):
     """`--backend` and `[model] backend` are the user's word; detection only
     fills the blank. Faked so detection would say ollama."""
-    _fake_platform(monkeypatch, "win32", "AMD64")
+    fake_platform(monkeypatch, "win32", "AMD64")
     monkeypatch.setattr(providers, "ollama_answers", lambda: True)
     argv = [str(photos), "--cache", str(tmp_path / "cache.jsonl")]
     assert _chosen_engine(monkeypatch, [*argv, "--backend", "mlx"]) == "mlx"
