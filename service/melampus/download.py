@@ -251,6 +251,15 @@ def _verify(blob: _Blob) -> None:
         )
 
 
+def _same_origin(url: str, endpoint: str) -> bool:
+    """Whether a file's bytes are served by the hub itself, so the user's
+    token may go with the request: the whole origin, scheme and host, must
+    match. An `http://` URL on an `https://` hub's host is another origin,
+    or the token would go in cleartext."""
+    ours, theirs = urlparse(url), urlparse(endpoint)
+    return (ours.scheme, ours.netloc) == (theirs.scheme, theirs.netloc)
+
+
 def _fetch(blob: _Blob, progress: _Progress, headers: dict[str, str], lock_dir: Path) -> None:
     """Append the rest of one file to its `.incomplete` blob and, once the
     size and the checksum check out, make it the blob. huggingface_hub's own
@@ -297,12 +306,13 @@ def download_model(
         headers = build_hf_headers()
         # The user's token is for the hub. An LFS file's bytes come from the
         # hub's CDN (a signed URL on another host): no token goes there, as
-        # huggingface_hub's own download strips it when the host differs.
+        # huggingface_hub's own download strips it when the host differs,
+        # nor to a plain-HTTP URL on the hub's own host.
         no_token = {k: v for k, v in headers.items() if k.lower() != "authorization"}
         for blob in blobs:
             if not blob.path.exists():
-                same_host = urlparse(blob.url).netloc == urlparse(endpoint).netloc
-                _fetch(blob, progress, headers if same_host else no_token, cache / ".locks" / folder)
+                _fetch(blob, progress, headers if _same_origin(blob.url, endpoint) else no_token,
+                       cache / ".locks" / folder)
         # Every blob is complete: the hub library lays out the snapshot and
         # the pointers of the planned commit exactly as mlx-vlm will look for
         # them (refs/main already names it), and moves no bytes because

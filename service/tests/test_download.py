@@ -44,6 +44,7 @@ from melampus.download import (
     DownloadCancelled,
     DownloadError,
     Update,
+    _same_origin,
     cancel_on_signals,
     download_model,
 )
@@ -329,6 +330,24 @@ def test_download_sends_the_user_token_to_the_hub_and_never_to_the_host_serving_
     assert all(r.authorization == "Bearer synthetic-token" for r in fake_hub.requests), fake_hub.requests
     assert [name for name in FAKE_FILES if cdn.gets(name)] == list(FAKE_FILES), "the bytes did not come from the CDN"
     assert all(r.authorization is None for r in cdn.requests), "the token left the hub"
+
+
+@pytest.mark.parametrize(("url", "endpoint", "trusted"), [
+    ("http://127.0.0.1:8/fake-org/fake-model/resolve/abc/config.json", "http://127.0.0.1:8", True),
+    ("https://huggingface.co/x/resolve/abc/config.json", "https://huggingface.co", True),
+    ("http://huggingface.co/x/resolve/abc/config.json", "https://huggingface.co", False),
+    ("https://cdn-lfs.hf.co/x", "https://huggingface.co", False),
+    ("https://huggingface.co:8443/x", "https://huggingface.co", False),
+], ids=["fake hub", "the hub itself", "https downgraded to http", "the CDN", "another port"])
+def test_the_token_goes_only_to_the_endpoints_own_origin(url: str, endpoint: str, trusted: bool):
+    """Security (Codex round 1, download.py:279). Whether the token goes with
+    a file's bytes was decided on the host alone, so an `https://` hub
+    naming an `http://` download URL on the same host would have had the
+    token sent in cleartext. The decision is the whole origin, scheme
+    included: a downgrade is another host, and gets no token. The fake hub
+    cannot serve two schemes on one host and port, so this is the decision
+    on its own; the boundary is proven by the CDN test above."""
+    assert _same_origin(url, endpoint) is trusted
 
 
 def test_download_of_a_repo_the_hub_does_not_have_names_the_setting_to_fix(
