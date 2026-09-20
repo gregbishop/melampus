@@ -352,7 +352,12 @@ end
 -- to `onProgress`; when the command exits, `onFinish` gets the exit code
 -- (0 done, 3 failed, 4 cancelled), the last update, and the tail of the
 -- log. `cancelPath` is where --model-status said to write to cancel.
--- Returns a handle whose cancel() writes it, or nil plus a message.
+-- Returns a handle whose cancel() writes it, or nil plus a message. The
+-- executable removes a stale marker when it starts, and its start (the
+-- one-file unpack, the imports) takes seconds after the click, so a
+-- cancel is held: once asked for, the poller writes the marker again on
+-- every tick until the command exits, and a start-up removal loses it
+-- for a second at most.
 function Analyze.downloadModel(cancelPath, onProgress, onFinish)
 	local command, err = Analyze.downloadCommand()
 	if not command then return nil, err end
@@ -364,12 +369,21 @@ function Analyze.downloadModel(cancelPath, onProgress, onFinish)
 		local handle = io.open(path, 'w')
 		if handle then handle:close() end
 	end
+	local cancelled = false
+	local function writeMarker()
+		LrFileUtils.createAllDirectories(LrPathUtils.parent(cancelPath))
+		local handle = io.open(cancelPath, 'w')
+		if handle then handle:close() else Log.warn('could not write ' .. cancelPath) end
+	end
 	Log.info('running: ' .. command)
 	local code = nil
 	LrTasks.startAsyncTask(function() code = LrTasks.execute(command) end)
 	LrTasks.startAsyncTask(function()
 		while code == nil do
 			LrTasks.sleep(1)
+			-- Not after the exit: the executable removed the marker then,
+			-- and one left behind would be the next run's stale one.
+			if cancelled and code == nil then writeMarker() end
 			local update = Rules.latestDownloadUpdate(LrFileUtils.readFile(progressFile))
 			if update then onProgress(update) end
 		end
@@ -379,9 +393,8 @@ function Analyze.downloadModel(cancelPath, onProgress, onFinish)
 	end)
 	return {
 		cancel = function()
-			LrFileUtils.createAllDirectories(LrPathUtils.parent(cancelPath))
-			local handle = io.open(cancelPath, 'w')
-			if handle then handle:close() else Log.warn('could not write ' .. cancelPath) end
+			cancelled = true
+			writeMarker()
 		end,
 	}
 end

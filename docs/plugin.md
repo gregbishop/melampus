@@ -135,7 +135,10 @@ executable's own default):
   the child, so Cancel writes the cancel marker at the path the status named
   (`cancel_path`), which the executable watches between chunks; it exits 4
   with `cancelled` and the partial file kept, and the row offers Download
-  again, resuming next time. Lightroom's own cancel on the progress bar does
+  again, resuming next time. The executable removes a stale marker when it
+  starts, and its start takes seconds after the click, so the poller writes
+  the marker again on every tick until the command exits: a Cancel clicked
+  in that window holds. Lightroom's own cancel on the progress bar does
   the same.
 - Done (`done <path>`, exit 0): the row reads **Installed**, greyed, beside
   **Remove**, which runs `--remove-model` and flips the row back. Exit 3 shows

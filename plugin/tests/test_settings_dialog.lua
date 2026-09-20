@@ -622,6 +622,42 @@ t.test('Cancel writes the marker where the status said, creating its folder', fu
 	os.remove(marker)
 end)
 
+t.test('a Cancel clicked while the executable is still starting holds: the marker comes back on the next tick', function()
+	-- Done-when 2. The executable removes a stale marker when it starts, and
+	-- its start (the one-file unpack, the imports) takes seconds after the
+	-- click. A Cancel in that window must not be lost: the poller writes the
+	-- marker again on every tick until the command exits.
+	os.remove(CANCEL_PATH)
+	local Analyze = loadAnalyze({ existing = { [mock.EXECUTABLE] = true } })
+	local progressFile = Analyze.downloadFiles()
+	local markerAtStart = nil
+	mock.state.onExecute = function()
+		mock.yield()
+		-- What download_model does first: the marker it finds is stale.
+		markerAtStart = exists(CANCEL_PATH)
+		os.remove(CANCEL_PATH)
+		mock.yield()
+		append(progressFile, 'progress 0 100\n')
+		mock.yield()
+		append(progressFile, 'cancelled\n')
+		-- And on exit, whatever the outcome.
+		os.remove(CANCEL_PATH)
+		return 4
+	end
+	local finished = nil
+	local handle = Analyze.downloadModel(CANCEL_PATH, function() end,
+		function(exit, update) finished = { code = exit, update = update } end)
+	handle.cancel()
+	t.isTrue(exists(CANCEL_PATH), 'Cancel did not write the marker')
+	mock.tick()
+	t.isTrue(markerAtStart, 'the fake executable did not find the marker to remove')
+	t.isTrue(exists(CANCEL_PATH), 'the marker the executable removed on start was not written again')
+	mock.settle()
+	t.equals(finished.code, 4)
+	t.isFalse(exists(CANCEL_PATH), 'the poller kept writing the marker after the command exited')
+	os.remove(CANCEL_PATH)
+end)
+
 t.test('a failed download hands back exit 3 and the tail of the log', function()
 	local Analyze = loadAnalyze({ existing = { [mock.EXECUTABLE] = true } })
 	local _, logFile = Analyze.downloadFiles()
