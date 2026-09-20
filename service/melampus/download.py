@@ -203,6 +203,12 @@ def cancel_on_signals() -> Iterator[None]:
             signal.signal(number, handler)
 
 
+def _incomplete(path: Path) -> Path:
+    """The cache's mark for "not yet whole": `<name>.incomplete` beside the
+    path, for a blob's partial file and a snapshot's staging folder alike."""
+    return path.with_name(f"{path.name}.incomplete")
+
+
 @dataclass
 class _Blob:
     """One file of the model as the hub describes it: where its bytes are and
@@ -217,7 +223,7 @@ class _Blob:
 
     @property
     def partial(self) -> Path:
-        return self.path.with_name(f"{self.path.name}.incomplete")
+        return _incomplete(self.path)
 
     def on_disk(self) -> int:
         """Bytes of this file already in the cache: all of it, or the partial's."""
@@ -452,7 +458,7 @@ def _lay_out(storage: Path, commit: str, blobs: list[_Blob]) -> Path:
     once every pointer is in place. A pointer already serving its blob is
     kept; one that does not (a short copy) is replaced."""
     snapshot = storage / "snapshots" / commit
-    staging = snapshot.with_name(f"{commit}.incomplete")
+    staging = _incomplete(snapshot)
     for blob in blobs:
         if blob.laid_out():
             continue
