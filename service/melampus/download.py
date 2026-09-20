@@ -330,13 +330,6 @@ class _Progress:
         return ChunkCounter
 
 
-def _files(api: HfApi, repo: str, revision: str | None = None) -> list[RepoFile]:
-    """Every file of the repo at `revision` (the hub's default when None), from
-    the tree listing: names and sizes."""
-    return [entry for entry in api.list_repo_tree(repo, recursive=True, revision=revision)
-            if isinstance(entry, RepoFile)]
-
-
 def _hub_client(endpoint: str) -> httpx.Client:
     """The hub library's own httpx client, with two rules on every request it
     sends, wherever in the library the request is made, one hook each.
