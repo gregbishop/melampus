@@ -50,6 +50,7 @@ from melampus.download import (
 # What `.venv/bin/melampus-id` runs, from any interpreter that has the package.
 VENV_CLI = [sys.executable, "-m", "melampus.cli"]
 
+
 def _fetch(hub: FakeHub, cache: Path, repo: str = FAKE_REPO) -> tuple[Path, list[Update]]:
     updates: list[Update] = []
     path = download_model(repo, endpoint=hub.endpoint, cache_dir=cache, on_update=updates.append)

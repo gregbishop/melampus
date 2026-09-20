@@ -243,8 +243,6 @@ FAKE_TOTAL = sum(len(data) for data in FAKE_FILES.values())
 FAKE_FOLDER = repo_folder_name(repo_id=FAKE_REPO, repo_type="model")
 
 
-
-
 def snapshot_files(path: Path) -> dict[str, bytes]:
     """What a snapshot folder holds, by name: compared with FAKE_FILES."""
     return {p.name: p.read_bytes() for p in sorted(path.iterdir())}
