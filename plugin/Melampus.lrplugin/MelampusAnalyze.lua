@@ -232,6 +232,12 @@ local function missingExecutable()
 		.. '\n\nCopy it there from the Melampus download and try again.'
 end
 
+--- The suffix every failure message that has a run behind it ends with: the
+-- plugin's log and the CLI log of that run, so the two paths are said once.
+local function seeTheLogs(cliLog)
+	return '\n\nSee the logs:\n' .. Log.path() .. '\n' .. cliLog
+end
+
 --- Ask the executable which engines can run here: `--detect-engines` (card
 -- #404) prints a JSON list of { engine, available, reason }. Returns the
 -- decoded list, or nil plus a message: the executable is missing, exited
@@ -255,13 +261,13 @@ function Analyze.detectEngines()
 	local code = LrTasks.execute(command)
 	if code ~= 0 then
 		return nil, 'Melampus could not ask its analysis program which engines can run here '
-			.. '(exit ' .. tostring(code) .. ').\n\nSee the logs:\n' .. Log.path() .. '\n' .. cliLog
+			.. '(exit ' .. tostring(code) .. ').' .. seeTheLogs(cliLog)
 	end
 	local verdicts, err = Json.decode(LrFileUtils.readFile(output) or '')
 	if type(verdicts) ~= 'table' or verdicts[1] == nil then
 		return nil, 'Melampus did not understand what its analysis program said about the engines'
 			.. (err and (': ' .. tostring(err)) or '') .. '.\n\nWhat it printed is in:\n' .. output
-			.. '\n\nSee the logs:\n' .. Log.path() .. '\n' .. cliLog
+			.. seeTheLogs(cliLog)
 	end
 	return verdicts
 end
@@ -328,8 +334,7 @@ function Analyze.run(previewFolder, resultsPath, profile, engine)
 	Log.info('running: ' .. shellLine(logged))
 	local code = LrTasks.execute(command)
 	if code ~= 0 then
-		return false, 'Identification failed (exit ' .. tostring(code)
-			.. ').\n\nSee the logs:\n' .. Log.path() .. '\n' .. cliLog
+		return false, 'Identification failed (exit ' .. tostring(code) .. ').' .. seeTheLogs(cliLog)
 	end
 
 	return true, resultsPath
