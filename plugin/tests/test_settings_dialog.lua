@@ -155,11 +155,15 @@ local function keyFields(contents)
 end
 
 --- Whether a view (or the row holding it) is visible with `engine` picked,
---- through its visible binding's transform.
+--- through its visible binding's transform. The row sits in a column bound
+--- to the preferences, but the field beside it is bound to the keys table,
+--- so the binding must name the preferences itself, with the SDK's own
+--- spelling (`bind_to_object`; anything else the SDK ignores).
 local function visibleFor(entry, engine)
 	local binding = entry.view.visible or (entry.parent and entry.parent.visible)
 	t.isNotNil(binding, 'the key field has no visible binding')
 	t.equals(bindingKey(binding), 'engine', 'the key field is not shown by the engine')
+	t.isTrue(binding.bind_to_object == mock.state.prefs, 'the visible binding does not name the preferences as bind_to_object')
 	t.equals(type(binding.transform), 'function', 'the visible binding has no transform')
 	return binding.transform(engine, mock.state.prefs)
 end

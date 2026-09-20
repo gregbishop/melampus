@@ -60,7 +60,9 @@ LrTasks.startAsyncTask(function()
 		-- A cloud engine's API key. It lives in LrPasswords (the OS keychain on
 		-- macOS), never in the preferences, so the fields bind to their own
 		-- table: read from the store as the dialog opens, written back when it
-		-- closes. Each field shows only while its engine is picked.
+		-- closes. Each field shows only while its engine is picked: the row's
+		-- visibility names the preferences as its target, since the field
+		-- beside it is where the target changes from the column's to the keys.
 		local keys, keysAtOpen = LrBinding.makePropertyTable(context), {}
 		for _, engine in ipairs(Rules.ENGINES) do
 			local variable = Rules.keyVariable(engine)
@@ -69,7 +71,7 @@ LrTasks.startAsyncTask(function()
 				keysAtOpen[variable] = keys[variable]
 				engineViews[#engineViews + 1] = f:row {
 					visible = bind {
-						key = 'engine', object = prefs,
+						key = 'engine', bind_to_object = prefs,
 						transform = function(value) return value == engine end,
 					},
 					f:static_text { title = 'API key:' },

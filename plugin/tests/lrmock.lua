@@ -501,7 +501,7 @@ namespaces.LrShell = { revealInShell = function() end }
 -- view asked for (static_text, group_box, ...), so a dialog's text can be
 -- read from the tree the plugin built: children are the array part,
 -- attributes the rest. `bind` returns what it was given (a key, or a table
--- with key, object and transform), so bindings are inspectable.
+-- with key, bind_to_object and transform), so bindings are inspectable.
 namespaces.LrView = {
 	osFactory = function()
 		return setmetatable({}, { __index = function(_, kind)
