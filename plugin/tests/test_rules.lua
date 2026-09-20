@@ -320,6 +320,17 @@ t.test('unavailable engines are disabled, and the note carries the reason detect
 	end
 	t.isTrue(byValue.openai.enabled, 'openai is available')
 	t.isTrue(byValue.claude.enabled, 'claude is available')
+	-- The title says so too: per-item enabled is not visible outside
+	-- Lightroom, the title is.
+	for _, item in ipairs(items) do
+		local saysNotAvailable = string.find(item.title, ' (not available)', 1, true) ~= nil
+		local endsWithIt = string.sub(item.title, -#' (not available)') == ' (not available)'
+		if item.enabled then
+			t.isFalse(saysNotAvailable, item.value .. ' is available but its title says otherwise: ' .. item.title)
+		else
+			t.isTrue(endsWithIt, item.value .. ' is greyed but its title does not end with "(not available)": ' .. item.title)
+		end
+	end
 	t.isNotNil(string.find(note, 'needs Apple Silicon', 1, true), 'the note does not carry the mlx reason:\n' .. note)
 	t.isNotNil(string.find(note, 'no Ollama server', 1, true), 'the note does not carry the ollama reason:\n' .. note)
 	t.isNil(string.find(note, 'API key required', 1, true), 'the note explains available engines:\n' .. note)
