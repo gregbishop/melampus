@@ -9,7 +9,6 @@ live here and both callers import them.
 
 from __future__ import annotations
 
-import http.client
 import platform
 import sys
 from dataclasses import dataclass
