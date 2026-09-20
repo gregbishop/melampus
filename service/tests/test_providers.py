@@ -1551,6 +1551,66 @@ def test_ollama_backend_neutralises_control_characters_in_a_servers_error_text(
     assert all(c.isprintable() for c in message), message
 
 
+class BadStatusLine(socketserver.BaseRequestHandler):
+    """A listener that answers whatever it is asked with a status line that
+    is not HTTP, carrying an escape sequence and a carriage return."""
+
+    def handle(self) -> None:
+        with contextlib.suppress(OSError):
+            self.request.recv(65536)
+            self.request.sendall(b"\x1b[31mHTTP/9.9 OK\r\x07fake log line\r\n\r\n")
+
+
+def test_ollama_backend_reports_a_malformed_status_line_in_printable_words(tmp_path):
+    """Codex round 2 (backend.py:545), security: a status line http.client
+    cannot parse raises `BadStatusLine` carrying the line as sent, and it
+    passed through `_exchange` uncaught, so its ESC and CR reached the
+    frame's error record and the terminal report unchanged, past the rule
+    round-1 finding 3 put on error bodies. Given a listener on loopback
+    answering a status line with an escape sequence and a carriage return,
+    the frame fails as a plain error naming the address and the line in
+    printable characters only."""
+    image = tmp_path / "image.jpg"
+    image.write_bytes(b"jpeg")
+    with loopback_server(BadStatusLine) as server:
+        backend = OllamaBackend(
+            "qwen3-vl:8b-instruct", f"http://127.0.0.1:{server.server_port}", timeout=5.0)
+        with pytest.raises(RuntimeError) as err:
+            backend.complete(image, "prompt", 10)
+    message = str(err.value)
+    assert message == (
+        f"Ollama's reply from {backend.url} was not HTTP: [31mHTTP/9.9 OK fake log line"
+    ), message
+    assert all(c.isprintable() for c in message), message
+
+
+@pytest.mark.parametrize(
+    ("error", "said"),
+    [
+        (http.client.BadStatusLine("\x1b[2K\rnot http\n"), "[2K not http"),
+        (http.client.RemoteDisconnected("Remote end closed connection without response"),
+         "Remote end closed connection without response"),
+        (http.client.IncompleteRead(b"\x1b[31m", 40), "IncompleteRead(5 bytes read, 40 more expected)"),
+        (http.client.LineTooLong("status line"), "got more than 65536 bytes when reading status line"),
+        (http.client.BadStatusLine("x" * 5000), "x" * OllamaBackend.MAX_ERROR_BYTES),
+    ],
+    ids=["bad-status-line", "hung-up", "incomplete-read", "line-too-long", "bounded"],
+)
+def test_ollama_backend_maps_each_protocol_error_to_a_plain_bounded_message(tmp_path, error, said):
+    """The same, at the urlopen edge, for each of http.client's protocol
+    errors urllib lets through unwrapped (a status line that is not HTTP,
+    a server hanging up before one, a body cut short, a line past
+    http.client's limit): a plain RuntimeError naming the address, the
+    words printable only and at most MAX_ERROR_BYTES of them, never an
+    http.client exception into identify()."""
+    image = tmp_path / "image.jpg"
+    image.write_bytes(b"jpeg")
+    backend = _ollama_backend(_FakeUrlopen(error=error))
+    with pytest.raises(RuntimeError) as err:
+        backend.complete(image, "prompt", 10)
+    assert str(err.value) == f"Ollama's reply from {backend.url} was not HTTP: {said}", str(err.value)
+
+
 def test_ollama_backend_bounds_what_it_reads_of_a_reply(tmp_path):
     """The reply is one object read into memory whole (`stream` false); a
     server that keeps sending must not fill it. Ollama's reply is the text of

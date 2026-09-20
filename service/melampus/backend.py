@@ -576,6 +576,13 @@ class OllamaBackend(VLMBackend):
             ) from exc
         except TimeoutError as exc:
             raise self._timed_out() from exc
+        except http.client.HTTPException as exc:
+            # What urllib lets through unwrapped: a status line that is not
+            # HTTP (BadStatusLine carries it as sent), a server hanging up
+            # before one, a body cut short, a line past http.client's limit.
+            raise RuntimeError(
+                f"Ollama's reply from {self.url} was not HTTP: {self._plain(str(exc))}"
+            ) from exc
 
     def _timed_out(self) -> TimeoutError:
         return TimeoutError(
@@ -584,24 +591,33 @@ class OllamaBackend(VLMBackend):
         )
 
     @classmethod
+    def _plain(cls, text: str) -> str:
+        """Text the server wrote, as it may reach the frame's error record,
+        the log and the terminal: one line of at most MAX_ERROR_BYTES
+        printable characters. An escape sequence in it would move the
+        cursor, recolour the terminal or erase a line, and a line break
+        would fake a line of the log. Whatever is not printable
+        (str.isprintable: the C0 and C1 controls, line and paragraph
+        breaks, the unassigned) becomes a space, and runs of whitespace
+        collapse to one, so what is left is words. The one rule for every
+        message that carries the server's words: an error body, and a
+        status line http.client could not parse."""
+        words = " ".join("".join(c if c.isprintable() else " " for c in text).split())
+        return words[: cls.MAX_ERROR_BYTES]
+
+    @classmethod
     def _error_text(cls, exc: urllib.error.HTTPError) -> str:
         """Ollama's own words when the body is its {"error": ...} object,
         else the body as it came (a proxy's HTML, say), else the status
-        line's reason; at most MAX_ERROR_BYTES of it, and only its printable
-        characters. All three are the server's to write, and the text lands
-        in the frame's error record, the log and the terminal: an escape
-        sequence in it would move the cursor, recolour the terminal or erase
-        a line, and a line break would fake a line of the log. Whatever is
-        not printable (str.isprintable: the C0 and C1 controls, line and
-        paragraph breaks, the unassigned) becomes a space, and runs of
-        whitespace collapse to one, so what is left is one line of words."""
+        line's reason; at most MAX_ERROR_BYTES of it read, and only its
+        printable characters (`_plain`), since all three are the server's
+        to write."""
         body = exc.read(cls.MAX_ERROR_BYTES).decode("utf-8", "replace").strip()
         try:
             error = json.loads(body).get("error")
         except (json.JSONDecodeError, AttributeError):
             error = None
-        text = f"{error}" if error else body or exc.reason
-        return " ".join("".join(c if c.isprintable() else " " for c in text).split())
+        return cls._plain(f"{error}" if error else body or exc.reason)
 
     def complete(self, image_path: Path, prompt: str, max_tokens: int) -> Completion:
         request = self._request(image_path, prompt, max_tokens)
