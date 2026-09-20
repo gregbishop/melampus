@@ -1157,21 +1157,26 @@ def test_status_of_an_installed_model_reports_it_with_its_path(fake_hub: FakeHub
     assert status.bytes_done == status.bytes_total == FAKE_TOTAL
 
 
-def test_status_with_no_host_answering_says_the_size_is_unknown_and_never_fails(
+def test_status_of_an_installed_model_with_no_host_answering_says_the_size_is_unknown_and_the_rest(
     fake_hub: FakeHub, tmp_path: Path
 ):
     """The network being down is not a reason for Settings not to open: the
     status still says what the cache holds, with `bytes_total` null."""
     path, _ = _fetch(fake_hub, tmp_path / "hub")
-    port = closed_port()
 
-    status = model_status(FAKE_REPO, endpoint=f"http://127.0.0.1:{port}", cache_dir=tmp_path / "hub")
+    status = model_status(FAKE_REPO, endpoint=f"http://127.0.0.1:{closed_port()}", cache_dir=tmp_path / "hub")
 
     assert status.bytes_total is None
     assert status.installed is True and status.path == str(path)
     assert status.bytes_done == FAKE_TOTAL
-    absent = model_status("fake-org/other", endpoint=f"http://127.0.0.1:{port}", cache_dir=tmp_path / "hub")
-    assert absent == Status("fake-org/other", installed=False, bytes_total=None, bytes_done=0,
+
+
+def test_status_of_an_absent_model_with_no_host_answering_never_fails(tmp_path: Path):
+    """With nothing in the cache and nothing answering, the status is still
+    an answer: absent, size unknown, and where to write to cancel."""
+    status = model_status("fake-org/other", endpoint=f"http://127.0.0.1:{closed_port()}", cache_dir=tmp_path / "hub")
+
+    assert status == Status("fake-org/other", installed=False, bytes_total=None, bytes_done=0,
                             path=None, cancel_path=str(cancel_marker_path()))
 
 
@@ -1240,47 +1245,76 @@ def test_remove_with_nothing_installed_says_so(fake_hub: FakeHub, tmp_path: Path
     assert FAKE_REPO in str(failure.value) and "nothing to remove" in str(failure.value)
 
 
+def _lock_dir(cache: Path) -> Path:
+    """The cache's locks folder for the fake repo, where a running download
+    holds the hub library's per-file lock on the blob it is appending to (the
+    one `_fetch` takes)."""
+    lock_dir = cache / ".locks" / FAKE_FOLDER
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    return lock_dir
+
+
 def test_remove_refuses_while_a_download_holds_the_lock(fake_hub: FakeHub, tmp_path: Path):
-    """A running download holds the hub library's per-file lock on the blob it
-    is appending to (the one `_fetch` takes); removing the model out from
-    under it is refused, exit 3 from the CLI, and the model stays."""
+    """Removing the model out from under a running download is refused, exit
+    3 from the CLI, and the model stays."""
     from huggingface_hub.utils import WeakFileLock
 
     path, _ = _fetch(fake_hub, tmp_path / "hub")
-    lock_dir = tmp_path / "hub" / ".locks" / FAKE_FOLDER
-    lock_dir.mkdir(parents=True, exist_ok=True)
-    with WeakFileLock(lock_dir / "abc.lock"):
+    with WeakFileLock(_lock_dir(tmp_path / "hub") / "abc.lock"):
         with pytest.raises(DownloadError) as failure:
             remove_model(FAKE_REPO, cache_dir=tmp_path / "hub")
     assert "running" in str(failure.value) and FAKE_REPO in str(failure.value)
     assert path.exists(), "the model was removed under a running download"
+
+
+def test_remove_goes_ahead_once_the_download_has_released_the_lock(fake_hub: FakeHub, tmp_path: Path):
+    """A lock file left behind by a download that finished is not a running
+    download: the removal takes the lock itself and goes ahead."""
+    from huggingface_hub.utils import WeakFileLock
+
+    _fetch(fake_hub, tmp_path / "hub")
+    with WeakFileLock(_lock_dir(tmp_path / "hub") / "abc.lock"):
+        pass
+
     assert remove_model(FAKE_REPO, cache_dir=tmp_path / "hub").exists() is False, "the lock outlived its holder"
 
 
-def test_model_status_and_remove_model_flags_follow_the_download_flag(monkeypatch, capsys, tmp_path):
-    """Both need no folder and take [model] repo or --model; status prints one
-    JSON object, remove prints `removed <path>`; a refusal is exit 3 with the
-    message on stderr and nothing on stdout."""
-    seen = []
-    monkeypatch.setattr(download, "model_status", lambda repo: seen.append(("status", repo)) or Status(
+def test_model_status_flag_needs_no_folder_and_prints_one_json_object_for_the_configured_repo(
+    monkeypatch, capsys
+):
+    """Like --download-model: no folder, [model] repo (or --model), and the
+    status as one JSON object on stdout, exit 0."""
+    asked = []
+    monkeypatch.setattr(download, "model_status", lambda repo: asked.append(repo) or Status(
         repo, installed=False, bytes_total=None, bytes_done=0, path=None, cancel_path="/data/download-cancel"))
-    monkeypatch.setattr(download, "remove_model", lambda repo: seen.append(("remove", repo)) or tmp_path / "gone")
 
     assert main(["--model-status", "--no-local-config"]) == 0
-    assert main(["--remove-model", "--no-local-config", "--model", "fake-org/other"]) == 0
-    out, err = capsys.readouterr()
-    assert seen == [("status", ModelConfig().repo), ("remove", "fake-org/other")]
-    status_line, removed_line = out.splitlines()
+
+    assert asked == [ModelConfig().repo]
+    (status_line,) = capsys.readouterr().out.splitlines()
     assert json.loads(status_line) == {
         "repo": ModelConfig().repo, "installed": False, "bytes_total": None,
         "bytes_done": 0, "path": None, "cancel_path": "/data/download-cancel"}
-    assert removed_line == f"removed {tmp_path / 'gone'}"
 
+
+def test_remove_model_flag_takes_model_and_prints_removed_with_the_path(monkeypatch, capsys, tmp_path):
+    asked = []
+    monkeypatch.setattr(download, "remove_model", lambda repo: asked.append(repo) or tmp_path / "gone")
+
+    assert main(["--remove-model", "--no-local-config", "--model", "fake-org/other"]) == 0
+
+    assert asked == ["fake-org/other"]
+    assert capsys.readouterr().out.splitlines() == [f"removed {tmp_path / 'gone'}"]
+
+
+def test_remove_model_flag_exits_3_with_the_refusal_on_stderr_and_nothing_on_stdout(monkeypatch, capsys):
     def refuse(repo):
         raise DownloadError("a download of x is running; cancel it first")
 
     monkeypatch.setattr(download, "remove_model", refuse)
+
     assert main(["--remove-model", "--no-local-config"]) == 3
+
     out, err = capsys.readouterr()
     assert out == "" and "cancel it first" in err
 
