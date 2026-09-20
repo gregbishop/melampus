@@ -34,3 +34,35 @@ jobs:
       - name: Run service and plugin tests, building the executable first
         working-directory: service
         run: uv sync --locked --extra dev --extra build && uv run pytest -q --build-binary
+
+  build-windows:
+    # Card #400: the Windows executable. MLX does not exist here, so the build
+    # carries everything but MLX and the smoke tests prove the executable
+    # analyzes a fixture with the scripted backend and, asked for mlx, names
+    # Apple Silicon and the backends that do work.
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      # Not astral-sh/setup-uv: this repository allows only GitHub-owned
+      # actions. The runner's own python installs uv, as brew does on macOS.
+      # Exact-pinned: this tool comes from PyPI outside the lockfile and builds
+      # the executable that is uploaded, so it is not whatever PyPI serves today.
+      - name: Install uv
+        run: pip install uv==0.12.17
+
+      # -v -rs: the job log is where the owner reads the proof, so it names
+      # every test that ran against dist/melampus.exe and why the one that
+      # needs MLX skipped, rather than a row of dots.
+      - name: Build the executable and run its smoke tests
+        working-directory: service
+        shell: bash
+        run: uv sync --locked --extra dev --extra build && uv run pytest -v -rs tests/test_binary.py --build-binary
+
+      - name: Upload melampus.exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: melampus-windows
+          path: dist/melampus.exe
+          if-no-files-found: error

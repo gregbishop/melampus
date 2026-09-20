@@ -318,9 +318,9 @@ run everything, which takes about a minute (CI always does this):
 ## Building the executable
 
 The service ships to users as one file, `dist/melampus`, so they install neither
-Python nor uv. It carries the Python runtime, the service, the prompts and the MLX
-runtime; model weights are not bundled and come from the HuggingFace cache as
-before. Apple Silicon only, like MLX.
+Python nor uv. It carries the Python runtime, the service, the prompts and, on
+Apple Silicon, the MLX runtime; model weights are not bundled and come from the
+HuggingFace cache as before.
 
 ```bash
 # once: the pinned PyInstaller, from the same lockfile as everything else
@@ -341,6 +341,23 @@ The executable keeps its results and reads its local config beside itself:
 checkout, so a run's identifications survive the unpack directory being
 deleted at exit. `--cache` and `--config` override both, as they do for the CLI,
 and `--no-local-config` leaves the local file unread (docs/config.md).
+
+### Building on Windows
+
+The same script on Windows writes `dist\melampus.exe`, which carries everything
+but MLX: there is no local runtime there, so `--backend` (or `[model] backend`)
+selects a cloud provider, exactly as in § Windows above. Asked for `--backend
+mlx`, it says MLX needs Apple Silicon and names the backends that do work.
+CI builds it on every pull request (the `build-windows` job in
+`.github/workflows/ci.yml`), smoke-tests it against the committed fixture frame
+in `service/tests/fixtures/`, and uploads it as the `melampus-windows` artifact.
+To build it yourself (PowerShell, from the repo folder):
+
+```powershell
+uv venv --python 3.12 .venv
+$env:VIRTUAL_ENV = ".venv"; uv sync --project service --locked --extra dev --extra build --active
+.venv\Scripts\python.exe tools\build_binary.py    # writes dist\melampus.exe
+```
 
 ---
 

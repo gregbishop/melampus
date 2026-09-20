@@ -48,6 +48,14 @@ class BackendUnavailable(RuntimeError):
     """This machine cannot run the configured backend; the message says what to do."""
 
 
+def on_apple_silicon() -> bool:
+    """The pyproject marker for mlx-vlm, as a predicate: the one place the
+    runtime check, the build script and the tests' skips ask whether MLX
+    exists here. Both halves, or an Intel Mac passes the OS check and then
+    dies on a raw ModuleNotFoundError at warmup instead of the message."""
+    return sys.platform == "darwin" and platform.machine() == "arm64"
+
+
 def normalise_provider(provider: str | None) -> str:
     name = (provider or "").strip().lower()
     if name not in KEY_VARIABLES:
@@ -91,15 +99,13 @@ def build_primary_backend(config: MelampusConfig) -> VLMBackend:
     kind = (config.model.backend or "mlx").strip().lower()
 
     if kind == "mlx":
-        # Both halves of the pyproject marker, or an Intel Mac passes the OS
-        # check and then dies on a raw ModuleNotFoundError at warmup instead of
-        # this message.
-        if sys.platform != "darwin" or platform.machine() != "arm64":
+        if not on_apple_silicon():
+            works_here = ", ".join(b for b in BACKEND_CHOICES if b != "mlx")
             raise BackendUnavailable(
-                "The local MLX backend only runs on Apple Silicon Macs. On this "
-                "machine set [model] backend = \"anthropic\" or \"openai\" in the "
-                "config (with the matching API key), or pass --backend. "
-                "See readme.md § Windows."
+                "The local MLX backend only runs on Apple Silicon Macs. The "
+                f"backends that work on this machine are: {works_here}. Set "
+                "[model] backend in the config (with the matching API key for a "
+                "cloud provider), or pass --backend. See readme.md § Windows."
             )
         from .backend import MLXBackend
 
