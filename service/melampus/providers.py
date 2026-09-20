@@ -103,10 +103,13 @@ def _hang_up(connection: http.client.HTTPConnection, expired: threading.Event) -
     http.client takes end-of-stream as the end of the headers: a status line
     that arrived before the trickle would still parse as a 200, and the
     probe must know the deadline finished the response, not the server. No
-    socket yet means the probe is still connecting, and the socket timeout
-    bounds that. The socket is read once: the main thread's close() sets it
-    to None at any moment, and a socket it already closed raises OSError,
-    which is suppressed; None between two reads would not be."""
+    socket yet means the probe is still connecting: the socket timeout bounds
+    that, and the probe checks `expired` once connected, since a timer that
+    fired before the socket existed had nothing to hang up and the reads
+    after a late handshake would otherwise be bounded per byte only. The
+    socket is read once: the main thread's close() sets it to None at any
+    moment, and a socket it already closed raises OSError, which is
+    suppressed; None between two reads would not be."""
     expired.set()
     sock = connection.sock
     if sock is not None:
@@ -138,6 +141,10 @@ def ollama_answers() -> bool:
     deadline.start()
     try:
         connection.request("GET", "/api/version")
+        # A timer that fired during connect() found no socket to hang up;
+        # a late handshake must not start a read the deadline cannot end.
+        if expired.is_set():
+            return False
         answered = connection.getresponse().status == 200
     except Exception:  # noqa: BLE001 - every failure means the same thing: not here
         return False
