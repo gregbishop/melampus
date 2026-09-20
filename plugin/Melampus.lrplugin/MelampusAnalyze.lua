@@ -283,11 +283,12 @@ local function runFlag(flag, output, what)
 end
 
 --- The JSON the executable printed to `target`, decoded, or nil plus a
--- message when `accept` does not recognise it. `what` names the question.
+-- message when `accept` does not recognise it. `what` names the question
+-- (askJson).
 local function decodeJson(target, cliLog, what, accept)
 	local value, err = Json.decode(LrFileUtils.readFile(target) or '')
 	if not accept(value) then
-		return nil, 'Melampus did not understand what its analysis program said about ' .. what
+		return nil, 'Melampus did not understand what its analysis program said ' .. what
 			.. (err and (': ' .. tostring(err)) or '') .. '.\n\nWhat it printed is in:\n' .. target
 			.. seeTheLogs(cliLog)
 	end
@@ -297,8 +298,10 @@ end
 --- Run the executable for one JSON answer (runFlag, then decodeJson).
 -- Returns the value, or nil plus a message: the executable is missing,
 -- exited non-zero, or printed something `accept` does not recognise.
--- `what` names the question for the messages, `file` the output file for
--- the Windows "%" refusal.
+-- `what` names the question for the messages, phrased to follow both
+-- "could not ask its analysis program" and "what its analysis program
+-- said" ('about the model'); `file` the output file for the Windows "%"
+-- refusal.
 local function askJson(flag, output, what, file, accept)
 	local code, target, cliLog = runFlag(flag, output, file)
 	if not code then return nil, target end
@@ -313,7 +316,7 @@ end
 -- #404) prints a JSON list of { engine, available, reason }. The Settings
 -- dialog calls it once, when it opens.
 function Analyze.detectEngines()
-	return askJson('--detect-engines', 'melampus-engines.json', 'which engines can run here',
+	return askJson('--detect-engines', 'melampus-engines.json', 'about the engines',
 		'engines file', function(verdicts) return type(verdicts) == 'table' and verdicts[1] ~= nil end)
 end
 
@@ -322,7 +325,7 @@ end
 -- cancel_path }; bytes_total is null when the hub could not be reached. The
 -- Settings dialog calls it once, when it opens.
 function Analyze.modelStatus()
-	return askJson('--model-status', 'melampus-model-status.json', 'the model',
+	return askJson('--model-status', 'melampus-model-status.json', 'about the model',
 		'model status file', function(status) return type(status) == 'table' and type(status.repo) == 'string' end)
 end
 

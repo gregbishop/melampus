@@ -61,8 +61,10 @@ end
 --- there); `options.status` what it prints for --model-status (default: the
 --- model absent); `options.download` plays --download-model: its `lines` land
 --- in the progress file one per tick, `stderr` in the log, and it exits
---- `code`; `options.removeCode` is --remove-model's exit code; `options
---- .onDialog` plays the user while the dialog is up.
+--- `code`; `options.detectionCode` and `options.statusCode` are the exit
+--- codes of --detect-engines and --model-status (0); `options.removeCode` is
+--- --remove-model's exit code; `options.onDialog` plays the user while the
+--- dialog is up.
 local function openSettings(options)
 	options = options or {}
 	mock.loadUnderMock('MelampusSettings', {
@@ -72,9 +74,10 @@ local function openSettings(options)
 		onExecute = function(command)
 			local target = string.match(command, ">'([^']+)'")
 			if string.find(command, '--detect-engines', 1, true) then
-				if options.detection then return mock.answersDetection(options.detection)(command) end
+				if options.detection then return mock.answersDetection(options.detection, options.detectionCode)(command) end
 			elseif string.find(command, '--model-status', 1, true) and target then
 				writeFile(target, options.status or modelStatus())
+				return options.statusCode or 0
 			elseif string.find(command, '--download-model', 1, true) and target then
 				local download = options.download or { lines = {}, code = 0 }
 				local log = string.match(command, "2>'([^']+)'")
@@ -510,6 +513,31 @@ t.test('a failed download shows a message with the tail of the log and offers Do
 	t.isNotNil(string.find(dialogsShown(false)[1].body, 'could not reach the hub', 1, true),
 		'the message lacks the log tail: ' .. tostring(dialogsShown(false)[1].body))
 	t.isNotNil(string.find(dialogsShown(false)[1].body, 'exit 3', 1, true))
+end)
+
+-- ── a command that fails ───────────────────────────────────────────────────
+t.test('when the status exits non-zero the dialog says it could not ask about the model, and there is no row', function()
+	local contents = openSettings({ detection = mock.detectionText(), statusCode = 1 })
+	t.equals(#titlesMatching(contents, 'Melampus could not ask its analysis program about the model (exit 1).'), 1,
+		'the message does not read as a sentence: ' .. table.concat(mock.dialogStrings(contents), ' | '))
+	t.isNil(modelRow(contents), 'a download row with no status to build it from')
+end)
+
+t.test('when detection exits non-zero the note under the picker says it could not ask about the engines', function()
+	local contents = openSettings({ detection = mock.detectionText(), detectionCode = 1 })
+	t.equals(#titlesMatching(contents, 'Melampus could not ask its analysis program about the engines (exit 1).'), 1,
+		'the note does not read as a sentence: ' .. table.concat(mock.dialogStrings(contents), ' | '))
+	for _, item in ipairs(enginePicker(contents).items) do
+		t.isTrue(item.enabled, item.value .. ' was greyed with no detection to grey it')
+	end
+end)
+
+t.test('a status the dialog does not understand is said to be about the model, and names the file', function()
+	local contents = openSettings({ detection = mock.detectionText(), status = 'not json' })
+	local notes = titlesMatching(contents, 'Melampus did not understand what its analysis program said about the model')
+	t.equals(#notes, 1, table.concat(mock.dialogStrings(contents), ' | '))
+	t.isNotNil(string.find(notes[1].title, 'melampus-model-status.json', 1, true), 'the message does not name the file')
+	t.isNil(modelRow(contents))
 end)
 
 -- ── no executable ──────────────────────────────────────────────────────────
