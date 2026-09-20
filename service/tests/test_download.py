@@ -817,6 +817,31 @@ def test_cli_exits_3_naming_the_fix_when_the_repo_id_is_a_pasted_url(hub_env: di
     assert "[model] repo" in proc.stderr and "--model" in proc.stderr
 
 
+def test_cli_names_the_cdn_url_on_stderr_without_its_signed_query_when_the_bytes_fail(
+    fake_hub: FakeHub, hub_env: dict[str, str]
+):
+    """Security (Codex round 3, download.py:340). The hub redirects an LFS
+    file's bytes to its CDN at a signed URL: a query holding the signature
+    and its expiry, a credential for that file. The hub library logs the
+    full URL on every retry, and its exception carries it, so a drop of the
+    connection put the signature on stderr twice. Given a CDN whose
+    connection drops after one chunk and then answers 503, stderr names the
+    file's path on the CDN and neither the signature's value nor its
+    parameter, and the run fails naming the re-run, exit 3."""
+    with FakeHub().serve() as cdn:
+        fake_hub.bytes_host = cdn.endpoint
+        fake_hub.cdn_query = "Signature=synthetic-not-a-secret&Expires=1700000000"
+        cdn.cut_after = DOWNLOAD_CHUNK_SIZE + 4096
+        proc = _cli(["--download-model", "--model", FAKE_REPO], hub_env)
+
+    assert proc.returncode == 3, proc.stderr[-3000:]
+    assert cdn.gets("model.safetensors") == [None, f"bytes={DOWNLOAD_CHUNK_SIZE}-"], "the drop was not retried by Range"
+    assert "503" in proc.stderr and "--download-model" in proc.stderr
+    assert f"{cdn.endpoint}/{FAKE_REPO}/resolve/{FAKE_COMMIT}/model.safetensors" in proc.stderr, "the URL's path is not named"
+    assert "synthetic-not-a-secret" not in proc.stderr, "the signature is on stderr"
+    assert "Signature=" not in proc.stderr and "Expires=" not in proc.stderr, "the signed query is on stderr"
+
+
 def _interrupt(proc: subprocess.Popen) -> None:
     if sys.platform == "win32":
         proc.send_signal(signal.CTRL_BREAK_EVENT)

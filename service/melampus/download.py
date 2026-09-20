@@ -38,6 +38,8 @@ os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
 
 import hashlib  # noqa: E402 - after the environment the hub reads at import
 import ipaddress  # noqa: E402
+import logging  # noqa: E402
+import re  # noqa: E402
 import signal  # noqa: E402
 from contextlib import contextmanager  # noqa: E402
 from dataclasses import dataclass  # noqa: E402
@@ -70,6 +72,7 @@ from huggingface_hub.file_download import (  # noqa: E402
 )
 from huggingface_hub.hf_api import RepoFile  # noqa: E402
 from huggingface_hub.utils import WeakFileLock, build_hf_headers  # noqa: E402
+from huggingface_hub.utils import logging as hub_logging  # noqa: E402 - the library's own logger, where its warnings go
 from huggingface_hub.utils._http import default_client_factory  # noqa: E402 - the library's own client, not a copy of it
 
 PROGRESS = "progress"
@@ -82,6 +85,38 @@ EXIT_CANCELLED = 4
 
 RERUN = "re-run melampus-id --download-model; it resumes where it stopped"
 NOT_A_HUB = "whatever answers there is not a Hugging Face hub; check HF_ENDPOINT"
+
+# The query string of any URL in a piece of text: an LFS file's bytes come
+# from the CDN at a signed URL, whose query is the signature and its expiry,
+# a credential for that file. Nothing this command prints carries it.
+_URL_QUERY = re.compile(r"(https?://[^\s'\"<>?]*)\?[^\s'\"<>]*")
+
+
+def _without_query(text: str) -> str:
+    """`text` with every URL in it cut at its `?`: the path stays, so the
+    message still names the file, the signed query does not."""
+    return _URL_QUERY.sub(r"\1", text)
+
+
+def _redact(record: logging.LogRecord) -> bool:
+    """A filter for the hub library's stderr handler: its retry warning
+    names the full URL it is downloading from, signed query included."""
+    record.msg, record.args = _without_query(record.getMessage()), ()
+    return True
+
+
+@contextmanager
+def _hub_warnings_redacted() -> Iterator[None]:
+    """For the command's lifetime, what the hub library's own logger prints
+    (its handler on stderr) goes through `_redact`."""
+    handlers = list(hub_logging.get_logger().handlers)
+    for handler in handlers:
+        handler.addFilter(_redact)
+    try:
+        yield
+    finally:
+        for handler in handlers:
+            handler.removeFilter(_redact)
 
 
 @dataclass(frozen=True)
@@ -133,7 +168,12 @@ class Update:
 
 
 class DownloadError(Exception):
-    """The download failed; the message names what to fix."""
+    """The download failed; the message names what to fix. A URL in it is
+    named by its path alone: the hub library's exceptions carry the URL they
+    failed at, an LFS file's being the CDN's signed one."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(_without_query(message))
 
 
 class DownloadCancelled(Exception):
@@ -411,55 +451,58 @@ def download_model(
     `on_update` gets one Update per chunk received, the first before any byte
     moves so the total is known at once. Raises DownloadError with the fix in
     the message; a DownloadCancelled raised from `cancel_on_signals` passes
-    through with the partial file kept.
+    through with the partial file kept. No URL's query string reaches the
+    message or the hub library's warnings: an LFS file's is the CDN's
+    signature for it.
     """
     endpoint = endpoint or constants.ENDPOINT
     cache = Path(cache_dir or constants.HF_HUB_CACHE)
     set_client_factory(lambda: _hub_client(endpoint))
-    try:
-        # The hub library's own check of the id (`namespace/name`, no URL,
-        # no path under it), before the hub is asked anything.
-        folder = repo_folder_name(repo_id=repo, repo_type="model")
-        commit, blobs = _plan(repo, endpoint, cache)
-        # Files with the same bytes share one etag, so one blob in the cache:
-        # its bytes move once and count once, in the total and from disk.
-        distinct: dict[str, _Blob] = {}
-        for blob in blobs:
-            distinct.setdefault(blob.etag, blob)
-        progress = _Progress(sum(b.size for b in distinct.values()), on_update)
-        progress.advance(sum(b.on_disk() for b in distinct.values()))
-        # The user's token is for the hub: `_hub_client` keeps it off any
-        # request to another origin, an LFS file's bytes from the CDN included.
-        headers = build_hf_headers()
-        for blob in distinct.values():
-            if not blob.path.exists():
-                _fetch(blob, progress, headers, cache / ".locks" / folder)
-        # Every blob is complete and verified: the snapshot of the planned
-        # commit points at those blobs and nothing else.
-        return _lay_out(cache / folder, commit, blobs)
-    except GatedRepoError as exc:
-        # A GatedRepoError is a RepositoryNotFoundError, but the repo exists:
-        # what is missing is the user's access to it.
-        raise DownloadError(
-            f"the model repo {repo} on the hub at {endpoint} is gated: request access to it "
-            f"on the hub, sign in with `hf auth login` (or set HF_TOKEN), then {RERUN} ({exc})"
-        ) from exc
-    except HFValidationError as exc:
-        raise DownloadError(
-            f"{repo} is not a model repo id (the hub's form is namespace/name, not a URL or a path): "
-            f"check [model] repo in config, or --model ({exc})"
-        ) from exc
-    except RepositoryNotFoundError as exc:
-        raise DownloadError(
-            f"the hub at {endpoint} has no model repo named {repo}: "
-            f"check [model] repo in config, or --model ({exc})"
-        ) from exc
-    except (httpx.TransportError, RevisionResolutionError) as exc:
-        # RevisionResolutionError: the hub could not be reached to resolve
-        # `main` and the cache has no refs/main to fall back on.
-        raise DownloadError(
-            f"could not reach the hub at {endpoint} ({type(exc).__name__}: {exc}): "
-            f"check the network, then {RERUN}"
-        ) from exc
-    except (OSError, httpx.HTTPError) as exc:
-        raise DownloadError(f"download of {repo} from {endpoint} failed: {exc}; {RERUN}") from exc
+    with _hub_warnings_redacted():
+        try:
+            # The hub library's own check of the id (`namespace/name`, no URL,
+            # no path under it), before the hub is asked anything.
+            folder = repo_folder_name(repo_id=repo, repo_type="model")
+            commit, blobs = _plan(repo, endpoint, cache)
+            # Files with the same bytes share one etag, so one blob in the cache:
+            # its bytes move once and count once, in the total and from disk.
+            distinct: dict[str, _Blob] = {}
+            for blob in blobs:
+                distinct.setdefault(blob.etag, blob)
+            progress = _Progress(sum(b.size for b in distinct.values()), on_update)
+            progress.advance(sum(b.on_disk() for b in distinct.values()))
+            # The user's token is for the hub: `_hub_client` keeps it off any
+            # request to another origin, an LFS file's bytes from the CDN included.
+            headers = build_hf_headers()
+            for blob in distinct.values():
+                if not blob.path.exists():
+                    _fetch(blob, progress, headers, cache / ".locks" / folder)
+            # Every blob is complete and verified: the snapshot of the planned
+            # commit points at those blobs and nothing else.
+            return _lay_out(cache / folder, commit, blobs)
+        except GatedRepoError as exc:
+            # A GatedRepoError is a RepositoryNotFoundError, but the repo exists:
+            # what is missing is the user's access to it.
+            raise DownloadError(
+                f"the model repo {repo} on the hub at {endpoint} is gated: request access to it "
+                f"on the hub, sign in with `hf auth login` (or set HF_TOKEN), then {RERUN} ({exc})"
+            ) from exc
+        except HFValidationError as exc:
+            raise DownloadError(
+                f"{repo} is not a model repo id (the hub's form is namespace/name, not a URL or a path): "
+                f"check [model] repo in config, or --model ({exc})"
+            ) from exc
+        except RepositoryNotFoundError as exc:
+            raise DownloadError(
+                f"the hub at {endpoint} has no model repo named {repo}: "
+                f"check [model] repo in config, or --model ({exc})"
+            ) from exc
+        except (httpx.TransportError, RevisionResolutionError) as exc:
+            # RevisionResolutionError: the hub could not be reached to resolve
+            # `main` and the cache has no refs/main to fall back on.
+            raise DownloadError(
+                f"could not reach the hub at {endpoint} ({type(exc).__name__}: {exc}): "
+                f"check the network, then {RERUN}"
+            ) from exc
+        except (OSError, httpx.HTTPError) as exc:
+            raise DownloadError(f"download of {repo} from {endpoint} failed: {exc}; {RERUN}") from exc

@@ -87,7 +87,10 @@ a protocol, defined once in `download.py` (`Update`) and stable:
 | `cancelled` | Last line when a signal stopped it. |
 
 Nothing else goes to stdout; errors and the hub library's own warnings go to
-stderr. Exit codes: **exit 0** once the model is complete (`done`); **exit 3**
+stderr, and a URL in either is named by its path alone: the hub serves a
+weights file's bytes from its CDN at a signed URL, whose query is a credential
+for that file, and neither the library's retry warning nor the failure message
+carries it. Exit codes: **exit 0** once the model is complete (`done`); **exit 3**
 on a failure, with a message on stderr naming the fix (the repo the hub does not
 have, or an id that is not a repo id at all, a pasted hub URL say, so check
 `[model] repo` or `--model`; a gated repo, so request access to

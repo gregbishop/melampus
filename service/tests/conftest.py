@@ -233,7 +233,8 @@ def built_executable(request: pytest.FixtureRequest) -> Path:
 # can land mid-file; `ignore_range` answers a Range request with 200 and the
 # whole file, as a CDN that ignores Range does. `bytes_host` is the real hub's CDN: the resolve HEAD
 # answers 302 to that host, as huggingface.co does for every LFS file, so the
-# bytes are fetched from a host that is not the hub. `corrupt` names files
+# bytes are fetched from a host that is not the hub; `cdn_query` is the query
+# that Location carries, as the real CDN's signed URLs do. `corrupt` names files
 # served with their first byte flipped while the etag stays the true one.
 # `gated` makes the repo one the user has no access to: it is listed, but
 # every resolve answers 403 with X-Error-Code GatedRepo, as huggingface.co
@@ -314,6 +315,7 @@ class FakeHub:
         self.ignore_range = False
         self.throttle: tuple[int, float] | None = None  # (bytes per write, seconds between)
         self.bytes_host: str | None = None
+        self.cdn_query: str | None = None  # `Signature=...&Expires=...` on the LFS redirect's Location
         self.corrupt: set[str] = set()
         self.gated = False
         self.commit = FAKE_COMMIT  # what `main` points at; a test moves the branch by setting it
@@ -345,9 +347,10 @@ class FakeHub:
                 hub answers X-Repo-Commit: the commit hash itself, or what the
                 branch points at now."""
                 prefix = f"/{hub.repo}/resolve/"
-                if not self.path.startswith(prefix):
+                path = self.path.partition("?")[0]
+                if not path.startswith(prefix):
                     return None
-                revision, _, name = self.path[len(prefix):].partition("/")
+                revision, _, name = path[len(prefix):].partition("/")
                 self.commit = revision if REGEX_COMMIT_HASH.match(revision) else hub.commit
                 return name if name in hub.files else None
 
@@ -437,7 +440,7 @@ class FakeHub:
                     etag = hub.later_etag
                 if hub.bytes_host:
                     self.send_response(302)
-                    self.send_header("Location", f"{hub.bytes_host}{self.path}")
+                    self.send_header("Location", f"{hub.bytes_host}{self.path}" + (f"?{hub.cdn_query}" if hub.cdn_query else ""))
                     self.send_header("X-Linked-Etag", f'"{etag}"')
                     self.send_header("X-Linked-Size", str(len(hub.files[name])))
                 else:
@@ -459,8 +462,8 @@ class FakeHub:
             yield self
 
     def _resolves(self, method: str, name: str) -> list[HubRequest]:
-        return [r for r in self.requests
-                if r.method == method and r.path.startswith(f"/{self.repo}/resolve/") and r.path.endswith(f"/{name}")]
+        return [r for r in self.requests if r.method == method
+                and r.path.startswith(f"/{self.repo}/resolve/") and r.path.partition("?")[0].endswith(f"/{name}")]
 
     def gets(self, name: str) -> list[str | None]:
         """The Range header of every GET for `name`'s bytes, at any revision,
