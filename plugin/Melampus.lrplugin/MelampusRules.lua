@@ -126,7 +126,6 @@ Rules.KEY_VARIABLES = {
 }
 
 function Rules.keyVariable(engine)
-	if engine == nil then return nil end
 	return Rules.KEY_VARIABLES[engine]
 end
 
