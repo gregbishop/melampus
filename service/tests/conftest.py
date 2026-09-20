@@ -227,7 +227,7 @@ def built_executable(request: pytest.FixtureRequest) -> Path:
 # (`GET /api/models/<repo>/tree/<revision>`), and the resolve endpoint's HEAD
 # (ETag, X-Repo-Commit, Content-Length) and GET (bytes, honouring Range with a
 # 206 and Content-Range), plus the repo info the library's `resolve_revision`
-# resolves the commit from (`GET /api/models/<repo>`). Two knobs drive the resume tests: `cut_after` drops
+# resolves the commit from (`GET /api/models/<repo>`). The knobs that drive the resume tests: `cut_after` drops
 # the connection once that many bytes of a file have been sent and starts an
 # outage (503 until `outage` is cleared); `throttle` slows the bytes so a cancel
 # can land mid-file; `ignore_range` answers a Range request with 200 and the
