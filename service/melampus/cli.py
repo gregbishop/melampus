@@ -278,8 +278,8 @@ def _model_command(args: argparse.Namespace, config) -> int:
     else:
         return _fail(
             f"the {engine} engine has no model to fetch here: the engines with one are "
-            f"{' and '.join(MODEL_ENGINES)}. Pass --backend {MODEL_ENGINES[0]} or --backend "
-            f"{MODEL_ENGINES[1]}, or set [model] backend."
+            f"{' and '.join(MODEL_ENGINES)}. Pass {' or '.join(f'--backend {e}' for e in MODEL_ENGINES)}, "
+            "or set [model] backend."
         )
     if args.download_model:
         return _download_model(fetch)
