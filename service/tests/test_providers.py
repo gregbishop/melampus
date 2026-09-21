@@ -2099,6 +2099,27 @@ def test_command_backend_expands_the_template_into_one_argv(tmp_path):
         "what the command started is stopped at its exit, by its pid while it is still the command's own")
 
 
+def test_command_backend_hands_the_program_the_real_path_of_the_image(tmp_path):
+    """The path that crosses the command line is the staged file's real
+    one, symlinks resolved: on macOS the temp folder is under /var, a link
+    to /private/var, and a program that checks a path-scoped permission
+    rule against both the path as given and where it resolves (Claude
+    Code's allow rules, permissions § Read and Edit) must see one path
+    that is the same either way."""
+    real = tmp_path / "real"
+    real.mkdir()
+    (real / "image.jpg").write_bytes(b"jpeg")
+    (tmp_path / "link").symlink_to(real)
+    through_link = tmp_path / "link" / "image.jpg"
+    run = _FakeRun(stdout=ID_OK)
+
+    _command_backend(run).complete(through_link, "what is this?", 10)
+
+    ((argv, _),) = run.calls
+    assert argv[2] == str(real.resolve() / "image.jpg")
+    assert "link" not in argv[2]
+
+
 def test_command_backend_expands_a_placeholder_inside_a_longer_argument(tmp_path):
     """`--image={image}` is one argument too: the placeholder is replaced
     wherever it sits, so a CLI that takes `--flag=value` works."""
@@ -3244,7 +3265,10 @@ the run, such as missing authentication, is printed as the result on stdout
 with a non-zero exit and nothing on stderr; `claude auth status` exits 0
 when signed in and 1 when not, `--json` carrying `loggedIn`. The image is
 a file the prompt names, read by the Read tool, which needs no prompt only
-when `--allowedTools Read` pre-approves it. MODE: "signed-in" answers;
+when an `--allowedTools` rule pre-approves it (permissions § Read and
+Edit: a bare `Read` matches everywhere; `Read(//path)` is one absolute
+path, and an allow rule applies only when both the path as given and
+the file it resolves to match). MODE: "signed-in" answers;
 "not-signed-in" fails the status check and every run the documented way;
 "expired" passes the status check and fails the run, the way a session
 that lapses mid-batch would; "hung" never answers the status check;
@@ -3332,7 +3356,16 @@ image = match.group(1)
 if "Read" not in args.tools.split(","):
     result("I have no tool that can read files.")
     sys.exit(0)
-if "Read" not in args.allowedTools.replace(",", " ").split():
+def allows(rule):
+    if rule == "Read":
+        return True
+    if rule.startswith("Read(//") and rule.endswith(")"):
+        allowed = rule[len("Read(/"):-1]
+        return image == allowed and os.path.realpath(image) == allowed
+    return False
+
+
+if not any(allows(rule) for rule in args.allowedTools.replace(",", " ").split()):
     result("Permission to read " + image + " was denied.")
     sys.exit(0)
 if not os.path.isfile(image):
@@ -3395,8 +3428,12 @@ def test_claude_code_template_is_the_documented_print_mode_invocation():
     exits; `--output-format json` puts the reply in the `result` field;
     `--tools Read` leaves it only the tool that reads files (which returns
     PNG and JPG "as visual content that Claude can see", tools-reference);
-    `--allowedTools Read` pre-approves that tool everywhere, so the staged
-    image in its temporary folder is read without a prompt;
+    `--allowedTools Read(/{image})` pre-approves reading the one staged
+    file and nothing else (permissions § Read and Edit: `//path` is
+    "Absolute path from filesystem root", and the staged path begins with
+    `/`), so the image in its temporary folder is read without a prompt
+    while a photograph whose rendered text asks for ~/.ssh or .env gets
+    that read denied, not answered (security review, round 1);
     `--permission-prompts none` denies anything else that would wait for a
     person; `--no-session-persistence` keeps a thousand frames from writing
     a thousand transcripts; `--strict-mcp-config` connects no MCP server;
@@ -3409,7 +3446,7 @@ def test_claude_code_template_is_the_documented_print_mode_invocation():
     assert template[0] == CLAUDE == providers.CLAUDE_CODE_PROGRAM
     flags = template[1:-1]
     assert flags == [
-        "-p", "--output-format", "json", "--tools", "Read", "--allowedTools", "Read",
+        "-p", "--output-format", "json", "--tools", "Read", "--allowedTools", "Read(/{image})",
         "--permission-prompts", "none", "--no-session-persistence", "--strict-mcp-config",
         "--setting-sources", "user",
     ]
@@ -3584,9 +3621,35 @@ def test_claude_code_returns_candidates_in_the_same_shape_as_mlx_on_the_fixture(
     runs = [c["argv"] for c in calls if c["argv"][:1] == ["-p"]]
     assert len(runs) == 2, calls
     for argv in runs:
-        assert argv[:-1] == providers.CLAUDE_CODE_COMMAND[1:-1]
+        rule = argv[argv.index("--allowedTools") + 1]
+        assert rule.startswith("Read(//") and rule.endswith(")"), rule
+        staged = rule[len("Read(/"):-1]
+        assert argv[:-1] == [a.replace("{image}", staged) for a in providers.CLAUDE_CODE_COMMAND[1:-1]]
         assert str(photos / PHOTO) not in argv[-1], "the original file's path reached the program"
-        assert "melampus-" in argv[-1], "the staged copy's path is not in the prompt"
+        assert "melampus-" in staged and staged in argv[-1], "the rule and the prompt name different files"
+        assert staged == os.path.realpath(staged), "the rule names a path through a symlink"
+
+
+@posix_only
+def test_the_fake_claude_denies_a_read_the_allow_rule_does_not_name(monkeypatch, tmp_path):
+    """Done-when 3: the fake imitates the documented permission check, so
+    the end-to-end runs above prove the template's rule reaches the staged
+    file. A rule naming another file denies the read (the reply says so,
+    and no candidates come back); a bare `Read` allows everywhere, which
+    is what the template no longer says."""
+    _fake_claude(monkeypatch, tmp_path)
+    image = tmp_path / "image.jpg"
+    image.write_bytes(b"jpeg")
+    elsewhere = tmp_path / "elsewhere.jpg"
+
+    def reply(rule: str) -> str:
+        own = [a.replace("Read(/{image})", rule) for a in providers.CLAUDE_CODE_COMMAND]
+        backend = providers.build_primary_backend(_cfg(model={"backend": "claude-code", "command": own}))
+        return backend.complete(image, "router", 10).text
+
+    assert reply(f"Read(/{elsewhere})") == f"Permission to read {image} was denied."
+    assert ROUTING_OK in reply(f"Read(/{image})")
+    assert ROUTING_OK in reply("Read")
 
 
 @posix_only

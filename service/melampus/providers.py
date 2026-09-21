@@ -98,11 +98,19 @@ CLAUDE_CODE_PROGRAM = "claude"
 #: field (claude_code_reply unwraps it); `--tools Read` leaves Claude Code
 #: only the tool that reads files, which returns "PNG, JPG, and other image
 #: formats ... as visual content that Claude can see" (tools-reference);
-#: `--allowedTools Read` pre-approves that tool everywhere, so the staged
-#: image in its temporary folder, outside any working directory, is read
-#: without a permission prompt; `--permission-prompts none` denies anything
-#: else that would wait for a person; `--no-session-persistence` writes no
-#: transcript per frame; `--strict-mcp-config` connects no MCP server;
+#: `--allowedTools Read(/{image})` pre-approves reading the one staged
+#: file, outside any working directory, and nothing else: per
+#: code.claude.com/docs/en/permissions § Read and Edit, `//path` is
+#: "Absolute path from filesystem root" (`Edit(//tmp/scratch.txt)` "edits
+#: the absolute path /tmp/scratch.txt"), and the staged path begins with
+#: `/`. A photograph is untrusted input; rendered text in one asking for
+#: ~/.ssh or .env gets that read denied, not answered (security review,
+#: round 1). The path is the real one (backend.py: CommandBackend._argv),
+#: since an allow rule "applies only when both the symlink path and its
+#: target match"; `//c/...` is the documented form on Windows, card #424's
+#: run. `--permission-prompts none` denies anything else that would wait
+#: for a person; `--no-session-persistence` writes no transcript per frame;
+#: `--strict-mcp-config` connects no MCP server;
 #: `--setting-sources user` loads no project or local settings from wherever
 #: melampus was launched. The prompt is the positional argument, last: the
 #: staged image's path for the Read tool, then the pipeline's prompt in full,
@@ -114,7 +122,7 @@ CLAUDE_CODE_PROGRAM = "claude"
 #: "bare mode doesn't use your subscription login").
 CLAUDE_CODE_COMMAND = [
     CLAUDE_CODE_PROGRAM, "-p", "--output-format", "json", "--tools", "Read",
-    "--allowedTools", "Read", "--permission-prompts", "none", "--no-session-persistence",
+    "--allowedTools", "Read(/{image})", "--permission-prompts", "none", "--no-session-persistence",
     "--strict-mcp-config", "--setting-sources", "user",
     "The photograph is the file {image}. Read it with the Read tool, then answer this "
     "about it: {prompt}",

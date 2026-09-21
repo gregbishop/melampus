@@ -968,8 +968,13 @@ class CommandBackend(VLMBackend):
         return self.command[0]
 
     def _argv(self, image_path: Path, prompt: str) -> list[str]:
+        # The real path, symlinks resolved (macOS stages under /var, a link
+        # to /private/var): a program that checks a path-scoped permission
+        # rule against both the path as given and where it resolves (Claude
+        # Code's allow rules) sees one path that is the same either way.
+        image = str(image_path.resolve())
         expanded = [
-            argument.replace("{image}", str(image_path)).replace("{prompt}", prompt)
+            argument.replace("{image}", image).replace("{prompt}", prompt)
             for argument in self.command
         ]
         return [self.executable, *expanded[1:]]

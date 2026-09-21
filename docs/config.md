@@ -80,7 +80,7 @@ command = [
   "--tools",
   "Read",
   "--allowedTools",
-  "Read",
+  "Read(/{image})",
   "--permission-prompts",
   "none",
   "--no-session-persistence",
@@ -97,9 +97,17 @@ the [CLI reference](https://code.claude.com/docs/en/cli-reference)): `-p` prints
 one reply and exits; `--output-format json` puts the reply in the result
 object's `result` field, which is unwrapped before the shared JSON extraction
 sees it; `--tools Read` leaves Claude Code only the tool that reads files (it
-returns PNG and JPG as an image the model sees), and `--allowedTools Read`
-pre-approves that tool everywhere, so the staged image, in a temporary folder
-outside any working directory, is read without a permission prompt;
+returns PNG and JPG as an image the model sees), and `--allowedTools
+Read(/{image})` pre-approves reading the one staged file, in a temporary
+folder outside any working directory, and nothing else: in the
+[permissions reference](https://code.claude.com/docs/en/permissions) `//path`
+is "Absolute path from filesystem root", and the staged path begins with `/`,
+so the rule reads `Read(//private/var/.../melampus-.../image.jpg)`. A
+photograph is untrusted input; text rendered in one asking for `~/.ssh` or
+`.env` gets that read denied, not answered. The staged path is handed over
+with symlinks resolved, since an allow rule applies only when the path as
+given and the file it resolves to both match; on Windows the documented
+form is `//c/...`, which card #424's run settles.
 `--permission-prompts none` denies anything else that would wait for a person;
 `--no-session-persistence` writes no transcript per frame; `--strict-mcp-config`
 connects no MCP server; `--setting-sources user` loads no project or local
