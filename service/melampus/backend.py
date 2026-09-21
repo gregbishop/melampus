@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import errno
 import functools
 import http.client
 import json
@@ -993,10 +994,14 @@ class CommandBackend(VLMBackend):
         without reaping it: an exited process that is not reaped keeps its
         pid, and so its group's id, until _wait reaps it last, so a tree
         stopped by that pid is the command's and never a process given the
-        number since. macOS's Python has no waitid, and kqueue's NOTE_EXIT
-        is how it sees an exit; waitid with WNOWAIT elsewhere on POSIX; on
-        Windows the Popen handle keeps the pid reserved, so wait itself is
-        safe there and the order does not matter."""
+        number since. macOS's Python has no waitid, and kqueue is how it
+        sees an exit: a NOTE_EXIT event is the exit, seen during the wait,
+        and a registration refused with ESRCH is the command already
+        exited before the look (XNU does not see an exited process; for
+        this process's own unreaped child that can only mean it has
+        exited); waitid with WNOWAIT elsewhere on POSIX; on Windows the
+        Popen handle keeps the pid reserved, so wait itself is safe there
+        and the order does not matter."""
         if sys.platform == "win32":
             with contextlib.suppress(subprocess.TimeoutExpired):
                 process.wait(timeout=within)
@@ -1009,9 +1014,21 @@ class CommandBackend(VLMBackend):
             )
             queue = select.kqueue()
             try:
-                return bool(queue.control([exit_event], 1, within))
+                events = queue.control([exit_event], 1, within)
             finally:
                 queue.close()
+            if not events:
+                return False
+            (event,) = events
+            if event.flags & select.KQ_EV_ERROR:
+                # The registration was refused, and with one event asked
+                # for the refusal comes back as an event. ESRCH is the
+                # command already exited (before this look, or between two
+                # looks); any other error is the error it is, not an exit.
+                if event.data == errno.ESRCH:
+                    return True
+                raise OSError(event.data, os.strerror(event.data))
+            return True  # NOTE_EXIT: the exit, seen during the wait.
         time.sleep(within)
         return os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOWAIT | os.WNOHANG) is not None
 
