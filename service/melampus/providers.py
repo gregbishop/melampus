@@ -99,7 +99,10 @@ CLAUDE_CODE_PROGRAM = "claude"
 #: only the tool that reads files, which returns "PNG, JPG, and other image
 #: formats ... as visual content that Claude can see" (tools-reference);
 #: `--allowedTools Read(/{image})` pre-approves reading the one staged
-#: file, outside any working directory, and nothing else: per
+#: file and nothing else (the run's working directory is that file's own
+#: temporary folder, backend.py: CommandBackend.complete, so the reads
+#: Claude Code allows without a rule, those inside the working directory,
+#: reach the same one file): per
 #: code.claude.com/docs/en/permissions § Read and Edit, `//path` is
 #: "Absolute path from filesystem root" (`Edit(//tmp/scratch.txt)` "edits
 #: the absolute path /tmp/scratch.txt"), and the staged path begins with

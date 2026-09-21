@@ -895,7 +895,10 @@ class CommandBackend(VLMBackend):
     The child gets the parent's environment as it is, so the
     program finds its own sign-in; nothing is added to it and no secret
     crosses the command line. As with every backend, the image is the staged,
-    metadata-free file and only its path travels. `max_tokens` has no
+    metadata-free file and only its path travels; the program runs in that
+    file's folder, the temporary one holding it and nothing else, so a
+    program that reads freely inside its working directory (Claude Code) is
+    confined to the one file it was handed. `max_tokens` has no
     placeholder: the program's own limits apply.
 
     stdout goes through the same JSON extraction and schema validation as
@@ -977,7 +980,12 @@ class CommandBackend(VLMBackend):
             argument.replace("{image}", image).replace("{prompt}", prompt)
             for argument in self.command
         ]
-        return [self.executable, *expanded[1:]]
+        # A program named by a path (`./tools/vlm`, which shutil.which hands
+        # back as given) is made absolute here, against melampus's cwd,
+        # because the run below moves into the staged image's folder. A bare
+        # name is left for PATH.
+        program = os.path.abspath(self.executable) if os.path.dirname(self.executable) else self.executable
+        return [program, *expanded[1:]]
 
     def _stop_tree(self, pid: int) -> None:
         """Stop the process tree the command with `pid` heads (OWN_GROUP):
@@ -1139,6 +1147,15 @@ class CommandBackend(VLMBackend):
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 stdin=subprocess.DEVNULL,
+                # Where the program runs: the staged image's own folder, the
+                # temporary one holding that file and nothing else, never the
+                # cwd melampus inherited from wherever it was launched (from
+                # Lightroom that is the app's, `/` on a Mac). A program that
+                # reads freely inside its working directory and asks for
+                # anything outside it (Claude Code's Read tool) is thereby
+                # confined to the one file it was handed, whatever folder
+                # melampus was started in (security review, round 2).
+                cwd=str(image_path.resolve().parent),
                 **self.OWN_GROUP,
             )
         except OSError as exc:

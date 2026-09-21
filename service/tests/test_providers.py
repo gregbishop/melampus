@@ -2120,6 +2120,50 @@ def test_command_backend_hands_the_program_the_real_path_of_the_image(tmp_path):
     assert "link" not in argv[2]
 
 
+def test_command_backend_runs_the_program_in_the_staged_images_folder(tmp_path):
+    """Where the program runs (security review, round 2): its working
+    directory is the staged image's own folder, the temporary one that
+    holds that file and nothing else, never melampus's cwd as inherited
+    from wherever it was launched (from Lightroom that is the app's, `/`
+    on a Mac). A program that reads files freely inside its working
+    directory and asks for anything outside it (Claude Code's Read tool:
+    permissions § Working directories, "access to files in the directory
+    where you launched it") is thereby confined to the one file it was
+    handed; a photograph carrying text that asks for ~/.ssh or .env gets
+    that read refused whatever folder melampus was started in. The folder
+    is the real one, symlinks resolved, like the path itself."""
+    real = tmp_path / "real"
+    real.mkdir()
+    (real / "image.jpg").write_bytes(b"jpeg")
+    (tmp_path / "link").symlink_to(real)
+    run = _FakeRun(stdout=ID_OK)
+
+    _command_backend(run).complete(tmp_path / "link" / "image.jpg", "what is this?", 10)
+
+    ((_, kwargs),) = run.calls
+    assert kwargs["cwd"] == str(real.resolve())
+
+
+def test_command_backend_resolves_a_program_named_by_a_relative_path_before_moving(tmp_path, monkeypatch):
+    """A `[model] command` whose program is a relative path (`./tools/vlm`,
+    which shutil.which hands back as given) must still be the file the user
+    named once the run moves into the staged image's folder: the argv
+    carries it as an absolute path, resolved against melampus's cwd. A bare
+    name is left for PATH, as before."""
+    monkeypatch.chdir(tmp_path)
+    image = tmp_path / "image.jpg"
+    image.write_bytes(b"jpeg")
+    run = _FakeRun(stdout=ID_OK)
+    relative = os.path.join(".", "tools", "vlm")
+
+    CommandBackend([relative, "{image}", "{prompt}"], executable=relative, run=run).complete(image, "p", 10)
+    CommandBackend(["vlm", "{image}", "{prompt}"], run=run).complete(image, "p", 10)
+
+    (by_path, _), (by_name, _) = run.calls
+    assert by_path[0] == str(tmp_path / "tools" / "vlm")
+    assert by_name[0] == "vlm"
+
+
 def test_command_backend_expands_a_placeholder_inside_a_longer_argument(tmp_path):
     """`--image={image}` is one argument too: the placeholder is replaced
     wherever it sits, so a CLI that takes `--flag=value` works."""
@@ -3618,9 +3662,10 @@ def test_claude_code_returns_candidates_in_the_same_shape_as_mlx_on_the_fixture(
     assert [c.common_name for c in result.identification.ranked()] == [
         "Tricolored Heron", "Little Blue Heron"]
     calls = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
-    runs = [c["argv"] for c in calls if c["argv"][:1] == ["-p"]]
+    runs = [c for c in calls if c["argv"][:1] == ["-p"]]
     assert len(runs) == 2, calls
-    for argv in runs:
+    for call in runs:
+        argv = call["argv"]
         rule = argv[argv.index("--allowedTools") + 1]
         assert rule.startswith("Read(//") and rule.endswith(")"), rule
         staged = rule[len("Read(/"):-1]
@@ -3628,6 +3673,8 @@ def test_claude_code_returns_candidates_in_the_same_shape_as_mlx_on_the_fixture(
         assert str(photos / PHOTO) not in argv[-1], "the original file's path reached the program"
         assert "melampus-" in staged and staged in argv[-1], "the rule and the prompt name different files"
         assert staged == os.path.realpath(staged), "the rule names a path through a symlink"
+        assert call["cwd"] == os.path.dirname(staged), \
+            "the program's working directory is not the staged image's folder"
 
 
 @posix_only
