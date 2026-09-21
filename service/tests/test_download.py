@@ -2841,6 +2841,35 @@ def test_the_pull_names_a_listener_that_does_not_speak_http_as_the_list_and_the_
     assert all(c.isprintable() for c in message), message
 
 
+def test_the_pull_whose_stream_is_reset_names_the_model_the_address_and_the_re_run_hint(tmp_path: Path):
+    """Review round 5 (download.py:828, backend.py:666-686): a socket reset
+    while the stream is being read (Ollama killed mid-pull, or a listener
+    hanging up) is a ConnectionResetError, which urllib lets through
+    unwrapped and the backend's `_naming` did not name, so it reached the
+    pull's `except ConnectionError`, written for the backend's not-running
+    failure, and the message was the bare `[Errno 54] Connection reset by
+    peer`: no model, no address, no re-run hint, on stderr, in the CLI log
+    and in the dialog. The backend names it, as it names every other
+    failure at the address, and the pull gives it the hint Ollama's resume
+    earns. Given a listener answering the stream's first line and then
+    resetting, the pull is a DownloadError naming the model, the address
+    and the re-run hint."""
+    from conftest import resetting_handler
+
+    answer = (b"HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\n"
+              b"Transfer-Encoding: chunked\r\n\r\n"
+              b"1f\r\n" + b'{"status": "pulling manifest"}\n' + b"\r\n")
+    with loopback_server(resetting_handler(answer)) as squatter:
+        address = f"http://127.0.0.1:{squatter.server_port}"
+        with pytest.raises(DownloadError) as failure:
+            pull_model(FAKE_MODEL, address, on_update=lambda update: None,
+                       cancel_marker=tmp_path / "download-cancel", timeout=5.0)
+    message = str(failure.value)
+    assert FAKE_MODEL in message, message
+    assert address in message, message
+    assert "re-run melampus-id --download-model" in message, message
+
+
 # The cooperative cancel, for Ollama: the marker and the signals end the
 # pull the way they end the MLX download, exit 4 and `cancelled` through
 # one path; Ollama keeps the layers it has and the next pull resumes them.
@@ -3053,6 +3082,24 @@ def test_remove_with_no_ollama_answering_uses_the_not_running_message():
     with pytest.raises(DownloadError) as failure:
         remove_ollama_model(FAKE_MODEL, f"http://127.0.0.1:{port}")
     assert f"no Ollama server answering at http://127.0.0.1:{port}" in str(failure.value)
+
+
+def test_remove_whose_reply_is_reset_names_the_address():
+    """Review round 5 (download.py:852): the delete's `except (RuntimeError,
+    ConnectionError, TimeoutError)` takes the backend's named failures by
+    class, and a socket reset mid-reply is a ConnectionError too, so the
+    message was the bare `[Errno 54] Connection reset by peer`, naming
+    neither the address nor the model. The backend names the address.
+    Given a listener answering the delete's status line and headers and
+    then resetting, the remove is a DownloadError naming the address."""
+    from conftest import resetting_handler
+
+    answer = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 40\r\n\r\n{"
+    with loopback_server(resetting_handler(answer)) as squatter:
+        address = f"http://127.0.0.1:{squatter.server_port}"
+        with pytest.raises(DownloadError) as failure:
+            remove_ollama_model(FAKE_MODEL, address, timeout=5.0)
+    assert address in str(failure.value), str(failure.value)
 
 
 

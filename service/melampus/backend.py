@@ -672,7 +672,10 @@ class OllamaBackend(VLMBackend):
     def _naming(self) -> Iterator[None]:
         """Every failure of the block a plain error naming the address or the
         status: what urllib raises for an HTTP status, for nothing answering
-        and for the socket timeout, and what it lets through unwrapped."""
+        and for the socket timeout, and what it lets through unwrapped: an
+        http.client protocol error, or the raw socket error of a connection
+        that ended while the reply was being read (a reset, a broken pipe:
+        Ollama killed, or a listener hanging up)."""
         try:
             yield
         except urllib.error.HTTPError as exc:
@@ -692,6 +695,12 @@ class OllamaBackend(VLMBackend):
             raise RuntimeError(
                 f"Ollama's reply from {self.url} was not HTTP: {self.plain(str(exc))}"
             ) from exc
+        except OSError as exc:
+            # The raw socket error of a connection that ended mid-reply
+            # (ConnectionResetError, BrokenPipeError: a ConnectionError, so
+            # otherwise taken by a caller's clause for the not-running
+            # failure above, which is the only ConnectionError raised here).
+            raise RuntimeError(f"the connection to Ollama at {self.url} ended: {exc}") from exc
 
     def _timed_out(self) -> TimeoutError:
         return TimeoutError(

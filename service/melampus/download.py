@@ -1091,8 +1091,10 @@ def pull_model(
     time and at most the backend's reply bound, as every frame is sent.
 
     Raises DownloadError with the fix in the message: the backend's own
-    words for nothing answering at `url`, for a reply that is not HTTP and
-    for a line not written within `timeout`; Ollama's words for a refusal
+    words for nothing answering at `url`, for a reply that is not HTTP,
+    for a connection that ended mid-stream (with the re-run hint, since
+    Ollama resumes) and for a line not written within `timeout`; Ollama's
+    words for a refusal
     before the stream starts (an HTTP status with its {"error"} object) or
     an error line within it. DownloadCancelled from a signal, or
     from `cancel_marker` (the documented path by default) appearing between
@@ -1113,9 +1115,12 @@ def pull_model(
     except RuntimeError as exc:
         # The backend's words for the status (a 3xx from the address is an
         # answer from the wrong place, and says so), a reply that is not
-        # HTTP, or one past its bound; Ollama's own error inside them.
+        # HTTP, one past its bound, or a connection that ended mid-stream
+        # (a reset: Ollama killed); Ollama's own error inside them.
         raise _pull_error(model, exc) from exc
     except ConnectionError as exc:
+        # The backend's not-running failure, the one ConnectionError it
+        # raises: a raw socket error is named a RuntimeError above.
         raise DownloadError(str(exc)) from exc
     except OSError as exc:
         raise DownloadError(f"the pull of {model} from {url} failed: {exc}; {RERUN}") from exc

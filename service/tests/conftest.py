@@ -41,6 +41,7 @@ import platform
 import shutil
 import socket
 import socketserver
+import struct
 import subprocess
 import sys
 import threading
@@ -239,6 +240,27 @@ class BadStatusLine(socketserver.BaseRequestHandler):
         with contextlib.suppress(OSError):
             self.request.recv(65536)
             self.request.sendall(b"\x1b[31mHTTP/9.9 OK\r\x07fake log line\r\n\r\n")
+
+
+def resetting_handler(answer: bytes) -> type[socketserver.BaseRequestHandler]:
+    """A listener that answers whatever it is asked with `answer` and then
+    resets the connection (SO_LINGER at zero makes the close an RST, not a
+    FIN, so the client's next read is a ConnectionResetError, the raw
+    socket error urllib lets through unwrapped): Ollama killed, or a
+    listener hanging up, while the reply is being read. The socket is
+    closed here, ahead of the server's own shutdown, so the reset is what
+    the client sees, not the orderly close."""
+
+    class Resetting(socketserver.BaseRequestHandler):
+        def handle(self) -> None:
+            with contextlib.suppress(OSError):
+                self.request.recv(65536)
+                self.request.sendall(answer)
+                self.request.setsockopt(
+                    socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+                self.request.close()
+
+    return Resetting
 
 
 class TricklingPull(QuietHandler):
