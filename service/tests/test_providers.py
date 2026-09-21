@@ -13,9 +13,9 @@ import contextlib
 import http.client
 import io
 import json
+import signal
 import socket
 import socketserver
-import signal
 import ssl
 import subprocess
 import sys
