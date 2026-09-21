@@ -12,8 +12,11 @@ import contextlib
 import functools
 import http.client
 import json
+import os
+import signal
 import socket
 import subprocess
+import sys
 import threading
 import time
 import urllib.error
@@ -868,12 +871,24 @@ class CommandBackend(VLMBackend):
 
     stdout goes through the same JSON extraction and schema validation as
     every other backend's text (identify.py); nothing here parses
-    candidates. stderr is kept for error messages only.
+    candidates. stderr is kept for error messages only. `timeout` is the
+    one ceiling on a run; past it the command and every process it started
+    are stopped (OWN_GROUP) before the frame's TimeoutError is raised.
     """
 
     #: How much of stderr an error message carries: enough to say what went
     #: wrong, not a CLI's whole usage text.
     STDERR_LINES = 3
+    #: The command runs in its own session (POSIX: setsid, so its process
+    #: group id is its pid and os.killpg reaches every worker it forked) or
+    #: its own process group (Windows, where `taskkill /T` walks the tree),
+    #: so a timeout stops everything it started and not just the first
+    #: process: a CLI that hands the work to a worker would otherwise leave
+    #: that worker running, one per timed-out frame, while the batch goes on.
+    OWN_GROUP = (
+        {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if sys.platform == "win32"
+        else {"start_new_session": True}
+    )
 
     def __init__(
         self,
@@ -889,9 +904,9 @@ class CommandBackend(VLMBackend):
         self.name = " ".join(self.command)
         self.executable = executable or self.command[0]
         self.timeout = timeout
-        # Shaped like subprocess.run(argv, **kwargs): the tests hand in a fake
-        # at this edge, the way the other backends take a client.
-        self._run = run or subprocess.run
+        # Shaped like subprocess.Popen(argv, **kwargs): the tests hand in a
+        # fake at this edge, the way the other backends take a client.
+        self._run = run or subprocess.Popen
 
     @property
     def program(self) -> str:
@@ -909,41 +924,69 @@ class CommandBackend(VLMBackend):
         lines = [line for line in (stderr or "").splitlines() if line.strip()]
         return " / ".join(lines[: self.STDERR_LINES])
 
+    def _stop_tree(self, pid: int) -> None:
+        """Stop the process tree the command with `pid` heads (OWN_GROUP):
+        every process in its group on POSIX, the tree under it on Windows.
+        A tree already gone is nothing to do."""
+        if sys.platform == "win32":
+            subprocess.run(
+                ["taskkill", "/T", "/F", "/PID", str(pid)],
+                stdin=subprocess.DEVNULL, capture_output=True, check=False,
+            )
+        else:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(pid, signal.SIGKILL)
+
+    def _stop(self, process) -> None:
+        """Stop the command and everything it started, and reap it."""
+        self._stop_tree(process.pid)
+        process.kill()
+        process.communicate()
+
     def complete(self, image_path: Path, prompt: str, max_tokens: int) -> Completion:
         argv = self._argv(image_path, prompt)
         started = time.perf_counter()
         try:
             process = self._run(
                 argv,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
                 encoding="utf-8",
                 errors="replace",
                 stdin=subprocess.DEVNULL,
-                timeout=self.timeout,
+                **self.OWN_GROUP,
             )
+        except OSError as exc:
+            raise RuntimeError(f"{self.program} could not be run: {exc}") from exc
+        try:
+            stdout, stderr = process.communicate(timeout=self.timeout)
         except subprocess.TimeoutExpired as exc:
+            self._stop(process)
             raise TimeoutError(
                 f"{self.program} did not answer within {self.timeout:g}s; "
                 "raise [model] timeout_seconds if it needs longer"
             ) from exc
-        except OSError as exc:
-            raise RuntimeError(f"{self.program} could not be run: {exc}") from exc
+        except BaseException:
+            # As subprocess.run does on any other interruption (Ctrl+C): the
+            # command does not outlive the run that started it.
+            self._stop(process)
+            raise
         elapsed = time.perf_counter() - started
 
         if process.returncode != 0:
-            said = self._stderr_lines(process.stderr)
+            said = self._stderr_lines(stderr)
             raise CommandFailed(
                 f"{self.program} exited {process.returncode}"
                 + (f": {said}" if said else " with nothing on stderr")
             )
-        if not (process.stdout or "").strip():
-            said = self._stderr_lines(process.stderr)
+        if not (stdout or "").strip():
+            said = self._stderr_lines(stderr)
             raise RuntimeError(
                 f"{self.program} printed nothing on stdout"
                 + (f": {said}" if said else "")
             )
-        return Completion(text=process.stdout, seconds=elapsed)
+        return Completion(text=stdout, seconds=elapsed)
 
 
 class ScriptedBackend(VLMBackend):

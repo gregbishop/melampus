@@ -1907,24 +1907,63 @@ def test_command_template_without_a_placeholder_is_refused_at_config_load(comman
 
 
 class _FakeRun:
-    """Stands in for subprocess.run at the backend's process edge: records
-    every call, then returns a completed process with `stdout`, `stderr` and
-    `returncode`, or raises `error`."""
+    """Stands in for subprocess.Popen at the backend's process edge: records
+    every call, then returns a started process that says `stdout` and
+    `stderr` and exits `returncode`, or raises `error` on starting. `hangs`
+    is a process that never finishes on its own: `communicate(timeout=...)`
+    raises TimeoutExpired until it is killed. `stopped` records the pid of
+    every process tree the backend stopped (the OS edge, faked)."""
 
     def __init__(self, stdout: str = "", stderr: str = "", returncode: int = 0,
-                 error: Exception | None = None):
+                 error: Exception | None = None, hangs: bool = False):
         self.stdout, self.stderr, self.returncode, self.error = stdout, stderr, returncode, error
+        self.hangs = hangs
         self.calls: list[tuple[list[str], dict]] = []
+        self.processes: list[_FakeProcess] = []
+        self.stopped: list[int] = []
 
     def __call__(self, argv, **kwargs):
         self.calls.append((argv, kwargs))
         if self.error is not None:
             raise self.error
-        return subprocess.CompletedProcess(argv, self.returncode, self.stdout, self.stderr)
+        self.processes.append(_FakeProcess(argv, self))
+        return self.processes[-1]
+
+
+class _FakeProcess:
+    """What _FakeRun starts: the Popen surface the backend uses."""
+
+    def __init__(self, argv, run: _FakeRun):
+        self.args, self._run = argv, run
+        self.pid = 4242
+        self.returncode: int | None = None
+        self.killed = False
+        self.waited: list[float | None] = []
+
+    def communicate(self, timeout: float | None = None):
+        self.waited.append(timeout)
+        if self._run.hangs and not self.killed:
+            raise subprocess.TimeoutExpired(self.args, timeout)
+        self.returncode = -9 if self.killed else self._run.returncode
+        return self._run.stdout, self._run.stderr
+
+    def poll(self):
+        return self.returncode
+
+    def wait(self, timeout: float | None = None):
+        self.communicate(timeout)
+        return self.returncode
+
+    def kill(self):
+        self.killed = True
 
 
 def _command_backend(run: _FakeRun, command: list[str] = COMMAND, **kwargs) -> CommandBackend:
-    return CommandBackend(command, executable="/opt/fake/bin/fake-vlm", run=run, **kwargs)
+    backend = CommandBackend(command, executable="/opt/fake/bin/fake-vlm", run=run, **kwargs)
+    # The process-tree stop is the OS edge (os.killpg, taskkill): the fake
+    # records the pid it would have stopped instead.
+    backend._stop_tree = run.stopped.append
+    return backend
 
 
 def test_command_backend_expands_the_template_into_one_argv(tmp_path):
@@ -1933,9 +1972,11 @@ def test_command_backend_expands_the_template_into_one_argv(tmp_path):
     full as one argument, spaces, quotes and newlines included, and every
     other argument is passed untouched. The resolved executable stands in
     for the bare name (shutil.which found it, so what was checked is what
-    runs). subprocess.run is given the list, no
-    shell, the reply as text, the config's timeout, stdout and stderr
-    captured, and nothing on stdin, so a program that reads it cannot hang."""
+    runs). subprocess.Popen is given the list, no
+    shell, the reply as text, stdout and stderr piped back, nothing on stdin,
+    so a program that reads it cannot hang, and its own session (POSIX) or
+    process group (Windows), so a timeout can stop every process it started
+    and not just the first; the config's timeout is the wait's ceiling."""
     image = tmp_path / "image.jpg"
     image.write_bytes(b"jpeg")
     run = _FakeRun(stdout=ID_OK)
@@ -1946,12 +1987,18 @@ def test_command_backend_expands_the_template_into_one_argv(tmp_path):
 
     ((argv, kwargs),) = run.calls
     assert argv == ["/opt/fake/bin/fake-vlm", "--image", str(image), "--prompt", prompt, "--quiet"]
-    assert kwargs["timeout"] == 42.0
     assert kwargs["text"] is True
-    assert kwargs["capture_output"] is True
+    assert kwargs["stdout"] is subprocess.PIPE and kwargs["stderr"] is subprocess.PIPE
     assert kwargs["stdin"] is subprocess.DEVNULL
     assert kwargs.get("shell", False) is False
     assert "env" not in kwargs, "the child gets the parent's environment as it is; nothing is added"
+    if sys.platform == "win32":
+        assert kwargs["creationflags"] == subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        assert kwargs["start_new_session"] is True
+    (process,) = run.processes
+    assert process.waited == [42.0]
+    assert run.stopped == [], "a process that answered in time is not stopped"
 
 
 def test_command_backend_expands_a_placeholder_inside_a_longer_argument(tmp_path):
@@ -1994,8 +2041,7 @@ def test_command_backend_reads_stdout_into_a_completion(tmp_path):
         (_FakeRun(returncode=2, stderr="not logged in\nrun `fake-vlm login` first\nmore\nand more"),
          CommandFailed, "fake-vlm exited 2: not logged in / run `fake-vlm login` first / more"),
         (_FakeRun(returncode=1), CommandFailed, "fake-vlm exited 1 with nothing on stderr"),
-        (_FakeRun(error=subprocess.TimeoutExpired(["fake-vlm"], 42.0)),
-         TimeoutError, "fake-vlm did not answer within 42s"),
+        (_FakeRun(hangs=True), TimeoutError, "fake-vlm did not answer within 42s"),
         (_FakeRun(stdout="  \n", stderr="usage: fake-vlm ..."),
          RuntimeError, "fake-vlm printed nothing on stdout: usage: fake-vlm ..."),
         (_FakeRun(error=PermissionError(13, "Permission denied")),
@@ -2018,6 +2064,26 @@ def test_command_backend_maps_each_failure_to_a_plain_error(tmp_path, run, expec
         backend.complete(image, "prompt", 10)
     assert said in str(err.value), str(err.value)
     assert not isinstance(err.value, subprocess.SubprocessError)
+
+
+def test_command_backend_stops_the_whole_process_tree_on_timeout(tmp_path):
+    """A timeout stops the command and everything it started, not just the
+    first process: the tree is stopped by the command's pid (its session or
+    process group), the command itself is killed, and it is reaped before
+    the TimeoutError is raised, so a CLI whose worker outlives it cannot
+    leave that worker running while the batch goes on."""
+    image = tmp_path / "image.jpg"
+    image.write_bytes(b"jpeg")
+    run = _FakeRun(hangs=True)
+    backend = _command_backend(run, timeout=0.5)
+
+    with pytest.raises(TimeoutError):
+        backend.complete(image, "prompt", 10)
+
+    (process,) = run.processes
+    assert run.stopped == [process.pid]
+    assert process.killed
+    assert process.returncode is not None, "the killed command was not reaped"
 
 
 def test_command_is_selectable_by_config_and_flag_but_not_a_picker_choice():
@@ -2139,21 +2205,38 @@ print(ROUTING if "router" in args.prompt else IDENTIFICATION)
 '''
 
 
-def _fake_cli(monkeypatch, tmp_path, *, exit_code: int = 0, stderr: str = "") -> list[str]:
+_LAUNCHER_SCRIPT = '''#!{python}
+"""A CLI that hands the work to a worker and waits for it, the way one
+wrapping a language server or a daemon does. The worker's pid goes to a
+file so the test can look for the worker after the CLI is stopped."""
+import subprocess
+import sys
+
+worker = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+with open({pid_file!r}, "w") as handle:
+    handle.write(str(worker.pid))
+worker.wait()
+'''
+
+
+def _fake_cli(monkeypatch, tmp_path, *, exit_code: int = 0, stderr: str = "",
+              script: str = _FAKE_CLI_SCRIPT, **fields) -> list[str]:
     """Write FAKE_CLI, an executable Python script, into a folder put first
     on PATH, and return the config template that runs it by its bare name:
     the real shutil.which, the real subprocess, no shell. `exit_code`
-    non-zero makes it fail after reading its arguments, saying `stderr`."""
+    non-zero makes it fail after reading its arguments, saying `stderr`.
+    `script` is another body in place of the answering CLI's, with `fields`
+    filled in."""
     folder = tmp_path / "bin"
     folder.mkdir(exist_ok=True)
-    script = folder / FAKE_CLI
-    script.write_text(_FAKE_CLI_SCRIPT.format(
+    path = folder / FAKE_CLI
+    path.write_text(script.format(
         python=sys.executable, routing=ROUTING_OK, identification=ID_OK,
-        exit_code=exit_code, stderr=stderr,
+        exit_code=exit_code, stderr=stderr, **fields,
     ), encoding="utf-8")
-    script.chmod(0o755)
+    path.chmod(0o755)
     monkeypatch.setenv("PATH", f"{folder}{os.pathsep}{os.environ.get('PATH', '')}")
-    assert shutil.which(FAKE_CLI) == str(script)
+    assert shutil.which(FAKE_CLI) == str(path)
     return [FAKE_CLI, "--image", "{image}", "--prompt", "{prompt}", "--quiet"]
 
 
@@ -2197,6 +2280,45 @@ def test_command_backend_returns_candidates_in_the_same_shape_as_mlx_on_the_fixt
     assert [c.common_name for c in result.identification.ranked()] == [
         "Tricolored Heron", "Little Blue Heron"]
     assert result.identification.top().scientific_name == "Egretta tricolor"
+
+
+def _gone(pid: int, within: float) -> bool:
+    """Whether process `pid` is gone (or a zombie no longer running) within
+    `within` seconds."""
+    deadline = time.monotonic() + within
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        time.sleep(0.05)
+    return False
+
+
+@posix_only
+def test_command_backend_timeout_stops_the_worker_the_command_started(monkeypatch, tmp_path):
+    """At the real boundary: the command starts a worker and waits for it,
+    the way a CLI wrapping a daemon does, and neither answers within the
+    timeout. Then the run is a TimeoutError as before, and the worker is
+    gone too: stopping only the command would leave a worker per timed-out
+    frame running while the batch goes on."""
+    pid_file = tmp_path / "worker.pid"
+    command = _fake_cli(monkeypatch, tmp_path, script=_LAUNCHER_SCRIPT, pid_file=str(pid_file))
+    backend = providers.build_primary_backend(
+        _cfg(model={"backend": "command", "command": command, "timeout_seconds": 1}))
+    image = tmp_path / "image.jpg"
+    image.write_bytes(b"jpeg")
+
+    try:
+        with pytest.raises(TimeoutError) as err:
+            backend.complete(image, "prompt", 10)
+        assert "fake-vlm did not answer within 1s" in str(err.value)
+        worker = int(pid_file.read_text(encoding="utf-8"))
+        assert _gone(worker, within=10.0), f"worker {worker} is still running after the timeout"
+    finally:
+        if pid_file.exists():
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(int(pid_file.read_text(encoding="utf-8")), 9)
 
 
 def test_command_not_installed_fires_before_any_image_is_read(tmp_path, capsys, no_ambient_ollama):
