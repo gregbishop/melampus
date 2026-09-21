@@ -152,7 +152,10 @@ the Settings dialog's Download button (card #408):
   `removed <path>` (that folder) and exits 0. It is refused with **exit 3**
   and the reason on stderr when nothing is installed, or while a download of
   the model is running (it holds the hub library's per-file lock the fetch
-  takes): cancel the download first.
+  takes): cancel the download first. It also exits 3, with the folder named,
+  when that folder is still there after the deletion (the hub library logs a
+  permission error and carries on rather than raising): check the folder's
+  permissions, and on Windows that no other program holds a file in it open.
 
 The bytes move over plain HTTP, through the hub library's own file download
 (its Range request, its size check, its per-file lock), and every finished file

@@ -670,8 +670,10 @@ def remove_model(repo: str, *, cache_dir: Path | None = None) -> Path:
     repo folder does, and return that folder. The library's `delete_revisions`
     is not used: it searches the whole cache by commit hash and takes the
     first repo found at one, which can be a fork cached at the same commit,
-    leaving `repo` installed. Raises DownloadError when nothing is installed
-    or a download of it is running."""
+    leaving `repo` installed. Raises DownloadError when nothing is installed,
+    a download of it is running, or the folder is still there after the
+    deletion: the library catches the PermissionError of a folder it cannot
+    delete, logs it and returns, so the folder is the only signal it leaves."""
     cache, _, locks = _cache_paths(repo, cache_dir)
     cached = _cached(repo, cache)
     if cached is None:
@@ -680,4 +682,7 @@ def remove_model(repo: str, *, cache_dir: Path | None = None) -> Path:
         raise DownloadError(f"a download of {repo} is running; cancel it first, then remove")
     DeleteCacheStrategy(expected_freed_size=cached.size_on_disk, blobs=frozenset(), refs=frozenset(),
                         repos=frozenset({cached.repo_path}), snapshots=frozenset()).execute()
+    if cached.repo_path.exists():
+        raise DownloadError(f"could not remove {repo} from {cache}: {cached.repo_path} is still there; "
+                            "check the folder's permissions")
     return cached.repo_path

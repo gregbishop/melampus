@@ -1334,6 +1334,31 @@ def test_remove_with_nothing_installed_says_so(fake_hub: FakeHub, tmp_path: Path
     assert FAKE_REPO in str(failure.value) and "nothing to remove" in str(failure.value)
 
 
+@pytest.mark.skipif(sys.platform == "win32" or getattr(os, "geteuid", lambda: 1)() == 0,
+                    reason="a read-only folder does not stop a deletion here")
+def test_remove_refuses_success_when_the_folder_is_still_there_after_the_deletion(
+    fake_hub: FakeHub, tmp_path: Path
+):
+    """Done-when 3 (Codex review 2, finding 1; Claude review 9, code finding 1;
+    download.py:681). The hub library's deletion strategy catches the
+    PermissionError of a folder it cannot delete, logs it and returns, so the
+    removal reported `removed <path>` for a model still on disk, and Settings
+    flipped the row to Download. The folder still being there is the only
+    signal the library leaves: a deletion that left it is a DownloadError
+    naming the repo and the folder, exit 3 from the CLI, and the model stays."""
+    path, _ = _fetch(fake_hub, tmp_path / "hub")
+    folder = tmp_path / "hub" / FAKE_FOLDER
+    os.chmod(path, 0o500)
+    try:
+        with pytest.raises(DownloadError) as failure:
+            remove_model(FAKE_REPO, cache_dir=tmp_path / "hub")
+    finally:
+        os.chmod(path, 0o700)
+
+    assert FAKE_REPO in str(failure.value) and str(folder) in str(failure.value)
+    assert folder.exists() and sorted(p.name for p in path.iterdir()) == sorted(FAKE_FILES), "the folder went after all"
+
+
 def _lock_dir(cache: Path) -> Path:
     """The cache's locks folder for the fake repo, where a running download
     holds the hub library's per-file lock on the blob it is appending to (the
