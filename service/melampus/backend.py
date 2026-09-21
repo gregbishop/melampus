@@ -397,7 +397,6 @@ class _Deadline:
         self.expired = threading.Event()
         self.cancelled = threading.Event()
         self._over = threading.Event()
-        self._until = time.monotonic() + seconds
         self._timer = threading.Thread(target=self._counting, daemon=True)
         self._watcher = threading.Thread(target=self._watching, args=[cancel], daemon=True) if cancel else None
 
@@ -414,7 +413,7 @@ class _Deadline:
                 return
 
     def __enter__(self) -> _Deadline:
-        self._until = time.monotonic() + self.seconds
+        self.again()
         self._timer.start()
         if self._watcher is not None:
             self._watcher.start()
@@ -427,13 +426,14 @@ class _Deadline:
             self._watcher.join()
 
     def again(self) -> None:
-        """The bound over again from now, for the next line of a stream
-        (OllamaBackend.stream): the deadline the timer waits for moves to
-        `seconds` from now, an assignment the timer reads when the old one
-        comes round. A stream has no one exchange to bound, since a model
-        pull runs as long as the model is large, so each line gets the
-        bound an exchange gets. A deadline that already fired stays fired:
-        its socket is hung up, and the caller reads that."""
+        """The bound from now: the deadline the timer waits for is `seconds`
+        from now, an assignment the timer reads when the one it waits on
+        comes round. `__enter__` arms the block with it, before the timer
+        starts, and OllamaBackend.stream calls it before each line: a
+        stream has no one exchange to bound, since a model pull runs as
+        long as the model is large, so each line gets the bound an
+        exchange gets. A deadline that already fired stays fired: its
+        socket is hung up, and the caller reads that."""
         self._until = time.monotonic() + self.seconds
 
     def on(self, sock: socket.socket | None) -> None:
