@@ -620,8 +620,10 @@ class FakeOllama:
 
             def do_DELETE(self):  # noqa: N802 - http.server's name
                 ollama.requests.append(("DELETE", self.path))
-                assert self.path == "/api/delete", self.path
                 body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                if self.path != f"{prefix}/api/delete":
+                    self._answer(404, {"error": "404 page not found"})
+                    return
                 name = body.get("model") or ""
                 ollama.deletes.append(name)
                 held = name if name in ollama.models else (name.removesuffix(":latest")

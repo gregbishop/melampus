@@ -2890,6 +2890,23 @@ def test_remove_deletes_the_pulled_model_from_ollama(fake_ollama: FakeOllama):
     assert _ollama_status(fake_ollama).installed is False
 
 
+def test_remove_reaches_an_ollama_behind_a_reverse_proxy_prefix():
+    """`[model] ollama_url` may carry a path (an Ollama behind a reverse
+    proxy at /ollama, as test_providers.py serves the chat endpoint): the
+    pull, the list and the delete all go under it, and the fake answers
+    all three there."""
+    with FakeOllama(library={FAKE_MODEL: [3000, 1000]}, prefix="/ollama").serve() as ollama:
+        address = f"{ollama.endpoint}/ollama"
+        pull_model(FAKE_MODEL, address, on_update=lambda update: None)
+        assert ollama_status(FAKE_MODEL, address).installed is True
+
+        assert remove_ollama_model(FAKE_MODEL, address) == FAKE_MODEL
+
+        assert ollama.deletes == [FAKE_MODEL] and ollama.models == {}
+        assert ollama_status(FAKE_MODEL, address).installed is False
+        assert {path for _, path in ollama.requests} == {"/ollama/api/pull", "/ollama/api/tags", "/ollama/api/delete"}
+
+
 def test_remove_of_a_model_ollama_does_not_hold_says_so(fake_ollama: FakeOllama):
     """404 with Ollama's not-found error (§ Delete a Model): nothing to
     remove, named."""
