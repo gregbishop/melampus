@@ -2247,6 +2247,48 @@ def test_command_backend_uses_the_reply_of_a_command_that_exited_leaving_its_pip
     assert process.returncode == 0, "the command was reaped last"
 
 
+def test_command_backend_leaves_a_pipe_still_held_past_the_reader_bound_to_its_holder(tmp_path):
+    """A pipe still held when the readers' bound runs out (by something the
+    tree stop could not reach: a daemon that left the session) is left to
+    its holder, not closed from here: closing a BufferedReader from another
+    thread waits for the read1 in flight to return, which is a wait on the
+    holder for as long as it lives, past the config's timeout. The reply
+    is used at the bound, the pipe that did end is closed, and the one
+    still held is not. The fake's stdout is a real pipe whose write end
+    the test holds for longer than the bound, so a close that waits shows
+    as elapsed time rather than a hang."""
+    image = tmp_path / "image.jpg"
+    image.write_bytes(b"jpeg")
+    read_end, write_end = os.pipe()
+    os.write(write_end, ID_OK.encode("utf-8"))
+    stdout = os.fdopen(read_end, "rb")
+    run = _FakeRun(stdout=stdout, stderr="warning: slow")
+    backend = _command_backend(run, timeout=5.0)
+    held = [write_end]
+
+    def let_go() -> None:
+        os.close(held.pop())  # the holder dies and the pipe ends
+    holder = threading.Timer(8.0, let_go)
+    holder.start()
+    try:
+        started = time.monotonic()
+        completion = backend.complete(image, "prompt", 10)
+        took = time.monotonic() - started
+
+        assert completion.text == ID_OK
+        assert 4.5 <= took < 7, f"the call took {took:.2f}s: held past the reader bound"
+        (process,) = run.processes
+        assert process.stderr.closed, "the pipe read to its end is closed"
+        assert not process.stdout.closed, "the pipe still held was closed from under its reader"
+        assert process.returncode == 0, "the command was reaped last"
+    finally:
+        holder.cancel()
+        holder.join()
+        if held:
+            let_go()
+        stdout.close()
+
+
 @pytest.mark.parametrize("system_root", [r"D:\Win", None], ids=["SystemRoot", "default"])
 def test_command_backend_stops_a_tree_on_windows_with_the_system_taskkill(monkeypatch, system_root):
     """`_stop_tree` on Windows runs taskkill by its absolute path under
