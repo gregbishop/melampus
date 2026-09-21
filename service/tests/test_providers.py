@@ -28,6 +28,7 @@ from conftest import (
     FakeOllama,
     QuietHandler,
     Silent,
+    TricklingPull,
     closed_port,
     fake_platform,
     loopback_server,
@@ -916,6 +917,20 @@ def test_hang_up_records_the_deadline_and_ends_the_stream_it_holds():
     assert deadline.expired.is_set()
 
 
+def test_deadline_again_counts_the_bound_from_now():
+    """Security (review round 4): a stream has no one exchange to bound, so
+    `_Deadline.again` gives the next line the bound an exchange gets, from
+    now. Given a deadline of one second armed, 0.6s in and again, it has
+    not fired 0.6s after that (1.2s from the start: the first timer would
+    have), and fires within the bound from the re-arm."""
+    with _Deadline(1.0) as deadline:
+        time.sleep(0.6)
+        deadline.again()
+        time.sleep(0.6)
+        assert not deadline.expired.is_set(), "the deadline counted from the start, not from again()"
+        assert deadline.expired.wait(2.0), "the deadline never fired after again()"
+
+
 def test_ollama_probe_stays_on_loopback_whatever_proxy_the_environment_names(monkeypatch):
     """Security: the probe is a loopback call and must stay one. urlopen's
     default opener honours `http_proxy` (and, on a Mac, the system proxy
@@ -1429,6 +1444,34 @@ def test_ollama_backend_gives_up_at_its_deadline_when_the_server_trickles(tmp_pa
         with _timed() as took, pytest.raises(TimeoutError) as err:
             backend.complete(image, "prompt", 10)
     assert took.seconds < deadline + SCHEDULING_SLACK, f"the frame read past its deadline: {took.seconds:.2f}s"
+    assert f"did not answer within {deadline:g}s" in str(err.value), str(err.value)
+
+
+def test_ollama_backend_stream_gives_up_at_its_deadline_when_a_line_trickles():
+    """Security (review round 4, download.py:784): the pull's stream was read
+    a line at a time with urlopen's socket timeout alone, which bounds each
+    read and resets on every byte, so a listener writing a line a byte at a
+    time within it held the pull, and the cancel marker read between lines,
+    for as long as it liked (a probe: the marker written one second into a
+    trickled line was read eight seconds later, at its newline). `stream`
+    gives each line what `send` gives an exchange, the deadline armed again
+    for it. Given a server writing two whole lines, each after a pause
+    within the deadline and the two together past it, then a line trickled
+    well past it, the stream yields both whole lines (the deadline counts
+    per line, not per exchange) and ends as timed out within a deadline of
+    the trickle's start, not at its newline."""
+    deadline = 0.5
+    with loopback_server(TricklingPull) as server:
+        url = f"http://127.0.0.1:{server.server_port}"
+        backend = OllamaBackend("qwen3-vl:8b-instruct", url, timeout=deadline)
+        request = urllib.request.Request(f"{url}/api/pull", data=b"{}", method="POST")
+        lines = []
+        with _timed() as took, pytest.raises(TimeoutError) as err:
+            for line in backend.stream(request):
+                lines.append(line)
+    assert lines == [TricklingPull.WHOLE, TricklingPull.WHOLE]
+    ceiling = 2 * TricklingPull.PAUSE + deadline + SCHEDULING_SLACK
+    assert took.seconds < ceiling, f"the stream read past its deadline: {took.seconds:.2f}s"
     assert f"did not answer within {deadline:g}s" in str(err.value), str(err.value)
 
 

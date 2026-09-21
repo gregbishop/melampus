@@ -369,12 +369,17 @@ class _Deadline:
     exchange is on, given by `on()` once there is one: a deadline that
     fired while the caller was still connecting found nothing to hang up,
     so `on()` hangs up then, and the reads after a late handshake are not
-    left bounded per byte only. Leaving the block cancels the timer."""
+    left bounded per byte only. Leaving the block cancels the timer;
+    `again()` starts the count over, for a stream's next line."""
 
     def __init__(self, seconds: float) -> None:
+        self.seconds = seconds
         self.sock: socket.socket | None = None
         self.expired = threading.Event()
-        self._timer = threading.Timer(seconds, _hang_up, [self, self.expired])
+        self._timer = self._counting()
+
+    def _counting(self) -> threading.Timer:
+        return threading.Timer(self.seconds, _hang_up, [self, self.expired])
 
     def __enter__(self) -> _Deadline:
         self._timer.start()
@@ -382,6 +387,17 @@ class _Deadline:
 
     def __exit__(self, *_exc) -> None:
         self._timer.cancel()
+
+    def again(self) -> None:
+        """The bound over again from now, for the next line of a stream
+        (OllamaBackend.stream): the timer counting is cancelled and a fresh
+        one counts `seconds`. A stream has no one exchange to bound, since
+        a model pull runs as long as the model is large, so each line gets
+        the bound an exchange gets. A deadline that already fired stays
+        fired: its socket is hung up, and the caller reads that."""
+        self._timer.cancel()
+        self._timer = self._counting()
+        self._timer.start()
 
     def on(self, sock: socket.socket | None) -> None:
         self.sock = sock
@@ -454,7 +470,7 @@ class _NotedHTTPS(_Noted, http.client.HTTPSConnection):
 
 class _Bounded(urllib.request.HTTPHandler, urllib.request.HTTPSHandler):
     """urllib's HTTP and HTTPS handlers, opening _Noted connections for the
-    request's deadline (OllamaBackend.send puts it on the request). The
+    request's deadline (OllamaBackend._bounded puts it on the request). The
     https side keeps HTTPSHandler's default context, the verifying one it
     builds when given none, and passes it to _NotedHTTPS as HTTPSHandler
     would to HTTPSConnection."""
@@ -470,7 +486,7 @@ class _Bounded(urllib.request.HTTPHandler, urllib.request.HTTPSHandler):
 
 def ollama_opener(*handlers: urllib.request.BaseHandler) -> Callable:
     """urllib's `open` for every request to the Ollama address, the backend's
-    frames and the model pull alike (card #409): straight to the address,
+    frames and the model pull's stream alike (card #409): straight to the address,
     never past it. Not urlopen itself: its opener honours http_proxy and
     the system proxy settings, which would send the bytes off the machine
     and let the proxy's answer stand in for Ollama's (the probe in
@@ -579,8 +595,8 @@ class OllamaBackend(VLMBackend):
         exchange then looks like (a body cut short, a status line that
         never finished, a reset) is the timeout, not that shape's error.
         The one way a request reaches Ollama: a frame's here, the list's
-        and the delete's from download.py, the pull's stream through the
-        same opener."""
+        and the delete's from download.py; the pull's stream through
+        `stream`, beside."""
         with self._bounded(request):
             raw = self._exchange(request)
         if len(raw) > self.MAX_REPLY_BYTES:
@@ -588,6 +604,30 @@ class OllamaBackend(VLMBackend):
                 f"Ollama's reply from {self.url} ran past {self.MAX_REPLY_BYTES} bytes"
             )
         return raw
+
+    def stream(self, request: urllib.request.Request) -> Iterator[bytes]:
+        """The reply's lines as the server writes them, for the model pull
+        (card #409, download.pull_model), each within `timeout` of wall-clock
+        time: the stream has no one exchange to bound, since a pull runs as
+        long as the model is large, so each line gets what `send` gives an
+        exchange, the deadline armed again for it. One line is one of
+        Ollama's objects, a few hundred bytes, written at once; a listener
+        writing one a byte at a time within the socket timeout would
+        otherwise hold the pull, and the cancel marker read between lines,
+        for as long as it liked. At most MAX_REPLY_BYTES of a line is read,
+        a longer one refused by name; the stream is closed on leaving the
+        loop, however it is left, which is how Ollama learns to stop."""
+        with self._bounded(request) as deadline, self._urlopen(request, timeout=self.timeout) as response:
+            while True:
+                deadline.again()
+                line = response.readline(self.MAX_REPLY_BYTES + 1)
+                if not line or deadline.expired.is_set():
+                    return
+                if len(line) > self.MAX_REPLY_BYTES:
+                    raise RuntimeError(
+                        f"Ollama's reply from {self.url} ran past {self.MAX_REPLY_BYTES} bytes"
+                    )
+                yield line
 
     @contextlib.contextmanager
     def _bounded(self, request: urllib.request.Request) -> Iterator[_Deadline]:

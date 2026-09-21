@@ -46,6 +46,7 @@ from conftest import (
     FakeOllama,
     QuietHandler,
     Silent,
+    TricklingPull,
     assert_download_completed,
     closed_port,
     fake_bytes,
@@ -2764,6 +2765,30 @@ def test_the_pull_reads_at_most_the_backends_reply_bound_of_one_line(tmp_path: P
             pull_model(FAKE_MODEL, f"http://127.0.0.1:{squatter.server_port}",
                        on_update=lambda update: None, cancel_marker=tmp_path / "download-cancel")
     assert f"ran past {OllamaBackend.MAX_REPLY_BYTES} bytes" in str(failure.value), str(failure.value)
+
+
+def test_the_pull_gives_up_on_an_ollama_that_trickles_a_line_naming_the_setting_that_bounds_it(tmp_path: Path):
+    """Security (review round 4, download.py:784): the pull read each line
+    with the socket timeout alone, which bounds each read and resets on
+    every byte, and looked for the cancel marker between lines, so a
+    listener writing a line a byte at a time within the timeout held the
+    pull, and Cancel with it, for as long as it liked: a probe saw a marker
+    written one second into a trickled line read eight seconds later, at
+    its newline. The pull reads the stream through the backend
+    (OllamaBackend.stream), each line within `timeout` of wall-clock time,
+    the bound the flags hand it as `[model] timeout_seconds`. Given a
+    server writing two whole lines, then one trickled past the timeout,
+    the pull is over within it and its message names the bound that
+    applies."""
+    with loopback_server(TricklingPull, ThreadingHTTPServer) as trickler:
+        started = time.monotonic()
+        with pytest.raises(DownloadError) as failure:
+            pull_model(FAKE_MODEL, f"http://127.0.0.1:{trickler.server_port}", on_update=lambda update: None,
+                       cancel_marker=tmp_path / "download-cancel", timeout=1.0)
+        took = time.monotonic() - started
+    assert took < 3.0, f"the pull ran past its timeout: {took:.1f}s"
+    assert "did not answer within 1s" in str(failure.value), str(failure.value)
+    assert "raise [model] timeout_seconds" in str(failure.value), str(failure.value)
 
 
 # The cooperative cancel, for Ollama: the marker and the signals end the

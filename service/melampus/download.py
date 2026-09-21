@@ -49,7 +49,7 @@ import shutil  # noqa: E402
 import signal  # noqa: E402
 import urllib.error  # noqa: E402
 import urllib.request  # noqa: E402
-from contextlib import AbstractContextManager, ExitStack, contextmanager, nullcontext  # noqa: E402
+from contextlib import AbstractContextManager, ExitStack, closing, contextmanager, nullcontext  # noqa: E402
 from dataclasses import asdict, dataclass  # noqa: E402
 from pathlib import Path  # noqa: E402
 from typing import Callable, Iterable, Iterator  # noqa: E402
@@ -86,7 +86,7 @@ from huggingface_hub.utils import WeakFileLock, build_hf_headers, filter_repo_ob
 from huggingface_hub.utils import logging as hub_logging  # noqa: E402 - the library's own logger, where its warnings go
 from huggingface_hub.utils._http import default_client_factory  # noqa: E402 - the library's own client, not a copy of it
 
-from .backend import OllamaBackend, ollama_not_running, ollama_opener  # noqa: E402
+from .backend import OllamaBackend, ollama_not_running  # noqa: E402
 from .config import cache_file  # noqa: E402
 
 PROGRESS = "progress"
@@ -1041,19 +1041,14 @@ def pull_updates(model: str, lines: Iterable[bytes | str]) -> Iterator[Update]:
     raise DownloadError(f"Ollama's pull of {model} ended before it reported success; {RERUN}")
 
 
-def _lines_until_cancelled(response, marker: Path, url: str) -> Iterator[bytes]:
-    """The response's lines, looking for the cancel marker before each one
-    is handed on: its appearance raises DownloadCancelled exactly as a
-    signal does, and leaving the `with` around the response closes the
-    stream, which is how Ollama learns to stop (the request's context is
-    cancelled; it keeps the layers it has). A line is held whole until its
-    newline, and it is whatever listens at `url` that writes it, so each
-    is read to at most the backend's reply bound (one of Ollama's objects
-    is a few hundred bytes) and a longer one is refused by name."""
-    bound = OllamaBackend.MAX_REPLY_BYTES
-    while line := response.readline(bound + 1):
-        if len(line) > bound:
-            raise DownloadError(f"Ollama's reply from {url} ran past {bound} bytes")
+def _lines_until_cancelled(lines: Iterable[bytes], marker: Path) -> Iterator[bytes]:
+    """The stream's lines (OllamaBackend.stream: each within the backend's
+    deadline and its reply bound, since it is whatever listens at the
+    address that writes them), looking for the cancel marker before each
+    one is handed on: its appearance raises DownloadCancelled exactly as a
+    signal does, and closing the stream is how Ollama learns to stop (the
+    request's context is cancelled; it keeps the layers it has)."""
+    for line in lines:
         if marker.exists():
             raise DownloadCancelled(CANCEL_MARKER)
         yield line
@@ -1073,9 +1068,10 @@ def pull_model(
     objects mapped by `pull_updates`), handing `on_update` each progress
     update, and return the model's name: what `done` prints, and what
     `--model-status` reports as the path, since the model lives in Ollama
-    under that name. The stream is read with `timeout` per line, through
-    the backend's opener (`ollama_opener`: straight to the address, never
-    through a proxy, never past a redirect), as every frame is sent.
+    under that name. The stream is read through the backend
+    (`OllamaBackend.stream`): straight to the address, never through a
+    proxy, never past a redirect, each line within `timeout` of wall-clock
+    time and at most the backend's reply bound, as every frame is sent.
 
     Raises DownloadError with the fix in the message: the backend's own
     not-running words when nothing answers at `url`, Ollama's words for a
@@ -1093,9 +1089,10 @@ def pull_model(
         headers={"Content-Type": "application/json"},
         method="POST",
     )
+    backend = OllamaBackend(model, url.rstrip("/"), timeout=timeout, client=opener)
     try:
-        with (opener or ollama_opener())(request, timeout=timeout) as response:
-            for update in pull_updates(model, _lines_until_cancelled(response, marker, url)):
+        with closing(backend.stream(request)) as lines:
+            for update in pull_updates(model, _lines_until_cancelled(lines, marker)):
                 # The stream's `done` proves success was seen; the entry point
                 # prints the protocol's `done` from the return, as for mlx.
                 if update.state != DONE:
@@ -1106,6 +1103,9 @@ def pull_model(
         raise _pull_error(model, f"{exc.code} {OllamaBackend.error_text(exc)}") from exc
     except urllib.error.URLError as exc:
         raise DownloadError(ollama_not_running(url, exc.reason)) from exc
+    except RuntimeError as exc:
+        # The backend's reply bound, as the list's is named.
+        raise DownloadError(str(exc)) from exc
     except (OSError, TimeoutError) as exc:
         raise DownloadError(f"the pull of {model} from {url} failed: {exc}; {RERUN}") from exc
     finally:

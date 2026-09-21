@@ -231,6 +231,33 @@ class Silent(socketserver.BaseRequestHandler):
             self.request.recv(65536)
 
 
+class TricklingPull(QuietHandler):
+    """A listener answering a pull's stream (POST /api/pull) with two whole
+    lines, each after a pause within the deadline the tests give and the
+    two together past it (a deadline on the exchange alone would end the
+    stream before the second), then a line trickled a byte every tenth of
+    a second: each byte within the socket timeout, the whole well past the
+    deadline. The shape that held the pull, and the cancel marker read
+    between lines, for as long as it liked (security review round 4)."""
+
+    PAUSE = 0.3
+    WHOLE = b'{"status": "pulling manifest"}\n'
+    TRICKLED = b'{"status": "success"}\n'
+
+    def do_POST(self) -> None:  # noqa: N802 - http.server's name
+        self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        with contextlib.suppress(OSError):
+            self.send_response(200)
+            self.send_header("Content-Type", "application/x-ndjson")
+            self.end_headers()
+            for _ in range(2):
+                time.sleep(self.PAUSE)
+                self.wfile.write(self.WHOLE)
+            for byte in self.TRICKLED:
+                time.sleep(0.1)
+                self.wfile.write(bytes([byte]))
+
+
 # What `.venv/bin/melampus-id` runs, spelled so it works from any interpreter
 # that has the package installed (CI has no root .venv).
 VENV_CLI = [sys.executable, "-m", "melampus.cli"]
