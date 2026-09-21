@@ -145,7 +145,8 @@ def package_script() -> ModuleType:
 
 #: The real Claude Code and Codex detection, kept for the tests that run
 #: them against a fake `claude` or `codex` on PATH (test_providers'
-#: _fake_claude and _fake_codex); every other test gets the stubs below.
+#: _fake_engine_cli, whose _FAKES table restores the one for its CLI);
+#: every other test gets the stubs below.
 REAL_CLAUDE_CODE_VERDICT = providers.claude_code_verdict
 REAL_CODEX_VERDICT = providers.codex_verdict
 
