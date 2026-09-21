@@ -243,10 +243,11 @@ at the first reply (Codex fails the turn with "You've hit your usage limit
 ... try again at <time>", exit 1) and the batch stops at exit 3 naming the
 limit and the reset time as Codex said it, with nothing cached; a session
 that lapses mid-batch (a 401 in the stream) stops it the same way, naming
-`codex login`. The one real run so far, on 2026-09-18, was exactly that
-usage-limit reply on the committed fixture (the owner's plan was at its
-limit until the next morning); the success path is covered by the fake
-until a run after the reset proves it.
+`codex login`. On the committed fixture (studio, 2026-09-19, after a
+reset), `--backend codex --json-out` ran the whole pipeline in 28 s, exit 0,
+and identified the bird as Tricolored Heron (*Egretta tricolor*) at
+confidence 0.99; the day before, with the plan at its limit, the same
+command exited 3 naming the limit and the reset time.
 
 ### Choosing a model
 

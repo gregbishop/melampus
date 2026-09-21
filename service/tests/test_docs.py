@@ -805,7 +805,7 @@ def test_docs_say_the_command_runs_once_per_completion():
     ("engine", "must_say"),
     [
         ("claude-code", ("subscription",)),
-        ("codex", ("usage limit", "bills per call")),
+        ("codex", ("usage limit", "bills per call", "Tricolored Heron")),
     ],
     ids=["claude-code", "codex"],
 )
@@ -816,9 +816,10 @@ def test_config_doc_quotes_the_cli_template_from_its_one_source(engine, must_say
     that list, so the doc cannot rot into a second copy; and it says what
     to install, how to sign in, and what is that CLI's own (`must_say`):
     that Claude Code's runs bill to the subscription; that Codex's stop at
-    the plan's usage limit and that an API-key sign-in bills per call and
-    is refused. The readme and the architecture doc name the engine and
-    the template's one source."""
+    the plan's usage limit, that an API-key sign-in bills per call and is
+    refused, and what the real success run answered on the committed
+    fixture (a measurement, not a status that goes stale). The readme and
+    the architecture doc name the engine and the template's one source."""
     import tomllib
 
     from melampus import providers
