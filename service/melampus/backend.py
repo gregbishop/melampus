@@ -1082,6 +1082,13 @@ class CommandBackend(VLMBackend):
             # something that left the group (a double-forked daemon) and is
             # left to it rather than waited on.
             reader.join(timeout=max(0.0, ends - time.monotonic()))
+        for reader, name in zip(readers, ("stdout", "stderr")):
+            # A pipe read to its end is closed here, not by the garbage
+            # collector; one whose reader is still in read1 is left to it,
+            # since closing a BufferedReader from another thread blocks
+            # until that read returns.
+            if not reader.is_alive():
+                getattr(process, name).close()
         process.wait()
         return in_time
 

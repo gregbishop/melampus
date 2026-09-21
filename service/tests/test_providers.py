@@ -2082,6 +2082,23 @@ def test_command_backend_reads_stdout_into_a_completion(tmp_path):
     assert stray.text == "\ufffd" + ID_OK, "a byte that is not UTF-8 is replaced, not a failed frame"
 
 
+def test_command_backend_closes_both_pipes_after_a_completion(tmp_path):
+    """The two pipes Popen opens are closed by the backend once their readers
+    have read them to their ends, not left to the garbage collector (which
+    `python -X dev` reports as an unclosed file per pipe per frame): the
+    Ollama backend scopes its response the same way, and subprocess.run its
+    child's pipes."""
+    image = tmp_path / "image.jpg"
+    image.write_bytes(b"jpeg")
+    run = _FakeRun(stdout=ID_OK, stderr="warning: slow")
+    backend = _command_backend(run)
+
+    backend.complete(image, "prompt", 900)
+
+    (process,) = run.processes
+    assert process.stdout.closed and process.stderr.closed, "the pipes were left to the garbage collector"
+
+
 @pytest.mark.parametrize(
     ("run", "expected", "said"),
     [
