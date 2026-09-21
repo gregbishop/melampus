@@ -2806,17 +2806,27 @@ def test_the_pull_gives_up_on_an_ollama_that_trickles_a_line_naming_the_setting_
     (OllamaBackend.stream), each line within `timeout` of wall-clock time,
     the bound the flags hand it as `[model] timeout_seconds`. Given a
     server writing two whole lines, then one trickled past the timeout,
-    the pull is over within it and its message names the bound that
-    applies."""
+    the pull is over within it and its message is the backend's timeout
+    (docs/config.md: "exit 3 with the backend's timeout message"), the
+    words the delete gives the same timeout: the address once, the model
+    once, naming the bound that applies. Code review round 6
+    (download.py:855): the pull's `except OSError` wrapped the backend's
+    TimeoutError a second time, `the pull of m from <url> failed: Ollama
+    at <url> did not answer ...`, the address twice and the model twice
+    on stderr, in the log and in the dialog."""
+    url = f"http://127.0.0.1:{{port}}"
     with loopback_server(TricklingPull, ThreadingHTTPServer) as trickler:
+        url = url.format(port=trickler.server_port)
         started = time.monotonic()
         with pytest.raises(DownloadError) as failure:
-            pull_model(FAKE_MODEL, f"http://127.0.0.1:{trickler.server_port}", on_update=lambda update: None,
+            pull_model(FAKE_MODEL, url, on_update=lambda update: None,
                        cancel_marker=tmp_path / "download-cancel", timeout=1.0)
         took = time.monotonic() - started
     assert took < 3.0, f"the pull ran past its timeout: {took:.1f}s"
-    assert "did not answer within 1s" in str(failure.value), str(failure.value)
-    assert "raise [model] timeout_seconds" in str(failure.value), str(failure.value)
+    message = str(failure.value)
+    assert message.startswith(f"Ollama at {url} did not answer within 1s"), message
+    assert message.count(url) == 1 and message.count(FAKE_MODEL) == 1, message
+    assert "raise [model] timeout_seconds" in message, message
 
 
 def test_the_pull_names_a_listener_that_does_not_speak_http_as_the_list_and_the_delete_do(tmp_path: Path):

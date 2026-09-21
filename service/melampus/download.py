@@ -1118,12 +1118,12 @@ def pull_model(
         # HTTP, one past its bound, or a connection that ended mid-stream
         # (a reset: Ollama killed); Ollama's own error inside them.
         raise _pull_error(model, exc) from exc
-    except ConnectionError as exc:
+    except (ConnectionError, TimeoutError) as exc:
         # The backend's not-running failure, the one ConnectionError it
-        # raises: a raw socket error is named a RuntimeError above.
+        # raises (a raw socket error is named a RuntimeError above), and
+        # its timeout for a line not written within `timeout`: each in
+        # the backend's words alone, as `_ollama_request` gives the delete's.
         raise DownloadError(str(exc)) from exc
-    except OSError as exc:
-        raise DownloadError(f"the pull of {model} from {url} failed: {exc}; {RERUN}") from exc
     finally:
         marker.unlink(missing_ok=True)
     return model
