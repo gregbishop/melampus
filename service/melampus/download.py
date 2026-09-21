@@ -1097,7 +1097,7 @@ def pull_model(
         raise _pull_error(model, exc) from exc
     except ConnectionError as exc:
         raise DownloadError(str(exc)) from exc
-    except (OSError, TimeoutError) as exc:
+    except OSError as exc:
         raise DownloadError(f"the pull of {model} from {url} failed: {exc}; {RERUN}") from exc
     finally:
         marker.unlink(missing_ok=True)
