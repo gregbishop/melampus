@@ -931,13 +931,20 @@ def test_deadline_watcher_runs_for_the_block_alone():
     started in __enter__ and ended by `_over` and joined in __exit__, and
     nothing asserted it. Given a deadline with a predicate, the block has
     the timer and the watcher running beside the caller, and after it the
-    watcher is not alive and the thread count is what it was."""
-    before = threading.active_count()
+    watcher is not alive and the timer, once joined, is not either.
+
+    Code review round 11 (test_providers.py:935): the threads the block
+    owns, not the process count. __exit__ joins the watcher but only
+    cancels the timer, which exits on its own a moment later, and the
+    count before the block can include a timer winding down from the
+    deadline before, so the counts raced both; the timer is joined here,
+    with a bound, before it is read."""
     with _Deadline(5.0, cancel=lambda: False) as deadline:
-        assert deadline._watcher.is_alive()
-        assert threading.active_count() == before + 2, "the timer and the watcher"
+        assert deadline._timer.is_alive(), "the timer"
+        assert deadline._watcher.is_alive(), "the watcher"
     assert not deadline._watcher.is_alive(), "the watcher outlived the block"
-    assert threading.active_count() == before, "a thread outlived the block"
+    deadline._timer.join(1.0)
+    assert not deadline._timer.is_alive(), "the timer outlived the block"
 
 
 def test_deadline_hangs_up_a_late_socket_for_a_cancel_as_for_the_timeout():
