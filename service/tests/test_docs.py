@@ -231,6 +231,23 @@ def test_the_section_reader_reads_a_docs_last_section():
     assert _section("## A\na\n## B\nb\n", "B") == "b\n"
 
 
+def _row(text: str, key: str) -> str | None:
+    """The line of a doc's config table whose first cell is `key` (the
+    `| `key` |` row, the whole key); None when the text has no such row."""
+    return next((line for line in text.splitlines() if line.startswith(f"| `{key}` |")), None)
+
+
+def test_the_row_reader_takes_the_key_whole():
+    """Round 8, finding 1: `_row` promises the row whose first cell is the
+    key, whole: docs/config.md's keys share prefixes (`max_edge`,
+    `max_tokens`; `ollama_model`, `ollama_url`), so a key must find its own
+    row and not the first whose key starts the same way, and None only when
+    the text has no such row."""
+    text = "| `timeout_seconds` | `180` | seconds |\n| `timeout` | `3` | plain |\n"
+    assert _row(text, "timeout") == "| `timeout` | `3` | plain |"
+    assert _row(text, "timeouts") is None
+
+
 def test_install_blocks_install_from_the_lockfile():
     """Card #425, Done-when 3: given a fresh clone, when the README setup runs,
     then the resolved versions match the lockfile. Only `uv sync --locked` (or
@@ -711,7 +728,7 @@ def test_config_doc_names_the_command_output_ceiling():
     change when the number does."""
     from melampus.backend import CommandBackend
     config_doc = CONFIG_DOC.read_text(encoding="utf-8")
-    command_row = next(line for line in config_doc.splitlines() if line.startswith("| `command` |"))
+    command_row = _row(config_doc, "command")
     assert str(CommandBackend.MAX_OUTPUT_BYTES) in command_row, (
         "docs/config.md's command row does not name the output ceiling in bytes")
     assert "4 MiB" in command_row, "docs/config.md's command row does not name the output ceiling"
@@ -727,8 +744,7 @@ def test_config_doc_says_the_commands_exit_ends_its_answer_and_stops_what_it_sta
     row must say so, and its `timeout_seconds` row must say the stop
     reaches everything the program started, not the program alone."""
     model = _section(CONFIG_DOC.read_text(encoding="utf-8"), "`[model]`")  # [escalation] has a timeout_seconds row of its own
-    rows = {line.split(" | ")[0]: line for line in model.splitlines() if line.startswith("| `")}
-    command_row, timeout_row = rows["| `command`"], rows["| `timeout_seconds`"]
+    command_row, timeout_row = _row(model, "command"), _row(model, "timeout_seconds")
     assert "exit ends its answer" in command_row, (
         "docs/config.md's command row does not say the command's exit ends its answer")
     assert "everything it started is stopped" in command_row, (
@@ -747,7 +763,7 @@ def test_config_doc_names_the_sigchld_refusal_beside_the_commands_other_refusals
     reap the program at its exit and the pid its tree is stopped by could
     be someone else's by then, and say the fix (a shell, or the default)."""
     config_doc = CONFIG_DOC.read_text(encoding="utf-8")
-    command_row = next(line for line in config_doc.splitlines() if line.startswith("| `command` |"))
+    command_row = _row(config_doc, "command")
     assert "SIGCHLD" in command_row, "docs/config.md's command row does not name the SIGCHLD refusal"
     assert "shell" in command_row and "default" in command_row, (
         "docs/config.md's command row does not say how to fix a launcher that ignores SIGCHLD")
@@ -762,8 +778,7 @@ def test_docs_say_the_command_runs_once_per_completion():
     must say so where it describes the engine, and name the two stages."""
     for doc, prose in (
         ("docs/architecture.md", (REPO / "docs" / "architecture.md").read_text(encoding="utf-8")),
-        ("docs/config.md", next(line for line in CONFIG_DOC.read_text(encoding="utf-8").splitlines()
-                                if line.startswith("| `backend` |"))),
+        ("docs/config.md", _row(CONFIG_DOC.read_text(encoding="utf-8"), "backend")),
         ("readme.md", README.read_text(encoding="utf-8")),
     ):
         prose = " ".join(prose.split())  # the prose wraps; the phrase must not hide across a line break
