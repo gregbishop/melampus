@@ -37,6 +37,7 @@ from conftest import (
     proxy_in_the_environment,
     recording_handler,
     redirecting_handler,
+    trickle,
 )
 from test_pipeline import ID_OK, ROUTING_OK
 
@@ -771,16 +772,6 @@ def test_ollama_probe_gives_up_after_its_timeout(monkeypatch):
         assert providers.ollama_answers() is False
 
 
-def _trickle(wfile, data: bytes) -> None:
-    """`data` one byte every hundred milliseconds: each byte within the
-    socket timeout, the whole (two seconds for twenty bytes) well past a
-    sub-second deadline. Once the client hangs up, the next write raises;
-    the caller's suppress(OSError) ends the trickle there."""
-    for byte in data:
-        time.sleep(0.1)
-        wfile.write(bytes([byte]))
-
-
 class Trickling(QuietHandler):
     """A listener that sends a valid 200 with the headers trickled: each
     byte within the socket timeout, the whole well past the probe's
@@ -789,7 +780,7 @@ class Trickling(QuietHandler):
     def do_GET(self):  # noqa: N802 - http.server's name
         with contextlib.suppress(OSError):
             self.wfile.write(b"HTTP/1.1 200 OK\r\n")
-            _trickle(self.wfile, b"Content-Length: 2\r\n\r\n")
+            trickle(self.wfile, b"Content-Length: 2\r\n\r\n")
             self.wfile.write(b"{}")
 
     def do_POST(self):  # noqa: N802 - http.server's name
@@ -811,7 +802,7 @@ def _trickling_body(status: int) -> type[QuietHandler]:
                 self.send_response(status)
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
-                _trickle(self.wfile, body)
+                trickle(self.wfile, body)
 
     return TricklingBody
 

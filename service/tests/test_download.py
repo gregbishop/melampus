@@ -2687,7 +2687,7 @@ def _trickling():
     """A server that answers the list and the delete a byte every tenth of
     a second for longer than the timeouts the tests set: the listener that
     would hold a call for as long as it liked."""
-    from conftest import QuietHandler
+    from conftest import QuietHandler, trickle
 
     class Trickling(QuietHandler):
         def do_GET(self):  # noqa: N802 - http.server's name
@@ -2695,10 +2695,7 @@ def _trickling():
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
-            for _ in range(40):
-                self.wfile.write(b" ")
-                self.wfile.flush()
-                time.sleep(0.1)
+            trickle(self.wfile, b" " * 40)
             self.wfile.write(b'{"models": []}')
 
         do_DELETE = do_GET  # noqa: N815 - http.server's name

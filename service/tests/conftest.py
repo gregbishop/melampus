@@ -186,6 +186,19 @@ def recording_handler(seen: list[str]) -> type[QuietHandler]:
     return Recording
 
 
+def trickle(wfile, data: bytes) -> None:
+    """`data` one byte every hundred milliseconds: each byte within the
+    socket timeout, the whole (two seconds for twenty bytes) well past a
+    sub-second deadline. The one trickle for every listener that holds a
+    call for as long as it likes (the probe's headers, a frame's body, the
+    list's and the delete's reply, a line of the pull's stream). Once the
+    client hangs up, the next write raises; a caller's suppress(OSError)
+    ends the trickle there."""
+    for byte in data:
+        time.sleep(0.1)
+        wfile.write(bytes([byte]))
+
+
 def redirecting_handler(elsewhere: str) -> type[QuietHandler]:
     """A handler that answers 302 to any GET, POST or DELETE with a Location
     at `elsewhere` (a server's root) plus the path it was asked: the squatter
@@ -285,9 +298,7 @@ class TricklingPull(QuietHandler):
             for _ in range(2):
                 time.sleep(self.PAUSE)
                 self.wfile.write(self.WHOLE)
-            for byte in self.TRICKLED:
-                time.sleep(0.1)
-                self.wfile.write(bytes([byte]))
+            trickle(self.wfile, self.TRICKLED)
 
 
 # What `.venv/bin/melampus-id` runs, spelled so it works from any interpreter
