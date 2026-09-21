@@ -700,3 +700,18 @@ def test_docs_say_the_same_button_and_flags_pull_ollamas_model():
     readme = README.read_text(encoding="utf-8")
     windows = re.search(r"^## Windows.*?\n(.*?)^## ", readme, re.MULTILINE | re.DOTALL).group(1)
     assert "Settings" in windows and "pull" in windows, "readme.md § Windows does not say the model can be pulled from Settings"
+
+
+def test_config_doc_names_the_command_output_ceiling():
+    """Card #420: the `command` backend reads stdout and stderr with a
+    ceiling (`CommandBackend.MAX_OUTPUT_BYTES`), past which the program is
+    stopped and the frame recorded as an error naming the number of bytes.
+    docs/config.md's `command` row names the other per-frame outcomes, so it
+    must name this one with the number the error message carries, and must
+    change when the number does."""
+    from melampus.backend import CommandBackend
+    config_doc = CONFIG_DOC.read_text(encoding="utf-8")
+    command_row = next(line for line in config_doc.splitlines() if line.startswith("| `command` |"))
+    assert str(CommandBackend.MAX_OUTPUT_BYTES) in command_row, (
+        "docs/config.md's command row does not name the output ceiling in bytes")
+    assert "4 MiB" in command_row, "docs/config.md's command row does not name the output ceiling"
