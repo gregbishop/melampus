@@ -117,8 +117,11 @@ included, and no API key is read or needed here; nothing is charged per call,
 so the cloud guards (the estimate, `max_images`, the cloud cache file) do not
 apply. Detection (`--detect-engines`) reports `claude-code` as not installed
 when nothing on PATH is called `claude`, as not signed in when
-`claude auth status` exits non-zero (its documented, cheap check: no model
-call), and otherwise as available, naming the account kind; a run asked for
+`claude auth status --json` says so (`loggedIn` false, or its documented exit
+1 with nothing on stderr: a cheap check, no model call), as failed in the
+CLI's own words when that check exits some other way (an older `claude`
+with no `auth` subcommand), and otherwise as available, naming the account
+kind; a run asked for
 `claude-code` is refused the same way before any image is read, exit 3. A
 session that lapses mid-batch is caught at the first reply (Claude Code prints
 `Not logged in` as its result, exit 1) and stops the batch at exit 3 with the

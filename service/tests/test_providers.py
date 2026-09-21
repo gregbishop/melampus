@@ -3247,7 +3247,10 @@ a file the prompt names, read by the Read tool, which needs no prompt only
 when `--allowedTools Read` pre-approves it. MODE: "signed-in" answers;
 "not-signed-in" fails the status check and every run the documented way;
 "expired" passes the status check and fails the run, the way a session
-that lapses mid-batch would; "hung" never answers the status check."""
+that lapses mid-batch would; "hung" never answers the status check;
+"no-auth-command" is an older CLI with no `auth` subcommand, a usage
+error on stderr at exit 2; "silent-not-signed-in" is the documented
+exit 1 alone, nothing printed."""
 import json
 import os
 import re
@@ -3267,6 +3270,12 @@ if argv[:2] == ["auth", "status"]:
     if MODE == "hung":
         import time
         time.sleep(30)
+    if MODE == "no-auth-command":
+        print("error: unknown command 'auth'", file=sys.stderr)
+        print("(Did you mean --help?)", file=sys.stderr)
+        sys.exit(2)
+    if MODE == "silent-not-signed-in":
+        sys.exit(1)
     logged_in = MODE != "not-signed-in"
     if "--text" in argv:
         print("Login method: Claude Max account" if logged_in
@@ -3569,6 +3578,34 @@ def test_detection_claude_code_not_signed_in_names_the_sign_in_command(monkeypat
     verdict = _verdict("claude-code")
     assert not verdict.available
     assert "not signed in" in verdict.reason and providers.CLAUDE_CODE_SIGN_IN in verdict.reason
+
+
+@posix_only
+def test_detection_claude_code_not_signed_in_is_the_documented_exit_alone(monkeypatch, tmp_path):
+    """Done-when 2: the documented check is "Exits with code 0 if logged in,
+    1 if not" (cli-reference), so exit 1 with nothing on stderr is not
+    signed in even when no status JSON came back to say `loggedIn`."""
+    _fake_claude(monkeypatch, tmp_path, mode="silent-not-signed-in")
+    verdict = _verdict("claude-code")
+    assert not verdict.available
+    assert "not signed in" in verdict.reason and providers.CLAUDE_CODE_SIGN_IN in verdict.reason
+
+
+@posix_only
+def test_detection_claude_code_reports_a_status_check_that_failed_some_other_way(monkeypatch, tmp_path):
+    """A status check that fails for a reason other than not being signed in
+    (an older `claude` with no `auth` subcommand: a usage error at exit 2)
+    is not "not signed in", and `claude auth login` would not help. The
+    verdict says what ran, the exit code and the CLI's own first words
+    on stderr, the way a failed run's CommandFailed does."""
+    _fake_claude(monkeypatch, tmp_path, mode="no-auth-command")
+    verdict = _verdict("claude-code")
+    assert not verdict.available
+    assert "not signed in" not in verdict.reason
+    assert providers.CLAUDE_CODE_SIGN_IN not in verdict.reason
+    assert "claude auth status --json" in verdict.reason
+    assert "exited 2" in verdict.reason
+    assert "error: unknown command 'auth'" in verdict.reason
 
 
 def test_detection_claude_code_not_installed_points_to_the_install(monkeypatch, tmp_path):

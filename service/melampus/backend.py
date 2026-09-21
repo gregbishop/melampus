@@ -853,6 +853,23 @@ class CommandFailed(RuntimeError):
     backend failures instead of recording it on every frame in turn."""
 
 
+#: How much of a program's stderr an error message carries: enough to say
+#: what went wrong, not a CLI's whole usage text.
+STDERR_LINES = 3
+
+
+def stderr_lines(stderr: str, limit: int = STDERR_LINES) -> str:
+    """What a program said on stderr, as one message: the first `limit`
+    lines it wrote that are words once read through `VLMBackend.plain`,
+    joined with " / ". They land in the frame's error record, the log and
+    the terminal, so an escape sequence in them would clear the screen or
+    recolour it, and a control would fake a line of the log. A line that
+    is only controls is not a line, so it spends none of the `limit`;
+    `islice` stops the reading at the cap."""
+    words = (VLMBackend.plain(line) for line in (stderr or "").splitlines())
+    return " / ".join(itertools.islice(filter(None, words), limit))
+
+
 class CommandBackend(VLMBackend):
     """An installed command-line program behind the same interface (card
     #420): one run per completion, the reply on stdout. Claude Code and Codex
@@ -899,9 +916,6 @@ class CommandBackend(VLMBackend):
     explained in its own words. Without it stdout is the reply as it came.
     """
 
-    #: How much of stderr an error message carries: enough to say what went
-    #: wrong, not a CLI's whole usage text.
-    STDERR_LINES = 3
     #: The most of stdout, and of stderr, that is kept: a JSON reply of
     #: candidates is kilobytes, and a CLI's progress chatter over a whole
     #: run is far less than this, so a program that streams megabytes is
@@ -959,17 +973,6 @@ class CommandBackend(VLMBackend):
             for argument in self.command
         ]
         return [self.executable, *expanded[1:]]
-
-    def _stderr_lines(self, stderr: str) -> str:
-        """The first STDERR_LINES lines the program wrote that are words
-        once read through `plain`, joined with " / ": they land in the
-        frame's error record, the log and the terminal, so an escape
-        sequence in them would clear the screen or recolour it, and a
-        control would fake a line of the log. A line that is only
-        controls is not a line, so it spends none of the STDERR_LINES;
-        `islice` stops the reading at the cap."""
-        words = (self.plain(line) for line in stderr.splitlines())
-        return " / ".join(itertools.islice(filter(None, words), self.STDERR_LINES))
 
     def _stop_tree(self, pid: int) -> None:
         """Stop the process tree the command with `pid` heads (OWN_GROUP):
@@ -1165,13 +1168,13 @@ class CommandBackend(VLMBackend):
             # empty stderr.
             text = self._decode(text)
         if process.returncode != 0:
-            said = self._stderr_lines(stderr)
+            said = stderr_lines(stderr)
             raise CommandFailed(
                 f"{self.program} exited {process.returncode}"
                 + (f": {said}" if said else " with nothing on stderr")
             )
         if not text.strip():
-            said = self._stderr_lines(stderr)
+            said = stderr_lines(stderr)
             raise RuntimeError(
                 f"{self.program} printed nothing on stdout"
                 + (f": {said}" if said else "")

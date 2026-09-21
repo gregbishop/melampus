@@ -20,7 +20,7 @@ from urllib.parse import urlsplit
 
 from pydantic import SecretStr
 
-from .backend import CommandFailed, VLMBackend, _Deadline, _NotedHTTP, _NotedHTTPS
+from .backend import CommandFailed, VLMBackend, _Deadline, _NotedHTTP, _NotedHTTPS, stderr_lines
 from .config import MelampusConfig
 
 #: Where each provider's key is looked for, in order, when the config has none.
@@ -244,7 +244,8 @@ def claude_code_verdict(program: str | None = None) -> EngineVerdict:
     and its status check must say signed in. Never raises; a verdict
     reports. The reasons are the words the user sees: not installed with
     where to get it, not signed in with the command that signs in, a check
-    that did not answer, or available and billing to the subscription."""
+    that did not answer or failed some other way (in the CLI's own words),
+    or available and billing to the subscription."""
     program = program or CLAUDE_CODE_PROGRAM
     executable = shutil.which(program)
     if executable is None:
@@ -267,18 +268,32 @@ def claude_code_verdict(program: str | None = None) -> EngineVerdict:
         )
     except OSError as exc:
         return EngineVerdict(CLAUDE_CODE, False, f"'{program}' could not be run: {exc}")
-    if status.returncode != 0:
-        return EngineVerdict(
-            CLAUDE_CODE, False,
-            f"Claude Code is installed but not signed in; run `{CLAUDE_CODE_SIGN_IN}`",
-        )
     try:
         account = json.loads(status.stdout)
     except ValueError:
         account = {}
+    if not isinstance(account, dict):
+        account = {}
+    if status.returncode != 0:
+        # Not signed in is what the status object says (`loggedIn` false) or,
+        # without one, the documented exit alone: "Exits with code 0 if
+        # logged in, 1 if not" (cli-reference), nothing on stderr. Any other
+        # failure (an older CLI with no `auth` subcommand, a usage error, a
+        # crash) is reported in the CLI's own words, since signing in would
+        # not help.
+        said = stderr_lines(status.stderr)
+        if account.get("loggedIn") is False or (status.returncode == 1 and not said):
+            return EngineVerdict(
+                CLAUDE_CODE, False,
+                f"Claude Code is installed but not signed in; run `{CLAUDE_CODE_SIGN_IN}`",
+            )
+        return EngineVerdict(
+            CLAUDE_CODE, False,
+            f"`{program} {' '.join(CLAUDE_CODE_STATUS)}` exited {status.returncode}"
+            + (f": {said}" if said else " with nothing on stderr"),
+        )
     signed_in_as = ", ".join(
-        str(account[key]) for key in ("authMethod", "subscriptionType")
-        if isinstance(account, dict) and account.get(key)
+        str(account[key]) for key in ("authMethod", "subscriptionType") if account.get(key)
     )
     return EngineVerdict(
         CLAUDE_CODE, True,
