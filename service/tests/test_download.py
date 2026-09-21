@@ -55,6 +55,7 @@ from melampus.config import ModelConfig
 from melampus.download import (
     CANCEL_MARKER,
     EXIT_CANCELLED,
+    MODEL_FILE_PATTERNS,
     DownloadCancelled,
     DownloadError,
     Status,
@@ -1298,6 +1299,45 @@ HUB_EXTRAS = {".gitattributes": b"*.safetensors filter=lfs diff=lfs merge=lfs -t
               "README.md": b"# fake model\n"}
 
 
+def _the_patterns_mlx_vlms_load_fetches() -> list[str] | None:
+    """The allow patterns mlx-vlm's `get_model_path` hands the hub library's
+    `snapshot_download`, which is what its `load` (calling `get_model_path`
+    with none of its own) lays out: recorded from a call on a repo id, the
+    fetch itself replaced. None where mlx-vlm does not import (Windows, an
+    Intel Mac: it needs Apple Silicon), which is where download.py's copy
+    of the list stands in."""
+    try:
+        from mlx_vlm import utils as mlx_vlm_utils
+    except ImportError:
+        return None
+    recorded: list[list[str]] = []
+
+    def record_instead_of_fetching(*, allow_patterns: list[str], **_) -> str:
+        recorded.append(list(allow_patterns))
+        return "/nowhere"
+
+    with pytest.MonkeyPatch.context() as patched:
+        patched.setattr(mlx_vlm_utils, "snapshot_download", record_instead_of_fetching)
+        mlx_vlm_utils.get_model_path(FAKE_REPO)
+    (patterns,) = recorded
+    return patterns
+
+
+def test_model_file_patterns_are_the_ones_mlx_vlms_load_hands_snapshot_download():
+    """Rule 7 (Claude review 12, code finding 2; download.py:110-115).
+    MODEL_FILE_PATTERNS is a copy of mlx-vlm's list, kept because mlx-vlm
+    does not import off Apple Silicon, and mlx-vlm is not pinned: a release
+    that adds or drops a pattern would make a model its load laid out read
+    not installed again, with no test to say so. Where mlx-vlm imports (the
+    Mac runner), the copy is what its `get_model_path` hands
+    `snapshot_download`; elsewhere this is skipped, not passed."""
+    patterns = _the_patterns_mlx_vlms_load_fetches()
+    if patterns is None:
+        pytest.skip("mlx-vlm does not import here: it needs Apple Silicon")
+
+    assert list(MODEL_FILE_PATTERNS) == patterns
+
+
 @pytest.mark.parametrize("fake_hub", [{**FAKE_FILES, **HUB_EXTRAS}], indirect=True, ids=["with the hub's extras"])
 def test_status_of_a_snapshot_laid_out_by_mlx_vlms_own_load_reports_installed(fake_hub: FakeHub, tmp_path: Path):
     """Done-when 3 (Claude review 11, code finding 1; download.py:676). The
@@ -1312,13 +1352,14 @@ def test_status_of_a_snapshot_laid_out_by_mlx_vlms_own_load_reports_installed(fa
     readme.md names) read not installed, and Settings offered Download,
     with no Remove, for a model the engine had just used. Whole means what
     the model's load needs: the listed files that match mlx-vlm's patterns,
-    each at the hub's size."""
+    each at the hub's size. The snapshot is laid out with the patterns
+    recorded from mlx-vlm itself where it imports, download.py's copy of
+    them only where it does not."""
     from huggingface_hub import snapshot_download
 
-    from melampus.download import MODEL_FILE_PATTERNS
-
+    patterns = _the_patterns_mlx_vlms_load_fetches() or list(MODEL_FILE_PATTERNS)
     laid_out = Path(snapshot_download(FAKE_REPO, endpoint=fake_hub.endpoint, cache_dir=tmp_path / "hub",
-                                      allow_patterns=list(MODEL_FILE_PATTERNS)))
+                                      allow_patterns=patterns))
     assert snapshot_files(laid_out) == FAKE_FILES, "the load's snapshot does not hold the model files alone"
 
     status = _status(fake_hub, tmp_path / "hub")
