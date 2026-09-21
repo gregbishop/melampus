@@ -2978,6 +2978,110 @@ def test_the_pull_watches_the_documented_marker_by_default(monkeypatch, tmp_path
     assert not marker.exists(), "the pull did not use the documented marker"
 
 
+def test_a_cancel_marker_that_cannot_be_removed_on_start_is_a_download_error_naming_it_before_ollama_is_asked(
+    fake_ollama: FakeOllama, tmp_path: Path
+):
+    """Codex review (opposing vendor) round 1, code finding 2
+    (download.py:1105). The pull's start called `marker.unlink` raw where
+    the MLX download calls `_remove_marker`: a folder at the marker's path
+    (or any marker the OS refuses to remove) raised its OSError straight out
+    of pull_model, a traceback and exit 1 where docs/config.md names exit 3
+    and a reason. The same rule as the download's: the failure is a
+    DownloadError naming the path and what to do, raised before Ollama is
+    asked anything."""
+    marker = _marker(tmp_path)
+    marker.mkdir(parents=True)
+
+    with pytest.raises(DownloadError) as failure:
+        _pull(fake_ollama, cancel_marker=marker)
+
+    message = str(failure.value)
+    assert str(marker) in message and "by hand" in message, message
+    assert not fake_ollama.requests, "Ollama was asked with a marker that cannot be removed in place"
+    assert marker.is_dir()
+
+
+@pytest.mark.parametrize("called", [
+    pytest.param(contextlib.nullcontext, id="plainly"),
+    pytest.param(_handling_an_exception_of_the_callers_own, id="from inside the caller's handler"),
+])
+def test_a_cancel_marker_that_cannot_be_removed_on_exit_is_a_download_error_naming_it_with_the_model_pulled(
+    fake_ollama: FakeOllama, tmp_path: Path, called
+):
+    """Codex review (opposing vendor) round 1, code finding 2
+    (download.py:1128). The exit's raw unlink in the pull's `finally` raised
+    the same bare OSError. The marker is looked for before every line, so a
+    folder at its path is a cancellation (the test below); what the exit's
+    removal can meet with the model complete is a marker that is not there
+    and still cannot be removed: a file at its parent's path, made as the
+    last layer's line is counted, which `exists` reads as absent and
+    `unlink` refuses (ENOTDIR, not the ENOENT `missing_ok` forgives). The
+    failure names the marker and what to do, and the fake holds the model.
+    From inside the caller's handler, as the download's test asks: whether
+    the caller is handling an exception of its own must not change the
+    outcome (the download's `finally` decides from its own flag, not
+    sys.exc_info())."""
+    marker = _marker(tmp_path)
+    marker.parent.mkdir(parents=True)
+
+    def a_file_at_the_markers_parent_once_complete(update: Update) -> None:
+        if update.bytes_done == update.bytes_total == 4000:
+            marker.parent.rmdir()
+            marker.parent.touch()
+
+    with pytest.raises(DownloadError) as failure, called():
+        pull_model(FAKE_MODEL, fake_ollama.endpoint, on_update=a_file_at_the_markers_parent_once_complete,
+                   cancel_marker=marker)
+
+    message = str(failure.value)
+    assert str(marker) in message and "by hand" in message, message
+    assert marker.parent.is_file()
+    assert fake_ollama.models == {FAKE_MODEL: 4000}, "the pull did not complete"
+
+
+def test_a_cancel_marker_that_cannot_be_removed_on_exit_does_not_mask_the_cancellation_of_the_pull_in_flight(
+    tmp_path: Path
+):
+    """Codex review (opposing vendor) round 1, code finding 2
+    (download.py:1128). A folder appearing at the marker's path mid-stream is
+    the marker appearing: the pull is cancelled at the next line, and the
+    `finally`'s removal, refused by the folder, must not replace that
+    DownloadCancelled (exit 4, `cancelled`, the layers kept) with its own
+    failure."""
+    marker = _marker(tmp_path)
+    marker.parent.mkdir(parents=True)
+
+    def a_folder_at_the_marker_after_a_megabyte(update: Update) -> None:
+        if update.bytes_done >= 1024 * 1024:
+            marker.mkdir(exist_ok=True)
+
+    with _slow_ollama().serve() as ollama:
+        with pytest.raises(DownloadCancelled) as cancelled:
+            pull_model(FAKE_MODEL, ollama.endpoint, on_update=a_folder_at_the_marker_after_a_megabyte,
+                       cancel_marker=marker)
+        assert CANCEL_MARKER in str(cancelled.value)
+        assert marker.is_dir()
+        assert FAKE_MODEL not in ollama.models, "the fake finished the pull after the stream closed"
+
+
+def test_download_model_flag_for_ollama_exits_3_naming_the_marker_it_cannot_remove_with_nothing_on_stdout(
+    monkeypatch: pytest.MonkeyPatch, capsys, tmp_path: Path
+):
+    """The same through the entry point, as the download's test measures it:
+    a folder at the path `--model-status` reports as `cancel_path`, then
+    `--download-model --backend ollama`. Exit 3 with the reason on stderr
+    naming the marker, no traceback, nothing on stdout, Ollama (a closed
+    port here) never asked."""
+    marker = _marker(tmp_path)
+    marker.mkdir(parents=True)
+    monkeypatch.setattr(download, "cancel_marker_path", lambda: marker)
+    settings = _ollama_settings(tmp_path, f"http://127.0.0.1:{closed_port()}")
+
+    assert main(["--download-model", "--backend", "ollama", "--config", str(settings)]) == 3
+    out, err = capsys.readouterr()
+    assert out == "" and str(marker) in err and "Traceback" not in err, err
+
+
 # The model's status and removal in Ollama, for the same Settings row.
 
 

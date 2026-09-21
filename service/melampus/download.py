@@ -1099,12 +1099,16 @@ def pull_model(
     an error line within it. DownloadCancelled from a signal, or
     from `cancel_marker` (the documented path by default) appearing between
     lines, passes through with the stream closed; a stale marker is removed
-    on start and the marker on exit, as the MLX download does.
+    on start and the marker on exit, as the MLX download does, and one that
+    cannot be removed is a DownloadError naming it by the download's rule
+    (`_remove_marker`): on start before Ollama is asked, on exit only when
+    nothing else is in flight.
     """
     marker = cancel_marker or cancel_marker_path()
-    marker.unlink(missing_ok=True)
+    _remove_marker(marker)
     request = ollama_request(url, OLLAMA_PULL, {"model": model, "stream": True})
     backend = OllamaBackend(model, url, timeout=timeout)
+    completed = False
     try:
         with closing(backend.stream(request)) as lines:
             for update in pull_updates(model, _lines_until_cancelled(lines, marker)):
@@ -1112,6 +1116,7 @@ def pull_model(
                 # prints the protocol's `done` from the return, as for mlx.
                 if update.state != DONE:
                     on_update(update)
+        completed = True
     except RuntimeError as exc:
         # The backend's words for the status (a 3xx from the address is an
         # answer from the wrong place, and says so), a reply that is not
@@ -1125,7 +1130,14 @@ def pull_model(
         # the backend's words alone, as `_ollama_request` gives the delete's.
         raise DownloadError(str(exc)) from exc
     finally:
-        marker.unlink(missing_ok=True)
+        # As the download's exit: a cancellation or failure already in
+        # flight is the outcome, and whether one is in flight is this
+        # try's own (`completed`), not sys.exc_info().
+        try:
+            _remove_marker(marker)
+        except DownloadError:
+            if completed:
+                raise
     return model
 
 
