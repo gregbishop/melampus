@@ -1020,11 +1020,13 @@ def _json_object(raw: bytes | str, named: str) -> dict:
     `complete` uses for its reply. The decoder raises a JSONDecodeError, a
     UnicodeDecodeError for bytes that are not UTF-8 (or the UTF-16 or -32
     a leading byte order mark names) and a plain ValueError for an integer
-    literal past Python's 4300-digit limit: all three are ValueErrors, and
-    all three mean the reply is not JSON."""
+    literal past Python's 4300-digit limit, all three ValueErrors; and a
+    RecursionError, a RuntimeError, for arrays or objects nested past the
+    interpreter's recursion limit (some 20 KB of `[`, well under the reply
+    bound). All four mean the reply is not JSON."""
     try:
         item = json.loads(raw)
-    except ValueError as exc:
+    except (ValueError, RecursionError) as exc:
         raise DownloadError(f"{named} was not JSON: {raw[:120]!r}") from exc
     if not isinstance(item, dict):
         raise DownloadError(f"{named} was not a JSON object: {raw[:120]!r}")

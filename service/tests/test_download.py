@@ -2462,13 +2462,23 @@ def test_pull_stream_error_line_mid_download_keeps_the_progress_so_far_and_says_
 # server's to write.
 NOT_UTF8 = b"\xff\xfe{"
 PAST_THE_DIGIT_LIMIT = b'{"status": "pulling manifest", "total": ' + b"9" * 5000 + b"}"
+# Codex review (opposing vendor) round 2, security finding (download.py:1179):
+# 20 KB, well under the reply bound, that the decoder refuses with a
+# RecursionError, a RuntimeError and not a ValueError.
+DEEPLY_NESTED = b"[" * 10_000 + b"]" * 10_000
+THE_DECODER_REFUSES = [NOT_UTF8, PAST_THE_DIGIT_LIMIT, DEEPLY_NESTED]
+THE_DECODER_REFUSES_IDS = ["not-utf-8", "an-integer-past-the-digit-limit", "arrays-nested-past-the-recursion-limit"]
 
 
-@pytest.mark.parametrize("line", [b"<html>proxy error</html>", NOT_UTF8, PAST_THE_DIGIT_LIMIT],
-                         ids=["a-page", "not-utf-8", "an-integer-past-the-digit-limit"])
+@pytest.mark.parametrize("line", [b"<html>proxy error</html>", *THE_DECODER_REFUSES],
+                         ids=["a-page", *THE_DECODER_REFUSES_IDS])
 def test_pull_stream_that_is_not_json_is_a_failure_not_a_traceback(line: bytes):
     """A line the decoder refuses, whatever it raises for it, is named as
-    not JSON: the message bounded to the line's first 120 characters."""
+    not JSON: the message bounded to the line's first 120 characters. The
+    RecursionError for arrays nested past the interpreter's limit (Codex
+    review round 2, security finding, download.py:1179) is a RuntimeError,
+    not a ValueError, and would otherwise reach the pull's clause for the
+    backend's words, named as Ollama's own error."""
     from melampus.download import pull_updates
 
     with pytest.raises(DownloadError) as failure:
@@ -3196,9 +3206,11 @@ def test_status_with_no_ollama_answering_says_absent_and_never_fails():
      "a size that is not a count"),
     (NOT_UTF8, "not JSON"),
     (b'{"models": [{"name": "%s", "size": ' % FAKE_MODEL.encode() + b"9" * 5000 + b"}]}", "not JSON"),
+    (DEEPLY_NESTED, "not JSON"),
 ], ids=["not-an-object", "models-not-a-list", "models-entry-not-an-object", "name-not-a-string",
         "model-not-a-string", "size-words", "size-a-list", "size-1e309", "size-negative", "size-fraction",
-        "size-bool", "size-above-MAX_SIZE", "not-utf-8", "size-past-the-digit-limit"])
+        "size-bool", "size-above-MAX_SIZE", "not-utf-8", "size-past-the-digit-limit",
+        "arrays-nested-past-the-recursion-limit"])
 def test_status_with_an_ollama_answering_the_list_in_the_wrong_shape_says_absent_and_never_fails(reply, named):
     """Security: the list is whatever listens at the address writes it, and
     `--model-status` is what the Settings dialog waits on when it opens, so
@@ -3222,7 +3234,11 @@ def test_status_with_an_ollama_answering_the_list_in_the_wrong_shape_says_absent
     its JSONDecodeError (the same review's security finding 2,
     download.py:1153): bytes that are not UTF-8, and an integer past
     Python's 4300-digit limit, both named as not JSON, the message bounded,
-    never the UnicodeDecodeError or the ValueError out of --model-status."""
+    never the UnicodeDecodeError or the ValueError out of --model-status;
+    and (the same vendor's round 2, download.py:1179) 20 KB of arrays
+    nested past the interpreter's recursion limit, well under the reply
+    bound, which the decoder refuses with a RecursionError, a RuntimeError
+    and not a ValueError, named the same."""
     from conftest import QuietHandler
 
     class WrongShape(QuietHandler):
@@ -3246,12 +3262,14 @@ def test_status_with_an_ollama_answering_the_list_in_the_wrong_shape_says_absent
                             path=None, cancel_path=str(cancel_marker_path()))
 
 
-@pytest.mark.parametrize("body", [NOT_UTF8, PAST_THE_DIGIT_LIMIT], ids=["not-utf-8", "an-integer-past-the-digit-limit"])
+@pytest.mark.parametrize("body", THE_DECODER_REFUSES, ids=THE_DECODER_REFUSES_IDS)
 def test_the_model_flags_for_ollama_meet_a_reply_the_decoder_refuses_status_absent_exit_0_pull_and_remove_exit_3(
     monkeypatch: pytest.MonkeyPatch, capsys, tmp_path: Path, body: bytes
 ):
     """Codex review (opposing vendor) round 1, security finding 2
-    (download.py:1153), through the entry point: a listener at `[model]
+    (download.py:1153), and round 2's (download.py:1179: arrays nested past
+    the recursion limit, a RecursionError), through the entry point: a
+    listener at `[model]
     ollama_url` answering every call with bytes Python's JSON decoder
     refuses with something other than its JSONDecodeError. `--model-status`
     never fails for the server: exit 0, absent, size unknown;
