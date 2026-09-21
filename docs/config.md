@@ -159,15 +159,23 @@ the hub is asked anything.
   and the status never fails for the network being down (the button then
   says "size unknown"). Example, absent:
   `{"repo": "mlx-community/Qwen3-VL-30B-A3B-Instruct-4bit", "installed": false, "bytes_total": 18300000000, "bytes_done": 0, "path": null, "cancel_path": "~/Library/Application Support/Melampus/cache/download-cancel"}` (the path is absolute).
-- `--remove-model` deletes the repo from the cache through the hub library's
-  own cache deletion (every revision, so the whole repo folder goes), prints
-  `removed <path>` (that folder) and exits 0. It is refused with **exit 3**
-  and the reason on stderr when nothing is installed, or while a download of
+- `--remove-model` deletes the repo from the cache, all or nothing from the
+  cache's point of view: the repo's folder is first set aside within the
+  cache as `<folder>.incomplete`, which the cache no longer lists as the
+  model, then deleted through the hub library's own cache deletion (every
+  revision, so the whole folder goes); it prints `removed <path>` (the
+  folder the model was in) and exits 0. It is refused with **exit 3** and
+  the reason on stderr when nothing is installed, or while a download of
   the model is running (it holds the hub library's per-file lock the fetch
-  takes): cancel the download first. It also exits 3, with the folder named,
-  when that folder is still there after the deletion (the hub library logs a
-  permission error and carries on rather than raising): check the folder's
-  permissions, and on Windows that no other program holds a file in it open.
+  takes): cancel the download first. It also exits 3 when the folder cannot
+  be set aside (on Windows, while another program holds a file in it open;
+  the model is then untouched), and when the set-aside folder is still
+  there after the deletion: the hub library's deletion deletes what it can,
+  logs a permission error at what it cannot and carries on rather than
+  raising, so the model is gone from the cache (`--model-status` reads
+  absent, a second `--remove-model` has nothing to remove) and the message
+  names the set-aside folder: check its permissions, and on Windows that no
+  other program holds a file in it open, and delete it by hand.
 
 The bytes move over plain HTTP, through the hub library's own file download
 (its Range request, its size check, its per-file lock), and every finished file

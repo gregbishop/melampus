@@ -702,24 +702,43 @@ def _download_running(lock_dir: Path) -> bool:
 
 
 def remove_model(repo: str, *, cache_dir: Path | None = None) -> Path:
-    """Delete `repo` from the cache through the hub library's own deletion
-    strategy, for this repo alone: every revision of it goes, so the whole
-    repo folder does, and return that folder. The library's `delete_revisions`
-    is not used: it searches the whole cache by commit hash and takes the
-    first repo found at one, which can be a fork cached at the same commit,
-    leaving `repo` installed. Raises DownloadError when nothing is installed,
-    a download of it is running, or the folder is still there after the
-    deletion: the library catches the PermissionError of a folder it cannot
-    delete, logs it and returns, so the folder is the only signal it leaves."""
+    """Delete `repo` from the cache, all or nothing from the cache's point of
+    view, and return the folder it was in. The repo's folder is first set
+    aside within the cache as `<folder>.incomplete` (`_incomplete`, the
+    module's mark for "not whole"), which the scan no longer lists as the
+    repo, then deleted through the hub library's own deletion strategy, for
+    this repo alone: every revision of it goes, so the whole folder does.
+    The library's `delete_revisions` is not used: it searches the whole
+    cache by commit hash and takes the first repo found at one, which can be
+    a fork cached at the same commit, leaving `repo` installed.
+
+    Raises DownloadError when nothing is installed, a download of it is
+    running, the folder cannot be set aside (Windows refuses while another
+    program holds a file in it open; the model is then untouched), or the
+    set-aside folder is still there after the deletion: the library's
+    deletion is one rmtree, which deletes what it can and stops at the first
+    entry it cannot, and the library catches its PermissionError, logs it
+    and returns, so the folder is the one signal it leaves. Deleted under
+    the repo's own name, that left the model half there, listed by nothing
+    and loadable by nothing; set aside, the model is gone from the cache
+    (the status reads absent, a second removal has nothing to remove), and
+    the message names the folder for the owner to delete by hand."""
     cache, _, locks = _cache_paths(repo, cache_dir)
     cached = _cached(repo, cache)
     if cached is None:
         raise DownloadError(f"{repo} is not in the cache at {cache}: nothing to remove")
     if _download_running(locks):
         raise DownloadError(f"a download of {repo} is running; cancel it first, then remove")
+    aside = _incomplete(cached.repo_path)
+    try:
+        cached.repo_path.rename(aside)
+    except OSError as exc:
+        raise DownloadError(f"could not remove {repo} from {cache}: {cached.repo_path} could not be set aside "
+                            f"as {aside} ({exc}); the model is untouched") from exc
     DeleteCacheStrategy(expected_freed_size=cached.size_on_disk, blobs=frozenset(), refs=frozenset(),
-                        repos=frozenset({cached.repo_path}), snapshots=frozenset()).execute()
-    if cached.repo_path.exists():
-        raise DownloadError(f"could not remove {repo} from {cache}: {cached.repo_path} is still there; "
-                            "check the folder's permissions")
+                        repos=frozenset({aside}), snapshots=frozenset()).execute()
+    if aside.exists():
+        raise DownloadError(f"could not remove {repo} from {cache} whole: the cache no longer lists it, and what "
+                            f"could not be deleted is set aside at {aside}; check that folder's permissions "
+                            "(on Windows, that no other program holds a file in it open) and delete it by hand")
     return cached.repo_path
