@@ -1826,10 +1826,19 @@ def test_remove_refuses_with_the_reason_when_a_lock_it_probes_cannot_be_opened(f
     assert path.exists() and snapshot_files(path) == FAKE_FILES, "the model was removed"
 
 
+def _made(folder: Path) -> Path:
+    folder.mkdir()
+    return folder
+
+
 @pytest.mark.skipif(sys.platform == "win32" or getattr(os, "geteuid", lambda: 1)() == 0,
                     reason="an unsearchable folder does not stop a scan here")
-def test_status_and_remove_refuse_with_the_reason_when_another_repo_in_the_cache_cannot_be_scanned(
-    fake_hub: FakeHub, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+@pytest.mark.parametrize("unsearchable", [
+    pytest.param(lambda cache: _made(cache / "models--other--repo"), id="another repo in the cache"),
+    pytest.param(lambda cache: cache.parent, id="the cache's parent"),
+])
+def test_status_and_remove_refuse_with_the_reason_when_a_folder_of_the_cache_cannot_be_searched(
+    fake_hub: FakeHub, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys, unsearchable
 ):
     """Security (Claude review 13, security finding 1; download.py:655-665).
     The hub library's scan of the cache walks every repo folder in it, other
@@ -1839,54 +1848,30 @@ def test_status_and_remove_refuse_with_the_reason_when_another_repo_in_the_cache
     contract is exit 3 with a reason. It is a DownloadError naming the
     cache and the folder the OS named, from both, and through the CLI exit
     3 with the folder on stderr, nothing on stdout, no traceback; the model
-    stays."""
-    cache = tmp_path / "hub"
-    path, _ = _fetch(fake_hub, cache)
-    other = cache / "models--other--repo"
-    other.mkdir()
-    os.chmod(other, 0)
-    try:
-        for ask in (lambda: _status(fake_hub, cache), lambda: remove_model(FAKE_REPO, cache_dir=cache)):
-            with pytest.raises(DownloadError) as failure:
-                ask()
-            message = str(failure.value)
-            assert str(cache) in message and str(other) in message and "permissions" in message, message
-        _cli_sees_the_cache(monkeypatch, cache)
-        for flag in ("--model-status", "--remove-model"):
-            _refused_through_the_cli(capsys, flag, str(other))
-    finally:
-        os.chmod(other, 0o700)
-    assert snapshot_files(path) == FAKE_FILES, "the model was removed"
+    stays.
 
-
-@pytest.mark.skipif(sys.platform == "win32" or getattr(os, "geteuid", lambda: 1)() == 0,
-                    reason="an unsearchable folder does not stop a stat here")
-def test_status_and_remove_refuse_with_the_reason_when_the_cache_itself_cannot_be_stat_ed(
-    fake_hub: FakeHub, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
-):
-    """Security (Codex review 7, code finding 1; Claude review 14, security
-    finding 1; download.py:664). The cache's own `is_dir` guard ran before
-    the bound round 13 put around the scan: a cache whose parent the
-    process cannot search (`HF_HOME` at mode 000, or the folder `--cache`
-    names under one) raised its PermissionError from `Path.is_dir` through
-    `--model-status` and `--remove-model` as a traceback, exit 1. It is the
-    one DownloadError every read of the cache says, naming the cache, from
-    both, and through the CLI exit 3 with the cache on stderr, nothing on
-    stdout, no traceback; the model stays."""
+    The cache's parent (Codex review 7, code finding 1; Claude review 14,
+    security finding 1; download.py:664): the cache's own `is_dir` guard
+    ran before the bound round 13 put around the scan: a cache whose
+    parent the process cannot search (`HF_HOME` at mode 000, or the folder
+    `--cache` names under one) raised its PermissionError from
+    `Path.is_dir` through both as a traceback, exit 1. It is the one
+    DownloadError every read of the cache says, naming the cache."""
     cache = tmp_path / "hf" / "hub"
     path, _ = _fetch(fake_hub, cache)
-    os.chmod(cache.parent, 0)
+    folder = unsearchable(cache)
+    os.chmod(folder, 0)
     try:
         for ask in (lambda: _status(fake_hub, cache), lambda: remove_model(FAKE_REPO, cache_dir=cache)):
             with pytest.raises(DownloadError) as failure:
                 ask()
             message = str(failure.value)
-            assert str(cache) in message and "permissions" in message, message
+            assert str(cache) in message and str(folder) in message and "permissions" in message, message
         _cli_sees_the_cache(monkeypatch, cache)
         for flag in ("--model-status", "--remove-model"):
-            _refused_through_the_cli(capsys, flag, str(cache))
+            _refused_through_the_cli(capsys, flag, str(folder))
     finally:
-        os.chmod(cache.parent, 0o700)
+        os.chmod(folder, 0o700)
     assert snapshot_files(path) == FAKE_FILES, "the model was removed"
 
 
