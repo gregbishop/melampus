@@ -2889,15 +2889,15 @@ def test_status_with_no_ollama_answering_says_absent_and_never_fails():
                             path=None, cancel_path=str(cancel_marker_path()))
 
 
-@pytest.mark.parametrize("reply", [
-    [],
-    {"models": 5},
-    {"models": [{"name": [FAKE_MODEL]}]},
-    {"models": [{"name": "other:latest", "model": [FAKE_MODEL]}]},
-    {"models": [{"name": FAKE_MODEL, "size": "large"}]},
-    {"models": [{"name": FAKE_MODEL, "size": [1]}]},
+@pytest.mark.parametrize(("reply", "named"), [
+    ([], "not a JSON object"),
+    ({"models": 5}, "not a list of models"),
+    ({"models": [{"name": [FAKE_MODEL]}]}, "whose name is not a string"),
+    ({"models": [{"name": "other:latest", "model": [FAKE_MODEL]}]}, "whose model is not a string"),
+    ({"models": [{"name": FAKE_MODEL, "size": "large"}]}, "a size that is not a count"),
+    ({"models": [{"name": FAKE_MODEL, "size": [1]}]}, "a size that is not a count"),
 ], ids=["not-an-object", "models-not-a-list", "name-not-a-string", "model-not-a-string", "size-words", "size-a-list"])
-def test_status_with_an_ollama_answering_the_list_in_the_wrong_shape_says_absent_and_never_fails(reply):
+def test_status_with_an_ollama_answering_the_list_in_the_wrong_shape_says_absent_and_never_fails(reply, named):
     """Security: the list is whatever listens at the address writes it, and
     `--model-status` is what the Settings dialog waits on when it opens, so
     it never fails for the server (test_status_with_no_ollama_answering...).
@@ -2905,7 +2905,9 @@ def test_status_with_an_ollama_answering_the_list_in_the_wrong_shape_says_absent
     List Local Models: an object whose `models` is a list of objects with
     a `name` and a `size`), the malformed reply is named at the boundary as
     the pull's is, never a traceback out of the entry point, and the status
-    reads absent, size unknown."""
+    reads absent, size unknown. Review round 3 (download.py:894-898): the
+    message says which field is wrong, the `name` or the `model`, not
+    "no name" for an entry that has one."""
     from conftest import QuietHandler
 
     class WrongShape(QuietHandler):
@@ -2920,6 +2922,7 @@ def test_status_with_an_ollama_answering_the_list_in_the_wrong_shape_says_absent
         with pytest.raises(DownloadError) as failure:
             download._held(FAKE_MODEL, address)
         assert download.OLLAMA_TAGS in str(failure.value), str(failure.value)
+        assert named in str(failure.value), str(failure.value)
 
         status = ollama_status(FAKE_MODEL, address)
 

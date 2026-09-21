@@ -1161,12 +1161,19 @@ def _held(model: str, url: str, *, timeout: float = STATUS_TIMEOUT) -> tuple[str
     if not isinstance(models, list):
         raise DownloadError(f"Ollama's list from {url}{OLLAMA_TAGS} was not a list of models: {str(models)[:120]!r}")
     for entry in models:
-        listed = [entry.get(key) for key in ("name", "model")] if isinstance(entry, dict) else [None]
-        if not isinstance(listed[0], str) or not all(isinstance(name, (str, type(None))) for name in listed):
+        name = entry.get("name") if isinstance(entry, dict) else None
+        alias = entry.get("model") if isinstance(entry, dict) else None
+        if not isinstance(name, str):
             raise DownloadError(
-                f"Ollama's list from {url}{OLLAMA_TAGS} carried an entry with no name: {str(entry)[:120]!r}"
+                f"Ollama's list from {url}{OLLAMA_TAGS} carried an entry whose name is not a string: "
+                f"{str(entry)[:120]!r}"
             )
-        if names & set(listed):
+        if not isinstance(alias, (str, type(None))):
+            raise DownloadError(
+                f"Ollama's list from {url}{OLLAMA_TAGS} carried an entry whose model is not a string: "
+                f"{str(entry)[:120]!r}"
+            )
+        if names & {name, alias}:
             try:
                 size = int(entry.get("size") or 0)
             except (TypeError, ValueError) as exc:
@@ -1174,7 +1181,7 @@ def _held(model: str, url: str, *, timeout: float = STATUS_TIMEOUT) -> tuple[str
                     f"Ollama's list from {url}{OLLAMA_TAGS} carried a size that is not a count: "
                     f"{str(entry)[:120]!r}"
                 ) from exc
-            return listed[0], size
+            return name, size
     return None
 
 
