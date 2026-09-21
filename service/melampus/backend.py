@@ -52,12 +52,33 @@ class VLMBackend(ABC):
     """Takes an image path and a prompt; returns text. Nothing else crosses this line."""
 
     name: str
+    #: The most of what the model's side wrote that an error message carries:
+    #: it lands in the frame's error record (identify.py), so in the cache
+    #: and --json-out. Ollama's own errors are one line; a proxy's error
+    #: page is cut here.
+    MAX_ERROR_BYTES = 1 << 10
 
     @abstractmethod
     def complete(self, image_path: Path, prompt: str, max_tokens: int) -> Completion: ...
 
     def warmup(self) -> None:  # pragma: no cover - optional
         return None
+
+    @classmethod
+    def plain(cls, text: str) -> str:
+        """Text the model's side wrote (a server, a program), as it may
+        reach the frame's error record, the log and the terminal: one line
+        of at most MAX_ERROR_BYTES printable characters. An escape
+        sequence in it would move the cursor, recolour the terminal or
+        erase a line, and a line break would fake a line of the log.
+        Whatever is not printable (str.isprintable: the C0 and C1
+        controls, line and paragraph breaks, the unassigned) becomes a
+        space, and runs of whitespace collapse to one, so what is left is
+        words. The one rule for every message that carries those words:
+        Ollama's error body, and a status line http.client could not
+        parse."""
+        words = " ".join("".join(c if c.isprintable() else " " for c in text).split())
+        return words[: cls.MAX_ERROR_BYTES]
 
 
 class MLXBackend(VLMBackend):
@@ -605,10 +626,6 @@ class OllamaBackend(VLMBackend):
     #: `num_predict` tokens and a dozen counters, so a megabyte is not an
     #: answer, and a server that keeps sending does not fill memory.
     MAX_REPLY_BYTES = 1 << 20
-    #: The most of a non-200's body that is read: it lands in the frame's
-    #: error record (identify.py), so in the cache and --json-out. Ollama's
-    #: own errors are one line; a proxy's error page is cut here.
-    MAX_ERROR_BYTES = 1 << 10
 
     def __init__(
         self,
@@ -789,21 +806,6 @@ class OllamaBackend(VLMBackend):
             f"Ollama at {self.url} did not answer within {self.timeout:g}s; "
             f"{self.model} may still be loading, or raise [model] timeout_seconds"
         )
-
-    @classmethod
-    def plain(cls, text: str) -> str:
-        """Text the server wrote, as it may reach the frame's error record,
-        the log and the terminal: one line of at most MAX_ERROR_BYTES
-        printable characters. An escape sequence in it would move the
-        cursor, recolour the terminal or erase a line, and a line break
-        would fake a line of the log. Whatever is not printable
-        (str.isprintable: the C0 and C1 controls, line and paragraph
-        breaks, the unassigned) becomes a space, and runs of whitespace
-        collapse to one, so what is left is words. The one rule for every
-        message that carries the server's words: an error body, and a
-        status line http.client could not parse."""
-        words = " ".join("".join(c if c.isprintable() else " " for c in text).split())
-        return words[: cls.MAX_ERROR_BYTES]
 
     @classmethod
     def error_text(cls, exc: urllib.error.HTTPError) -> str:
