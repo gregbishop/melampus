@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import http.client
 import importlib.util
 import json
 import platform
@@ -260,14 +261,22 @@ def resetting_handler(answer: bytes) -> type[socketserver.BaseRequestHandler]:
     resets the connection (SO_LINGER at zero makes the close an RST, not a
     FIN, so the client's next read is a ConnectionResetError, the raw
     socket error urllib lets through unwrapped): Ollama killed, or a
-    listener hanging up, while the reply is being read. The socket is
-    closed here, ahead of the server's own shutdown, so the reset is what
-    the client sees, not the orderly close."""
+    listener hanging up, while the reply is being read. The whole request
+    is read first, the head to its blank line and then Content-Length
+    bytes of body: http.client sends the two in two `send` calls, and a
+    listener answering after the head alone resets before the body is
+    sent, so the client's failure is the body's send (EPIPE, a URLError
+    to urllib) and not the read it is meant to be. The socket is closed
+    here, ahead of the server's own shutdown, so the reset is what the
+    client sees, not the orderly close."""
 
     class Resetting(socketserver.BaseRequestHandler):
         def handle(self) -> None:
             with contextlib.suppress(OSError):
-                self.request.recv(65536)
+                with self.request.makefile("rb") as request:
+                    request.readline()
+                    headers = http.client.parse_headers(request)
+                    request.read(int(headers.get("Content-Length") or 0))
                 self.request.sendall(answer)
                 self.request.setsockopt(
                     socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))

@@ -20,6 +20,7 @@ import json
 import os
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -2874,6 +2875,38 @@ def test_the_pull_whose_stream_is_reset_names_the_model_the_address_and_the_re_r
     assert FAKE_MODEL in message, message
     assert address in message, message
     assert "re-run melampus-id --download-model" in message, message
+
+
+def test_the_resetting_listener_reads_the_whole_request_before_it_answers_and_resets():
+    """Tests (CI on PR #15, #18 twice and #23; passing locally): the pull's
+    reset test above flaked on the macOS runner with the not-running message
+    in place of the re-run hint. http.client sends a POST's headers and its
+    body in two `send` calls, and `resetting_handler`'s listener did one
+    recv, so when the two arrived as two segments it answered and reset
+    after the headers alone: the client's send of the body then failed with
+    EPIPE, urllib wrapped that as a URLError, the backend named it as Ollama
+    not running, and the pull took that clause. The listener reads the
+    request through to the end of its body before it answers, so the reset
+    is what the client reads, whatever segments the request arrives in.
+    Given the request's head sent, a pause, then its body, the body's send
+    completes, the answer is read whole, and the read after it is the
+    reset."""
+    from conftest import resetting_handler
+
+    answer = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 40\r\n\r\n{"
+    body = b'{"name": "fake"}'
+    head = b"POST /api/pull HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: %d\r\n\r\n" % len(body)
+    with loopback_server(resetting_handler(answer)) as squatter:
+        with socket.create_connection(("127.0.0.1", squatter.server_port), timeout=5.0) as client:
+            client.sendall(head)
+            time.sleep(0.2)
+            client.sendall(body)
+            read = b""
+            while len(read) < len(answer):
+                read += client.recv(65536)
+            assert read == answer, read
+            with pytest.raises(ConnectionResetError):
+                client.recv(65536)
 
 
 # The cooperative cancel, for Ollama: the marker and the signals end the
