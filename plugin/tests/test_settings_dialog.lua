@@ -466,6 +466,25 @@ t.test('a refused removal that set the model aside shows the message and the row
 	t.equals(model.phase, 'absent')
 end)
 
+t.test('a refused removal keeps the row\'s phase when the status cannot be asked after it, and shows the refusal alone', function()
+	-- Claude review 14, code finding 1. The status asked again after a
+	-- refused removal can itself fail (exit 1: the cache unreadable by
+	-- then); the row then keeps the phase it had, the message shown is the
+	-- removal's, and the status's own failure is not shown over it.
+	local options = { detection = mock.detectionText(), status = modelStatus({ installed = 'true' }), removeCode = 3 }
+	local contents = openSettings(options)
+	local row, model = modelRow(contents)
+	options.statusCode = 1
+	theButton(row, model, 'Remove', true).action()
+	mock.settle()
+	t.equals(commandsRun('--model-status'), 2, 'the status was not asked again after the refused removal')
+	t.equals(model.phase, 'installed', 'the row lost its phase to a status it could not ask')
+	local shown = dialogsShown(false)
+	t.equals(#shown, 1, 'expected one message, the removal\'s')
+	t.isNotNil(string.find(shown[1].body, 'could not remove the model (exit 3)', 1, true),
+		'the message is not the removal\'s: ' .. tostring(shown[1].body))
+end)
+
 t.test('the row shows when the picked engine is mlx, or the unset preference resolves to it', function()
 	local contents = openSettings({ detection = mock.detectionText() })
 	local row = modelRow(contents)
