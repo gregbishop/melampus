@@ -1496,6 +1496,9 @@ _NOT_A_HUBS_ANSWER = [
      b'{"id": "fake-org/fake-model", "siblings": [{"size": 3}]}'),
     ("a size that is not a number", "application/json",
      b'{"id": "fake-org/fake-model", "siblings": [{"rfilename": "model.safetensors", "size": "big"}]}'),
+    *[(f"a size that is not a non-negative integer: {size.decode()}", "application/json",
+       b'{"id": "fake-org/fake-model", "siblings": [{"rfilename": "model.safetensors", "size": ' + size + b'}]}')
+      for size in (b"1e309", b"-1", b"1.5", b"true")],
     ("a name that is null", "application/json",
      b'{"id": "fake-org/fake-model", "siblings": [{"rfilename": null, "size": 3}]}'),
     ("a name that is a number", "application/json",
@@ -1536,7 +1539,13 @@ def test_status_treats_a_hub_answering_200_with_something_else_as_unreachable(
     installed (with the cache empty `_holds` never ran), so the row that
     should read Installed became the exit-1 note; and for `lastModified`,
     `createdAt` or `evalResults` of another shape, the library's own
-    AttributeError parsing them, not in the tuple either. The status never
+    AttributeError parsing them, not in the tuple either. And for a size
+    that is a number but not a non-negative integer (Codex review 8,
+    security finding 1, download.py:739): `1e309` is `inf` in Python, which
+    `json.dumps` writes as `Infinity`, which the plugin's decoder
+    (MelampusJson.lua) rejects, hiding the row instead of showing "size
+    unknown"; `-1` and `1.5` summed to a total that is not a size, and
+    `true` (a bool is an int in Python) to 1. The status never
     fails for the network: whatever the hub's answer does wrong, such a hub
     is one that could not be reached, the size unknown and installed what
     the cache lays out; through the CLI that is exit 0, the JSON on stdout

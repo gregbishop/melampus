@@ -702,7 +702,9 @@ def model_status(repo: str, *, endpoint: str | None = None, cache_dir: Path | No
     does not within that time, or answers with something that is not a hub's
     answer (a captive portal's page, a proxy's block page, a JSON error page
     or a listing of another shape: a file's name that is not a string, a
-    size that is not a number, a date or an evaluation result the library
+    size that is not a non-negative integer (a string, a bool, a negative
+    number, a fraction, or `1e309`, a float, infinite, which the plugin's
+    JSON decoder rejects), a date or an evaluation result the library
     cannot read, a repo id or a name missing, a page that is not JSON at
     all), `bytes_total` is None and the listing is as if the hub had not
     answered: the status never fails for the network. Whatever the answer
@@ -736,6 +738,10 @@ def model_status(repo: str, *, endpoint: str | None = None, cache_dir: Path | No
         listed: dict[str, int | None] = {f.rfilename: f.size for f in info.siblings or []}
         if not all(isinstance(name, str) for name in listed):
             raise TypeError("a file name in the listing is not a string")
+        # A bool is an int in Python; 1e309 is a float, inf, which the plugin's
+        # JSON decoder rejects as `Infinity`.
+        if not all(size is None or (type(size) is int and size >= 0) for size in listed.values()):
+            raise TypeError("a file size in the listing is not a non-negative integer")
         total: int | None = sum(size or 0 for size in listed.values())
         installed = main is not None and _holds(main, listed)
     except Exception:  # noqa: BLE001 - the hub's answer, whatever it did wrong, is as if it had not answered
