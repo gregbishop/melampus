@@ -814,32 +814,39 @@ t.test('the model commands refuse an engine the plugin does not know, before the
 	t.isNil(mock.state.executed, 'the executable ran for an unknown engine')
 end)
 
-t.test('the model commands refuse a nil engine before the shell, naming the engines with a model', function()
+t.test('the model commands refuse an unset engine before the shell, naming the engines with a model', function()
 	-- Claude review round 14, code finding 1 (MelampusAnalyze.lua:421): a
 	-- run without the preference lets the CLI decide (no --backend), but
 	-- every command the Download row runs carries the engine (docs/plugin.md
 	-- § The Download row), and downloadModel's one-at-a-time guard is the
-	-- engine's name, so nil must not reach the shell.
-	local Analyze = loadAnalyze({ existing = { [mock.EXECUTABLE] = true } })
-	local command, message = Analyze.downloadCommand(nil)
-	t.isNil(command, 'a nil engine reached the command line')
-	for _, engine in ipairs({ 'mlx', 'ollama' }) do
-		t.isNotNil(string.find(tostring(message), engine, 1, true), 'the refusal does not name ' .. engine .. ': ' .. tostring(message))
+	-- engine's name, so an unset engine must not reach the shell. Unset is
+	-- Rules.chosenEngine's word: nil, and '' (review round 15,
+	-- MelampusAnalyze.lua:348), which the preference holds once a value is
+	-- cleared.
+	for _, unset in ipairs({ { nil }, { '' } }) do
+		local engine = unset[1]
+		local shown = engine == nil and 'a nil engine' or 'an empty engine'
+		local Analyze = loadAnalyze({ existing = { [mock.EXECUTABLE] = true } })
+		local command, message = Analyze.downloadCommand(engine)
+		t.isNil(command, shown .. ' reached the command line')
+		for _, named in ipairs({ 'mlx', 'ollama' }) do
+			t.isNotNil(string.find(tostring(message), named, 1, true), 'the refusal does not name ' .. named .. ': ' .. tostring(message))
+		end
+		local status, why = Analyze.modelStatus(engine)
+		t.isNil(status, shown .. ' reached --model-status')
+		t.equals(why, message)
+		local ok, reason = Analyze.removeModel(engine)
+		t.isFalse(ok)
+		t.equals(reason, message)
+		mock.state.onExecute = fakeDownload({ 'progress 0 100', 'done /hf/hub/models--x--y/snapshots/abc' }, 0)
+		local handle, err = Analyze.downloadModel(engine, CANCEL_PATH, function() end, function() end)
+		t.isNil(handle, 'a download started for ' .. shown)
+		t.equals(err, message)
+		t.isNil(mock.state.executed, 'the executable ran for ' .. shown)
+		local second = Analyze.downloadModel('ollama', CANCEL_PATH, function() end, function() end)
+		t.isNotNil(second, 'the refused download left the one-at-a-time guard set')
+		mock.settle()
 	end
-	local status, why = Analyze.modelStatus(nil)
-	t.isNil(status, 'a nil engine reached --model-status')
-	t.equals(why, message)
-	local ok, reason = Analyze.removeModel(nil)
-	t.isFalse(ok)
-	t.equals(reason, message)
-	mock.state.onExecute = fakeDownload({ 'progress 0 100', 'done /hf/hub/models--x--y/snapshots/abc' }, 0)
-	local handle, err = Analyze.downloadModel(nil, CANCEL_PATH, function() end, function() end)
-	t.isNil(handle, 'a download started for a nil engine')
-	t.equals(err, message)
-	t.isNil(mock.state.executed, 'the executable ran for a nil engine')
-	local second = Analyze.downloadModel('ollama', CANCEL_PATH, function() end, function() end)
-	t.isNotNil(second, 'the refused download left the one-at-a-time guard set')
-	mock.settle()
 end)
 
 t.test('without the executable the download command is the missing-executable message', function()
