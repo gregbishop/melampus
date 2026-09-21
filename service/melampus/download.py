@@ -645,8 +645,9 @@ def download_model(
 
 def _remove_marker(marker: Path) -> None:
     """Remove the cancel marker, or raise DownloadError naming it: a marker
-    the OS refuses to remove (a folder at its path, say) would stop the next
-    download at its first chunk, so the owner is told where it is."""
+    the OS refuses to remove (a folder at its path, say) would, left in
+    place, cancel the next download at its first chunk, so the start refuses
+    instead and the owner is told where it is."""
     try:
         marker.unlink(missing_ok=True)
     except OSError as exc:

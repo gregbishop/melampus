@@ -128,9 +128,10 @@ is counted, and its appearance ends the run exactly as a signal does:
 when it starts and the marker when it exits, whatever the outcome; a marker it
 cannot remove (a folder at that path, say) is **exit 3** naming the path, on
 start before the hub is asked, and on exit when the download completed (the
-model is there; remove the marker by hand, or the next download stops at its
-first chunk). A cancellation or failure already under way is the outcome
-reported, and the next run names the marker. The name is
+model is there; remove the marker by hand: until it is gone every
+`--download-model` exits 3 naming it before the hub is asked). A cancellation
+or failure already under way is the outcome reported, and the next run names
+the marker. The name is
 `download.CANCEL_MARKER`, the path `download.cancel_marker_path()`, and
 `--model-status` reports it as `cancel_path`, so the plugin's Cancel button
 writes where the executable looks without deriving the directory itself.

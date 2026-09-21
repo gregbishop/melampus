@@ -1118,9 +1118,10 @@ def test_a_cancel_marker_that_cannot_be_removed_on_start_is_a_download_error_nam
     download.py:583). A folder at the marker's path (or any marker the OS
     refuses to remove) made the start's unlink raise its OSError straight
     out of download_model: a traceback, exit 1, where docs/config.md names
-    exit 3 and a reason. Such a marker would stop the next download at its
-    first chunk, so the failure is a DownloadError naming the path and what
-    to do, raised before the hub is asked anything."""
+    exit 3 and a reason. Left in place such a marker would cancel the next
+    download at its first chunk, so the start refuses instead: the failure
+    is a DownloadError naming the path and what to do, raised before the
+    hub is asked anything."""
     marker = tmp_path / "data" / "download-cancel"
     marker.mkdir(parents=True)
 
