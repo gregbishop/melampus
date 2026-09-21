@@ -20,7 +20,7 @@ import urllib.request
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Iterator
 
 
 @dataclass(slots=True)
@@ -581,28 +581,45 @@ class OllamaBackend(VLMBackend):
         The one way a request reaches Ollama: a frame's here, the list's
         and the delete's from download.py, the pull's stream through the
         same opener."""
-        with _Deadline(self.timeout) as deadline:
-            request.deadline = deadline
-            try:
-                raw = self._exchange(request)
-            except Exception as exc:
-                if deadline.expired.is_set():
-                    raise self._timed_out() from exc
-                raise
-        if deadline.expired.is_set():
-            raise self._timed_out()
+        with self._bounded(request):
+            raw = self._exchange(request)
         if len(raw) > self.MAX_REPLY_BYTES:
             raise RuntimeError(
                 f"Ollama's reply from {self.url} ran past {self.MAX_REPLY_BYTES} bytes"
             )
         return raw
 
+    @contextlib.contextmanager
+    def _bounded(self, request: urllib.request.Request) -> Iterator[_Deadline]:
+        """The block within `timeout` of wall-clock time: a _Deadline on the
+        request, for the connection _Bounded opens for it, that hangs up the
+        socket when the time is up. Whatever the block then looks like (a
+        body cut short, a status line that never finished, a reset, or a
+        return with what arrived) is the timeout, not that shape's error."""
+        with _Deadline(self.timeout) as deadline:
+            request.deadline = deadline
+            try:
+                yield deadline
+            except Exception as exc:
+                if deadline.expired.is_set():
+                    raise self._timed_out() from exc
+                raise
+        if deadline.expired.is_set():
+            raise self._timed_out()
+
     def _exchange(self, request: urllib.request.Request) -> bytes:
         """One request and what came back, every failure a plain error naming
         the address or the status."""
+        with self._naming(), self._urlopen(request, timeout=self.timeout) as response:
+            return response.read(self.MAX_REPLY_BYTES + 1)
+
+    @contextlib.contextmanager
+    def _naming(self) -> Iterator[None]:
+        """Every failure of the block a plain error naming the address or the
+        status: what urllib raises for an HTTP status, for nothing answering
+        and for the socket timeout, and what it lets through unwrapped."""
         try:
-            with self._urlopen(request, timeout=self.timeout) as response:
-                return response.read(self.MAX_REPLY_BYTES + 1)
+            yield
         except urllib.error.HTTPError as exc:
             raise RuntimeError(
                 f"Ollama answered {exc.code}: {self.error_text(exc)}"
