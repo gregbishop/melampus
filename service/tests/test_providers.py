@@ -163,11 +163,13 @@ def test_backend_choices_are_the_owners_engine_names_in_order():
     assert providers.BACKEND_CHOICES == (*ENGINES, providers.SCRIPTED)
 
 
-@pytest.mark.parametrize("engine", ENGINES)
+@pytest.mark.parametrize("engine", (*ENGINES, providers.COMMAND))
 def test_cli_accepts_each_engine_name(engine, photos, tmp_path, no_ambient_keys, capsys):
     """Card #403, Done-when 1: given an engine name, when the plugin passes it
     as --backend, then the CLI receives it. --report-only stops before any
-    engine is built, so this is the parse alone: the name is accepted."""
+    engine is built, so this is the parse alone: the name is accepted. Card
+    #420's `command` is accepted the same way (chosen by config or --backend
+    until the picker learns it in #423)."""
     from melampus.cli import main
 
     code = main([str(photos), "--backend", engine, "--report-only",
@@ -2027,15 +2029,6 @@ def test_command_is_selectable_by_config_and_flag_but_not_a_picker_choice():
     assert providers.BACKEND_CHOICES == (*ENGINES, providers.SCRIPTED)
     assert providers.COMMAND in providers.LOCAL_BACKENDS
     assert not providers.is_cloud_primary(_cfg(model={"backend": "command", "command": COMMAND}))
-
-
-def test_cli_accepts_backend_command(photos, tmp_path, capsys):
-    from melampus.cli import main
-
-    code = main([str(photos), "--backend", "command", "--report-only",
-                 "--cache", str(tmp_path / "cache.jsonl")])
-
-    assert code == 0, capsys.readouterr().err
 
 
 def test_command_not_configured_is_refused_with_the_shape(no_ambient_ollama):
