@@ -850,7 +850,8 @@ def test_config_doc_quotes_the_codex_template_from_its_one_source():
     `[model] command` a user would set to override it, in a TOML block
     that parses to exactly that list, so the doc cannot rot into a second
     copy; and it says what to install, how to sign in, that runs bill to
-    the plan, and what happens at its usage limit."""
+    the plan, that an API-key sign-in bills per call and is refused, and
+    what happens at its usage limit."""
     import tomllib
 
     from melampus import providers
@@ -863,7 +864,8 @@ def test_config_doc_quotes_the_codex_template_from_its_one_source():
     assert blocks, "docs/config.md has no ```toml block with backend = \"codex\""
     (block,) = blocks
     assert tomllib.loads(block)["model"]["command"] == providers.CODEX_COMMAND
-    for said in (providers.CODEX_INSTALL, f"`{providers.CODEX_SIGN_IN}`", "usage limit"):
+    for said in (providers.CODEX_INSTALL, f"`{providers.CODEX_SIGN_IN}`", "usage limit",
+                 "bills per call"):
         assert said in text, f"docs/config.md does not say {said!r}"
     readme = (REPO / "readme.md").read_text(encoding="utf-8")
     assert "`codex`" in readme and "--backend codex" in readme

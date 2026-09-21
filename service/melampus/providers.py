@@ -254,7 +254,8 @@ CLAUDE_CODE_PROBE_SECONDS = 10.0
 #: Codex CLI as an engine (card #422): the second CLI behind the same seam,
 #: for when Claude is at its limit or the owner prefers it. `codex` resolves
 #: to a CommandBackend on CODEX_COMMAND, or on `[model] command` when the
-#: user sets one. Runs bill to the ChatGPT plan Codex is signed in to.
+#: user sets one. Runs bill to the ChatGPT plan Codex is signed in to; a
+#: Codex signed in with an API key is refused (CODEX_CLI).
 CODEX = "codex"
 
 #: The program, as shutil.which looks for it: `codex` on PATH.
@@ -664,10 +665,12 @@ def _codex_account(status: subprocess.CompletedProcess) -> Credential:
 def codex_verdict(command: list[str] | None = None) -> EngineVerdict:
     """Whether Codex CLI can be the engine here (card #422): the program
     `command` (CODEX_COMMAND unless the user set a template) names on PATH
-    and `codex login status` saying signed in, under CODEX_PROBE_SECONDS.
-    Never raises; a verdict reports. Whether the plan is at its usage limit
-    is not knowable here without a model call; the first run says, and the
-    batch stops on it naming the reset time (codex_reply)."""
+    and `codex login status` saying signed in to the ChatGPT plan (an
+    API-key sign-in bills per call and is refused), under
+    CODEX_PROBE_SECONDS. Never raises; a verdict reports. Whether the plan
+    is at its usage limit is not knowable here without a model call; the
+    first run says, and the batch stops on it naming the reset time
+    (codex_reply)."""
     return _cli_verdict(CODEX_CLI, command, CODEX_PROBE_SECONDS)
 
 
@@ -799,12 +802,16 @@ def _codex_refuse(message: str) -> None:
     raise CommandFailed(f"Codex CLI reported an error: {message}")
 
 
-#: Codex CLI, as the one verdict and the one factory branch see it.
+#: Codex CLI, as the one verdict and the one factory branch see it. Signed
+#: in with an API key (`codex login --with-api-key`; the status check says
+#: "Logged in using an API key", measured on 0.155.1), every frame would
+#: bill the OpenAI API per token with none of the cloud guards, so that
+#: account kind is refused: this engine runs on the ChatGPT plan only.
 CODEX_CLI = CliEngine(
     CODEX, "Codex CLI", CODEX_PROGRAM, CODEX_INSTALL, CODEX_SIGN_IN,
     CODEX_STATUS, CODEX_COMMAND, codex_reply,
     status_check=lambda command: list(CODEX_STATUS), signed_out=_codex_signed_out,
-    account=_codex_account, subscription="the ChatGPT plan",
+    account=_codex_account, subscription="the ChatGPT plan", bills_per_call=("an API key",),
 )
 
 #: The subscription CLIs, in the owner's order: the verdicts after the

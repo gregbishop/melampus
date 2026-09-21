@@ -4881,21 +4881,26 @@ def test_detection_codex_at_its_usage_limit_is_still_signed_in(monkeypatch, tmp_
 
 
 @posix_only
-def test_detection_codex_signed_in_with_an_api_key_names_the_kind_and_never_the_key(
+def test_detection_codex_signed_in_with_an_api_key_is_refused_naming_the_kind_and_never_the_key(
     monkeypatch, tmp_path
 ):
     """Measured on 0.155.1: after `codex login --with-api-key`, `codex login
     status` exits 0 with "Logged in using an API key - " and a masked
-    fragment of the key (first eight characters, `***`, last five). The
-    verdict names the account kind, as it does the ChatGPT plan, and never
-    any part of the key: the reason goes to --detect-engines' stdout, to the
-    plugin's melampus-engines.json on disk, and to the settings dialog."""
+    fragment of the key (first eight characters, `***`, last five). That
+    sign-in bills the OpenAI API per token, not the ChatGPT plan, and
+    `codex` is a local engine with none of the cloud guards, so the verdict
+    refuses it: unavailable, naming the account kind, that it bills per
+    call, and `codex login` (no flags: the plan); and never any part of the
+    key: the reason goes to --detect-engines' stdout, to the plugin's
+    melampus-engines.json on disk, and to the settings dialog."""
     _fake_codex(monkeypatch, tmp_path, mode="api-key")
     verdict = _verdict("codex")
-    assert verdict.available, verdict.reason
-    assert "API key" in verdict.reason
+    assert not verdict.available, verdict.reason
+    assert "API key" in verdict.reason and "per call" in verdict.reason
+    assert providers.CODEX_SIGN_IN in verdict.reason
     for key_material in (_CODEX_API_KEY_FRAGMENT, "syntheti", "a-key", "***"):
         assert key_material not in verdict.reason, f"key material in a verdict: {verdict.reason}"
+    assert "codex" not in providers._works_here(providers.detect_engines())
 
 
 @posix_only

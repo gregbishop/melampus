@@ -110,8 +110,10 @@ it exits and the pid its tree is stopped by could be someone else's: start
 melampus from a shell, or restore the signal's default in the launcher; and
 Claude Code and Codex CLI are refused as not installed or, by their own `claude
 auth status` and `codex login status`, as not signed in, or as signed in but not
-to the subscription. The one failure that stops a batch rather than being
-recorded on the frame is a command exiting
+to the subscription (Claude Code's login set aside for a key; an account that
+bills per call, `CliEngine.bills_per_call`: Codex's API-key sign-in). The one
+failure that stops a batch rather than being recorded on the frame is a command
+exiting
 non-zero (`CommandFailed`): that is a broken engine, not a bad file, and every
 frame would fail the same way. A CLI's decoder raises the same before the
 exit code is judged, so a plan at its usage limit (Codex fails the turn on

@@ -230,9 +230,13 @@ read or needed here; nothing is charged per call, so the cloud guards (the
 estimate, `max_images`, the cloud cache file) do not apply. Detection
 (`--detect-engines`) reports `codex` as not installed when nothing on PATH is
 called `codex`, as not signed in when `codex login status` exits non-zero
-(its documented, cheap check: no model call), and otherwise as available,
-naming the account kind; a run asked for `codex` is refused the same way
-before any image is read, exit 3. The plan's usage limit is not knowable
+(its documented, cheap check: no model call), as refused when that check says
+the sign-in is an API key (`codex login --with-api-key`: that account
+bills per call, which none of the cloud guards would watch here, so the
+reason names the kind, never the key, and says to run `codex login` for the
+plan), and otherwise as available, naming the account kind; a run asked for
+`codex` is refused the same way before any image is read, exit 3. The plan's
+usage limit is not knowable
 without a model call (the status check does not report it, nor does
 `codex doctor`), so detection does not try: a plan at its limit is caught
 at the first reply (Codex fails the turn with "You've hit your usage limit
