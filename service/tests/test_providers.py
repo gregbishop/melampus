@@ -3621,16 +3621,16 @@ def test_claude_code_primary_asks_claude_code_once_refused_or_built(monkeypatch,
     assert _status_checks(log) == [["auth", "status", "--json"]]
 
     log.unlink()
-    script = _fake_claude(monkeypatch, tmp_path).with_name("bin") / CLAUDE
+    _fake_claude(monkeypatch, tmp_path)
     backend = providers.build_primary_backend(_cfg(model={"backend": "claude-code"}))
     assert _status_checks(log) == [["auth", "status", "--json"]]
-    assert backend.executable == str(script)
+    assert backend.executable == shutil.which(CLAUDE)
 
     log.unlink()
-    own = [str(script), "-p", "--output-format", "json", "{image} {prompt}"]
+    own = [shutil.which(CLAUDE), "-p", "--output-format", "json", "{image} {prompt}"]
     backend = providers.build_primary_backend(_cfg(model={"backend": "claude-code", "command": own}))
     assert _status_checks(log) == [["auth", "status", "--json"]], "the built-in's verdict was asked too"
-    assert backend.executable == str(script)
+    assert backend.executable == shutil.which(CLAUDE)
 
 
 @posix_only
