@@ -335,15 +335,16 @@ class OpenAIBackend(VLMBackend):
         )
 
 
-def _hang_up(line, expired: threading.Event) -> None:
-    """The deadline, from its timer, or the cancellation, from its watcher
-    (`expired` is whichever event says which). `line` is the _Deadline holding the
+def _hang_up(line, event: threading.Event) -> None:
+    """The deadline, from its timer, or the cancellation, from its watcher:
+    `event` is the one that says which, the _Deadline's `expired` or its
+    `cancelled`. `line` is the _Deadline holding the
     exchange's socket as `sock`, handed over the moment `_Noted` makes it
     and again, for https, as the wrapped socket before the handshake. Not
     close(): the response being read holds the socket's file object, and
     socket.close() waits for that to go before it really closes, so the
     blocked read would read on. shutdown(SHUT_RDWR) ends the stream now.
-    And `expired`, because http.client takes end-of-stream as the end of
+    And `event`, because http.client takes end-of-stream as the end of
     the headers: a status line that arrived before the trickle would still
     parse as a 200, and the caller must know the deadline finished the
     response, not the server. No socket yet means the caller is still
@@ -352,7 +353,7 @@ def _hang_up(line, expired: threading.Event) -> None:
     the socket existed had nothing to hang up. A socket the main thread
     already closed (the probe's `finally`, or urllib once the headers are
     in) raises OSError, which is suppressed."""
-    expired.set()
+    event.set()
     sock = line.sock
     if sock is not None:
         with contextlib.suppress(OSError):
