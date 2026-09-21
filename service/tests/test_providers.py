@@ -3424,19 +3424,21 @@ def account(restricted, bare, sources, named):
 
 
 # The global flags the real CLI takes before a subcommand, the
-# settings-deciding ones read off; a print-mode run parses argv whole below.
+# settings-deciding ones read off, in either spelling (`--settings file`
+# or `--settings=file`; measured on 2.1.278, both report the same status);
+# a print-mode run parses argv whole below.
 command = list(argv)
 global_flags = {{"restricted": False, "bare": False, "sources": ["user", "project", "local"], "named": None}}
 while command and command[0].startswith("--"):
-    flag = command.pop(0)
+    flag, attached, value = command.pop(0).partition("=")
     if flag == "--restricted":
         global_flags["restricted"] = True
     elif flag == "--bare":
         global_flags["bare"] = True
     elif flag == "--setting-sources":
-        global_flags["sources"] = command.pop(0).split(",")
+        global_flags["sources"] = (value if attached else command.pop(0)).split(",")
     elif flag == "--settings":
-        global_flags["named"] = command.pop(0)
+        global_flags["named"] = value if attached else command.pop(0)
 if command[:2] == ["auth", "status"]:
     if MODE == "hung":
         import time
@@ -4074,6 +4076,16 @@ def test_the_status_check_is_probed_under_the_templates_own_settings_flags(monke
     assert f"claude --restricted --settings {helper} auth status --json" in reason
     assert _status_checks(log) == [["--restricted", "--settings", str(helper), "auth", "status", "--json"]]
 
+    # The same helper in the CLI's other spelling, `--settings=file` (Codex
+    # round 3, C1 and S1; measured on 2.1.278: `claude --restricted
+    # --settings=helper.json auth status --json` reports authMethod
+    # api_key_helper, apiKeySource apiKeyHelper, as the two-argument form
+    # does): carried as given, and refused the same way.
+    equals = [*template[:-1], f"--settings={helper}", template[-1]]
+    reason = refused(equals)
+    assert f"claude --restricted --settings={helper} auth status --json" in reason
+    assert _status_checks(log) == [["--restricted", f"--settings={helper}", "auth", "status", "--json"]]
+
     # The user's settings file names the helper: the built-in template loads
     # no settings file and is available; a template without --restricted
     # loads it and is refused; one with `--setting-sources user` in the
@@ -4091,6 +4103,10 @@ def test_the_status_check_is_probed_under_the_templates_own_settings_flags(monke
     user = [*without[:-1], "--setting-sources", "user", without[-1]]
     refused(user)
     assert _status_checks(log) == [["--setting-sources", "user", "auth", "status", "--json"]]
+
+    user_equals = [*without[:-1], "--setting-sources=user", without[-1]]
+    refused(user_equals)
+    assert _status_checks(log) == [["--setting-sources=user", "auth", "status", "--json"]]
 
     both = [*template[:-1], "--setting-sources", "user", template[-1]]
     assert build(both).executable == shutil.which(CLAUDE)
@@ -4117,7 +4133,13 @@ def test_the_status_check_argv_is_derived_from_the_template():
     """C1, the one source: the status check's global flags are read off the
     template that will run, so the built-in's check carries its
     --restricted and nothing else, a template with none of the flags is
-    checked with none, and the flags keep their values and order."""
+    checked with none, and the flags keep their values and order, in
+    either spelling the CLI takes: `--flag value` or `--flag=value`
+    (Codex round 3, C1 and S1; measured on 2.1.278, `claude --restricted
+    --settings=helper.json auth status --json` reports apiKeySource
+    apiKeyHelper exactly as the two-argument form does, and
+    `--setting-sources=bogus` is refused as an invalid setting source, so
+    the `=` spelling is carried as given, one argument)."""
     assert providers.claude_code_status(providers.CLAUDE_CODE_COMMAND) == [
         "--restricted", "auth", "status", "--json"]
     assert providers.claude_code_status([CLAUDE, "-p", "--output-format", "json", "{image} {prompt}"]) == [
@@ -4129,6 +4151,13 @@ def test_the_status_check_argv_is_derived_from_the_template():
         "auth", "status", "--json"]
     assert providers.claude_code_status([CLAUDE, "-p", "--settings", "{image} {prompt}"]) == [
         "--settings", "{image} {prompt}", "auth", "status", "--json"]
+    equals = [CLAUDE, "-p", '--settings={"apiKeyHelper": "x"}', "--add-dir=/tmp",
+              "--setting-sources=user,project", "--restricted", "{image} {prompt}"]
+    assert providers.claude_code_status(equals) == [
+        '--settings={"apiKeyHelper": "x"}', "--setting-sources=user,project", "--restricted",
+        "auth", "status", "--json"]
+    assert providers.claude_code_status([CLAUDE, "-p", "--settings=a=b", "--bare", "{image} {prompt}"]) == [
+        "--settings=a=b", "--bare", "auth", "status", "--json"]
 
 
 @posix_only
@@ -4271,6 +4300,39 @@ def test_claude_code_on_an_api_key_is_refused_before_any_image_is_read(
     assert code == 3, err
     assert "not to a Claude subscription" in err and "unset ANTHROPIC_API_KEY" in err
     assert providers.CLAUDE_CODE_SIGN_IN in err
+    assert_no_image_was_touched(err, "sign-in check")
+
+
+@posix_only
+def test_claude_code_on_a_helper_named_by_settings_is_refused_before_any_image_is_read(
+    monkeypatch, tmp_path, capsys, link_to_nowhere
+):
+    """Codex round 3, C1 and S1, at analysis time: a `[model] command` of
+    the user's own carrying `--settings=helper.json` in the CLI's `=`
+    spelling, the file naming an `apiKeyHelper`, on a signed-in Mac, and
+    the folder's one image a link to nowhere. The status check carries the
+    flag as spelled (measured on 2.1.278, no model call: `claude
+    --restricted --settings=helper.json auth status --json` reports
+    authMethod api_key_helper, apiKeySource apiKeyHelper), so the run is
+    refused as the two-argument spelling is: exit 3 naming the helper to
+    remove, before any image is read, never mentioning the file."""
+    from melampus.cli import main
+
+    log = _fake_claude(monkeypatch, tmp_path)
+    helper = tmp_path / "helper.json"
+    helper.write_text(json.dumps({"apiKeyHelper": "/usr/bin/true"}), encoding="utf-8")
+    template = providers.CLAUDE_CODE_COMMAND
+    own = [*template[:-1], f"--settings={helper}", template[-1]]
+    settings = tmp_path / "settings.toml"
+    settings.write_text(
+        f'[model]\nbackend = "claude-code"\ncommand = {json.dumps(own)}\n', encoding="utf-8")
+
+    code = main([str(link_to_nowhere), "--config", str(settings), "--cache", str(tmp_path / "cache.jsonl")])
+
+    err = capsys.readouterr().err
+    assert code == 3, err
+    assert "not to a Claude subscription" in err and "remove apiKeyHelper from the settings" in err, err
+    assert _status_checks(log) == [["--restricted", f"--settings={helper}", "auth", "status", "--json"]]
     assert_no_image_was_touched(err, "sign-in check")
 
 

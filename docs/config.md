@@ -147,7 +147,8 @@ documented exit 1 with nothing on stderr: a cheap check, no model call, under
 the template's own settings flags, `--restricted` for the built-in, so it
 reads the same settings and the same environment as the run; a command of
 your own is checked under whatever it carries of `--restricted`, `--bare`,
-`--settings` and `--setting-sources`, values included, so one that leaves
+`--settings` and `--setting-sources`, values included, in either spelling
+(`--settings file` or `--settings=file`), so one that leaves
 `--restricted` out or names a settings file with an `apiKeyHelper` is
 refused as the run would bill it, below, and one with `--bare` is never
 signed in, since bare mode never reads the login), as signed in but not to

@@ -185,7 +185,12 @@ CLAUDE_CODE_STATUS = ("auth", "status", "--json")
 #: on the signed-in Mac). A check under fixed flags would approve the
 #: subscription while the run billed an apiKeyHelper's key (Codex round
 #: 2, C1); one read off the template is the run's own configuration,
-#: whatever the template. Flags that decide nothing about credentials
+#: whatever the template, in whichever spelling it uses (`--settings
+#: file` or `--settings=file`: measured on 2.1.278, `claude --restricted
+#: --settings=helper.json auth status --json` reports the helper exactly
+#: as the two-argument form does, and a check that dropped the `=` form
+#: approved the subscription for a run billing the helper's key; Codex
+#: round 3, C1 and S1). Flags that decide nothing about credentials
 #: (`--add-dir`, the tools, the prompt) are not carried.
 CLAUDE_CODE_SETTINGS_FLAGS = {
     CLAUDE_CODE_ISOLATION: 0, "--bare": 0, "--settings": 1, "--setting-sources": 1,
@@ -340,17 +345,23 @@ def _key_required(engine: str) -> str:
 def claude_code_status(command: list[str]) -> list[str]:
     """The status check for `command`, the template that will run: its
     settings-deciding global flags (CLAUDE_CODE_SETTINGS_FLAGS, values
-    included, in the template's order) before CLAUDE_CODE_STATUS, so the
-    credential the check reports is the one that template's run would
-    bill (Codex round 2, C1). The argv after the executable."""
+    included, in the template's order and spelling) before
+    CLAUDE_CODE_STATUS, so the credential the check reports is the one
+    that template's run would bill (Codex round 2, C1). A value the
+    template attaches with `=` (`--settings=file`, the CLI's other
+    spelling: measured on 2.1.278, it reports the same status as
+    `--settings file`) is carried as that one argument (Codex round 3, C1
+    and S1). The argv after the executable."""
     carried: list[str] = []
     arguments = iter(command[1:])
     for argument in arguments:
-        values = CLAUDE_CODE_SETTINGS_FLAGS.get(argument)
+        flag, attached, _ = argument.partition("=")
+        values = CLAUDE_CODE_SETTINGS_FLAGS.get(flag)
         if values is None:
             continue
         carried.append(argument)
-        carried.extend(next(arguments, "") for _ in range(values))
+        if not attached:
+            carried.extend(next(arguments, "") for _ in range(values))
     return [*carried, *CLAUDE_CODE_STATUS]
 
 
