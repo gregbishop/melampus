@@ -1118,6 +1118,25 @@ def test_bounded_block_asks_the_cancel_once_more_when_the_socket_timed_out_befor
     assert not deadline.expired.is_set() and not deadline.cancelled.is_set()
 
 
+def test_bounded_block_re_raises_a_failure_that_is_not_the_timeout_though_the_cancel_is_true(monkeypatch):
+    """Code review round 12 (backend.py:718), rule 7: `_cancelled` asks the
+    predicate once more only once the block has timed out, the timer's
+    `expired` or the socket's TimeoutError (c099782: "once the block has
+    timed out the predicate decides"), and no test pinned the guard: with
+    it dropped, a failure of any shape while the marker is present would
+    be read as the cancellation, exit 4 and `cancelled` for a 400 Ollama
+    answered. Given a watcher that never ticks, a deadline not fired, the
+    predicate true, and the block ending with a failure that is not the
+    timeout, that failure is raised as it was, and neither event is set.
+    Red against the guard dropped (`return cancel is not None and
+    cancel()`), green at head."""
+    monkeypatch.setattr(_Deadline, "WATCH", 60.0)
+    with pytest.raises(RuntimeError, match="answered 400"):
+        with _bounded_pull(60.0, cancel=lambda: True) as deadline:
+            raise RuntimeError("Ollama answered 400: bad")
+    assert not deadline.cancelled.is_set() and not deadline.expired.is_set()
+
+
 def test_ollama_probe_stays_on_loopback_whatever_proxy_the_environment_names(monkeypatch):
     """Security: the probe is a loopback call and must stay one. urlopen's
     default opener honours `http_proxy` (and, on a Mac, the system proxy
