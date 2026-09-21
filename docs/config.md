@@ -179,7 +179,9 @@ cache and the folder the OS named: check that folder's permissions.
   as it opens, so a stalled connection ends here rather than in Lightroom),
   or answers with something that is not a hub's answer (a captive portal's
   page, a proxy's block page or JSON error, a listing whose files have no
-  name or a name that is not a string, whose sizes are not numbers, or
+  name or a name that is not a string, whose sizes are not non-negative
+  integers (a string, a negative number, a fraction, or one so large it is
+  not a number the plugin's JSON decoder can read), or
   whose dates or evaluation results the hub library cannot read: whatever
   the answer does wrong), which counts as the hub not reached, `installed`
   then what the cache lays out; the status never fails for the network
