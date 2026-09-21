@@ -112,16 +112,25 @@ shell.
 
 ### The Download row
 
-The MLX model is not bundled; the dialog fetches it (card #408). Where
-detection says mlx can run, the dialog asks the executable once more as it
-opens, `--model-status` (docs/config.md § Downloading the model), and shows a
-row under the picker while the picked engine is mlx, or *Let Melampus choose*
-resolves to it (the first engine detection says can run, which is the
-executable's own default):
+The MLX model is not bundled; the dialog fetches it (card #408), and it
+fetches Ollama's model the same way (card #409). For each engine with a
+model, mlx and ollama, that detection says can run here, the dialog asks the
+executable once more as it opens, `--model-status --backend <engine>`
+(docs/config.md § Downloading the model), and builds one row from the
+answer, shown under the picker while that engine is picked, or *Let Melampus
+choose* resolves to it (the first engine detection says can run, which is
+the executable's own default). Every command the row runs carries the engine
+as `--backend`, the argument a run already passes, and the executable does
+the right thing for it: the hub for mlx, Ollama's own pull for ollama; the
+row, the parser and the poller are the same for both. The row for ollama
+names Ollama's model (`[model] ollama_model`) and says *size unknown* until
+Ollama holds it, since Ollama lists sizes for held models only; the progress
+then shows the layers' total as they appear, and *Installed* carries the
+size Ollama lists.
 
 - Model absent: a button **Download `<repo>` (`<size>`)**, the size from the
   hub, or *size unknown* when it could not be reached. Clicking it runs
-  `<executable> --download-model` with stdout redirected to
+  `<executable> --download-model --backend <engine>` with stdout redirected to
   `melampus-download.progress` and stderr to `melampus-download.log`, both in
   the OS temp directory like the analysis log, because `LrTasks.execute`
   blocks and returns only the exit code: it cannot stream stdout. The command

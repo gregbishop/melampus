@@ -695,3 +695,26 @@ def test_executable_downloads_the_model_from_the_hub_with_no_python_on_the_path(
     _assert_no_missing_module(tail, "the executable does not carry the hub library")
     assert proc.returncode == 0, f"exit {proc.returncode}:\n{tail}"
     assert_download_completed(proc.stdout, hub_env)
+
+
+def test_executable_reports_ollamas_model_absent_with_no_server_and_exits_0(
+    built_executable: Path, tmp_path: Path
+):
+    """Card #409, from the executable alone: `--model-status --backend
+    ollama` with nothing answering at the configured address (a closed
+    port on loopback, so a developer's Ollama cannot answer) prints one
+    JSON object saying the model is absent with the size unknown, exit 0,
+    so the Settings dialog opens with Ollama down. Nothing is pulled."""
+    port = closed_port()
+    settings = tmp_path / "settings.toml"
+    settings.write_text(f'[model]\nollama_url = "http://127.0.0.1:{port}"\n', encoding="utf-8")
+    proc = subprocess.run(
+        [str(built_executable), "--model-status", "--backend", "ollama", "--config", str(settings)],
+        env=no_python_environment(tmp_path), capture_output=True, text=True, timeout=600,
+    )
+    assert proc.returncode == 0, f"exit {proc.returncode}:\n{proc.stderr[-3000:]}"
+    status = json.loads(proc.stdout)
+    assert status["repo"] == "qwen3-vl:8b-instruct" and status["installed"] is False
+    assert status["bytes_total"] is None and status["bytes_done"] == 0 and status["path"] is None
+    assert status["cancel_path"].endswith("download-cancel")
+    assert "Traceback" not in proc.stderr

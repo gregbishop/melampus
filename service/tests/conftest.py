@@ -35,17 +35,20 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import http.client
 import importlib.util
 import json
 import platform
 import shutil
 import socket
 import socketserver
+import struct
 import subprocess
 import sys
 import threading
 import time
-from collections.abc import Iterator
+import urllib.request
+from collections.abc import Callable, Iterator
 from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from pathlib import Path
 from types import ModuleType
@@ -95,6 +98,31 @@ def pytest_addoption(parser: pytest.Parser) -> None:
     )
 
 
+@pytest.fixture(autouse=True)
+def no_real_hub(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Every test, whatever it exercises, is pointed away from the real
+    Hugging Face hub and the real cache (docs/brief.md § hard rules: no
+    model downloads; docs/plugin.md: weights are fetched only by the owner
+    running a command). A test that reaches the hub by mistake, say a red
+    test against a dispatch not yet written, then fails on a closed
+    loopback port instead of fetching 18 GB into ~/.cache. The environment
+    covers child processes; the constants cover this process, since the
+    hub library reads the environment once at import. The tests that mean
+    to reach a hub pass the fake's endpoint explicitly or through hub_env."""
+    from huggingface_hub import constants
+
+    closed = f"http://127.0.0.1:{closed_port()}"
+    home = tmp_path / "no-real-hub"
+    monkeypatch.setenv("HF_ENDPOINT", closed)
+    monkeypatch.setenv("HF_HOME", str(home))
+    monkeypatch.setattr(constants, "ENDPOINT", closed)
+    # The file URL template bakes the endpoint in at import; hf_hub_url swaps
+    # an explicit endpoint in only where the template starts with ENDPOINT.
+    monkeypatch.setattr(constants, "HUGGINGFACE_CO_URL_TEMPLATE",
+                        closed + "/{repo_id}/resolve/{revision}/{filename}")
+    monkeypatch.setattr(constants, "HF_HUB_CACHE", str(home / "hub"))
+
+
 @pytest.fixture(scope="session")
 def repo() -> Path:
     """The checkout root, for tests that reach outside service/ (fixtures/,
@@ -139,9 +167,9 @@ class QuietHandler(BaseHTTPRequestHandler):
 
 
 def recording_handler(seen: list[str]) -> type[QuietHandler]:
-    """A handler that answers 200 `{}` to any GET or POST and appends the path
-    it was asked to `seen`: the server a test stands up to prove the client
-    under test never reached it (a proxy, a redirect's destination)."""
+    """A handler that answers 200 `{}` to any GET, POST or DELETE and appends
+    the path it was asked to `seen`: the server a test stands up to prove the
+    client under test never reached it (a proxy, a redirect's destination)."""
 
     class Recording(QuietHandler):
         def do_GET(self) -> None:  # noqa: N802 - http.server's name
@@ -154,7 +182,56 @@ def recording_handler(seen: list[str]) -> type[QuietHandler]:
             self.rfile.read(int(self.headers.get("Content-Length") or 0))
             self.do_GET()
 
+        do_DELETE = do_POST  # noqa: N815 - http.server's name
+
     return Recording
+
+
+def trickle(wfile, data: bytes) -> None:
+    """`data` one byte every hundred milliseconds: each byte within the
+    socket timeout, the whole (two seconds for twenty bytes) well past a
+    sub-second deadline. The one trickle for every listener that holds a
+    call for as long as it likes (the probe's headers, a frame's body, the
+    list's and the delete's reply, a line of the pull's stream). Once the
+    client hangs up, the next write raises; a caller's suppress(OSError)
+    ends the trickle there."""
+    for byte in data:
+        time.sleep(0.1)
+        wfile.write(bytes([byte]))
+
+
+def redirecting_handler(elsewhere: str) -> type[QuietHandler]:
+    """A handler that answers 302 to any GET, POST or DELETE with a Location
+    at `elsewhere` (a server's root) plus the path it was asked: the squatter
+    a test stands up at the address to prove the client under test never
+    follows a redirect off it, `elsewhere` being a recording server's."""
+
+    class Redirecting(QuietHandler):
+        def do_GET(self) -> None:  # noqa: N802 - http.server's name
+            self.rfile.read(int(self.headers.get("Content-Length") or 0))
+            self.send_response(302)
+            self.send_header("Location", f"{elsewhere}{self.path}")
+            self.end_headers()
+
+        do_POST = do_DELETE = do_GET  # noqa: N815 - http.server's names
+
+    return Redirecting
+
+
+@contextlib.contextmanager
+def proxy_in_the_environment(monkeypatch: pytest.MonkeyPatch, seen: list[str]) -> Iterator[HTTPServer]:
+    """A proxy on loopback recording every request it is asked to `seen`,
+    named by `http_proxy` for the block with no bypass list in the way: what
+    urlopen's default opener would send a request through. That opener is
+    built once, reading the proxy variables then, so it is started fresh
+    for the environment set here. A client that stays at its address
+    leaves `seen` empty."""
+    for name in ("no_proxy", "NO_PROXY"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(urllib.request, "_opener", None)
+    with loopback_server(recording_handler(seen)) as proxy:
+        monkeypatch.setenv("http_proxy", f"http://127.0.0.1:{proxy.server_port}")
+        yield proxy
 
 
 class Silent(socketserver.BaseRequestHandler):
@@ -167,6 +244,108 @@ class Silent(socketserver.BaseRequestHandler):
         with contextlib.suppress(OSError):
             self.request.recv(65536)
             self.request.recv(65536)
+
+
+class BadStatusLine(socketserver.BaseRequestHandler):
+    """A listener that answers whatever it is asked with a status line that
+    is not HTTP, carrying an escape sequence and a carriage return."""
+
+    def handle(self) -> None:
+        with contextlib.suppress(OSError):
+            self.request.recv(65536)
+            self.request.sendall(b"\x1b[31mHTTP/9.9 OK\r\x07fake log line\r\n\r\n")
+
+
+def read_request(connection: socket.socket) -> None:
+    """The whole request off `connection`, for a raw listener that answers
+    it: the head to its blank line and then Content-Length bytes of body.
+    http.client sends the two in two `send` calls, and a listener answering
+    after the head alone answers before the body is sent, so a client's
+    failure would be the body's send (EPIPE, a URLError to urllib) and not
+    the read it is meant to be."""
+    with connection.makefile("rb") as request:
+        request.readline()
+        headers = http.client.parse_headers(request)
+        request.read(int(headers.get("Content-Length") or 0))
+
+
+def chunked_pull_answer(line: bytes) -> bytes:
+    """A pull's stream (a chunked 200 of application/x-ndjson, as Ollama
+    writes it) carrying `line`, one of its objects, as one chunk, and then
+    nothing: the answer a raw listener (`stalling_handler`,
+    `resetting_handler`) gives before it does what it is there to do."""
+    return (b"HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\n"
+            b"Transfer-Encoding: chunked\r\n\r\n"
+            + f"{len(line):x}".encode() + b"\r\n" + line + b"\r\n")
+
+
+def stalling_handler(answer: bytes, then: Callable[[], None] = lambda: None) -> type[socketserver.BaseRequestHandler]:
+    """A listener that answers whatever it is asked with `answer`, calls
+    `then`, and then writes nothing more, holding the connection open until
+    the client hangs up: an Ollama that stalls mid-pull (a registry that
+    stops answering it, a proxy holding the stream), the shape in which a
+    read blocks for as long as the caller's timeout allows. Served threaded,
+    it does not hold `loopback_server`'s shutdown while a client is still
+    reading."""
+
+    class Stalling(socketserver.BaseRequestHandler):
+        def handle(self) -> None:
+            with contextlib.suppress(OSError):
+                read_request(self.request)
+                self.request.sendall(answer)
+                then()
+                while self.request.recv(65536):
+                    pass
+
+    return Stalling
+
+
+def resetting_handler(answer: bytes) -> type[socketserver.BaseRequestHandler]:
+    """A listener that answers whatever it is asked with `answer` and then
+    resets the connection (SO_LINGER at zero makes the close an RST, not a
+    FIN, so the client's next read is a ConnectionResetError, the raw
+    socket error urllib lets through unwrapped): Ollama killed, or a
+    listener hanging up, while the reply is being read. The whole request
+    is read first (`read_request`), so the reset is what the client reads,
+    whatever segments the request arrives in. The socket is closed here,
+    ahead of the server's own shutdown, so the reset is what the client
+    sees, not the orderly close."""
+
+    class Resetting(socketserver.BaseRequestHandler):
+        def handle(self) -> None:
+            with contextlib.suppress(OSError):
+                read_request(self.request)
+                self.request.sendall(answer)
+                self.request.setsockopt(
+                    socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+                self.request.close()
+
+    return Resetting
+
+
+class TricklingPull(QuietHandler):
+    """A listener answering a pull's stream (POST /api/pull) with two whole
+    lines, each after a pause within the deadline the tests give and the
+    two together past it (a deadline on the exchange alone would end the
+    stream before the second), then a line trickled a byte every tenth of
+    a second: each byte within the socket timeout, the whole well past the
+    deadline. The shape that held the pull, and the cancel marker read
+    between lines, for as long as it liked (security review round 4)."""
+
+    PAUSE = 0.3
+    WHOLE = b'{"status": "pulling manifest"}\n'
+    TRICKLED = b'{"status": "success"}\n'
+
+    def do_POST(self) -> None:  # noqa: N802 - http.server's name
+        self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        with contextlib.suppress(OSError):
+            self.send_response(200)
+            self.send_header("Content-Type", "application/x-ndjson")
+            self.end_headers()
+            for _ in range(2):
+                time.sleep(self.PAUSE)
+                self.wfile.write(self.WHOLE)
+            trickle(self.wfile, self.TRICKLED)
 
 
 # What `.venv/bin/melampus-id` runs, spelled so it works from any interpreter
@@ -507,3 +686,205 @@ def hub_env(fake_hub: FakeHub, tmp_path: Path) -> dict[str, str]:
     under tmp_path, so the real cache is never touched and nothing can reach
     the internet (Done-when 3 of card #407)."""
     return {"HF_ENDPOINT": fake_hub.endpoint, "HF_HOME": str(tmp_path / "hf")}
+
+
+# --- the fake Ollama (card #406, #409) -----------------------------------
+#
+# An HTTP server on 127.0.0.1 speaking the endpoints of Ollama's docs/api.md
+# that the service uses: § Version (`GET /api/version`, the probe),
+# § Generate a chat completion (`POST /api/chat`, one response object with
+# `stream` false), and for the Download button (card #409) § Pull a Model
+# (`POST /api/pull`, a stream of JSON objects one per line: `pulling
+# manifest`, then per layer `pulling <digest>` with `digest`, `total` and
+# `completed`, then the verifying, writing and removing statuses, then
+# `success`; an error is an object with `error`, mid-stream once content
+# has started, else the HTTP status with the same object). No model, no
+# weights, no network beyond loopback.
+#
+# `status` is what the version probe answers, `delay` holds that answer,
+# `replies` are the texts the chat answers with in order (a 404 with Ollama's
+# not-found error once they run out); every chat request's JSON body lands on
+# `chats`. `library` is what can be pulled, name -> layer sizes; `models` is
+# what is held, name -> size, filled by a pull, listed by § List Local Models
+# (`GET /api/tags`) and emptied, with the model's layers, by § Delete a Model
+# (`DELETE /api/delete`, 200, or 404 with the not-found error); `pulls` keeps every pull's body,
+# `deletes` every deletion's name and `requests` every request. `throttle` (bytes per line, seconds
+# between) slows a pull so a cancel can land mid-stream, and a pull the
+# client cut off keeps what each layer had, so the next pull of the same
+# model starts there (docs/api.md § Pull a Model: "Cancelled pulls are
+# resumed from where they left off").
+
+
+def ollama_chat_reply(model: str, text: str) -> dict:
+    """The final response object POST /api/chat answers with when `stream` is
+    false (Ollama's docs/api.md § Generate a chat completion): the text is
+    `message.content`, the counts `prompt_eval_count` and `eval_count`, the
+    other fields as the docs show them. The one shape every fake Ollama
+    answers with: FakeOllama at the HTTP boundary, and test_providers.py's
+    fake at the `urlopen` edge."""
+    return {
+        "model": model,
+        "created_at": "2026-09-18T00:00:00Z",
+        "message": {"role": "assistant", "content": text},
+        "done_reason": "stop",
+        "done": True,
+        "total_duration": 1668506709,
+        "prompt_eval_count": 26,
+        "eval_count": 83,
+    }
+
+
+class FakeOllama:
+    """The fake Ollama's state and its handler; `serve` puts it on loopback.
+    `prefix` mounts the endpoints under a path, the way a reverse proxy
+    does; any other path is Ollama's own 404."""
+
+    def __init__(
+        self, *, status: int = 200, delay: float = 0.0, replies: list[str] = (), prefix: str = "",
+        library: dict[str, list[int]] | None = None,
+    ) -> None:
+        self.chats: list[dict] = []
+        self.pulls: list[dict] = []
+        self.deletes: list[str] = []
+        self.requests: list[tuple[str, str]] = []
+        self.library = dict(library or {})
+        self.models: dict[str, int] = {}
+        self.partial: dict[tuple[str, str], int] = {}
+        self.throttle: tuple[int, float] | None = None
+        self.endpoint = ""  # set while `serve` runs
+        self.server_port = 0
+        self.release = threading.Event()
+        pending = list(replies)
+        ollama = self
+
+        class Handler(QuietHandler):
+            def do_GET(self):  # noqa: N802 - http.server's name
+                ollama.requests.append(("GET", self.path))
+                if self.path == f"{prefix}/api/tags":
+                    self._answer(200, {"models": ollama.tags()})
+                    return
+                if self.path != f"{prefix}/api/version":
+                    self._answer(404, {"error": "404 page not found"})
+                    return
+                if delay:
+                    ollama.release.wait(delay)
+                self._answer(status, {"version": "0.0.0-fake"})
+
+            def do_DELETE(self):  # noqa: N802 - http.server's name
+                ollama.requests.append(("DELETE", self.path))
+                body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                if self.path != f"{prefix}/api/delete":
+                    self._answer(404, {"error": "404 page not found"})
+                    return
+                name = body.get("model") or ""
+                ollama.deletes.append(name)
+                held = name if name in ollama.models else (name.removesuffix(":latest")
+                                                             if name.endswith(":latest") else None)
+                if held in ollama.models:
+                    # The manifest and its layers go together (server/images.go
+                    # removes the layers no other manifest references; the pull's
+                    # own "removing any unused layers"), so the next pull of the
+                    # model downloads them again from zero.
+                    del ollama.models[held]
+                    for layer in [key for key in ollama.partial if key[0] == held]:
+                        del ollama.partial[layer]
+                    self._answer(200, {})
+                else:
+                    self._answer(404, {"error": f"model '{name}' not found"})
+
+            def do_POST(self):  # noqa: N802 - http.server's name
+                ollama.requests.append(("POST", self.path))
+                body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                if self.path == f"{prefix}/api/pull":
+                    self._pull(body)
+                    return
+                if self.path != f"{prefix}/api/chat":
+                    self._answer(404, {"error": "404 page not found"})
+                    return
+                ollama.chats.append(body)
+                if not pending:
+                    self._answer(404, {"error": f"model '{body.get('model')}' not found"})
+                    return
+                self._answer(200, ollama_chat_reply(body["model"], pending.pop(0)))
+
+            def _pull(self, body: dict) -> None:
+                ollama.pulls.append(body)
+                name = body.get("model") or ""
+                if not name:
+                    self._answer(400, {"error": "invalid model name"})
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "application/x-ndjson")
+                self.end_headers()
+                try:
+                    self._line({"status": "pulling manifest"})
+                    if name not in ollama.library:
+                        self._line({"error": "pull model manifest: file does not exist"})
+                        return
+                    for index, size in enumerate(ollama.library[name]):
+                        digest = "sha256:" + hashlib.sha256(f"{name}:{index}".encode()).hexdigest()
+                        line = {"status": f"pulling {digest[7:19]}", "digest": digest, "total": size}
+                        done = ollama.partial.get((name, digest), 0)
+                        if done == size:
+                            # A layer already held is reported once, complete
+                            # (server/download.go), whether the whole model is
+                            # installed or a cut-off pull kept this layer alone.
+                            self._line({**line, "completed": done})
+                            continue
+                        if done == 0:
+                            self._line(line)
+                        step, pause = ollama.throttle or (size, 0.0)
+                        while done < size:
+                            done = min(done + step, size)
+                            ollama.partial[(name, digest)] = done
+                            self._line({**line, "completed": done})
+                            time.sleep(pause)
+                    for status_ in ("verifying sha256 digest", "writing manifest", "removing any unused layers"):
+                        self._line({"status": status_})
+                    ollama.models[name] = sum(ollama.library[name])
+                    self._line({"status": "success"})
+                except (BrokenPipeError, ConnectionResetError):
+                    # The client closed the stream: the pull stops with what
+                    # each layer had kept, for the next pull to start from.
+                    self.close_connection = True
+
+            def _line(self, item: dict) -> None:
+                self.wfile.write(json.dumps(item).encode("utf-8") + b"\n")
+                self.wfile.flush()
+
+            def _answer(self, code: int, payload: dict) -> None:
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps(payload).encode("utf-8"))
+
+        self.handler = Handler
+
+    def tags(self) -> list[dict]:
+        """The models held, as § List Local Models lists them: `name` and
+        `model` with the tag (`latest` when the pull named none, § Model
+        names), `size`, `digest`, `modified_at`, `details`."""
+        return [
+            {
+                "name": name if ":" in name else f"{name}:latest",
+                "model": name if ":" in name else f"{name}:latest",
+                "modified_at": "2026-09-18T00:00:00Z", "size": size,
+                "digest": hashlib.sha256(name.encode()).hexdigest(),
+                "details": {"parent_model": "", "format": "gguf", "family": "fake",
+                            "families": ["fake"], "parameter_size": "1B", "quantization_level": "Q4_0"},
+            }
+            for name, size in self.models.items()
+        ]
+
+    @contextlib.contextmanager
+    def serve(self) -> Iterator[FakeOllama]:
+        """Serve this Ollama on loopback for the block; `endpoint` is its URL.
+        Threaded, as the hub is, so a held probe cannot block the next
+        request; a delayed answer is released when the block ends."""
+        with loopback_server(self.handler, ThreadingHTTPServer) as server:
+            self.server_port = server.server_port
+            self.endpoint = f"http://127.0.0.1:{self.server_port}"
+            try:
+                yield self
+            finally:
+                self.release.set()

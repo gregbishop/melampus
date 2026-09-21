@@ -4,6 +4,10 @@ The progress protocol is the plugin's contract (card #408): one line per update
 on stdout, defined once here in `Update` and documented in docs/config.md
 § Downloading the model. Errors go to stderr, never into the protocol.
 
+The same protocol carries an Ollama pull (card #409): `pull_updates` maps the
+stream of Ollama's pull endpoint onto it, so the plugin's parser, poller and
+row serve both engines with no second protocol.
+
 Why the bytes are fetched here and not by `snapshot_download`: huggingface_hub
 1.26 downloads each file to a process-unique temporary file, from byte zero,
 and deletes it when the run fails, so nothing survives an interrupted run for
@@ -43,10 +47,10 @@ import logging  # noqa: E402
 import re  # noqa: E402
 import shutil  # noqa: E402
 import signal  # noqa: E402
-from contextlib import AbstractContextManager, ExitStack, contextmanager, nullcontext  # noqa: E402
+from contextlib import AbstractContextManager, ExitStack, closing, contextmanager, nullcontext, suppress  # noqa: E402
 from dataclasses import asdict, dataclass  # noqa: E402
 from pathlib import Path  # noqa: E402
-from typing import Callable, Iterator  # noqa: E402
+from typing import Callable, Iterable, Iterator  # noqa: E402
 from urllib.parse import urlparse  # noqa: E402
 
 import httpx  # noqa: E402
@@ -80,6 +84,7 @@ from huggingface_hub.utils import WeakFileLock, build_hf_headers, filter_repo_ob
 from huggingface_hub.utils import logging as hub_logging  # noqa: E402 - the library's own logger, where its warnings go
 from huggingface_hub.utils._http import default_client_factory  # noqa: E402 - the library's own client, not a copy of it
 
+from .backend import OllamaBackend, ollama_request  # noqa: E402
 from .config import cache_file  # noqa: E402
 
 PROGRESS = "progress"
@@ -101,10 +106,13 @@ def cancel_marker_path() -> Path:
     return cache_file(CANCEL_MARKER)
 
 
-# How long `--model-status` waits for the hub's file listing: the hub
-# library's own request timeout. The Settings dialog runs the status as it
-# opens and waits for the exit code, so a connection the hub takes and never
-# answers must end here, not hang the dialog.
+# How long `--model-status` waits for the hub's file listing, or for Ollama's
+# list: the hub library's own request timeout. The Settings dialog runs the
+# status as it opens and waits for the exit code, so a connection the hub or
+# the server takes and never answers must end here, not hang the dialog;
+# neither call loads a model, so `[model] timeout_seconds`, which allows for
+# one loading on a frame, does not bound it (the pull and the delete wait
+# that setting: cli._model_command binds it).
 STATUS_TIMEOUT: float = constants.DEFAULT_REQUEST_TIMEOUT
 
 # The files a model's load needs: mlx-vlm's own allow patterns
@@ -153,6 +161,17 @@ PROBE_TIMEOUT: float = 0.1
 # JSON decoder shares, so two sizes of 4300 digits pass and their sum does
 # not), and the plugin reads a shorter one as `inf` or as a rounded number.
 MAX_SIZE = 2**53
+
+
+def _is_count(value: object) -> bool:
+    """Whether `value` is a count of bytes as a listing or a stream may
+    carry one: a non-negative integer of at most MAX_SIZE. A bool is an int
+    in Python and is not one; `1e309` is a float, `inf`, which `int()`
+    refuses with an OverflowError, not a ValueError, and which the plugin's
+    JSON decoder rejects as `Infinity`; above MAX_SIZE a count is one
+    `json.dumps` or the plugin's decoder cannot carry. One rule for the
+    hub's file sizes, Ollama's pull counts and its list's sizes."""
+    return type(value) is int and 0 <= value <= MAX_SIZE
 
 # The query string of any URL in a piece of text: an LFS file's bytes come
 # from the CDN at a signed URL, whose query is the signature and its expiry,
@@ -654,9 +673,7 @@ def download_model(
     """
     endpoint = _hub_at(endpoint)
     marker = cancel_marker or cancel_marker_path()
-    _remove_marker(marker)
-    completed = False
-    with _hub_warnings_redacted():
+    with _marker_cleared(marker), _hub_warnings_redacted():
         try:
             # The folders are the repo's in the cache and beside it, in `.locks`;
             # an id that is not a repo id is refused here, before the hub is asked.
@@ -681,7 +698,6 @@ def download_model(
                 # Every blob is complete and verified: the snapshot of the planned
                 # commit points at those blobs and nothing else.
                 path = _lay_out(storage, commit, blobs)
-            completed = True
         except GatedRepoError as exc:
             # A GatedRepoError is a RepositoryNotFoundError, but the repo exists:
             # what is missing is the user's access to it.
@@ -708,16 +724,6 @@ def download_model(
             raise DownloadError(f"{HELD.format(repo=repo)}, then {RERUN} ({exc})") from exc
         except (OSError, httpx.HTTPError) as exc:
             raise DownloadError(f"download of {repo} from {endpoint} failed: {exc}; {RERUN}") from exc
-        finally:
-            # A cancellation or failure already in flight is the outcome; a
-            # marker that then cannot be removed is the next run's to name.
-            # Whether one is in flight is this try's own (`completed`), not
-            # sys.exc_info(), which is whatever the caller is handling.
-            try:
-                _remove_marker(marker)
-            except DownloadError:
-                if completed:
-                    raise
     return path
 
 
@@ -732,6 +738,27 @@ def _remove_marker(marker: Path) -> None:
         raise DownloadError(
             f"the cancel marker at {marker} could not be removed ({exc}): remove it by hand, then {RERUN}"
         ) from exc
+
+
+@contextmanager
+def _marker_cleared(marker: Path) -> Iterator[None]:
+    """The cancel marker's lifecycle around one run, the MLX download's and
+    the Ollama pull's alike: `_remove_marker` on entry, before the hub or
+    Ollama is asked, its DownloadError raised; and again on exit, whatever
+    the outcome, its DownloadError raised only when nothing else is in
+    flight. A cancellation or failure leaving the block is the outcome; a
+    marker that then cannot be removed is the next run's to name. Whether
+    one is in flight is this block's own: with @contextmanager the
+    exception thrown at the `yield` is the one leaving the block, not
+    sys.exc_info(), which is whatever the caller is handling."""
+    _remove_marker(marker)
+    try:
+        yield
+    except BaseException:
+        with suppress(DownloadError):
+            _remove_marker(marker)
+        raise
+    _remove_marker(marker)
 
 
 def _cached(repo: str, cache: Path):
@@ -818,10 +845,7 @@ def model_status(repo: str, *, endpoint: str | None = None, cache_dir: Path | No
         listed: dict[str, int | None] = {f.rfilename: f.size for f in info.siblings or []}
         if not all(isinstance(name, str) for name in listed):
             raise TypeError("a file name in the listing is not a string")
-        # A bool is an int in Python; 1e309 is a float, inf, which the plugin's
-        # JSON decoder rejects as `Infinity`; above MAX_SIZE, a size or the
-        # total is one `json.dumps` or the plugin's decoder cannot carry.
-        if not all(size is None or (type(size) is int and 0 <= size <= MAX_SIZE) for size in listed.values()):
+        if not all(size is None or _is_count(size) for size in listed.values()):
             raise TypeError("a file size in the listing is not a non-negative integer, or is above MAX_SIZE")
         total: int | None = sum(size or 0 for size in listed.values())
         if total > MAX_SIZE:
@@ -944,3 +968,313 @@ def remove_model(repo: str, *, cache_dir: Path | None = None) -> Path:
         if aside.exists():
             raise DownloadError(left)
     return cached.repo_path
+
+
+# --- the same button for Ollama, through its pull (card #409) -------------
+#
+# Ollama holds its own models; the plugin's Download button asks it to pull
+# one, and the stream it answers with (docs/api.md § Pull a Model) is mapped
+# onto the protocol above, line for line, so nothing downstream knows which
+# engine is fetching.
+
+
+OLLAMA_PULL = "/api/pull"
+OLLAMA_TAGS = "/api/tags"
+OLLAMA_DELETE = "/api/delete"
+#: The most layers a pull's stream may report, and the longest digest a layer
+#: line may name: the table summing the layers (pull_updates) keeps one entry
+#: per digest, and it is whatever listens at the address that writes the
+#: lines, so with no bound a listener naming a fresh digest on every line
+#: grows the process by a line's worth per line until it dies. A model's
+#: manifest holds a handful of layers (the weights, the template, the
+#: parameters, the license), each a `sha256:` digest of 71 characters
+#: (Ollama's server/layer.go); the table holds at most the product.
+MAX_PULL_LAYERS = 1024
+MAX_DIGEST_CHARS = 256
+
+
+def _pull_error(model: str, error: object) -> DownloadError:
+    """Ollama's error, in a message naming the fix: the model and
+    `[model] ollama_model` when the library has no such model (`pull model
+    manifest: file does not exist`, its 404 as os.ErrNotExist in
+    server/images.go), else the re-run hint, since Ollama keeps the layers it
+    has and resumes them. The words are the server's and land on stderr,
+    so in the CLI log and the terminal: only their printable characters,
+    by the backend's one rule for every message carrying them
+    (OllamaBackend.plain)."""
+    words = OllamaBackend.plain(str(error))
+    if "file does not exist" in words:
+        return DownloadError(
+            f"Ollama has no model named {model} ({words}): check [model] ollama_model "
+            "is a tag from ollama.com/library"
+        )
+    return DownloadError(f"Ollama could not pull {model}: {words}; {RERUN}")
+
+
+def _json_object(raw: bytes | str, named: str) -> dict:
+    """`raw`, a JSON object the server wrote (one line of the pull's stream,
+    the list's or the delete's reply), decoded; else a DownloadError naming
+    it as `named`, bounded to its first 120 bytes: "was not JSON" for what
+    the decoder refuses, whatever it raises for it, "was not a JSON object"
+    for JSON of another shape (`[1]`, `"text"`, `5`), the words the chat's
+    `complete` uses for its reply. The decoder raises a JSONDecodeError, a
+    UnicodeDecodeError for bytes that are not UTF-8 (or the UTF-16 or -32
+    a leading byte order mark names) and a plain ValueError for an integer
+    literal past Python's 4300-digit limit, all three ValueErrors; and a
+    RecursionError, a RuntimeError, for arrays or objects nested past the
+    interpreter's recursion limit (some 20 KB of `[`, well under the reply
+    bound). All four mean the reply is not JSON."""
+    try:
+        item = json.loads(raw)
+    except (ValueError, RecursionError) as exc:
+        raise DownloadError(f"{named} was not JSON: {raw[:120]!r}") from exc
+    if not isinstance(item, dict):
+        raise DownloadError(f"{named} was not a JSON object: {raw[:120]!r}")
+    return item
+
+
+def pull_updates(model: str, lines: Iterable[bytes | str]) -> Iterator[Update]:
+    """Ollama's pull stream as protocol updates. `lines` are the response's
+    lines, one JSON object each (docs/api.md § Streaming responses; the
+    server delimits them with newlines).
+
+    The stream (§ Pull a Model): `{"status": "pulling manifest"}`, then one
+    object per layer as it downloads, `{"status": "pulling <digest>",
+    "digest", "total", "completed"}`, where `completed` may be missing until
+    any of the layer is done and the layers come one after another (a layer
+    Ollama already holds is reported once, complete); then the verifying,
+    writing-manifest and removing-unused-layers statuses; then `{"status":
+    "success"}`. Each layer line becomes `progress <sum of completed> <sum
+    of total>` over every layer seen so far; `success` becomes `done
+    <model>`; the other statuses print nothing.
+
+    An error is an object with `error` (server/routes.go streamResponse): it
+    raises DownloadError with Ollama's words, naming the model and
+    `[model] ollama_model` when the library has no such model (`pull model
+    manifest: file does not exist`, its 404), else the re-run hint, since
+    Ollama keeps the layers it has and resumes them. A stream that ends
+    before `success` is a failure too, as is a line that is not a JSON
+    object (`_json_object`, the list's and the delete's decoder too), a
+    layer line whose `total` or `completed` is not a count (`_is_count`:
+    the hub's rule for a file's size, so `1e309`, a fraction, a negative
+    number, a bool or an integer above MAX_SIZE is named, never converted),
+    a digest longer than MAX_DIGEST_CHARS or a layer past MAX_PULL_LAYERS:
+    every line is the server's to write, and a malformed one is named,
+    never a traceback.
+    """
+    layers: dict[str, tuple[int, int]] = {}
+    for raw in lines:
+        text = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else raw
+        if not text.strip():
+            continue
+        item = _json_object(text, "Ollama's pull reply")
+        error = item.get("error")
+        if error:
+            raise _pull_error(model, error)
+        status = str(item.get("status") or "")
+        if status == "success":
+            yield Update.done(model)
+            return
+        if status.startswith("pulling ") and item.get("digest") and "total" in item:
+            counts = (item["total"], item.get("completed", 0))
+            if not all(_is_count(count) for count in counts):
+                raise DownloadError(f"Ollama's pull reply carried a size that is not a count: {text[:120]!r}")
+            digest = str(item["digest"])
+            if len(digest) > MAX_DIGEST_CHARS:
+                raise DownloadError(
+                    f"Ollama's pull reply named a digest longer than one is: {text[:120]!r}"
+                )
+            if digest not in layers and len(layers) >= MAX_PULL_LAYERS:
+                raise DownloadError(
+                    f"Ollama's pull of {model} reported more than {MAX_PULL_LAYERS} layers; {RERUN}"
+                )
+            layers[digest] = counts
+            yield Update.progress(sum(c for _, c in layers.values()), sum(t for t, _ in layers.values()))
+    raise DownloadError(f"Ollama's pull of {model} ended before it reported success; {RERUN}")
+
+
+def _lines_until_cancelled(lines: Iterable[bytes], marker: Path) -> Iterator[bytes]:
+    """The stream's lines (OllamaBackend.stream: each within the backend's
+    deadline and its reply bound, since it is whatever listens at the
+    address that writes them), looking for the cancel marker before each
+    one is handed on and once the stream has ended: its appearance raises
+    DownloadCancelled exactly as a signal does, and closing the stream is
+    how Ollama learns to stop (the request's context is cancelled; it
+    keeps the layers it has). The stream watches the marker while a read
+    blocks (`cancel=marker.exists` in pull_model: the backend's deadline
+    thread hangs the socket up for it within _Deadline.WATCH) and ends
+    when it appears, whatever Ollama was writing, so a stalled Ollama
+    holds Cancel for a quarter second, not the timeout; the marker there
+    once the stream has ended is that cancellation."""
+    for line in lines:
+        if marker.exists():
+            raise DownloadCancelled(CANCEL_MARKER)
+        yield line
+    if marker.exists():
+        raise DownloadCancelled(CANCEL_MARKER)
+
+
+def pull_model(
+    model: str,
+    url: str,
+    *,
+    on_update: Callable[[Update], None],
+    cancel_marker: Path | None = None,
+    timeout: float = 180.0,
+) -> str:
+    """Ask the Ollama server at `url` to pull `model` (its docs/api.md § Pull
+    a Model: POST /api/pull with the model's name, the stream of JSON
+    objects mapped by `pull_updates`), handing `on_update` each progress
+    update, and return the model's name: what `done` prints, and what
+    `--model-status` reports as the path, since the model lives in Ollama
+    under that name. The stream is read through the backend
+    (`OllamaBackend.stream`): straight to the address, never through a
+    proxy, never past a redirect, each line within `timeout` of wall-clock
+    time and at most the backend's reply bound, as every frame is sent.
+
+    Raises DownloadError with the fix in the message: the backend's own
+    words for nothing answering at `url`, for a reply that is not HTTP,
+    for a connection that ended mid-stream (with the re-run hint, since
+    Ollama resumes) and for a line not written within `timeout`; Ollama's
+    words for a refusal
+    before the stream starts (an HTTP status with its {"error"} object) or
+    an error line within it. DownloadCancelled from a signal, or
+    from `cancel_marker` (the documented path by default) appearing between
+    lines, passes through with the stream closed; a stale marker is removed
+    on start and the marker on exit, by the download's own lifecycle
+    (`_marker_cleared`), and one that cannot be removed is a DownloadError
+    naming it: on start before Ollama is asked, on exit only when nothing
+    else is in flight.
+    """
+    marker = cancel_marker or cancel_marker_path()
+    with _marker_cleared(marker):
+        request = ollama_request(url, OLLAMA_PULL, {"model": model, "stream": True})
+        backend = OllamaBackend(model, url, timeout=timeout)
+        try:
+            with closing(backend.stream(request, cancel=marker.exists)) as lines:
+                for update in pull_updates(model, _lines_until_cancelled(lines, marker)):
+                    # The stream's `done` proves success was seen; the entry point
+                    # prints the protocol's `done` from the return, as for mlx.
+                    if update.state != DONE:
+                        on_update(update)
+        except RuntimeError as exc:
+            # The backend's words for the status (a 3xx from the address is an
+            # answer from the wrong place, and says so), a reply that is not
+            # HTTP, one past its bound, or a connection that ended mid-stream
+            # (a reset: Ollama killed); Ollama's own error inside them.
+            raise _pull_error(model, exc) from exc
+        except (ConnectionError, TimeoutError) as exc:
+            # The backend's not-running failure, the one ConnectionError it
+            # raises (a raw socket error is named a RuntimeError above), and
+            # its timeout for a line not written within `timeout`: each in
+            # the backend's words alone, as `_ollama_request` gives the delete's.
+            raise DownloadError(str(exc)) from exc
+    return model
+
+
+def _ollama_request(model: str, url: str, path: str, body: dict | None = None, *,
+                    method: str = "POST", timeout: float) -> dict:
+    """One JSON answer from the Ollama server at `url`: `body` sent as JSON
+    when given, the reply decoded. Sent as the backend sends a frame for
+    `model`, through `OllamaBackend.send`: straight to the address (no
+    proxy, no redirect), the whole exchange within `timeout` of wall-clock
+    time, at most `MAX_REPLY_BYTES` of the reply read. Raises DownloadError
+    with the backend's words, the three kinds `send` raises and nothing
+    else: not-running when nothing answers (its one ConnectionError), the
+    timeout (its message names `[model] timeout_seconds`, so `timeout` is
+    that setting for a call whose failure is shown: the delete's), and a
+    RuntimeError for `Ollama answered <status>: <its words>` on an HTTP
+    error, a reply that ran past the bound or was not HTTP, or a
+    connection that ended mid-reply (a reset, a broken pipe: the raw
+    socket error, named `the connection to Ollama at <url> ended`); and
+    its own, bounded to the reply's first 120 bytes, for a reply the
+    decoder refuses, whatever it raises for it (not JSON, not UTF-8, an
+    integer past Python's digit limit), or that is not a JSON object
+    (`_json_object`, the pull line's decoder too)."""
+    request = ollama_request(url, path, body, method=method)
+    try:
+        raw = OllamaBackend(model, url, timeout=timeout).send(request)
+    except (RuntimeError, ConnectionError, TimeoutError) as exc:
+        raise DownloadError(str(exc)) from exc
+    return _json_object(raw or b"{}", f"Ollama's reply from {url}{path}")
+
+
+def _held(model: str, url: str, *, timeout: float = STATUS_TIMEOUT) -> tuple[str, int] | None:
+    """The name and size the Ollama at `url` lists `model` under (docs/api.md
+    § List Local Models: GET /api/tags, `models` each with `name` and
+    `size`), parsed here once, or None when it is not held, the whole
+    exchange within `timeout`. A name without a tag is `<name>:latest`
+    there (§ Model names: the tag defaults to `latest`). The list is the
+    server's to write: one not in that shape (`models` not a list, an
+    entry not an object, its name not a string, its size not a count by
+    the hub's rule, `_is_count`) is a DownloadError naming it, as a
+    malformed pull line is, never a traceback."""
+    names = {model, model if ":" in model else f"{model}:latest"}
+    models = _ollama_request(model, url, OLLAMA_TAGS, method="GET", timeout=timeout).get("models") or []
+    if not isinstance(models, list):
+        raise DownloadError(f"Ollama's list from {url}{OLLAMA_TAGS} was not a list of models: {str(models)[:120]!r}")
+    for entry in models:
+        if not isinstance(entry, dict):
+            raise DownloadError(
+                f"Ollama's list from {url}{OLLAMA_TAGS} carried an entry that is not an object: "
+                f"{str(entry)[:120]!r}"
+            )
+        name = entry.get("name")
+        alias = entry.get("model")
+        if not isinstance(name, str):
+            raise DownloadError(
+                f"Ollama's list from {url}{OLLAMA_TAGS} carried an entry whose name is not a string: "
+                f"{str(entry)[:120]!r}"
+            )
+        if not isinstance(alias, (str, type(None))):
+            raise DownloadError(
+                f"Ollama's list from {url}{OLLAMA_TAGS} carried an entry whose model is not a string: "
+                f"{str(entry)[:120]!r}"
+            )
+        if names & {name, alias}:
+            size = entry.get("size", 0)
+            if not _is_count(size):
+                raise DownloadError(
+                    f"Ollama's list from {url}{OLLAMA_TAGS} carried a size that is not a count: "
+                    f"{str(entry)[:120]!r}"
+                )
+            return name, size
+    return None
+
+
+def ollama_status(model: str, url: str, *, timeout: float = STATUS_TIMEOUT) -> Status:
+    """Whether the Ollama at `url` holds `model`, from its list endpoint:
+    installed with the size it reports for both totals and the model's
+    name as the path (where it lives: in Ollama, under that name, what
+    `done` printed); else absent with `bytes_total` None, since the docs
+    give sizes for held models only. Never fails: with no server answering
+    the model is reported absent, size unknown, so Settings opens, and a
+    server that has not answered the list within `timeout` (STATUS_TIMEOUT,
+    the short bound on what Settings waits on) reads the same, the
+    timeout's words never shown."""
+    try:
+        held = _held(model, url, timeout=timeout)
+    except DownloadError:
+        held = None
+    if held is None:
+        return Status(model, False, None, 0, None, str(cancel_marker_path()))
+    name, size = held
+    return Status(model, True, size, size, name, str(cancel_marker_path()))
+
+
+def remove_ollama_model(model: str, url: str, *, timeout: float = 180.0) -> str:
+    """Delete `model` from the Ollama at `url` through its delete endpoint
+    (docs/api.md § Delete a Model: DELETE /api/delete with the model's name;
+    200 when gone, 404 when it was not held) and return the name, the
+    exchange within `timeout` as the pull's is: `[model] timeout_seconds`
+    from the flags, which the timeout's message names. Raises DownloadError
+    naming the model when nothing is held, the backend's not-running words
+    when no server answers, its timeout words when the server does not
+    finish."""
+    try:
+        _ollama_request(model, url, OLLAMA_DELETE, {"model": model}, method="DELETE", timeout=timeout)
+    except DownloadError as exc:
+        if "Ollama answered 404" in str(exc):
+            raise DownloadError(f"{model} is not in Ollama at {url}: nothing to remove ({exc})") from exc
+        raise
+    return model

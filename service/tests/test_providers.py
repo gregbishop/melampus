@@ -13,25 +13,35 @@ import contextlib
 import http.client
 import io
 import json
+import signal
 import socket
 import socketserver
 import ssl
+import subprocess
 import sys
 import threading
 import time
 import types
 import urllib.error
 import urllib.request
+from http.server import ThreadingHTTPServer
 
 import pytest
 from conftest import (
     PHOTO,
+    BadStatusLine,
+    FakeOllama,
     QuietHandler,
     Silent,
+    TricklingPull,
     closed_port,
     fake_platform,
     loopback_server,
+    ollama_chat_reply,
+    proxy_in_the_environment,
     recording_handler,
+    redirecting_handler,
+    trickle,
 )
 from test_pipeline import ID_OK, ROUTING_OK
 
@@ -585,70 +595,21 @@ def _timed_probe(monkeypatch, handler: type[QuietHandler]) -> tuple[bool, float]
     return answered, took.seconds
 
 
-def _ollama_chat_reply(model: str, text: str) -> dict:
-    """The final response object POST /api/chat answers with when `stream` is
-    false (Ollama's docs/api.md § Generate a chat completion): the text is
-    `message.content`, the counts `prompt_eval_count` and `eval_count`, the
-    other fields as the docs show them. The one shape every fake Ollama in
-    this file answers with, at the HTTP boundary and at the `urlopen` edge."""
-    return {
-        "model": model,
-        "created_at": "2026-09-18T00:00:00Z",
-        "message": {"role": "assistant", "content": text},
-        "done_reason": "stop",
-        "done": True,
-        "total_duration": 1668506709,
-        "prompt_eval_count": 26,
-        "eval_count": 83,
-    }
-
-
 @contextlib.contextmanager
 def _fake_ollama(
     monkeypatch, *, status: int = 200, delay: float = 0.0, replies: list[str] = (), prefix: str = ""
 ):
-    """A server speaking Ollama's version and chat endpoints, standing in for
-    Ollama. `status` is what GET /api/version answers; `delay` holds the
-    answer that long. `replies` are the texts POST /api/chat answers with, in
-    order, each wrapped in the final response object docs/api.md § Generate a
-    chat completion shows; every chat request's JSON body is kept on
-    `server.chats`. `prefix` mounts both endpoints under a path, the way a
-    reverse proxy does; any other path is Ollama's own 404."""
-    release = threading.Event()
-    pending = list(replies)
-
-    class Ollama(QuietHandler):
-        def do_GET(self):  # noqa: N802 - http.server's name
-            if self.path != f"{prefix}/api/version":
-                self._answer(404, {"error": "404 page not found"})
-                return
-            if delay:
-                release.wait(delay)
-            self._answer(status, {"version": "0.0.0-fake"})
-
-        def do_POST(self):  # noqa: N802 - http.server's name
-            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-            if self.path != f"{prefix}/api/chat":
-                self._answer(404, {"error": "404 page not found"})
-                return
-            self.server.chats.append(body)
-            if not pending:
-                self._answer(404, {"error": f"model '{body.get('model')}' not found"})
-                return
-            self._answer(200, _ollama_chat_reply(body["model"], pending.pop(0)))
-
-        def _answer(self, code: int, payload: dict) -> None:
-            self.send_response(code)
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(json.dumps(payload).encode("utf-8"))
-
-    with _ollama_served_by(monkeypatch, Ollama, prefix) as server:
-        server.chats = []
-        try:
-            yield server
-        finally:
-            release.set()
+    """conftest's FakeOllama (Ollama's version and chat endpoints on
+    127.0.0.1 at an ephemeral port) with detection pointed at it. `status`
+    is what GET /api/version answers; `delay` holds the answer that long.
+    `replies` are the texts POST /api/chat answers with, in order; every
+    chat request's JSON body is kept on `server.chats`. `prefix` mounts both
+    endpoints under a path, the way a reverse proxy does, and is part of
+    the address detection is pointed at; any other path is Ollama's own
+    404."""
+    with FakeOllama(status=status, delay=delay, replies=replies, prefix=prefix).serve() as server:
+        monkeypatch.setattr(providers, "OLLAMA_URL", f"{server.endpoint}{prefix}")
+        yield server
 
 
 def test_ollama_backend_returns_candidates_in_the_same_shape_as_mlx_on_the_fixture(
@@ -815,16 +776,6 @@ def test_ollama_probe_gives_up_after_its_timeout(monkeypatch):
         assert providers.ollama_answers() is False
 
 
-def _trickle(wfile, data: bytes) -> None:
-    """`data` one byte every hundred milliseconds: each byte within the
-    socket timeout, the whole (two seconds for twenty bytes) well past a
-    sub-second deadline. Once the client hangs up, the next write raises;
-    the caller's suppress(OSError) ends the trickle there."""
-    for byte in data:
-        time.sleep(0.1)
-        wfile.write(bytes([byte]))
-
-
 class Trickling(QuietHandler):
     """A listener that sends a valid 200 with the headers trickled: each
     byte within the socket timeout, the whole well past the probe's
@@ -833,7 +784,7 @@ class Trickling(QuietHandler):
     def do_GET(self):  # noqa: N802 - http.server's name
         with contextlib.suppress(OSError):
             self.wfile.write(b"HTTP/1.1 200 OK\r\n")
-            _trickle(self.wfile, b"Content-Length: 2\r\n\r\n")
+            trickle(self.wfile, b"Content-Length: 2\r\n\r\n")
             self.wfile.write(b"{}")
 
     def do_POST(self):  # noqa: N802 - http.server's name
@@ -855,7 +806,7 @@ def _trickling_body(status: int) -> type[QuietHandler]:
                 self.send_response(status)
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
-                _trickle(self.wfile, body)
+                trickle(self.wfile, body)
 
     return TricklingBody
 
@@ -962,6 +913,234 @@ def test_hang_up_records_the_deadline_and_ends_the_stream_it_holds():
     assert deadline.expired.is_set()
 
 
+def test_deadline_again_counts_the_bound_from_now():
+    """Security (review round 4): a stream has no one exchange to bound, so
+    `_Deadline.again` gives the next line the bound an exchange gets, from
+    now. Given a deadline of one second armed, 0.6s in and again, it has
+    not fired 0.6s after that (1.2s from the start: the first timer would
+    have), and fires within the bound from the re-arm."""
+    with _Deadline(1.0) as deadline:
+        time.sleep(0.6)
+        deadline.again()
+        time.sleep(0.6)
+        assert not deadline.expired.is_set(), "the deadline counted from the start, not from again()"
+        assert deadline.expired.wait(2.0), "the deadline never fired after again()"
+
+
+AGAIN_UNDER_A_SIGNAL = """\
+import json, signal, time
+from melampus.backend import _Deadline
+
+
+class Interrupted(Exception):
+    pass
+
+
+def raise_interrupted(signum, frame):
+    raise Interrupted()
+
+
+signal.signal(signal.SIGALRM, raise_interrupted)
+ended_with = []
+for _ in range({rounds}):
+    try:
+        with _Deadline(60.0) as deadline:
+            signal.setitimer(signal.ITIMER_REAL, 0.002)
+            until = time.monotonic() + 2.0
+            while time.monotonic() < until:
+                deadline.again()
+        ended_with.append("nothing: the signal never landed")
+    except BaseException as exc:
+        ended_with.append(type(exc).__name__)
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+print(json.dumps(ended_with))
+"""
+
+
+@pytest.mark.skipif(not hasattr(signal, "SIGALRM"),
+                    reason="SIGALRM and setitimer are POSIX; the window this pins is the thread module's, "
+                           "the same on every platform, and the pull's handler on Windows is SIGBREAK's")
+def test_deadline_again_under_a_signal_handlers_exception_leaves_that_exception_alone_and_nothing_on_stderr():
+    """Code review round 12 (backend.py:419), Done-when 1's signal path: the
+    pull runs under `cancel_on_signals`, whose handler raises wherever the
+    main thread is, and `again()`, called before every line of the stream,
+    started a `threading.Timer` thread for each: raised inside
+    `Thread.start()`, the handler's exception left the thread module's
+    limbo table to be deleted twice (the new thread dying with a KeyError
+    traceback on stderr, the log's tail the plugin shows) or the start
+    event's lock held (`RuntimeError: release unlocked lock` out of the
+    block, named as Ollama's failure, exit 3, the cancellation lost; or a
+    thread stuck on that lock, the process hanging at exit). Given a
+    SIGALRM handler that raises while the main thread loops `again()`
+    inside a block, `rounds` times in a fresh interpreter (a hang is then
+    the timeout, not the suite's), every block ends with the handler's
+    exception alone and the process writes nothing on stderr. Measured
+    at f398718, the timer per line: 20 of 20 runs failed, 19 with the
+    timer thread's KeyError traceback on stderr and 1 hung to the timeout;
+    on the one timer per block, 40 of 40 passed, and 40 of 40 under six
+    CPU-bound processes loading the machine."""
+    rounds = 40
+    proc = subprocess.run(
+        [sys.executable, "-c", AGAIN_UNDER_A_SIGNAL.format(rounds=rounds)],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert proc.stderr == "", f"the process wrote on stderr:\n{proc.stderr[-2000:]}"
+    assert proc.returncode == 0, f"exit {proc.returncode}"
+    ended_with = json.loads(proc.stdout)
+    assert ended_with == ["Interrupted"] * rounds, [e for e in ended_with if e != "Interrupted"]
+
+
+def test_deadline_watcher_runs_for_the_block_alone():
+    """Code review round 10 (backend.py:386), rule 7: 36147fd gave the
+    deadline a second thread with a lifecycle, the watcher of `cancel`,
+    started in __enter__ and ended by `_over` and joined in __exit__, and
+    nothing asserted it. Given a deadline with a predicate, the block has
+    the timer and the watcher running beside the caller, and after it the
+    watcher is not alive and the timer, once joined, is not either.
+
+    Code review round 11 (test_providers.py:935): the threads the block
+    owns, not the process count. __exit__ joins the watcher but only
+    cancels the timer, which exits on its own a moment later, and the
+    count before the block can include a timer winding down from the
+    deadline before, so the counts raced both; the timer is joined here,
+    with a bound, before it is read. Round 12 (backend.py:419): the timer
+    is one thread for the block, ended by `_over` and joined in __exit__
+    as the watcher is, so the join here is already done."""
+    with _Deadline(5.0, cancel=lambda: False) as deadline:
+        assert deadline._timer.is_alive(), "the timer"
+        assert deadline._watcher.is_alive(), "the watcher"
+    assert not deadline._watcher.is_alive(), "the watcher outlived the block"
+    deadline._timer.join(1.0)
+    assert not deadline._timer.is_alive(), "the timer outlived the block"
+
+
+def test_deadline_hangs_up_a_late_socket_for_a_cancel_as_for_the_timeout():
+    """Code review round 10 (backend.py:386), rule 7: `on()` hangs up a
+    socket given after the event, for the cancellation as for the
+    deadline (a cancel that fired while the caller was still connecting
+    has no socket to hang up). Given the watcher's hang-up with no socket
+    yet, `cancelled` is set and, once the socket is given, the other end
+    reads end-of-stream."""
+    deadline = _Deadline(60.0, cancel=lambda: True)
+    _hang_up(deadline, deadline.cancelled)
+    assert deadline.cancelled.is_set() and not deadline.expired.is_set()
+    ours, theirs = socket.socketpair()
+    with ours, theirs:
+        deadline.on(ours)
+        theirs.settimeout(1.0)
+        assert theirs.recv(1) == b"", "the stream was not ended for the cancellation"
+
+
+def test_ollama_backend_stream_ends_cleanly_within_a_watch_when_its_cancel_turns_true():
+    """Code review round 10 (backend.py:386), rule 7: the stream's `cancel`
+    predicate, watched while a read blocks, had its proof only through
+    pull_model and the entry point at 10 s timeouts. Given a listener
+    writing one line and then nothing, and a predicate true once that
+    line is out, the stream yields the line that arrived and ends with no
+    exception within WATCH plus slack, `cancelled` set and `expired` not:
+    the cancellation, whatever shape the hung-up read took."""
+    from conftest import chunked_pull_answer, stalling_handler
+
+    line = b'{"status": "pulling manifest"}\n'
+    lines: list[bytes] = []
+    with loopback_server(stalling_handler(chunked_pull_answer(line)), ThreadingHTTPServer) as stalled:
+        url = f"http://127.0.0.1:{stalled.server_port}"
+        backend = OllamaBackend("qwen3-vl:8b-instruct", url, timeout=10.0)
+        request = urllib.request.Request(f"{url}/api/pull", data=b"{}", method="POST")
+        with _timed() as took:
+            lines.extend(backend.stream(request, cancel=lambda: bool(lines)))
+    assert lines == [line]
+    assert took.seconds < _Deadline.WATCH + SCHEDULING_SLACK, f"the cancel waited on the read: {took.seconds:.2f}s"
+    assert request.deadline.cancelled.is_set() and not request.deadline.expired.is_set()
+
+
+def _bounded_pull(timeout: float, cancel):
+    """A `_bounded` block of a backend at a closed port, with `cancel` as
+    the stream gives it: what the block does once it ends is the whole of
+    the test, so nothing is sent."""
+    backend = OllamaBackend("qwen3-vl:8b-instruct", "http://127.0.0.1:9", timeout=timeout)
+    request = urllib.request.Request("http://127.0.0.1:9/api/pull", data=b"{}", method="POST")
+    return backend._bounded(request, cancel)
+
+
+@pytest.mark.parametrize("raising", [True, False], ids=["read-raised", "read-returned"])
+def test_bounded_block_ends_cleanly_for_a_cancel_whose_deadline_has_fired_too(raising):
+    """Code review round 10 (backend.py:686), Done-when 1: the timer and
+    the watcher hang up the same socket and set their own event, and
+    `_bounded` read `expired` first on both of its paths, so a cancel asked
+    in the last WATCH before a line's deadline was reported as the timeout,
+    exit 3 with its message, not `cancelled`, exit 4: the outcome the
+    watcher was written to end. Given a block whose deadline (0.3s) and
+    cancel (true from the start) have both fired, ending as the hung-up
+    read ends it, raising or returning, the block ends cleanly with
+    `cancelled` set and nothing raised."""
+    with _bounded_pull(0.3, cancel=lambda: True) as deadline:
+        time.sleep(0.5)
+        assert deadline.expired.is_set() and deadline.cancelled.is_set(), "the case needs both fired"
+        if raising:
+            raise ConnectionResetError("the hung-up read")
+    assert deadline.cancelled.is_set()
+
+
+@pytest.mark.parametrize("raising", [True, False], ids=["read-raised", "read-returned"])
+def test_bounded_block_asks_the_cancel_once_more_when_the_deadline_fired_before_the_watchers_tick(
+    monkeypatch, raising
+):
+    """Code review round 10 (backend.py:686), Done-when 1, the marker the
+    watcher has not seen: written after its last tick and before the timer
+    fired, a window of up to WATCH at the end of each line's deadline. The
+    hang-up is the same hang-up, so once the timer has fired the caller's
+    predicate decides which it was. Given a watcher that never ticks (WATCH
+    held large), a deadline fired, and the predicate true only after it,
+    the block ends cleanly with `cancelled` not set by the watcher and
+    nothing raised, for `_lines_until_cancelled` to name the marker."""
+    monkeypatch.setattr(_Deadline, "WATCH", 60.0)
+    marker = threading.Event()
+    with _bounded_pull(0.3, cancel=marker.is_set) as deadline:
+        assert deadline.expired.wait(2.0), "the deadline never fired"
+        marker.set()
+        if raising:
+            raise ConnectionResetError("the hung-up read")
+    assert not deadline.cancelled.is_set(), "the watcher ticked: the case needs the marker unseen"
+
+
+def test_bounded_block_asks_the_cancel_once_more_when_the_socket_timed_out_before_the_timer(monkeypatch):
+    """Code review round 10 (backend.py:686), Done-when 1, the same window
+    by the socket's clock: `stream` gives urlopen `timeout` as the socket
+    timeout too, and a blocked read is armed with both at once
+    (`again()`, then readline), so at the deadline the socket's timeout
+    and the timer race, and half the time the read ends with the socket's
+    TimeoutError (named by `_naming`) before the timer has fired. That is
+    the timeout the user sees as much as the timer's, so the predicate is
+    asked then too. Given a watcher that never ticks, a deadline not
+    fired, the predicate true, and the read ending with the timeout, the
+    block ends cleanly and nothing is raised."""
+    monkeypatch.setattr(_Deadline, "WATCH", 60.0)
+    with _bounded_pull(60.0, cancel=lambda: True) as deadline:
+        raise TimeoutError("the socket's timeout, as _naming names it")
+    assert not deadline.expired.is_set() and not deadline.cancelled.is_set()
+
+
+def test_bounded_block_re_raises_a_failure_that_is_not_the_timeout_though_the_cancel_is_true(monkeypatch):
+    """Code review round 12 (backend.py:718), rule 7: `_cancelled` asks the
+    predicate once more only once the block has timed out, the timer's
+    `expired` or the socket's TimeoutError (c099782: "once the block has
+    timed out the predicate decides"), and no test pinned the guard: with
+    it dropped, a failure of any shape while the marker is present would
+    be read as the cancellation, exit 4 and `cancelled` for a 400 Ollama
+    answered. Given a watcher that never ticks, a deadline not fired, the
+    predicate true, and the block ending with a failure that is not the
+    timeout, that failure is raised as it was, and neither event is set.
+    Red against the guard dropped (`return cancel is not None and
+    cancel()`), green at head."""
+    monkeypatch.setattr(_Deadline, "WATCH", 60.0)
+    with pytest.raises(RuntimeError, match="answered 400"):
+        with _bounded_pull(60.0, cancel=lambda: True) as deadline:
+            raise RuntimeError("Ollama answered 400: bad")
+    assert not deadline.cancelled.is_set() and not deadline.expired.is_set()
+
+
 def test_ollama_probe_stays_on_loopback_whatever_proxy_the_environment_names(monkeypatch):
     """Security: the probe is a loopback call and must stay one. urlopen's
     default opener honours `http_proxy` (and, on a Mac, the system proxy
@@ -974,13 +1153,7 @@ def test_ollama_probe_stays_on_loopback_whatever_proxy_the_environment_names(mon
     unavailable and the proxy never hears from it."""
     seen: list[str] = []
     monkeypatch.setattr(providers, "OLLAMA_URL", f"http://127.0.0.1:{closed_port()}")
-    for name in ("no_proxy", "NO_PROXY"):
-        monkeypatch.delenv(name, raising=False)
-    # urlopen builds its default opener once, reading the proxy variables then;
-    # start it fresh so the environment set here is the one it would see.
-    monkeypatch.setattr(urllib.request, "_opener", None)
-    with loopback_server(recording_handler(seen)) as proxy:
-        monkeypatch.setenv("http_proxy", f"http://127.0.0.1:{proxy.server_port}")
+    with proxy_in_the_environment(monkeypatch, seen):
         assert providers.ollama_answers() is False
     assert seen == [], f"the probe left the machine through the proxy: {seen}"
 
@@ -996,15 +1169,8 @@ def test_ollama_probe_refuses_a_redirect_off_loopback(monkeypatch):
     redirected destination never hears from it."""
     seen: list[str] = []
     with loopback_server(recording_handler(seen)) as destination:
-        elsewhere = f"http://127.0.0.1:{destination.server_port}/api/version"
-
-        class Redirecting(QuietHandler):
-            def do_GET(self):  # noqa: N802 - http.server's name
-                self.send_response(302)
-                self.send_header("Location", elsewhere)
-                self.end_headers()
-
-        with _ollama_served_by(monkeypatch, Redirecting):
+        elsewhere = f"http://127.0.0.1:{destination.server_port}"
+        with _ollama_served_by(monkeypatch, redirecting_handler(elsewhere)):
             answered = providers.ollama_answers()
     assert seen == [], f"the probe followed the redirect off loopback: {seen}"
     assert answered is False
@@ -1267,7 +1433,7 @@ class _FakeUrlopen:
         return io.BytesIO(self.reply)
 
 
-OLLAMA_REPLY = json.dumps(_ollama_chat_reply("qwen3-vl:8b-instruct", ID_OK)).encode("utf-8")
+OLLAMA_REPLY = json.dumps(ollama_chat_reply("qwen3-vl:8b-instruct", ID_OK)).encode("utf-8")
 
 
 def _ollama_backend(client: _FakeUrlopen, **kwargs) -> OllamaBackend:
@@ -1402,15 +1568,9 @@ def test_ollama_backend_stays_at_the_address_whatever_proxy_the_environment_name
     everything and nothing at the address, the frame fails as not-running
     and the proxy never hears from it."""
     seen: list[str] = []
-    for name in ("no_proxy", "NO_PROXY"):
-        monkeypatch.delenv(name, raising=False)
-    # urlopen builds its default opener once, reading the proxy variables then;
-    # start it fresh so the environment set here is the one it would see.
-    monkeypatch.setattr(urllib.request, "_opener", None)
     image = tmp_path / "image.jpg"
     image.write_bytes(b"jpeg")
-    with loopback_server(recording_handler(seen)) as proxy:
-        monkeypatch.setenv("http_proxy", f"http://127.0.0.1:{proxy.server_port}")
+    with proxy_in_the_environment(monkeypatch, seen):
         backend = OllamaBackend(
             "qwen3-vl:8b-instruct", f"http://127.0.0.1:{closed_port()}", timeout=5.0)
         with pytest.raises(ConnectionError):
@@ -1430,16 +1590,8 @@ def test_ollama_backend_refuses_a_redirect_off_the_address(tmp_path):
     image = tmp_path / "image.jpg"
     image.write_bytes(b"jpeg")
     with loopback_server(recording_handler(seen)) as destination:
-        elsewhere = f"http://127.0.0.1:{destination.server_port}/api/chat"
-
-        class Redirecting(QuietHandler):
-            def do_POST(self):  # noqa: N802 - http.server's name
-                self.rfile.read(int(self.headers["Content-Length"]))
-                self.send_response(302)
-                self.send_header("Location", elsewhere)
-                self.end_headers()
-
-        with loopback_server(Redirecting) as squatter:
+        elsewhere = f"http://127.0.0.1:{destination.server_port}"
+        with loopback_server(redirecting_handler(elsewhere)) as squatter:
             backend = OllamaBackend(
                 "qwen3-vl:8b-instruct", f"http://127.0.0.1:{squatter.server_port}", timeout=5.0)
             with pytest.raises(RuntimeError) as err:
@@ -1502,6 +1654,34 @@ def test_ollama_backend_gives_up_at_its_deadline_when_the_server_trickles(tmp_pa
         with _timed() as took, pytest.raises(TimeoutError) as err:
             backend.complete(image, "prompt", 10)
     assert took.seconds < deadline + SCHEDULING_SLACK, f"the frame read past its deadline: {took.seconds:.2f}s"
+    assert f"did not answer within {deadline:g}s" in str(err.value), str(err.value)
+
+
+def test_ollama_backend_stream_gives_up_at_its_deadline_when_a_line_trickles():
+    """Security (review round 4, download.py:784): the pull's stream was read
+    a line at a time with urlopen's socket timeout alone, which bounds each
+    read and resets on every byte, so a listener writing a line a byte at a
+    time within it held the pull, and the cancel marker read between lines,
+    for as long as it liked (a probe: the marker written one second into a
+    trickled line was read eight seconds later, at its newline). `stream`
+    gives each line what `send` gives an exchange, the deadline armed again
+    for it. Given a server writing two whole lines, each after a pause
+    within the deadline and the two together past it, then a line trickled
+    well past it, the stream yields both whole lines (the deadline counts
+    per line, not per exchange) and ends as timed out within a deadline of
+    the trickle's start, not at its newline."""
+    deadline = 0.5
+    with loopback_server(TricklingPull) as server:
+        url = f"http://127.0.0.1:{server.server_port}"
+        backend = OllamaBackend("qwen3-vl:8b-instruct", url, timeout=deadline)
+        request = urllib.request.Request(f"{url}/api/pull", data=b"{}", method="POST")
+        lines = []
+        with _timed() as took, pytest.raises(TimeoutError) as err:
+            for line in backend.stream(request):
+                lines.append(line)
+    assert lines == [TricklingPull.WHOLE, TricklingPull.WHOLE]
+    ceiling = 2 * TricklingPull.PAUSE + deadline + SCHEDULING_SLACK
+    assert took.seconds < ceiling, f"the stream read past its deadline: {took.seconds:.2f}s"
     assert f"did not answer within {deadline:g}s" in str(err.value), str(err.value)
 
 
@@ -1607,16 +1787,6 @@ def test_ollama_backend_neutralises_control_characters_in_a_servers_error_text(
     message = str(err.value)
     assert message == f"Ollama answered 502: {said}", message
     assert all(c.isprintable() for c in message), message
-
-
-class BadStatusLine(socketserver.BaseRequestHandler):
-    """A listener that answers whatever it is asked with a status line that
-    is not HTTP, carrying an escape sequence and a carriage return."""
-
-    def handle(self) -> None:
-        with contextlib.suppress(OSError):
-            self.request.recv(65536)
-            self.request.sendall(b"\x1b[31mHTTP/9.9 OK\r\x07fake log line\r\n\r\n")
 
 
 def test_ollama_backend_reports_a_malformed_status_line_in_printable_words(tmp_path):

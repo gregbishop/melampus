@@ -20,7 +20,7 @@ import urllib.request
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Iterator
 
 
 @dataclass(slots=True)
@@ -335,14 +335,16 @@ class OpenAIBackend(VLMBackend):
         )
 
 
-def _hang_up(line, expired: threading.Event) -> None:
-    """The deadline, from its timer. `line` is the _Deadline holding the
+def _hang_up(line, event: threading.Event) -> None:
+    """The deadline, from its timer, or the cancellation, from its watcher:
+    `event` is the one that says which, the _Deadline's `expired` or its
+    `cancelled`. `line` is the _Deadline holding the
     exchange's socket as `sock`, handed over the moment `_Noted` makes it
     and again, for https, as the wrapped socket before the handshake. Not
     close(): the response being read holds the socket's file object, and
     socket.close() waits for that to go before it really closes, so the
     blocked read would read on. shutdown(SHUT_RDWR) ends the stream now.
-    And `expired`, because http.client takes end-of-stream as the end of
+    And `event`, because http.client takes end-of-stream as the end of
     the headers: a status line that arrived before the trickle would still
     parse as a 200, and the caller must know the deadline finished the
     response, not the server. No socket yet means the caller is still
@@ -351,7 +353,7 @@ def _hang_up(line, expired: threading.Event) -> None:
     the socket existed had nothing to hang up. A socket the main thread
     already closed (the probe's `finally`, or urllib once the headers are
     in) raises OSError, which is suppressed."""
-    expired.set()
+    event.set()
     sock = line.sock
     if sock is not None:
         with contextlib.suppress(OSError):
@@ -362,31 +364,83 @@ class _Deadline:
     """A wall-clock bound on one HTTP exchange, as a context manager. A
     socket timeout bounds each operation, not the exchange, so a server
     trickling a byte at a time, each within the timeout, could hold the
-    caller for as long as it liked. Inside the block a timer counts
-    `seconds`; when it fires, `_hang_up` ends the stream on `sock` and sets
-    `expired`, which the caller reads after the exchange, since whatever
-    arrived by then is not the server's answer. `sock` is the socket the
-    exchange is on, given by `on()` once there is one: a deadline that
-    fired while the caller was still connecting found nothing to hang up,
-    so `on()` hangs up then, and the reads after a late handshake are not
-    left bounded per byte only. Leaving the block cancels the timer."""
+    caller for as long as it liked. Inside the block one thread, the timer,
+    waits for the deadline `seconds` away; when it passes, `_hang_up` ends
+    the stream on `sock` and sets `expired`, which the caller reads after
+    the exchange, since whatever arrived by then is not the server's
+    answer. `sock` is the socket the exchange is on, given by `on()` once
+    there is one: a deadline that fired while the caller was still
+    connecting found nothing to hang up, so `on()` hangs up then, and the
+    reads after a late handshake are not left bounded per byte only.
+    Leaving the block ends the timer; `again()` moves the deadline, for a
+    stream's next line, and starts nothing: the pull runs under a signal
+    handler that raises wherever the main thread is, and an exception
+    raised inside `Thread.start()` leaves the thread module's tables and
+    locks half-changed (review round 12, backend.py:419), so the block
+    starts its threads once, on entry, not once a line.
 
-    def __init__(self, seconds: float) -> None:
+    `cancel`, when given, is a predicate looked at every WATCH seconds from
+    a thread of the timer's kind, for a stream whose caller may need it
+    ended while a read blocks (the pull's cancel marker, download.py:
+    looked for between lines, it waited on a stalled Ollama for the whole
+    timeout). Its turning true hangs the socket up as the timer does and
+    sets `cancelled`, which the caller reads as it reads `expired`: the
+    read ends within WATCH whatever the server is writing, and whatever
+    shape the ended read takes is the cancellation, not that shape's
+    error. Leaving the block ends the watcher too."""
+
+    WATCH = 0.25
+
+    def __init__(self, seconds: float, cancel: Callable[[], bool] | None = None) -> None:
+        self.seconds = seconds
         self.sock: socket.socket | None = None
         self.expired = threading.Event()
-        self._timer = threading.Timer(seconds, _hang_up, [self, self.expired])
+        self.cancelled = threading.Event()
+        self._over = threading.Event()
+        self._timer = threading.Thread(target=self._counting, daemon=True)
+        self._watcher = threading.Thread(target=self._watching, args=[cancel], daemon=True) if cancel else None
+
+    def _counting(self) -> None:
+        while not self._over.wait(max(0.0, self._until - time.monotonic())):
+            if time.monotonic() >= self._until:
+                _hang_up(self, self.expired)
+                return
+
+    def _watching(self, cancel: Callable[[], bool]) -> None:
+        while not self._over.wait(self.WATCH):
+            if cancel():
+                _hang_up(self, self.cancelled)
+                return
 
     def __enter__(self) -> _Deadline:
+        self.again()
         self._timer.start()
+        if self._watcher is not None:
+            self._watcher.start()
         return self
 
     def __exit__(self, *_exc) -> None:
-        self._timer.cancel()
+        self._over.set()
+        self._timer.join()
+        if self._watcher is not None:
+            self._watcher.join()
+
+    def again(self) -> None:
+        """The bound from now: the deadline the timer waits for is `seconds`
+        from now, an assignment the timer reads when the one it waits on
+        comes round. `__enter__` arms the block with it, before the timer
+        starts, and OllamaBackend.stream calls it before each line: a
+        stream has no one exchange to bound, since a model pull runs as
+        long as the model is large, so each line gets the bound an
+        exchange gets. A deadline that already fired stays fired: its
+        socket is hung up, and the caller reads that."""
+        self._until = time.monotonic() + self.seconds
 
     def on(self, sock: socket.socket | None) -> None:
         self.sock = sock
-        if self.expired.is_set():
-            _hang_up(self, self.expired)
+        for event in (self.expired, self.cancelled):
+            if event.is_set():
+                _hang_up(self, event)
 
 
 class _StayPut(urllib.request.HTTPRedirectHandler):
@@ -454,7 +508,7 @@ class _NotedHTTPS(_Noted, http.client.HTTPSConnection):
 
 class _Bounded(urllib.request.HTTPHandler, urllib.request.HTTPSHandler):
     """urllib's HTTP and HTTPS handlers, opening _Noted connections for the
-    request's deadline (OllamaBackend._send puts it on the request). The
+    request's deadline (OllamaBackend._bounded puts it on the request). The
     https side keeps HTTPSHandler's default context, the verifying one it
     builds when given none, and passes it to _NotedHTTPS as HTTPSHandler
     would to HTTPSConnection."""
@@ -466,6 +520,50 @@ class _Bounded(urllib.request.HTTPHandler, urllib.request.HTTPSHandler):
         return self.do_open(
             functools.partial(_NotedHTTPS, deadline=req.deadline), req, context=self._context
         )
+
+
+def ollama_opener(*handlers: urllib.request.BaseHandler) -> Callable:
+    """urllib's `open` for every request to the Ollama address, the backend's
+    frames and the model pull's stream alike (card #409): straight to the address,
+    never past it. Not urlopen itself: its opener honours http_proxy and
+    the system proxy settings, which would send the bytes off the machine
+    and let the proxy's answer stand in for Ollama's (the probe in
+    providers.ollama_answers keeps off the proxy for the same reason);
+    ProxyHandler({}) consults neither. And it follows a 3xx, so whatever
+    listens on the port when Ollama does not could point a request at
+    another host and have that host's reply stand in for Ollama's;
+    _StayPut follows nothing, as the probe follows nothing. `handlers` add
+    to those two: the backend passes _Bounded, whose connections hand their
+    socket to the request's deadline."""
+    return urllib.request.build_opener(
+        urllib.request.ProxyHandler({}), _StayPut(), *handlers
+    ).open
+
+
+def ollama_request(
+    address: str, path: str, body: dict | None = None, *, method: str = "POST"
+) -> urllib.request.Request:
+    """The one request to an Ollama endpoint: `path` under `address` (the
+    address as providers.ollama_url hands it, its trailing slash already
+    dropped, so the path appends cleanly), `body` sent as JSON with its
+    content type when given. The backend's frame, the model pull and the
+    list and the delete of download.py (card #409) build theirs here."""
+    return urllib.request.Request(
+        f"{address}{path}",
+        data=json.dumps(body).encode("utf-8") if body is not None else None,
+        headers={"Content-Type": "application/json"} if body is not None else {},
+        method=method,
+    )
+
+
+def ollama_not_running(url: str, reason: object) -> str:
+    """The one message for a request Ollama did not answer at `url`: the
+    backend's mid-run failure and the model pull (card #409) say the same
+    thing about the same condition."""
+    return (
+        f"no Ollama server answering at {url} ({reason}); "
+        "start Ollama, or set [model] ollama_url to where it listens"
+    )
 
 
 class OllamaBackend(VLMBackend):
@@ -523,20 +621,11 @@ class OllamaBackend(VLMBackend):
         self.timeout = timeout
         # Shaped like urllib.request.urlopen(request, timeout=...): the tests hand
         # in a fake at this edge, the way the cloud backends take a client. Not
-        # urlopen itself: its opener honours http_proxy and the system proxy
-        # settings, which would send every frame's bytes off the machine and
-        # let the proxy's answer stand in for the model's (the probe in
-        # providers.ollama_answers keeps off the proxy for the same reason);
-        # ProxyHandler({}) consults neither. And it follows a 3xx, so
-        # whatever listens on the port when Ollama does not could point a
-        # frame at another host and have that host's reply stand in for the
-        # model's; _StayPut follows nothing, as the probe follows nothing.
-        # And its `timeout` is the socket's, per operation, so a server
+        # urlopen itself: ollama_opener says why (no proxy, no redirect). And
+        # urlopen's `timeout` is the socket's, per operation, so a server
         # trickling bytes could hold a frame past `timeout_seconds`; _Bounded
         # opens connections that hand their socket to the request's deadline.
-        self._urlopen = client or urllib.request.build_opener(
-            urllib.request.ProxyHandler({}), _StayPut(), _Bounded()
-        ).open
+        self._urlopen = client or ollama_opener(_Bounded())
 
     def _request(self, image_path: Path, prompt: str, max_tokens: int) -> urllib.request.Request:
         image = _image_as_base64(image_path)
@@ -546,52 +635,122 @@ class OllamaBackend(VLMBackend):
             "stream": False,
             "options": {"num_predict": max_tokens, "temperature": self.temperature},
         }
-        return urllib.request.Request(
-            f"{self.url}{self.ENDPOINT}",
-            data=json.dumps(body).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
+        return ollama_request(self.url, self.ENDPOINT, body)
 
-    def _send(self, request: urllib.request.Request) -> bytes:
+    def send(self, request: urllib.request.Request) -> bytes:
         """The reply's bytes, within `timeout` of wall-clock time from
         connecting to the last byte read, error bodies included: a
         _Deadline hangs up the socket when the time is up, and whatever the
         exchange then looks like (a body cut short, a status line that
-        never finished, a reset) is the timeout, not that shape's error."""
-        with _Deadline(self.timeout) as deadline:
+        never finished, a reset) is the timeout, not that shape's error.
+        The one way a request reaches Ollama: a frame's here, the list's
+        and the delete's from download.py; the pull's stream through
+        `stream`, beside."""
+        with self._bounded(request):
+            raw = self._exchange(request)
+        return self._within_bound(raw)
+
+    def stream(self, request: urllib.request.Request, *,
+               cancel: Callable[[], bool] | None = None) -> Iterator[bytes]:
+        """The reply's lines as the server writes them, for the model pull
+        (card #409, download.pull_model), each within `timeout` of wall-clock
+        time: the stream has no one exchange to bound, since a pull runs as
+        long as the model is large, so each line gets what `send` gives an
+        exchange, the deadline armed again for it. One line is one of
+        Ollama's objects, a few hundred bytes, written at once; a listener
+        writing one a byte at a time within the socket timeout would
+        otherwise hold the pull, and the cancel marker read between lines,
+        for as long as it liked. At most MAX_REPLY_BYTES of a line is read,
+        a longer one refused by name; the stream is closed on leaving the
+        loop, however it is left, which is how Ollama learns to stop. Every
+        failure is named as `send` names one (`_naming`): the status with
+        Ollama's words, nothing answering, the timeout, a reply that is not
+        HTTP. `cancel`, when given, is the caller's predicate (the pull's
+        cancel marker), looked at every _Deadline.WATCH seconds while a
+        read blocks: its turning true ends the stream, cleanly, within that
+        period, whatever the server is writing; the caller, whose predicate
+        it is, knows why the stream ended."""
+        with self._bounded(request, cancel) as deadline, self._naming(), \
+                self._urlopen(request, timeout=self.timeout) as response:
+            while True:
+                deadline.again()
+                line = response.readline(self.MAX_REPLY_BYTES + 1)
+                if not line or deadline.expired.is_set() or deadline.cancelled.is_set():
+                    return
+                yield self._within_bound(line)
+
+    @contextlib.contextmanager
+    def _bounded(self, request: urllib.request.Request,
+                 cancel: Callable[[], bool] | None = None) -> Iterator[_Deadline]:
+        """The block within `timeout` of wall-clock time: a _Deadline on the
+        request, for the connection _Bounded opens for it, that hangs up the
+        socket when the time is up. Whatever the block then looks like (a
+        body cut short, a status line that never finished, a reset, or a
+        return with what arrived) is the timeout, not that shape's error.
+        With `cancel` (a stream's), the deadline hangs the socket up for
+        the predicate too, and whatever the block then looks like is the
+        cancellation: the block ends, and nothing is raised for its shape.
+        The cancellation is read before the timeout: the two hang-ups are
+        the same hang-up, and both may have fired (a cancel in the last
+        WATCH before a line's deadline), so once the block has timed out
+        the predicate decides which it was (`_cancelled`), asked once more
+        for a marker the watcher's tick has not yet seen."""
+        with _Deadline(self.timeout, cancel) as deadline:
             request.deadline = deadline
             try:
-                raw = self._exchange(request)
+                yield deadline
             except Exception as exc:
+                if self._cancelled(deadline, cancel, exc):
+                    return
                 if deadline.expired.is_set():
                     raise self._timed_out() from exc
                 raise
+        if self._cancelled(deadline, cancel):
+            return
         if deadline.expired.is_set():
             raise self._timed_out()
-        if len(raw) > self.MAX_REPLY_BYTES:
-            raise RuntimeError(
-                f"Ollama's reply from {self.url} ran past {self.MAX_REPLY_BYTES} bytes"
-            )
-        return raw
+
+    @staticmethod
+    def _cancelled(deadline: _Deadline, cancel: Callable[[], bool] | None,
+                   exc: Exception | None = None) -> bool:
+        """Whether the block ended for the cancellation: the watcher saw the
+        predicate true and hung up, or the block timed out and the
+        predicate, asked now, is true. The watcher looks every WATCH
+        seconds, so a cancel asked in the last WATCH before the deadline
+        is one it may not have seen; and the block times out two ways at
+        the same moment, the timer's hang-up (`expired`) or the socket's
+        own timeout on the read, `exc` as `_naming` names it, since the
+        one `timeout` arms both. Never with no `cancel`: `send` has no
+        cancellation."""
+        if deadline.cancelled.is_set():
+            return True
+        timed_out = deadline.expired.is_set() or isinstance(exc, TimeoutError)
+        return timed_out and cancel is not None and cancel()
 
     def _exchange(self, request: urllib.request.Request) -> bytes:
         """One request and what came back, every failure a plain error naming
         the address or the status."""
+        with self._naming(), self._urlopen(request, timeout=self.timeout) as response:
+            return response.read(self.MAX_REPLY_BYTES + 1)
+
+    @contextlib.contextmanager
+    def _naming(self) -> Iterator[None]:
+        """Every failure of the block a plain error naming the address or the
+        status: what urllib raises for an HTTP status, for nothing answering
+        and for the socket timeout, and what it lets through unwrapped: an
+        http.client protocol error, or the raw socket error of a connection
+        that ended while the reply was being read (a reset, a broken pipe:
+        Ollama killed, or a listener hanging up)."""
         try:
-            with self._urlopen(request, timeout=self.timeout) as response:
-                return response.read(self.MAX_REPLY_BYTES + 1)
+            yield
         except urllib.error.HTTPError as exc:
             raise RuntimeError(
-                f"Ollama answered {exc.code}: {self._error_text(exc)}"
+                f"Ollama answered {exc.code}: {self.error_text(exc)}"
             ) from exc
         except urllib.error.URLError as exc:
             if isinstance(exc.reason, TimeoutError):
                 raise self._timed_out() from exc
-            raise ConnectionError(
-                f"no Ollama server answering at {self.url} ({exc.reason}); "
-                "start Ollama, or set [model] ollama_url to where it listens"
-            ) from exc
+            raise ConnectionError(ollama_not_running(self.url, exc.reason)) from exc
         except TimeoutError as exc:
             raise self._timed_out() from exc
         except http.client.HTTPException as exc:
@@ -599,8 +758,24 @@ class OllamaBackend(VLMBackend):
             # HTTP (BadStatusLine carries it as sent), a server hanging up
             # before one, a body cut short, a line past http.client's limit.
             raise RuntimeError(
-                f"Ollama's reply from {self.url} was not HTTP: {self._plain(str(exc))}"
+                f"Ollama's reply from {self.url} was not HTTP: {self.plain(str(exc))}"
             ) from exc
+        except OSError as exc:
+            # The raw socket error of a connection that ended mid-reply
+            # (ConnectionResetError, BrokenPipeError: a ConnectionError, so
+            # otherwise taken by a caller's clause for the not-running
+            # failure above, which is the only ConnectionError raised here).
+            raise RuntimeError(f"the connection to Ollama at {self.url} ended: {exc}") from exc
+
+    def _within_bound(self, raw: bytes) -> bytes:
+        """`raw` (a reply, or one line of a stream) when it is at most
+        MAX_REPLY_BYTES; the refusal naming the bound past it, the one
+        for `send` and `stream` alike."""
+        if len(raw) > self.MAX_REPLY_BYTES:
+            raise RuntimeError(
+                f"Ollama's reply from {self.url} ran past {self.MAX_REPLY_BYTES} bytes"
+            )
+        return raw
 
     def _timed_out(self) -> TimeoutError:
         return TimeoutError(
@@ -609,7 +784,7 @@ class OllamaBackend(VLMBackend):
         )
 
     @classmethod
-    def _plain(cls, text: str) -> str:
+    def plain(cls, text: str) -> str:
         """Text the server wrote, as it may reach the frame's error record,
         the log and the terminal: one line of at most MAX_ERROR_BYTES
         printable characters. An escape sequence in it would move the
@@ -624,23 +799,23 @@ class OllamaBackend(VLMBackend):
         return words[: cls.MAX_ERROR_BYTES]
 
     @classmethod
-    def _error_text(cls, exc: urllib.error.HTTPError) -> str:
+    def error_text(cls, exc: urllib.error.HTTPError) -> str:
         """Ollama's own words when the body is its {"error": ...} object,
         else the body as it came (a proxy's HTML, say), else the status
         line's reason; at most MAX_ERROR_BYTES of it read, and only its
-        printable characters (`_plain`), since all three are the server's
+        printable characters (`plain`), since all three are the server's
         to write."""
         body = exc.read(cls.MAX_ERROR_BYTES).decode("utf-8", "replace").strip()
         try:
             error = json.loads(body).get("error")
         except (json.JSONDecodeError, AttributeError):
             error = None
-        return cls._plain(f"{error}" if error else body or exc.reason)
+        return cls.plain(f"{error}" if error else body or exc.reason)
 
     def complete(self, image_path: Path, prompt: str, max_tokens: int) -> Completion:
         request = self._request(image_path, prompt, max_tokens)
         started = time.perf_counter()
-        raw = self._send(request)
+        raw = self.send(request)
         elapsed = time.perf_counter() - started
         try:
             reply = json.loads(raw)

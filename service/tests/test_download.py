@@ -20,11 +20,14 @@ import json
 import os
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import threading
+import time
 import tomllib
 import types
+from collections.abc import Iterator
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 from typing import Callable
@@ -34,6 +37,7 @@ import pytest
 from conftest import (
     AGENT_HARNESS,
     CUT_IN_THE_SECOND_CHUNK,
+    BadStatusLine,
     FAKE_COMMIT,
     FAKE_FILES,
     FAKE_FOLDER,
@@ -41,8 +45,10 @@ from conftest import (
     FAKE_TOTAL,
     VENV_CLI,
     FakeHub,
+    FakeOllama,
     QuietHandler,
     Silent,
+    TricklingPull,
     assert_download_completed,
     closed_port,
     fake_bytes,
@@ -74,7 +80,10 @@ from melampus.download import (
     cancel_on_signals,
     download_model,
     model_status,
+    ollama_status,
+    pull_model,
     remove_model,
+    remove_ollama_model,
 )
 
 
@@ -95,12 +104,15 @@ def _cli_sees_the_cache(monkeypatch: pytest.MonkeyPatch, cache: Path) -> None:
     monkeypatch.setattr(download.constants, "HF_HUB_CACHE", str(cache))
 
 
-def _refused_through_the_cli(capsys, flag: str, naming: str, repo: str = FAKE_REPO) -> str:
+def _refused_through_the_cli(capsys, flag: str, naming: str, *argv: str) -> str:
     """The one contract every refusal keeps through the entry point (cli.py,
     docs/config.md): exit 3, the reason on stderr naming `naming`, nothing
-    on stdout, never a traceback. Returns stderr for what else a test asks
-    of the reason."""
-    assert main([flag, "--no-local-config", "--model", repo]) == 3, flag
+    on stdout, never a traceback. `argv` is the rest of the line after the
+    flag, the way each engine names its model: the mlx way, `--no-local-config
+    --model <FAKE_REPO>`, when none is given; `--backend ollama --config
+    <settings>` for the Ollama tests. Returns stderr for what else a test
+    asks of the reason."""
+    assert main([flag, *(argv or ("--no-local-config", "--model", FAKE_REPO))]) == 3, flag
     out, err = capsys.readouterr()
     assert out == "" and naming in err and "Traceback" not in err, (flag, err)
     return err
@@ -751,6 +763,21 @@ def test_download_gives_up_when_the_hub_accepts_and_never_answers(monkeypatch, t
     (failure,) = outcome
     assert isinstance(failure, DownloadError), failure
     assert endpoint in str(failure) and "network" in str(failure)
+
+
+def test_a_download_that_names_no_hub_reaches_no_real_one(tmp_path: Path):
+    """conftest's guard: with no endpoint named, the download goes to a
+    closed loopback port, not huggingface.co, and the cache is under
+    tmp_path. A test that misses the fake by mistake fails here instead of
+    fetching weights (docs/brief.md § hard rules)."""
+    from huggingface_hub import constants
+
+    with pytest.raises(DownloadError) as failure:
+        download_model(FAKE_REPO, on_update=lambda update: None, cancel_marker=tmp_path / "download-cancel")
+    message = str(failure.value)
+    assert "http://127.0.0.1:" in message and "huggingface.co" not in message, message
+    assert Path(constants.HF_HUB_CACHE).is_relative_to(tmp_path)
+    assert os.environ["HF_HOME"].startswith(str(tmp_path)) and os.environ["HF_ENDPOINT"].startswith("http://127.0.0.1:")
 
 
 def declared_dependency(package: str) -> list[str]:
@@ -2291,7 +2318,7 @@ def test_model_flags_exit_3_with_the_config_key_on_stderr_when_the_repo_is_not_a
     download mapped that to exit 3 naming the config key, the status and the
     removal let it out as a 19-line traceback, exit 1. All three refuse the
     same way: exit 3, the key on stderr, nothing on stdout."""
-    err = _refused_through_the_cli(capsys, flag, "[model] repo", repo="not a repo id/x/y")
+    err = _refused_through_the_cli(capsys, flag, "[model] repo", "--no-local-config", "--model", "not a repo id/x/y")
     assert "not a repo id/x/y" in err
 
 
@@ -2322,3 +2349,1389 @@ def test_cli_reports_absent_then_installed_then_removed_against_the_fake_hub(
     assert removed.returncode == 0, removed.stderr[-3000:]
     assert removed.stdout.startswith("removed ") and not Path(snapshot).exists()
     assert json.loads(_cli(["--model-status", "--model", FAKE_REPO], hub_env).stdout)["installed"] is False
+
+
+# --- the same button for Ollama, through its pull (card #409) -------------
+#
+# Done-when 1: given ollama is picked and the model is absent, when Download
+# is clicked, then the plugin asks Ollama to pull it and shows Ollama's
+# progress. Done-when 2: given the tests, when they run, then a fake Ollama
+# serves the pull progress. One protocol: Ollama's pull stream (its
+# docs/api.md § Pull a Model, newline-delimited JSON objects) is mapped to
+# the same `progress` / `done` / `cancelled` lines the plugin already parses.
+
+FAKE_MODEL = "fake-org/fake-vision:1b"
+
+
+def _stream(*objects: dict) -> list[bytes]:
+    """The pull stream as Ollama writes it: one JSON object per line."""
+    return [json.dumps(o).encode("utf-8") + b"\n" for o in objects]
+
+
+def test_pull_stream_maps_each_layer_line_to_a_progress_line_summing_across_layers():
+    """docs/api.md § Pull a Model: after `pulling manifest`, one object per
+    layer as it downloads with `digest`, `total` and `completed`
+    (`completed` may be missing until any of it is done), layers one after
+    another. The protocol's `progress` is the whole pull: the sum of every
+    layer's completed over the sum of every layer's total seen so far. The
+    statuses around the layers (manifest, verifying, writing, removing) say
+    nothing new and print nothing; `success` is `done <model>`."""
+    from melampus.download import pull_updates
+
+    updates = list(pull_updates(FAKE_MODEL, _stream(
+        {"status": "pulling manifest"},
+        {"status": "pulling aaa", "digest": "sha256:aaa", "total": 100},
+        {"status": "pulling aaa", "digest": "sha256:aaa", "total": 100, "completed": 40},
+        {"status": "pulling aaa", "digest": "sha256:aaa", "total": 100, "completed": 100},
+        {"status": "pulling bbb", "digest": "sha256:bbb", "total": 50, "completed": 10},
+        {"status": "pulling bbb", "digest": "sha256:bbb", "total": 50, "completed": 50},
+        {"status": "verifying sha256 digest"},
+        {"status": "writing manifest"},
+        {"status": "removing any unused layers"},
+        {"status": "success"},
+    )))
+
+    assert updates == [
+        Update.progress(0, 100), Update.progress(40, 100), Update.progress(100, 100),
+        Update.progress(110, 150), Update.progress(150, 150),
+        Update.done(FAKE_MODEL),
+    ]
+
+
+def test_pull_stream_of_a_model_already_there_is_one_complete_line_per_layer_then_done():
+    """A layer Ollama already holds is reported once with completed equal to
+    total (server/download.go: a blob on disk answers with its size for
+    both), so a re-pull of a complete model prints its layers at 100% and
+    `done`, the way a complete MLX model prints one equal `progress` line."""
+    from melampus.download import pull_updates
+
+    updates = list(pull_updates(FAKE_MODEL, _stream(
+        {"status": "pulling manifest"},
+        {"status": "pulling aaa", "digest": "sha256:aaa", "total": 100, "completed": 100},
+        {"status": "pulling bbb", "digest": "sha256:bbb", "total": 50, "completed": 50},
+        {"status": "success"},
+    )))
+
+    assert updates == [Update.progress(100, 100), Update.progress(150, 150), Update.done(FAKE_MODEL)]
+
+
+def test_pull_stream_error_line_for_an_unknown_model_names_the_model_and_the_setting():
+    """An error mid-stream is a JSON object with `error` (server/routes.go
+    streamResponse); an unknown model's is `pull model manifest: file does
+    not exist` (a 404 from the library is os.ErrNotExist). It ends the pull
+    as a failure naming the model and `[model] ollama_model`, with Ollama's
+    own words, and nothing after it is read."""
+    from melampus.download import pull_updates
+
+    lines = _stream(
+        {"status": "pulling manifest"},
+        {"error": "pull model manifest: file does not exist"},
+        {"status": "success"},
+    )
+    seen = []
+    with pytest.raises(DownloadError) as failure:
+        for update in pull_updates(FAKE_MODEL, lines):
+            seen.append(update)
+    message = str(failure.value)
+    assert FAKE_MODEL in message and "[model] ollama_model" in message
+    assert "file does not exist" in message
+    assert seen == []
+
+
+def test_pull_stream_error_line_mid_download_keeps_the_progress_so_far_and_says_to_re_run():
+    """Any other error mid-stream (the library unreachable, say) fails the
+    same way, with Ollama's words and the re-run hint: Ollama keeps the
+    layers it has and the next pull resumes them (docs/api.md § Pull a
+    Model)."""
+    from melampus.download import pull_updates
+
+    seen = []
+    with pytest.raises(DownloadError) as failure:
+        for update in pull_updates(FAKE_MODEL, _stream(
+            {"status": "pulling manifest"},
+            {"status": "pulling aaa", "digest": "sha256:aaa", "total": 100, "completed": 40},
+            {"error": "max retries exceeded: connection reset"},
+        )):
+            seen.append(update)
+    assert seen == [Update.progress(40, 100)]
+    assert "connection reset" in str(failure.value) and "--download-model" in str(failure.value)
+
+
+# Two replies Python's JSON decoder refuses with something other than its
+# JSONDecodeError (Codex review, opposing vendor, round 1, security finding
+# 2, download.py:1153): bytes that are not UTF-8 (a UnicodeDecodeError from
+# the bytes' decoding) and an integer literal past its int-to-str limit of
+# 4300 digits (a plain ValueError, `Exceeds the limit`). Both are the
+# server's to write.
+NOT_UTF8 = b"\xff\xfe{"
+PAST_THE_DIGIT_LIMIT = b'{"status": "pulling manifest", "total": ' + b"9" * 5000 + b"}"
+# Codex review (opposing vendor) round 2, security finding (download.py:1179):
+# 20 KB, well under the reply bound, that the decoder refuses with a
+# RecursionError, a RuntimeError and not a ValueError.
+DEEPLY_NESTED = b"[" * 10_000 + b"]" * 10_000
+THE_DECODER_REFUSES = [NOT_UTF8, PAST_THE_DIGIT_LIMIT, DEEPLY_NESTED]
+THE_DECODER_REFUSES_IDS = ["not-utf-8", "an-integer-past-the-digit-limit", "arrays-nested-past-the-recursion-limit"]
+
+
+@pytest.mark.parametrize("line", [b"<html>proxy error</html>", *THE_DECODER_REFUSES],
+                         ids=["a-page", *THE_DECODER_REFUSES_IDS])
+def test_pull_stream_that_is_not_json_is_a_failure_not_a_traceback(line: bytes):
+    """A line the decoder refuses, whatever it raises for it, is named as
+    not JSON: the message bounded to the line's first 120 characters. The
+    RecursionError for arrays nested past the interpreter's limit (Codex
+    review round 2, security finding, download.py:1179) is a RuntimeError,
+    not a ValueError, and would otherwise reach the pull's clause for the
+    backend's words, named as Ollama's own error."""
+    from melampus.download import pull_updates
+
+    with pytest.raises(DownloadError) as failure:
+        list(pull_updates(FAKE_MODEL, [line + b"\n"]))
+    assert "not JSON" in str(failure.value), str(failure.value)
+    assert len(str(failure.value)) < 400, "the message is not bounded"
+
+
+@pytest.mark.parametrize("line", [b"[1]", b'"text"', b"5"], ids=["a-list", "a-string", "a-number"])
+def test_pull_stream_line_that_is_json_but_not_an_object_is_named_as_such(line: bytes):
+    """Review round 9 (download.py:1040, :1177): a line that is JSON but not
+    an object was named "not JSON", which it is; the list's and the delete's
+    reply of the same shape is named "not a JSON object", the words the
+    chat's `complete` uses too. One decoder, one message for the one case."""
+    from melampus.download import pull_updates
+
+    with pytest.raises(DownloadError) as failure:
+        list(pull_updates(FAKE_MODEL, [line + b"\n"]))
+    assert "not a JSON object" in str(failure.value), str(failure.value)
+
+
+@pytest.mark.parametrize(
+    "error",
+    ["pull model manifest: file does not exist\x1b[2K\rfake log line", "boom\x1b[31m\r\nfake log line\x07"],
+    ids=["unknown-model", "other"],
+)
+def test_pull_stream_error_words_keep_none_of_the_servers_control_characters(error: str):
+    """Security: an error line's words are the server's, and the message
+    carrying them lands on stderr, so in the CLI log the dialog shows its
+    tail of, and the terminal. Escape sequences and control characters in
+    it would move the cursor, recolour the terminal, erase a line, or fake a
+    line of the log. The backend neutralises them in every message that
+    carries the server's words (OllamaBackend.plain); the stream's error
+    line, one more such message, keeps the words and none of the controls,
+    on both of its paths."""
+    from melampus.download import pull_updates
+
+    with pytest.raises(DownloadError) as failure:
+        list(pull_updates(FAKE_MODEL, _stream({"error": error})))
+    message = str(failure.value)
+    assert "fake log line" in message
+    assert all(c.isprintable() for c in message), repr(message)
+
+
+@pytest.mark.parametrize(
+    "layer",
+    [
+        '{"status": "pulling aaa", "digest": "sha256:aaa", "total": "lots"}',
+        '{"status": "pulling aaa", "digest": "sha256:aaa", "total": [100], "completed": 1}',
+        '{"status": "pulling aaa", "digest": "sha256:aaa", "total": 100, "completed": {"n": 1}}',
+        '{"status": "pulling aaa", "digest": "sha256:aaa", "total": 1e309}',
+        '{"status": "pulling aaa", "digest": "sha256:aaa", "total": 100, "completed": 1e309}',
+        '{"status": "pulling aaa", "digest": "sha256:aaa", "total": -1}',
+        '{"status": "pulling aaa", "digest": "sha256:aaa", "total": 1.5}',
+        '{"status": "pulling aaa", "digest": "sha256:aaa", "total": true}',
+        '{"status": "pulling aaa", "digest": "sha256:aaa", "total": 100, "completed": true}',
+        '{"status": "pulling aaa", "digest": "sha256:aaa", "total": %d}' % (download.MAX_SIZE + 1),
+        '{"status": "pulling aaa", "digest": "sha256:aaa", "total": %d, "completed": %d}'
+        % (download.MAX_SIZE, download.MAX_SIZE + 1),
+    ],
+    ids=["total-words", "total-list", "completed-object", "total-1e309", "completed-1e309", "total-negative",
+         "total-fraction", "total-bool", "completed-bool", "total-above-MAX_SIZE", "completed-above-MAX_SIZE"],
+)
+def test_pull_stream_layer_line_with_counts_that_are_not_counts_is_a_failure_not_a_traceback(layer: str):
+    """A layer line's `total` and `completed` are the server's to write; one
+    that is not a count is a malformed stream, a failure named like the
+    non-JSON line, not a traceback out of --download-model. A count is what
+    the MLX status takes as a file's size (Codex review 8 and Claude review
+    16 there): a non-negative integer of at most MAX_SIZE, not a bool, not
+    a fraction, not `1e309`, which Python reads as the float `inf` and
+    `int()` refuses with an OverflowError, not a ValueError (Codex review,
+    opposing vendor, round 1, security finding 1, download.py:1043: a
+    traceback out of --download-model, in the plugin's log)."""
+    from melampus.download import pull_updates
+
+    with pytest.raises(DownloadError) as failure:
+        list(pull_updates(FAKE_MODEL, _stream({"status": "pulling manifest"}) + [layer.encode("utf-8") + b"\n"]))
+    assert "not a count" in str(failure.value), str(failure.value)
+
+
+@pytest.mark.parametrize(
+    ("layers", "named"),
+    [
+        ([{"status": "pulling x", "digest": "sha256:" + "a" * download.MAX_DIGEST_CHARS, "total": 1}],
+         "a digest longer than one is"),
+        ([{"status": f"pulling {i}", "digest": f"sha256:{i:064x}", "total": 1}
+          for i in range(download.MAX_PULL_LAYERS + 1)],
+         f"more than {download.MAX_PULL_LAYERS} layers"),
+    ],
+    ids=["digest-past-the-bound", "layers-past-the-bound"],
+)
+def test_pull_stream_naming_more_layers_or_a_longer_digest_than_a_model_has_is_a_failure_not_a_memory_leak(
+    layers: list, named: str
+):
+    """Security review (PR #19, round 5): the stream reader bounds each line
+    (round 1) and each line's time (round 4), but the table summing the
+    layers kept every digest the listener named, so a squatter on the
+    port naming a fresh, in-bound digest on every line grew --download-model
+    by a line's worth per line, with no end but a MemoryError traceback or
+    the OS. A model's manifest holds a handful of layers, each a `sha256:`
+    digest of 71 characters: a digest past MAX_DIGEST_CHARS, or a layer past
+    MAX_PULL_LAYERS, is a malformed stream, named like a count that is not
+    one, and the table holds at most their product."""
+    from melampus.download import pull_updates
+
+    with pytest.raises(DownloadError) as failure:
+        list(pull_updates(FAKE_MODEL, _stream({"status": "pulling manifest"}, *layers)))
+    assert named in str(failure.value), str(failure.value)
+
+
+def test_pull_stream_ending_without_success_is_a_failure():
+    """The connection dropped before `success`: not done, and said so."""
+    from melampus.download import pull_updates
+
+    with pytest.raises(DownloadError) as failure:
+        list(pull_updates(FAKE_MODEL, _stream(
+            {"status": "pulling manifest"},
+            {"status": "pulling aaa", "digest": "sha256:aaa", "total": 100, "completed": 40},
+        )))
+    assert "ended" in str(failure.value) and "--download-model" in str(failure.value)
+
+
+# The pull against a fake Ollama on 127.0.0.1 (Done-when 2): conftest's
+# FakeOllama grows the pull endpoint, streaming the layers of a model in its
+# `library` and keeping what a cut-off pull had, the way Ollama does.
+
+
+@pytest.fixture()
+def fake_ollama() -> Iterator[FakeOllama]:
+    """The Ollama, holding nothing and able to pull FAKE_MODEL."""
+    with FakeOllama(library={FAKE_MODEL: [3000, 1000]}).serve() as ollama:
+        yield ollama
+
+
+def _pull(ollama: FakeOllama, model: str = FAKE_MODEL, **kwargs) -> list[Update]:
+    """The progress updates of a pull, and, as the CLI prints it, `done
+    <model>` last from what pull_model returns."""
+    updates: list[Update] = []
+    pulled = pull_model(model, ollama.endpoint, on_update=updates.append, **kwargs)
+    return [*updates, Update.done(pulled)]
+
+
+def test_pull_asks_ollama_to_pull_the_model_and_reports_its_progress_then_done(fake_ollama: FakeOllama):
+    """Done-when 1 at the library: POST /api/pull with the model (docs/api.md
+    § Pull a Model), the stream's layer lines become progress lines that
+    climb to the whole model, `done <model>` ends it, and the fake then
+    holds the model. Every request went to the fake's pull endpoint."""
+    updates = _pull(fake_ollama)
+
+    assert [p["model"] for p in fake_ollama.pulls] == [FAKE_MODEL]
+    assert {path for _, path in fake_ollama.requests} == {"/api/pull"}
+    assert updates[0] == Update.progress(0, 3000), "the first layer's total, before any byte"
+    assert updates[-2] == Update.progress(4000, 4000)
+    assert updates[-1] == Update.done(FAKE_MODEL)
+    counts = [u.bytes_done for u in updates[:-1]]
+    assert counts == sorted(counts)
+    assert fake_ollama.models == {FAKE_MODEL: 4000}
+
+
+def test_pull_of_a_model_ollama_has_no_name_for_names_the_setting(fake_ollama: FakeOllama):
+    with pytest.raises(DownloadError) as failure:
+        _pull(fake_ollama, model="fake-org/no-such-model:1b")
+    message = str(failure.value)
+    assert "fake-org/no-such-model:1b" in message and "[model] ollama_model" in message
+
+
+def test_pull_with_no_ollama_answering_uses_the_backends_not_running_message(tmp_path: Path):
+    """The same words the ollama backend uses for the same condition, so the
+    dialog's message matches what a run would say."""
+    port = closed_port()
+    with pytest.raises(DownloadError) as failure:
+        pull_model(FAKE_MODEL, f"http://127.0.0.1:{port}", on_update=lambda update: None,
+                   cancel_marker=tmp_path / "download-cancel")
+    message = str(failure.value)
+    assert f"no Ollama server answering at http://127.0.0.1:{port}" in message
+    assert "start Ollama, or set [model] ollama_url" in message
+
+
+def test_pull_refused_before_any_content_carries_ollamas_words(fake_ollama: FakeOllama):
+    """An error before the stream starts is an HTTP status with the same
+    {"error": ...} object (server/routes.go: a bad name is 400): the message
+    carries Ollama's words, not a traceback."""
+    with pytest.raises(DownloadError) as failure:
+        _pull(fake_ollama, model="")
+    assert "invalid model name" in str(failure.value)
+
+
+# Security review (PR #19): the pull, the list and the delete reach the
+# Ollama address the way every frame does (PR #11's review of the backend):
+# straight to it, never through a proxy, never past a redirect, the one-shot
+# calls within a deadline and a bounded reply. One mechanism, the backend's.
+
+
+def _through(ollama_call: str, url: str, tmp_path: Path):
+    """One of the three Ollama calls against `url`, as the flags make it:
+    what it returns, or the DownloadError it raised."""
+    try:
+        if ollama_call == "pull":
+            return pull_model(FAKE_MODEL, url, on_update=lambda update: None,
+                              cancel_marker=tmp_path / "download-cancel", timeout=5.0)
+        if ollama_call == "status":
+            return ollama_status(FAKE_MODEL, url)
+        return remove_ollama_model(FAKE_MODEL, url)
+    except DownloadError as exc:
+        return exc
+
+
+@pytest.mark.parametrize("ollama_call", ["pull", "status", "remove"])
+def test_the_ollama_calls_stay_at_the_address_whatever_proxy_the_environment_names(
+    monkeypatch, tmp_path: Path, ollama_call: str
+):
+    """Security: readme.md § Windows promises that through Ollama nothing
+    leaves the machine, and the probe and the backend keep it by consulting
+    no proxy. The pull, the list and the delete must keep it too: urlopen's
+    default opener honours `http_proxy` (and, on a Mac, the system proxy
+    settings, whose default bypass list does not cover 127.0.0.1), which
+    would send the model's name off the machine and let the proxy's answer
+    stand in for Ollama's: its stream for the pull, its list for
+    `--model-status`. Given a proxy in the environment that answers 200 to
+    everything and nothing at the address, each call fails as not-running
+    (the status reads absent) and the proxy never hears from it."""
+    from conftest import proxy_in_the_environment
+
+    seen: list[str] = []
+    with proxy_in_the_environment(monkeypatch, seen):
+        outcome = _through(ollama_call, f"http://127.0.0.1:{closed_port()}", tmp_path)
+    assert seen == [], f"the {ollama_call} left the machine through the proxy: {seen}"
+    if ollama_call == "status":
+        assert outcome.installed is False
+    else:
+        assert "no Ollama server answering" in str(outcome), outcome
+
+
+@pytest.mark.parametrize("ollama_call", ["pull", "status", "remove"])
+def test_the_ollama_calls_refuse_a_redirect_off_the_address(tmp_path: Path, ollama_call: str):
+    """Security: the backend asks one address and takes only that address's
+    answer, as the probe does. urlopen's default opener follows a 3xx (a
+    POST's as a GET), so whatever listens on the port when Ollama does not
+    (any local process can bind it) could answer 302 with a Location
+    anywhere, and the reply from there would stand in for Ollama's: a
+    `success` line for the pull, a list holding the model for
+    `--model-status`. Given a server at the address answering 302 towards a
+    second server that records every request, each call fails on the
+    status (the status reads absent) and the destination never hears from
+    it."""
+    from conftest import recording_handler, redirecting_handler
+
+    seen: list[str] = []
+    with loopback_server(recording_handler(seen)) as destination:
+        elsewhere = f"http://127.0.0.1:{destination.server_port}"
+        with loopback_server(redirecting_handler(elsewhere)) as squatter:
+            outcome = _through(ollama_call, f"http://127.0.0.1:{squatter.server_port}", tmp_path)
+    assert seen == [], f"the {ollama_call} followed the redirect off the address: {seen}"
+    if ollama_call == "status":
+        assert outcome.installed is False
+    else:
+        assert "302" in str(outcome), outcome
+
+
+def _trickling():
+    """A server that answers the list and the delete a byte every tenth of
+    a second for longer than the timeouts the tests set: the listener that
+    would hold a call for as long as it liked."""
+    from conftest import QuietHandler, trickle
+
+    class Trickling(QuietHandler):
+        def do_GET(self):  # noqa: N802 - http.server's name
+            self.rfile.read(int(self.headers.get("Content-Length") or 0))
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            trickle(self.wfile, b" " * 40)
+            self.wfile.write(b'{"models": []}')
+
+        do_DELETE = do_GET  # noqa: N815 - http.server's name
+
+    return Trickling
+
+
+def test_the_list_gives_up_on_an_ollama_that_answers_and_never_finishes():
+    """Security: `--model-status` is what the Settings dialog waits on when
+    it opens, and its socket timeout bounds each read, not the call, so a
+    listener trickling the list a byte at a time could hold the dialog for
+    as long as it liked. The backend bounds a frame with a deadline
+    (_Deadline) for that reason; the list is one exchange like it. Given a
+    server that writes a byte every tenth of a second for longer than the
+    timeout, the call is over within it and says so."""
+    with loopback_server(_trickling(), ThreadingHTTPServer) as trickler:
+        started = time.monotonic()
+        with pytest.raises(DownloadError) as failure:
+            download._ollama_request(FAKE_MODEL, f"http://127.0.0.1:{trickler.server_port}",
+                                     download.OLLAMA_TAGS, method="GET", timeout=1.0)
+        took = time.monotonic() - started
+    assert took < 3.0, f"the list ran past its timeout: {took:.1f}s"
+    assert "did not answer within 1s" in str(failure.value), str(failure.value)
+
+
+def test_remove_gives_up_on_an_ollama_that_answers_and_never_finishes_naming_the_setting_that_bounds_it():
+    """Review round 2 (download.py:844, :861): a Remove that ran past the
+    delete's timeout said "raise [model] timeout_seconds" while the delete
+    waited a fixed ten seconds the setting did not govern. The delete is
+    one exchange like the pull, and waits as the pull does: `timeout`,
+    which the flags bind to `[model] timeout_seconds`
+    (test_the_model_flags_with_backend_ollama...). Given a server that
+    trickles the delete's reply for longer than the timeout, the remove is
+    over within it and its message names the bound that applies, the
+    setting the flags hand it."""
+    with loopback_server(_trickling(), ThreadingHTTPServer) as trickler:
+        started = time.monotonic()
+        with pytest.raises(DownloadError) as failure:
+            remove_ollama_model(FAKE_MODEL, f"http://127.0.0.1:{trickler.server_port}", timeout=1.0)
+        took = time.monotonic() - started
+    assert took < 3.0, f"the remove ran past its timeout: {took:.1f}s"
+    assert "did not answer within 1s" in str(failure.value), str(failure.value)
+    assert "raise [model] timeout_seconds" in str(failure.value), str(failure.value)
+
+
+def test_the_list_reads_at_most_the_backends_reply_bound():
+    """Security: the list is read whole into memory before it is parsed, and
+    it is whatever listens at the address that writes it. The backend reads
+    at most OllamaBackend.MAX_REPLY_BYTES of a reply and refuses a longer
+    one by name; the list, one reply like it, keeps the same bound. Given a
+    server answering the list with more than that, the call refuses it
+    naming the bound, not the parser's complaint about what it read."""
+    from conftest import QuietHandler
+
+    from melampus.backend import OllamaBackend
+
+    class Endless(QuietHandler):
+        def do_GET(self):  # noqa: N802 - http.server's name
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"models": [' + b" " * (OllamaBackend.MAX_REPLY_BYTES + 1) + b"]}")
+
+    with loopback_server(Endless) as squatter:
+        with pytest.raises(DownloadError) as failure:
+            download._ollama_request(FAKE_MODEL, f"http://127.0.0.1:{squatter.server_port}",
+                                     download.OLLAMA_TAGS, method="GET", timeout=5.0)
+    assert f"ran past {OllamaBackend.MAX_REPLY_BYTES} bytes" in str(failure.value), str(failure.value)
+
+
+def test_the_pull_reads_at_most_the_backends_reply_bound_of_one_line(tmp_path: Path):
+    """Security: the pull's stream is read a line at a time, each held whole
+    until its newline, and it is whatever listens at the address that
+    writes it: a line that never ends is read into memory until it does.
+    One line is one of Ollama's objects, a few hundred bytes; the backend's
+    reply bound (OllamaBackend.MAX_REPLY_BYTES) is the one bound for what
+    Ollama writes, and a line past it is refused by name, the stream
+    closed, not read on."""
+    from conftest import QuietHandler
+
+    from melampus.backend import OllamaBackend
+
+    class Endless(QuietHandler):
+        def do_POST(self):  # noqa: N802 - http.server's name
+            self.rfile.read(int(self.headers.get("Content-Length") or 0))
+            self.send_response(200)
+            self.send_header("Content-Type", "application/x-ndjson")
+            self.end_headers()
+            self.wfile.write(b'{"status": "pulling manifest"}\n')
+            self.wfile.write(b'{"status": "' + b"x" * (OllamaBackend.MAX_REPLY_BYTES + 1) + b'"}\n')
+            self.wfile.write(b'{"status": "success"}\n')
+
+    with loopback_server(Endless) as squatter:
+        with pytest.raises(DownloadError) as failure:
+            pull_model(FAKE_MODEL, f"http://127.0.0.1:{squatter.server_port}",
+                       on_update=lambda update: None, cancel_marker=tmp_path / "download-cancel")
+    assert f"ran past {OllamaBackend.MAX_REPLY_BYTES} bytes" in str(failure.value), str(failure.value)
+
+
+def test_the_pull_gives_up_on_an_ollama_that_trickles_a_line_naming_the_setting_that_bounds_it(tmp_path: Path):
+    """Security (review round 4, download.py:784): the pull read each line
+    with the socket timeout alone, which bounds each read and resets on
+    every byte, and looked for the cancel marker between lines, so a
+    listener writing a line a byte at a time within the timeout held the
+    pull, and Cancel with it, for as long as it liked: a probe saw a marker
+    written one second into a trickled line read eight seconds later, at
+    its newline. The pull reads the stream through the backend
+    (OllamaBackend.stream), each line within `timeout` of wall-clock time,
+    the bound the flags hand it as `[model] timeout_seconds`. Given a
+    server writing two whole lines, then one trickled past the timeout,
+    the pull is over within it and its message is the backend's timeout
+    (docs/config.md: "exit 3 with the backend's timeout message"), the
+    words the delete gives the same timeout: the address once, the model
+    once, naming the bound that applies. Code review round 6
+    (download.py:855): the pull's `except OSError` wrapped the backend's
+    TimeoutError a second time, `the pull of m from <url> failed: Ollama
+    at <url> did not answer ...`, the address twice and the model twice
+    on stderr, in the log and in the dialog."""
+    with loopback_server(TricklingPull, ThreadingHTTPServer) as trickler:
+        url = f"http://127.0.0.1:{trickler.server_port}"
+        started = time.monotonic()
+        with pytest.raises(DownloadError) as failure:
+            pull_model(FAKE_MODEL, url, on_update=lambda update: None,
+                       cancel_marker=tmp_path / "download-cancel", timeout=1.0)
+        took = time.monotonic() - started
+    assert took < 3.0, f"the pull ran past its timeout: {took:.1f}s"
+    message = str(failure.value)
+    assert message.startswith(f"Ollama at {url} did not answer within 1s"), message
+    assert message.count(url) == 1 and message.count(FAKE_MODEL) == 1, message
+    assert "raise [model] timeout_seconds" in message, message
+
+
+def test_the_pull_names_a_listener_that_does_not_speak_http_as_the_list_and_the_delete_do(tmp_path: Path):
+    """Security (review round 4, download.py:827): a status line http.client
+    cannot parse raises `BadStatusLine`, which urllib lets through unwrapped
+    and the pull caught nowhere, so a listener on the port that does not
+    speak HTTP ended `--download-model` in a traceback: exit 1, the
+    interpreter's frames on stderr, so in the CLI log and the dialog's
+    failure message, where the list and the delete name it through the
+    backend (`Ollama's reply from <url> was not HTTP: <its words>`, in
+    printable characters). Given such a listener, the pull is a
+    DownloadError carrying those words."""
+    with loopback_server(BadStatusLine) as squatter:
+        with pytest.raises(DownloadError) as failure:
+            pull_model(FAKE_MODEL, f"http://127.0.0.1:{squatter.server_port}", on_update=lambda update: None,
+                       cancel_marker=tmp_path / "download-cancel", timeout=5.0)
+    message = str(failure.value)
+    assert f"Ollama's reply from http://127.0.0.1:{squatter.server_port} was not HTTP: [31mHTTP/9.9 OK fake log line" in message, message
+    assert all(c.isprintable() for c in message), message
+
+
+def test_the_pull_whose_stream_is_reset_names_the_model_the_address_and_the_re_run_hint(tmp_path: Path):
+    """Review round 5 (download.py:828, backend.py:666-686): a socket reset
+    while the stream is being read (Ollama killed mid-pull, or a listener
+    hanging up) is a ConnectionResetError, which urllib lets through
+    unwrapped and the backend's `_naming` did not name, so it reached the
+    pull's `except ConnectionError`, written for the backend's not-running
+    failure, and the message was the bare `[Errno 54] Connection reset by
+    peer`: no model, no address, no re-run hint, on stderr, in the CLI log
+    and in the dialog. The backend names it, as it names every other
+    failure at the address, and the pull gives it the hint Ollama's resume
+    earns. Given a listener answering the stream's first line and then
+    resetting, the pull is a DownloadError naming the model, the address
+    and the re-run hint."""
+    from conftest import chunked_pull_answer, resetting_handler
+
+    answer = chunked_pull_answer(b'{"status": "pulling manifest"}\n')
+    with loopback_server(resetting_handler(answer)) as squatter:
+        address = f"http://127.0.0.1:{squatter.server_port}"
+        with pytest.raises(DownloadError) as failure:
+            pull_model(FAKE_MODEL, address, on_update=lambda update: None,
+                       cancel_marker=tmp_path / "download-cancel", timeout=5.0)
+    message = str(failure.value)
+    assert FAKE_MODEL in message, message
+    assert address in message, message
+    assert "re-run melampus-id --download-model" in message, message
+
+
+def test_the_resetting_listener_reads_the_whole_request_before_it_answers_and_resets():
+    """Tests (CI on PR #15, #18 twice and #23; passing locally): the pull's
+    reset test above flaked on the macOS runner with the not-running message
+    in place of the re-run hint. http.client sends a POST's headers and its
+    body in two `send` calls, and `resetting_handler`'s listener did one
+    recv, so when the two arrived as two segments it answered and reset
+    after the headers alone: the client's send of the body then failed with
+    EPIPE, urllib wrapped that as a URLError, the backend named it as Ollama
+    not running, and the pull took that clause. The listener reads the
+    request through to the end of its body before it answers, so the reset
+    is what the client reads, whatever segments the request arrives in.
+    Given the request's head sent, a pause, then its body, the body's send
+    completes, the answer is read whole, and the read after it is the
+    reset."""
+    from conftest import resetting_handler
+
+    answer = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 40\r\n\r\n{"
+    body = b'{"name": "fake"}'
+    head = b"POST /api/pull HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: %d\r\n\r\n" % len(body)
+    with loopback_server(resetting_handler(answer)) as squatter:
+        with socket.create_connection(("127.0.0.1", squatter.server_port), timeout=5.0) as client:
+            client.sendall(head)
+            time.sleep(0.2)
+            client.sendall(body)
+            read = b""
+            while len(read) < len(answer):
+                read += client.recv(65536)
+            assert read == answer, read
+            with pytest.raises(ConnectionResetError):
+                client.recv(65536)
+
+
+# The cooperative cancel, for Ollama: the marker and the signals end the
+# pull the way they end the MLX download, exit 4 and `cancelled` through
+# one path; Ollama keeps the layers it has and the next pull resumes them.
+
+
+def _slow_ollama() -> FakeOllama:
+    """An Ollama with one 40 MiB layer to pull, served slowly enough for a
+    cancel to land mid-stream; the caller serves it."""
+    ollama = FakeOllama(library={FAKE_MODEL: [40 * 4096 * 256]})
+    ollama.throttle = (64 * 1024, 0.002)
+    return ollama
+
+
+def test_pull_stops_when_the_cancel_marker_appears_and_the_next_pull_resumes(tmp_path: Path):
+    """Done-when 1's Cancel: the marker is written once the first megabyte is
+    reported; the pull raises DownloadCancelled (the exception a signal
+    raises, so the entry point prints `cancelled` and exits 4 through one
+    path) with the stream closed and the marker gone. Ollama resumes a
+    cancelled pull by itself (docs/api.md § Pull a Model), so the proof is
+    the second pull: it is asked of the fake, its first line starts at what
+    the first pull had kept, and it completes."""
+    marker = tmp_path / "data" / "download-cancel"
+    seen: list[Update] = []
+
+    def cancel_after_a_megabyte(update: Update) -> None:
+        seen.append(update)
+        if update.bytes_done >= 1024 * 1024 and not marker.exists():
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.touch()
+
+    with _slow_ollama().serve() as ollama:
+        size = ollama.library[FAKE_MODEL][0]
+        with pytest.raises(DownloadCancelled) as cancelled:
+            pull_model(FAKE_MODEL, ollama.endpoint, on_update=cancel_after_a_megabyte, cancel_marker=marker)
+        assert CANCEL_MARKER in str(cancelled.value)
+        assert not marker.exists(), "the marker was not removed on exit"
+        assert 1024 * 1024 <= seen[-1].bytes_done < size, "the pull did not stop"
+        assert FAKE_MODEL not in ollama.models, "the fake finished the pull after the stream closed"
+
+        ollama.throttle = None
+        updates = _pull(ollama, cancel_marker=marker)
+        assert [p["model"] for p in ollama.pulls] == [FAKE_MODEL, FAKE_MODEL], "the second pull was not asked for"
+        assert updates[0].bytes_done >= seen[-1].bytes_done, "the second pull did not start from what was kept"
+        assert updates[-2] == Update.progress(size, size) and updates[-1] == Update.done(FAKE_MODEL)
+        assert ollama.models == {FAKE_MODEL: size}
+
+
+def test_a_pull_resumed_after_a_cancel_in_its_second_layer_counts_the_first_layer_held_and_both_in_its_total(
+    tmp_path: Path
+):
+    """Codex review (opposing vendor) round 2, code finding 2
+    (conftest.py:792). The fake reported a layer already complete only when
+    the whole model was installed, so a pull resumed after a cancel during
+    the second layer never saw the first: its lines were the second layer's
+    alone, `progress 1000 1000` for a model of 4,000 bytes, where Ollama
+    reports a layer it already holds once, complete (server/download.go;
+    docs/api.md § Pull a Model), so the protocol's sums cover both. Given a
+    cancel during the second layer, the resumed pull's first line is the
+    first layer held whole, its last progress line the whole model, and
+    the fake then holds the model at its whole size."""
+    marker = tmp_path / "data" / "download-cancel"
+    seen: list[Update] = []
+
+    def cancel_in_the_second_layer(update: Update) -> None:
+        seen.append(update)
+        if update.bytes_total == 4000 and update.bytes_done > 3000 and not marker.exists():
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.touch()
+
+    ollama = FakeOllama(library={FAKE_MODEL: [3000, 1000]})
+    ollama.throttle = (100, 0.01)
+    with ollama.serve():
+        with pytest.raises(DownloadCancelled):
+            pull_model(FAKE_MODEL, ollama.endpoint, on_update=cancel_in_the_second_layer, cancel_marker=marker)
+        assert 3000 < seen[-1].bytes_done < 4000, "the cancel did not land in the second layer"
+        assert FAKE_MODEL not in ollama.models, "the fake finished the pull after the stream closed"
+
+        ollama.throttle = None
+        updates = _pull(ollama, cancel_marker=marker)
+
+    assert [p["model"] for p in ollama.pulls] == [FAKE_MODEL, FAKE_MODEL], "the second pull was not asked for"
+    assert updates[0] == Update.progress(3000, 3000), f"the first layer was not reported held: {updates}"
+    assert updates[-2] == Update.progress(4000, 4000), f"the total did not cover both layers: {updates}"
+    assert updates[-1] == Update.done(FAKE_MODEL)
+    assert ollama.models == {FAKE_MODEL: 4000}
+
+
+def _stalling_pull(then: Callable[[], None] = lambda: None):
+    """A listener answering the pull's stream with one layer line, chunked as
+    Ollama writes it, and then nothing: the pull's next read blocks."""
+    from conftest import chunked_pull_answer, stalling_handler
+
+    line = b'{"status": "pulling aaa", "digest": "sha256:aaa", "total": 100}\n'
+    return stalling_handler(chunked_pull_answer(line), then)
+
+
+def test_the_cancel_marker_ends_a_pull_whose_stream_has_stalled_within_a_second_not_at_the_timeout(tmp_path: Path):
+    """Codex review (opposing vendor) round 2, code finding 1
+    (download.py:1079). The marker was looked for between lines only, so
+    with Ollama stalled mid-stream Cancel waited for the read to end: the
+    timeout, exit 3 with its message, the marker removed without
+    `cancelled` ever printed, and the dialog told of a failure it did not
+    have. The pull's stream watches the marker while a read blocks (the
+    backend's deadline thread, on a short period, hanging the socket up as
+    it does for the timeout), so the marker cancels the pull within about
+    a second whether Ollama writes or not. Given a listener writing one
+    layer line and then nothing, and the marker written once that line is
+    reported, the pull raises DownloadCancelled well within its 10 s
+    timeout, the marker removed on exit."""
+    marker = tmp_path / "data" / "download-cancel"
+    marker.parent.mkdir(parents=True)
+
+    with loopback_server(_stalling_pull(), ThreadingHTTPServer) as stalled:
+        started = time.monotonic()
+        with pytest.raises(DownloadCancelled) as cancelled:
+            pull_model(FAKE_MODEL, f"http://127.0.0.1:{stalled.server_port}", on_update=lambda update: marker.touch(),
+                       cancel_marker=marker, timeout=10.0)
+        took = time.monotonic() - started
+    assert CANCEL_MARKER in str(cancelled.value)
+    assert took < 3.0, f"the cancel waited on the stalled read: {took:.1f}s"
+    assert not marker.exists(), "the marker was not removed on exit"
+
+
+def test_a_stale_cancel_marker_is_removed_when_a_pull_starts(fake_ollama: FakeOllama, tmp_path: Path):
+    marker = tmp_path / "data" / "download-cancel"
+    marker.parent.mkdir(parents=True)
+    marker.touch()
+
+    updates = _pull(fake_ollama, cancel_marker=marker)
+
+    assert updates[-1] == Update.done(FAKE_MODEL)
+    assert not marker.exists()
+
+
+def test_the_pull_watches_the_documented_marker_by_default(monkeypatch, tmp_path: Path, fake_ollama: FakeOllama):
+    marker = tmp_path / "data" / "download-cancel"
+    monkeypatch.setattr(download, "cancel_marker_path", lambda: marker)
+    marker.parent.mkdir(parents=True)
+    marker.touch()
+
+    _pull(fake_ollama)
+
+    assert not marker.exists(), "the pull did not use the documented marker"
+
+
+def test_a_cancel_marker_that_cannot_be_removed_on_start_is_a_download_error_naming_it_before_ollama_is_asked(
+    fake_ollama: FakeOllama, tmp_path: Path
+):
+    """Codex review (opposing vendor) round 1, code finding 2
+    (download.py:1105). The pull's start called `marker.unlink` raw where
+    the MLX download calls `_remove_marker`: a folder at the marker's path
+    (or any marker the OS refuses to remove) raised its OSError straight out
+    of pull_model, a traceback and exit 1 where docs/config.md names exit 3
+    and a reason. The same rule as the download's: the failure is a
+    DownloadError naming the path and what to do, raised before Ollama is
+    asked anything."""
+    marker = _marker(tmp_path)
+    marker.mkdir(parents=True)
+
+    with pytest.raises(DownloadError) as failure:
+        _pull(fake_ollama, cancel_marker=marker)
+
+    message = str(failure.value)
+    assert str(marker) in message and "by hand" in message, message
+    assert not fake_ollama.requests, "Ollama was asked with a marker that cannot be removed in place"
+    assert marker.is_dir()
+
+
+@pytest.mark.parametrize("called", [
+    pytest.param(contextlib.nullcontext, id="plainly"),
+    pytest.param(_handling_an_exception_of_the_callers_own, id="from inside the caller's handler"),
+])
+def test_a_cancel_marker_that_cannot_be_removed_on_exit_is_a_download_error_naming_it_with_the_model_pulled(
+    fake_ollama: FakeOllama, tmp_path: Path, called
+):
+    """Codex review (opposing vendor) round 1, code finding 2
+    (download.py:1128). The exit's raw unlink in the pull's `finally` raised
+    the same bare OSError. The marker is looked for before every line, so a
+    folder at its path is a cancellation (the test below); what the exit's
+    removal can meet with the model complete is a marker that is not there
+    and still cannot be removed: a file at its parent's path, made as the
+    last layer's line is counted, which `exists` reads as absent and
+    `unlink` refuses (ENOTDIR, not the ENOENT `missing_ok` forgives). The
+    failure names the marker and what to do, and the fake holds the model.
+    From inside the caller's handler, as the download's test asks: whether
+    the caller is handling an exception of its own must not change the
+    outcome (the download's `finally` decides from its own flag, not
+    sys.exc_info())."""
+    marker = _marker(tmp_path)
+    marker.parent.mkdir(parents=True)
+
+    def a_file_at_the_markers_parent_once_complete(update: Update) -> None:
+        if update.bytes_done == update.bytes_total == 4000:
+            marker.parent.rmdir()
+            marker.parent.touch()
+
+    with pytest.raises(DownloadError) as failure, called():
+        pull_model(FAKE_MODEL, fake_ollama.endpoint, on_update=a_file_at_the_markers_parent_once_complete,
+                   cancel_marker=marker)
+
+    message = str(failure.value)
+    assert str(marker) in message and "by hand" in message, message
+    assert marker.parent.is_file()
+    assert fake_ollama.models == {FAKE_MODEL: 4000}, "the pull did not complete"
+
+
+def test_a_cancel_marker_that_cannot_be_removed_on_exit_does_not_mask_the_cancellation_of_the_pull_in_flight(
+    tmp_path: Path
+):
+    """Codex review (opposing vendor) round 1, code finding 2
+    (download.py:1128). A folder appearing at the marker's path mid-stream is
+    the marker appearing: the pull is cancelled at the next line, and the
+    `finally`'s removal, refused by the folder, must not replace that
+    DownloadCancelled (exit 4, `cancelled`, the layers kept) with its own
+    failure."""
+    marker = _marker(tmp_path)
+    marker.parent.mkdir(parents=True)
+
+    def a_folder_at_the_marker_after_a_megabyte(update: Update) -> None:
+        if update.bytes_done >= 1024 * 1024:
+            marker.mkdir(exist_ok=True)
+
+    with _slow_ollama().serve() as ollama:
+        with pytest.raises(DownloadCancelled) as cancelled:
+            pull_model(FAKE_MODEL, ollama.endpoint, on_update=a_folder_at_the_marker_after_a_megabyte,
+                       cancel_marker=marker)
+        assert CANCEL_MARKER in str(cancelled.value)
+        assert marker.is_dir()
+        assert FAKE_MODEL not in ollama.models, "the fake finished the pull after the stream closed"
+
+
+def test_download_model_flag_for_ollama_exits_3_naming_the_marker_it_cannot_remove_with_nothing_on_stdout(
+    monkeypatch: pytest.MonkeyPatch, capsys, tmp_path: Path
+):
+    """The same through the entry point, as the download's test measures it:
+    a folder at the path `--model-status` reports as `cancel_path`, then
+    `--download-model --backend ollama`. Exit 3 with the reason on stderr
+    naming the marker, no traceback, nothing on stdout, Ollama (a closed
+    port here) never asked."""
+    marker = _marker(tmp_path)
+    marker.mkdir(parents=True)
+    monkeypatch.setattr(download, "cancel_marker_path", lambda: marker)
+    settings = _ollama_settings(tmp_path, f"http://127.0.0.1:{closed_port()}")
+
+    _refused_through_the_cli(capsys, "--download-model", str(marker), "--backend", "ollama", "--config", str(settings))
+
+
+# The model's status and removal in Ollama, for the same Settings row.
+
+
+def _ollama_status(ollama: FakeOllama, model: str = FAKE_MODEL) -> Status:
+    return ollama_status(model, ollama.endpoint)
+
+
+def test_status_of_a_model_ollama_does_not_hold_reports_absent_with_no_size(fake_ollama: FakeOllama):
+    """Present-ness from the list endpoint (docs/api.md § List Local Models:
+    GET /api/tags, `models` each with `name` and `size`). A model not held
+    has no size to give: the docs list sizes for local models only, so
+    bytes_total is null and the button says the size is unknown."""
+    status = _ollama_status(fake_ollama)
+
+    assert status == Status(FAKE_MODEL, installed=False, bytes_total=None, bytes_done=0,
+                            path=None, cancel_path=str(cancel_marker_path()))
+    assert {path for _, path in fake_ollama.requests} == {"/api/tags"}
+
+
+def test_status_of_a_pulled_model_reports_installed_with_its_size_and_name(fake_ollama: FakeOllama):
+    """Installed, with the size the list gives for both totals, and the
+    model's name as the path: it lives in Ollama under that name, which is
+    what `done` printed."""
+    _pull(fake_ollama)
+
+    status = _ollama_status(fake_ollama)
+
+    assert status.installed is True
+    assert status.bytes_total == status.bytes_done == 4000
+    assert status.path == FAKE_MODEL
+
+
+def test_status_matches_a_name_without_a_tag_to_ollamas_latest(fake_ollama: FakeOllama):
+    """docs/api.md § Model names: the tag is optional and defaults to
+    `latest`, and the list names the model with it."""
+    fake_ollama.library["fake-org/plain"] = [10]
+    _pull(fake_ollama, model="fake-org/plain")
+    assert "fake-org/plain:latest" in {m["name"] for m in fake_ollama.tags()}
+
+    assert _ollama_status(fake_ollama, model="fake-org/plain").installed is True
+    assert _ollama_status(fake_ollama, model="fake-org/plain:latest").installed is True
+    assert _ollama_status(fake_ollama, model="fake-org/plain:1b").installed is False
+
+
+def test_status_with_no_ollama_answering_says_absent_and_never_fails():
+    """Settings must open with Ollama down: absent, size unknown, exit 0."""
+    port = closed_port()
+
+    status = ollama_status(FAKE_MODEL, f"http://127.0.0.1:{port}")
+
+    assert status == Status(FAKE_MODEL, installed=False, bytes_total=None, bytes_done=0,
+                            path=None, cancel_path=str(cancel_marker_path()))
+
+
+@pytest.mark.parametrize(("reply", "named"), [
+    ([], "not a JSON object"),
+    ({"models": 5}, "not a list of models"),
+    ({"models": [5]}, "carried an entry that is not an object"),
+    ({"models": [{"name": [FAKE_MODEL]}]}, "whose name is not a string"),
+    ({"models": [{"name": "other:latest", "model": [FAKE_MODEL]}]}, "whose model is not a string"),
+    ({"models": [{"name": FAKE_MODEL, "size": "large"}]}, "a size that is not a count"),
+    ({"models": [{"name": FAKE_MODEL, "size": [1]}]}, "a size that is not a count"),
+    (b'{"models": [{"name": "%s", "size": 1e309}]}' % FAKE_MODEL.encode(), "a size that is not a count"),
+    (b'{"models": [{"name": "%s", "size": -1}]}' % FAKE_MODEL.encode(), "a size that is not a count"),
+    (b'{"models": [{"name": "%s", "size": 1.5}]}' % FAKE_MODEL.encode(), "a size that is not a count"),
+    (b'{"models": [{"name": "%s", "size": true}]}' % FAKE_MODEL.encode(), "a size that is not a count"),
+    (b'{"models": [{"name": "%s", "size": %d}]}' % (FAKE_MODEL.encode(), download.MAX_SIZE + 1),
+     "a size that is not a count"),
+    (NOT_UTF8, "not JSON"),
+    (b'{"models": [{"name": "%s", "size": ' % FAKE_MODEL.encode() + b"9" * 5000 + b"}]}", "not JSON"),
+    (DEEPLY_NESTED, "not JSON"),
+], ids=["not-an-object", "models-not-a-list", "models-entry-not-an-object", "name-not-a-string",
+        "model-not-a-string", "size-words", "size-a-list", "size-1e309", "size-negative", "size-fraction",
+        "size-bool", "size-above-MAX_SIZE", "not-utf-8", "size-past-the-digit-limit",
+        "arrays-nested-past-the-recursion-limit"])
+def test_status_with_an_ollama_answering_the_list_in_the_wrong_shape_says_absent_and_never_fails(reply, named):
+    """Security: the list is whatever listens at the address writes it, and
+    `--model-status` is what the Settings dialog waits on when it opens, so
+    it never fails for the server (test_status_with_no_ollama_answering...).
+    Given a list that is JSON but not the documented shape (docs/api.md §
+    List Local Models: an object whose `models` is a list of objects with
+    a `name` and a `size`), the malformed reply is named at the boundary as
+    the pull's is, never a traceback out of the entry point, and the status
+    reads absent, size unknown. Review round 3 (download.py:894-898): the
+    message says which field is wrong, the `name` or the `model`, not
+    "no name" for an entry that has one; round 4 (download.py:894-899): an
+    entry that is not an object is named as such, not for a name it has no
+    field to hold. A size that is a number but not a count (Codex review,
+    opposing vendor, round 1, security finding 1, download.py:1194): `1e309`
+    is the float `inf` in Python, which `int()` refuses with an
+    OverflowError, not a ValueError, a traceback out of --model-status; a
+    count is what the MLX status takes as a file's size, a non-negative
+    integer of at most MAX_SIZE, not a bool, not a fraction. Those replies
+    are the bytes as the server writes them (`json.dumps` cannot write
+    `1e309`). And a reply the decoder refuses with something other than
+    its JSONDecodeError (the same review's security finding 2,
+    download.py:1153): bytes that are not UTF-8, and an integer past
+    Python's 4300-digit limit, both named as not JSON, the message bounded,
+    never the UnicodeDecodeError or the ValueError out of --model-status;
+    and (the same vendor's round 2, download.py:1179) 20 KB of arrays
+    nested past the interpreter's recursion limit, well under the reply
+    bound, which the decoder refuses with a RecursionError, a RuntimeError
+    and not a ValueError, named the same."""
+    from conftest import QuietHandler
+
+    class WrongShape(QuietHandler):
+        def do_GET(self):  # noqa: N802 - http.server's name
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(reply if isinstance(reply, bytes) else json.dumps(reply).encode("utf-8"))
+
+    with loopback_server(WrongShape) as squatter:
+        address = f"http://127.0.0.1:{squatter.server_port}"
+        with pytest.raises(DownloadError) as failure:
+            download._held(FAKE_MODEL, address)
+        assert download.OLLAMA_TAGS in str(failure.value), str(failure.value)
+        assert named in str(failure.value), str(failure.value)
+        assert len(str(failure.value)) < 400, "the message is not bounded"
+
+        status = ollama_status(FAKE_MODEL, address)
+
+    assert status == Status(FAKE_MODEL, installed=False, bytes_total=None, bytes_done=0,
+                            path=None, cancel_path=str(cancel_marker_path()))
+
+
+@pytest.mark.parametrize("body", THE_DECODER_REFUSES, ids=THE_DECODER_REFUSES_IDS)
+def test_the_model_flags_for_ollama_meet_a_reply_the_decoder_refuses_status_absent_exit_0_pull_and_remove_exit_3(
+    monkeypatch: pytest.MonkeyPatch, capsys, tmp_path: Path, body: bytes
+):
+    """Codex review (opposing vendor) round 1, security finding 2
+    (download.py:1153), and round 2's (download.py:1179: arrays nested past
+    the recursion limit, a RecursionError), through the entry point: a
+    listener at `[model]
+    ollama_url` answering every call with bytes Python's JSON decoder
+    refuses with something other than its JSONDecodeError. `--model-status`
+    never fails for the server: exit 0, absent, size unknown;
+    `--download-model` and `--remove-model` are refused with exit 3 and a
+    reason on stderr saying the reply was not JSON, nothing on stdout, no
+    traceback (an exception out of main here would be one)."""
+    from conftest import QuietHandler
+
+    class Undecodable(QuietHandler):
+        def do_GET(self):  # noqa: N802 - http.server's name
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_POST(self):  # noqa: N802 - http.server's name
+            self.rfile.read(int(self.headers.get("Content-Length") or 0))
+            self.do_GET()
+
+        do_DELETE = do_POST  # noqa: N815 - http.server's name
+
+    monkeypatch.setattr(download, "cancel_marker_path", lambda: _marker(tmp_path))
+    with loopback_server(Undecodable) as squatter:
+        address = f"http://127.0.0.1:{squatter.server_port}"
+        flags = ["--backend", "ollama", "--config", str(_ollama_settings(tmp_path, address))]
+
+        assert main(["--model-status", *flags]) == 0
+        out, err = capsys.readouterr()
+        status = json.loads(out)
+        assert status["installed"] is False and status["bytes_total"] is None, out
+        assert "Traceback" not in err, err
+
+        for flag in ("--download-model", "--remove-model"):
+            _refused_through_the_cli(capsys, flag, "not JSON", *flags)
+
+
+def test_remove_deletes_the_pulled_model_from_ollama(fake_ollama: FakeOllama):
+    """Remove: the delete endpoint (docs/api.md § Delete a Model: DELETE
+    /api/delete with the model's name, 200 when gone). The status reads
+    absent again, and the removal is what the fake saw."""
+    _pull(fake_ollama)
+
+    removed = remove_ollama_model(FAKE_MODEL, fake_ollama.endpoint)
+
+    assert removed == FAKE_MODEL
+    assert fake_ollama.deletes == [FAKE_MODEL]
+    assert fake_ollama.models == {}
+    assert _ollama_status(fake_ollama).installed is False
+
+
+def test_a_pull_after_a_remove_downloads_the_layers_again_from_zero(fake_ollama: FakeOllama):
+    """Code review round 10 (conftest.py:763), Done-when 2, the fake's
+    fidelity: c07a1d7 made `partial` the fake's record of what it holds,
+    and do_DELETE deleted from `models` alone, so a pull after a delete
+    was answered as if every layer were still held, complete, nothing
+    downloaded, where Ollama's delete removes the layers no other
+    manifest references (server/images.go; the stream's own "removing any
+    unused layers") and a real pull after it downloads them from zero.
+    Given a pull, a remove, and a second pull, the second pull's first
+    layer line starts from zero and the fake holds the model whole after."""
+    _pull(fake_ollama)
+    remove_ollama_model(FAKE_MODEL, fake_ollama.endpoint)
+
+    updates = _pull(fake_ollama)
+
+    assert [p["model"] for p in fake_ollama.pulls] == [FAKE_MODEL, FAKE_MODEL]
+    assert updates[0] == Update.progress(0, 3000), f"the second pull did not start from zero: {updates}"
+    assert updates[-2] == Update.progress(4000, 4000) and updates[-1] == Update.done(FAKE_MODEL)
+    assert fake_ollama.models == {FAKE_MODEL: 4000}
+
+
+def test_remove_reaches_an_ollama_behind_a_reverse_proxy_prefix():
+    """`[model] ollama_url` may carry a path (an Ollama behind a reverse
+    proxy at /ollama, as test_providers.py serves the chat endpoint): the
+    pull, the list and the delete all go under it, and the fake answers
+    all three there."""
+    with FakeOllama(library={FAKE_MODEL: [3000, 1000]}, prefix="/ollama").serve() as ollama:
+        address = f"{ollama.endpoint}/ollama"
+        pull_model(FAKE_MODEL, address, on_update=lambda update: None)
+        assert ollama_status(FAKE_MODEL, address).installed is True
+
+        assert remove_ollama_model(FAKE_MODEL, address) == FAKE_MODEL
+
+        assert ollama.deletes == [FAKE_MODEL] and ollama.models == {}
+        assert ollama_status(FAKE_MODEL, address).installed is False
+        assert {path for _, path in ollama.requests} == {"/ollama/api/pull", "/ollama/api/tags", "/ollama/api/delete"}
+
+
+def test_remove_of_a_model_ollama_does_not_hold_says_so(fake_ollama: FakeOllama):
+    """404 with Ollama's not-found error (§ Delete a Model): nothing to
+    remove, named."""
+    with pytest.raises(DownloadError) as failure:
+        remove_ollama_model(FAKE_MODEL, fake_ollama.endpoint)
+    assert FAKE_MODEL in str(failure.value) and "nothing to remove" in str(failure.value)
+
+
+def test_remove_with_no_ollama_answering_uses_the_not_running_message():
+    port = closed_port()
+    with pytest.raises(DownloadError) as failure:
+        remove_ollama_model(FAKE_MODEL, f"http://127.0.0.1:{port}")
+    assert f"no Ollama server answering at http://127.0.0.1:{port}" in str(failure.value)
+
+
+def test_remove_whose_reply_is_reset_names_the_address():
+    """Review round 5 (download.py:852): the delete's `except (RuntimeError,
+    ConnectionError, TimeoutError)` takes the backend's named failures by
+    class, and a socket reset mid-reply is a ConnectionError too, so the
+    message was the bare `[Errno 54] Connection reset by peer`, naming
+    neither the address nor the model. The backend names the address.
+    Given a listener answering the delete's status line and headers and
+    then resetting, the remove is a DownloadError naming the address."""
+    from conftest import resetting_handler
+
+    answer = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 40\r\n\r\n{"
+    with loopback_server(resetting_handler(answer)) as squatter:
+        address = f"http://127.0.0.1:{squatter.server_port}"
+        with pytest.raises(DownloadError) as failure:
+            remove_ollama_model(FAKE_MODEL, address, timeout=5.0)
+    assert address in str(failure.value), str(failure.value)
+
+
+
+# The three flags dispatch on the engine: --backend or [model] backend names
+# it, else detection's default, as a run does. For ollama the pull, the
+# list and the delete endpoints answer; for mlx the hub as before.
+
+
+def _ollama_settings(tmp_path: Path, url: str, model: str = FAKE_MODEL, timeout_seconds: float | None = None) -> Path:
+    """A settings file naming the Ollama at `url` and `model`, and `[model]
+    timeout_seconds` when a test bounds the pull or the delete itself."""
+    settings = tmp_path / "settings.toml"
+    lines = [f'ollama_url = "{url}"', f'ollama_model = "{model}"']
+    if timeout_seconds is not None:
+        lines.append(f"timeout_seconds = {timeout_seconds:g}")
+    settings.write_text("[model]\n" + "\n".join(lines) + "\n", encoding="utf-8")
+    return settings
+
+
+def test_the_model_flags_with_backend_ollama_go_to_the_ollama_functions_with_the_configured_model_and_address(
+    monkeypatch, capsys, tmp_path
+):
+    """`--backend ollama` (what the plugin passes) sends each flag to the
+    Ollama function with `[model] ollama_model` and `ollama_url` (its
+    default, providers.OLLAMA_URL, when unset); the same lines come out:
+    the protocol, the JSON, `removed <model>`."""
+    from melampus import providers
+
+    seen = []
+
+    def fake_pull(model, url, *, on_update, timeout, **_):
+        seen.append(("pull", model, url, timeout))
+        on_update(Update.progress(1, 2))
+        return model
+
+    monkeypatch.setattr(download, "pull_model", fake_pull)
+    monkeypatch.setattr(download, "ollama_status", lambda model, url, *, timeout: seen.append(
+        ("status", model, url, timeout)) or Status(
+        model, installed=False, bytes_total=None, bytes_done=0, path=None, cancel_path="/data/download-cancel"))
+    monkeypatch.setattr(download, "remove_ollama_model",
+                        lambda model, url, *, timeout: seen.append(("remove", model, url, timeout)) or model)
+    settings = _ollama_settings(tmp_path, "http://127.0.0.1:11435/", timeout_seconds=7.5)
+
+    assert main(["--download-model", "--no-local-config", "--backend", "ollama"]) == 0
+    assert main(["--model-status", "--backend", "ollama", "--config", str(settings)]) == 0
+    assert main(["--remove-model", "--backend", "ollama", "--config", str(settings)]) == 0
+
+    out = capsys.readouterr().out
+    # The pull and the delete wait `[model] timeout_seconds`, what their
+    # timeout message names; the list, which Settings waits on as it opens,
+    # keeps the short bound whatever the setting says.
+    assert seen == [
+        ("pull", "qwen3-vl:8b-instruct", providers.OLLAMA_URL, ModelConfig().timeout_seconds),
+        ("status", FAKE_MODEL, "http://127.0.0.1:11435", download.STATUS_TIMEOUT),
+        ("remove", FAKE_MODEL, "http://127.0.0.1:11435", 7.5),
+    ]
+    progress, done, status_line, removed = out.splitlines()
+    assert (progress, done) == ("progress 1 2", "done qwen3-vl:8b-instruct")
+    assert json.loads(status_line)["repo"] == FAKE_MODEL
+    assert removed == f"removed {FAKE_MODEL}"
+
+
+def _machine(mlx: bool, ollama: bool) -> list:
+    """Detection's verdicts on a machine where mlx and ollama can or cannot
+    run, the cloud engines always able to."""
+    from melampus.providers import EngineVerdict
+
+    return [EngineVerdict("mlx", mlx, ""), EngineVerdict("ollama", ollama, ""),
+            EngineVerdict("openai", True, ""), EngineVerdict("claude", True, "")]
+
+
+FIRST_WITH_A_MODEL = "(the first with a model that can run here"
+
+
+@pytest.mark.parametrize(("machine", "settings", "argv", "asks", "says"), [
+    pytest.param(_machine(mlx=True, ollama=True), '[model]\nbackend = "ollama"\n', [],
+                 ("ollama", ModelConfig().ollama_model), None, id="the config file names ollama"),
+    pytest.param(_machine(mlx=False, ollama=True), None, [],
+                 ("ollama", ModelConfig().ollama_model), f"engine: ollama {FIRST_WITH_A_MODEL}",
+                 id="windows with ollama answering"),
+    pytest.param(_machine(mlx=False, ollama=False), None, [],
+                 ("mlx", ModelConfig().repo), f"engine: mlx {FIRST_WITH_A_MODEL}",
+                 id="windows with nothing local"),
+    pytest.param(_machine(mlx=True, ollama=True), None, [],
+                 ("mlx", ModelConfig().repo), f"engine: mlx {FIRST_WITH_A_MODEL}", id="a mac"),
+    pytest.param(_machine(mlx=False, ollama=True), None, ["--model", "fake-org/other"],
+                 ("mlx", "fake-org/other"), f"engine: mlx {FIRST_WITH_A_MODEL}",
+                 id="--model names a hub repo with ollama answering"),
+])
+def test_the_model_flags_take_the_engine_from_the_config_file_and_detection_when_nothing_names_it(
+    monkeypatch, capsys, tmp_path, machine, settings, argv, asks, says
+):
+    """`[model] backend = "ollama"` in the config picks the pull too, and
+    says nothing about choosing. With nothing named, the first engine *with
+    a model* that detection says can run here decides, said on stderr: mlx
+    on this Mac, ollama on a Windows machine with Ollama answering, and mlx
+    on one without (the hub download works on every platform, card #407,
+    where a run would pick a cloud engine that has no model to fetch);
+    `--model` names a hub repo, so it means mlx whatever is running."""
+    import melampus.cli
+
+    asked = []
+    monkeypatch.setattr(download, "model_status", lambda repo: asked.append(("mlx", repo)) or Status(
+        repo, installed=False, bytes_total=None, bytes_done=0, path=None, cancel_path="/x"))
+    monkeypatch.setattr(download, "ollama_status", lambda model, url, **_: asked.append(("ollama", model)) or Status(
+        model, installed=False, bytes_total=None, bytes_done=0, path=None, cancel_path="/x"))
+    monkeypatch.setattr(melampus.cli, "detect_engines", lambda ollama_at=None: machine)
+    if settings is None:
+        config = ["--no-local-config"]
+    else:
+        (tmp_path / "settings.toml").write_text(settings, encoding="utf-8")
+        config = ["--config", str(tmp_path / "settings.toml")]
+
+    assert main(["--model-status", *config, *argv]) == 0
+
+    assert asked == [asks]
+    err = capsys.readouterr().err
+    if says is None:
+        assert "engine:" not in err, err
+    else:
+        assert says in err, err
+
+
+@pytest.mark.parametrize("engine", ["openai", "claude", "scripted"])
+def test_the_model_flags_refuse_an_engine_with_no_model_to_fetch_naming_the_two_that_have_one(capsys, engine):
+    for flag in ("--download-model", "--model-status", "--remove-model"):
+        assert main([flag, "--no-local-config", "--backend", engine]) == 3
+        out, err = capsys.readouterr()
+        assert out == "", "a refusal must not be spoken in the protocol"
+        assert engine in err and "mlx" in err and "ollama" in err and "--backend" in err
+
+
+def test_cli_pulls_the_model_from_the_fake_ollama_and_the_status_flips_to_installed_then_removed(
+    fake_ollama: FakeOllama, tmp_path: Path
+):
+    """Done-when 1 and 2 through the entry point, in the order the Settings
+    dialog sees them for ollama: absent with the size unknown, the pull's
+    protocol lines ending in `done <model>` with exit 0, installed with the
+    size, `removed <model>`, absent again. Every request went to the fake."""
+    settings = _ollama_settings(tmp_path, fake_ollama.endpoint)
+    flags = ["--backend", "ollama", "--config", str(settings)]
+
+    before = _cli(["--model-status", *flags], {})
+    assert before.returncode == 0, before.stderr[-3000:]
+    status = json.loads(before.stdout)
+    assert status["repo"] == FAKE_MODEL and status["installed"] is False
+    assert status["bytes_total"] is None and status["bytes_done"] == 0 and status["path"] is None
+    assert status["cancel_path"].endswith(CANCEL_MARKER)
+
+    pulled = _cli(["--download-model", *flags], {})
+    assert pulled.returncode == 0, pulled.stderr[-3000:]
+    updates = [Update.parse(line) for line in pulled.stdout.splitlines()]
+    assert updates[0] == Update.progress(0, 3000) and updates[-2] == Update.progress(4000, 4000)
+    assert updates[-1] == Update.done(FAKE_MODEL)
+    assert [p["model"] for p in fake_ollama.pulls] == [FAKE_MODEL]
+
+    after = _cli(["--model-status", *flags], {})
+    assert after.returncode == 0, after.stderr[-3000:]
+    status = json.loads(after.stdout)
+    assert status["installed"] is True and status["path"] == FAKE_MODEL
+    assert status["bytes_done"] == status["bytes_total"] == 4000
+
+    removed = _cli(["--remove-model", *flags], {})
+    assert removed.returncode == 0, removed.stderr[-3000:]
+    assert removed.stdout.strip() == f"removed {FAKE_MODEL}"
+    assert json.loads(_cli(["--model-status", *flags], {}).stdout)["installed"] is False
+    assert {path for _, path in fake_ollama.requests} == {"/api/tags", "/api/pull", "/api/delete"}
+
+
+def test_cli_pull_of_an_unknown_model_exits_3_naming_the_setting(fake_ollama: FakeOllama, tmp_path: Path):
+    settings = _ollama_settings(tmp_path, fake_ollama.endpoint, model="fake-org/no-such-model:1b")
+    proc = _cli(["--download-model", "--backend", "ollama", "--config", str(settings)], {})
+    assert proc.returncode == 3, proc.stderr[-3000:]
+    assert proc.stdout == "", "an error must not be spoken in the protocol"
+    assert "fake-org/no-such-model:1b" in proc.stderr and "[model] ollama_model" in proc.stderr
+
+
+def test_cli_pull_with_no_ollama_answering_exits_3_with_the_not_running_message(tmp_path: Path):
+    port = closed_port()
+    settings = _ollama_settings(tmp_path, f"http://127.0.0.1:{port}")
+    proc = _cli(["--download-model", "--backend", "ollama", "--config", str(settings)], {})
+    assert proc.returncode == 3, proc.stderr[-3000:]
+    assert proc.stdout == ""
+    assert f"no Ollama server answering at http://127.0.0.1:{port}" in proc.stderr
+    assert "Traceback" not in proc.stderr
+
+
+def test_cli_pull_cancelled_by_a_signal_prints_cancelled_exit_4_and_the_next_pull_completes(tmp_path: Path):
+    """The signal path for ollama: mid-stream against the throttled fake, the
+    signal arrives, the command prints `cancelled` and exits 4 with the
+    stream closed; run again at full speed the second pull is asked for,
+    starts from what Ollama kept, and completes."""
+    flags = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if sys.platform == "win32" else {}
+    with _slow_ollama().serve() as ollama:
+        size = ollama.library[FAKE_MODEL][0]
+        settings = _ollama_settings(tmp_path, ollama.endpoint)
+        proc = subprocess.Popen([*VENV_CLI, "--download-model", "--backend", "ollama", "--config", str(settings)],
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, **flags)
+        lines = []
+        for line in proc.stdout:
+            lines.append(Update.parse(line))
+            if lines[-1].state == "progress" and lines[-1].bytes_done >= 1024 * 1024:
+                _interrupt(proc)
+                break
+        rest = proc.stdout.read()
+        stderr = proc.stderr.read()
+        code = proc.wait(timeout=60)
+        ollama.throttle = None
+        assert code == EXIT_CANCELLED, (code, stderr[-3000:])
+        assert rest.splitlines() == ["cancelled"], rest
+        assert "Traceback" not in stderr, stderr[-3000:]
+        kept = lines[-1].bytes_done
+        assert 0 < kept < size
+
+        again = _cli(["--download-model", "--backend", "ollama", "--config", str(settings)], {})
+        assert again.returncode == 0, again.stderr[-3000:]
+        assert [p["model"] for p in ollama.pulls] == [FAKE_MODEL, FAKE_MODEL], "the second pull was not asked for"
+        updates = [Update.parse(line) for line in again.stdout.splitlines()]
+        assert updates[0].bytes_done >= kept, "the second pull did not start from what was kept"
+        assert updates[-1] == Update.done(FAKE_MODEL) and ollama.models == {FAKE_MODEL: size}
+
+
+def test_cli_pull_cancelled_by_the_marker_while_its_stream_has_stalled_prints_cancelled_and_exits_4(
+    monkeypatch: pytest.MonkeyPatch, capsys, tmp_path: Path
+):
+    """Codex review (opposing vendor) round 2, code finding 1
+    (download.py:1079), through the entry point, as the plugin's Cancel
+    button does it: the marker written at `cancel_path` while Ollama has
+    stalled after its first line. `cancelled` on stdout, exit 4, well
+    within `[model] timeout_seconds` (10 s here), no traceback."""
+    marker = _marker(tmp_path)
+    marker.parent.mkdir(parents=True)
+    monkeypatch.setattr(download, "cancel_marker_path", lambda: marker)
+
+    def the_marker_once_the_line_is_read() -> None:
+        time.sleep(0.2)
+        marker.touch()
+
+    with loopback_server(_stalling_pull(the_marker_once_the_line_is_read), ThreadingHTTPServer) as stalled:
+        settings = _ollama_settings(tmp_path, f"http://127.0.0.1:{stalled.server_port}", timeout_seconds=10.0)
+        started = time.monotonic()
+        code = main(["--download-model", "--backend", "ollama", "--config", str(settings)])
+        took = time.monotonic() - started
+    out, err = capsys.readouterr()
+    assert code == EXIT_CANCELLED, (code, err[-3000:])
+    assert out.splitlines()[-1] == "cancelled", out
+    assert took < 3.0, f"the cancel waited on the stalled read: {took:.1f}s"
+    assert "Traceback" not in err, err[-3000:]
+    assert not marker.exists()
+
+
+def test_cli_pull_cancelled_by_a_signal_while_its_stream_has_stalled_prints_cancelled_and_exits_4(tmp_path: Path):
+    """The signal path against the same stalled stream: SIGINT while the
+    read blocks ends the pull as it ends a chunk of the MLX download, within
+    the read, not at the timeout: `cancelled`, exit 4."""
+    flags = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if sys.platform == "win32" else {}
+    with loopback_server(_stalling_pull(), ThreadingHTTPServer) as stalled:
+        settings = _ollama_settings(tmp_path, f"http://127.0.0.1:{stalled.server_port}", timeout_seconds=10.0)
+        proc = subprocess.Popen([*VENV_CLI, "--download-model", "--backend", "ollama", "--config", str(settings)],
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, **flags)
+        assert Update.parse(proc.stdout.readline()) == Update.progress(0, 100)
+        started = time.monotonic()
+        _interrupt(proc)
+        rest = proc.stdout.read()
+        stderr = proc.stderr.read()
+        code = proc.wait(timeout=60)
+        took = time.monotonic() - started
+    assert code == EXIT_CANCELLED, (code, stderr[-3000:])
+    assert rest.splitlines() == ["cancelled"], rest
+    assert took < 3.0, f"the cancel waited on the stalled read: {took:.1f}s"
+    assert "Traceback" not in stderr, stderr[-3000:]
