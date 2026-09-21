@@ -221,8 +221,9 @@ def _model_status(repo: str) -> int:
 
 def _remove_model(repo: str) -> int:
     """--remove-model (card #408): delete the MLX model from the cache, exit 0
-    with `removed <path>`; exit 3 with the reason on stderr when nothing is
-    installed or a download of it is running."""
+    with `removed <path>`; exit 3 with the reason on stderr when the removal
+    is refused (the causes: docs/config.md § `--model-status` and
+    `--remove-model`, and `download.remove_model`)."""
     from .download import DownloadError, remove_model
 
     try:
@@ -285,7 +286,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--remove-model", action="store_true",
                     help="delete the MLX model ([model] repo, or --model) from the "
                          "Hugging Face cache and print 'removed <path>', then exit; "
-                         "refused while a download of it is running; needs no folder")
+                         "refused, exit 3 with the reason, for the causes docs/config.md "
+                         "lists (a download of it running, nothing installed, ...); "
+                         "needs no folder")
     ap.add_argument("--yes", action="store_true",
                     help="skip the cost confirmation when the primary backend is a "
                          "cloud provider (for non-interactive callers)")
