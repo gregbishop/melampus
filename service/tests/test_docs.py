@@ -755,18 +755,29 @@ def test_config_doc_says_the_commands_exit_ends_its_answer_and_stops_what_it_sta
         "docs/config.md's timeout_seconds row does not say the stop reaches everything the program started")
 
 
-def test_config_doc_names_the_sigchld_refusal_beside_the_commands_other_refusals():
-    """Card #420: the `command` row of docs/config.md enumerates what the
-    factory refuses up front (a template lacking a placeholder, a program
-    not on PATH, a `.cmd`/`.bat` shim), so it must also name the launcher
-    that ignores SIGCHLD, refused the same way because the kernel would
-    reap the program at its exit and the pid its tree is stopped by could
-    be someone else's by then, and say the fix (a shell, or the default)."""
-    config_doc = CONFIG_DOC.read_text(encoding="utf-8")
-    command_row = _row(config_doc, "command")
-    assert "SIGCHLD" in command_row, "docs/config.md's command row does not name the SIGCHLD refusal"
+def test_docs_name_the_sigchld_refusal_beside_the_commands_other_refusals():
+    """Card #420: docs/config.md's `command` row, docs/architecture.md,
+    readme.md and `CommandBackend`'s docstring each enumerate what the
+    factory refuses up front (a program not on PATH, a `.cmd`/`.bat`
+    shim), so each must also name the launcher that ignores SIGCHLD,
+    refused the same way because the kernel would reap the program at its
+    exit and the pid its tree is stopped by could be someone else's by
+    then; the row must say the fix (a shell, or the default), and the
+    docstring must say that refusal is what `_stop_tree` rests on."""
+    from melampus.backend import CommandBackend
+    command_row = _row(CONFIG_DOC.read_text(encoding="utf-8"), "command")
+    for doc, prose in (
+        ("docs/architecture.md", (REPO / "docs" / "architecture.md").read_text(encoding="utf-8")),
+        ("docs/config.md", command_row),
+        ("readme.md", README.read_text(encoding="utf-8")),
+        ("CommandBackend's docstring", CommandBackend.__doc__),
+    ):
+        prose = " ".join(prose.split())  # the prose wraps; the phrase must not hide across a line break
+        assert "ignores SIGCHLD" in prose, f"{doc} does not name the SIGCHLD refusal beside the command's other refusals"
     assert "shell" in command_row and "default" in command_row, (
         "docs/config.md's command row does not say how to fix a launcher that ignores SIGCHLD")
+    assert "_stop_tree" in CommandBackend.__doc__, (
+        "CommandBackend's docstring does not say the SIGCHLD refusal is what _stop_tree rests on")
 
 
 def test_docs_say_the_command_runs_once_per_completion():

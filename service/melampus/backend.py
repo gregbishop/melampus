@@ -866,6 +866,12 @@ class CommandBackend(VLMBackend):
     so a missing program is refused up front, and so is one that resolves to
     a `.cmd` or `.bat` file, which Windows would run through cmd.exe): it
     replaces the bare name in the argv, so what was checked is what runs.
+    The same factory refuses the engine when the process that started
+    melampus ignores SIGCHLD (`SIG_IGN` is inherited across exec), because
+    the kernel would then reap the program the moment it exits; that
+    refusal is what `_stop_tree`'s precondition rests on: the command stays
+    unreaped until `_wait` reaps it, so the pid its tree is stopped by is
+    still its own and never a number given since to someone else's process.
     The child gets the parent's environment as it is, so the
     program finds its own sign-in; nothing is added to it and no secret
     crosses the command line. As with every backend, the image is the staged,
