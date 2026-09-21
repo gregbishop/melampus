@@ -699,9 +699,10 @@ def build_primary_backend(config: MelampusConfig) -> VLMBackend:
         # whose claude-code verdict is the refusal's sentence and whose list
         # is its "what works", so Claude Code is asked its status once,
         # under the template's own settings flags, refused or built, and
-        # what runs is the executable that verdict resolved.
-        command = list(settings.command or CLAUDE_CODE_COMMAND)
-        verdicts = detect_engines(settings.ollama_url, claude_code_command(settings))
+        # what runs is the executable that verdict resolved. The template
+        # is read once, by the reader --detect-engines uses.
+        command = claude_code_command(settings) or list(CLAUDE_CODE_COMMAND)
+        verdicts = detect_engines(settings.ollama_url, command)
         verdict = next(v for v in verdicts if v.engine == CLAUDE_CODE)
         if not verdict.available:
             raise _refusal(f"{verdict.reason}.", works_here=_works_here(verdicts))
