@@ -2907,10 +2907,12 @@ def _fake_cli(monkeypatch, tmp_path, *, exit_code: int = 0, stderr: str = "",
     return [FAKE_CLI, "--image", "{image}", "--prompt", "{prompt}", "--quiet"]
 
 
-def _command_settings(tmp_path, command: list[str]) -> Path:
+def _command_settings(tmp_path, command: list[str], backend: str = providers.COMMAND) -> Path:
+    """A config file naming `command` as the template under `backend`:
+    `command` itself, or `claude-code` for a template of the user's own."""
     settings = tmp_path / "settings.toml"
     settings.write_text(
-        f'[model]\nbackend = "command"\ncommand = {json.dumps(command)}\n', encoding="utf-8")
+        f'[model]\nbackend = {json.dumps(backend)}\ncommand = {json.dumps(command)}\n', encoding="utf-8")
     return settings
 
 
@@ -4207,9 +4209,7 @@ def test_cli_detect_engines_probes_the_users_own_template_under_its_flags(
     helper.write_text(json.dumps({"apiKeyHelper": "/usr/bin/true"}), encoding="utf-8")
     template = providers.CLAUDE_CODE_COMMAND
     own = [*template[:-1], "--settings", str(helper), template[-1]]
-    settings = tmp_path / "settings.toml"
-    settings.write_text(
-        f'[model]\nbackend = "claude-code"\ncommand = {json.dumps(own)}\n', encoding="utf-8")
+    settings = _command_settings(tmp_path, own, backend=providers.CLAUDE_CODE)
 
     assert main(["--detect-engines", "--config", str(settings)]) == 0
 
@@ -4280,9 +4280,7 @@ def test_cli_detect_engines_probes_the_program_the_claude_code_run_would(
     script = shutil.which(CLAUDE)
     _no_claude(monkeypatch, tmp_path)
     own = [script, "-p", "--output-format", "json", "{image} {prompt}"]
-    settings = tmp_path / "settings.toml"
-    settings.write_text(
-        f'[model]\nbackend = "claude-code"\ncommand = {json.dumps(own)}\n', encoding="utf-8")
+    settings = _command_settings(tmp_path, own, backend=providers.CLAUDE_CODE)
 
     assert main(["--detect-engines", "--config", str(settings)]) == 0
 
@@ -4355,9 +4353,7 @@ def test_claude_code_on_a_helper_named_by_settings_is_refused_before_any_image_i
     helper.write_text(json.dumps({"apiKeyHelper": "/usr/bin/true"}), encoding="utf-8")
     template = providers.CLAUDE_CODE_COMMAND
     own = [*template[:-1], f"--settings={helper}", template[-1]]
-    settings = tmp_path / "settings.toml"
-    settings.write_text(
-        f'[model]\nbackend = "claude-code"\ncommand = {json.dumps(own)}\n', encoding="utf-8")
+    settings = _command_settings(tmp_path, own, backend=providers.CLAUDE_CODE)
 
     code = main([str(link_to_nowhere), "--config", str(settings), "--cache", str(tmp_path / "cache.jsonl")])
 
