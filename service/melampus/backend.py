@@ -999,9 +999,11 @@ class CommandBackend(VLMBackend):
         and a registration refused with ESRCH is the command already
         exited before the look (XNU does not see an exited process; for
         this process's own unreaped child that can only mean it has
-        exited); waitid with WNOWAIT elsewhere on POSIX; on Windows the
-        Popen handle keeps the pid reserved, so wait itself is safe there
-        and the order does not matter."""
+        exited); waitid with WNOWAIT elsewhere on POSIX, a look before the
+        step and one at its end, so an exit already there is seen at once
+        and one during the step at its end; on Windows the Popen handle
+        keeps the pid reserved, so wait itself is safe there and the order
+        does not matter."""
         if sys.platform == "win32":
             with contextlib.suppress(subprocess.TimeoutExpired):
                 process.wait(timeout=within)
@@ -1029,8 +1031,14 @@ class CommandBackend(VLMBackend):
                     return True
                 raise OSError(event.data, os.strerror(event.data))
             return True  # NOTE_EXIT: the exit, seen during the wait.
+        # Look first, so a command already exited is seen at once as the
+        # other two branches see it; sleep the step and look once more only
+        # when it has not, so an exit during the step is seen at its end.
+        look = os.WEXITED | os.WNOWAIT | os.WNOHANG
+        if os.waitid(os.P_PID, process.pid, look) is not None:
+            return True
         time.sleep(within)
-        return os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOWAIT | os.WNOHANG) is not None
+        return os.waitid(os.P_PID, process.pid, look) is not None
 
     def _wait(self, process, readers: list[threading.Thread], overflowed: list[str]) -> bool:
         """Whether the command exited within `timeout`. Its exit ends its

@@ -2364,8 +2364,11 @@ def test_command_backend_sees_the_exit_through_kqueue_and_names_what_each_event_
 
 def test_command_backend_sees_the_exit_through_waitid_where_there_is_no_kqueue(monkeypatch):
     """`_exited` on a POSIX without kqueue (Linux) asks waitid for the
-    command by pid with WEXITED, WNOWAIT (seen, not reaped) and WNOHANG
-    after sleeping the step: None is not yet, anything else is exited.
+    command by pid with WEXITED, WNOWAIT (seen, not reaped) and WNOHANG:
+    None is not yet, anything else is exited. It looks first, so a command
+    already exited is seen at once (as the kqueue and Windows looks see
+    it), and only when the command has not exited sleeps the step and
+    looks once more, so an exit during the step is seen at its end.
     Runs on every platform: kqueue is taken away and waitid faked."""
     monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.delattr(select, "kqueue", raising=False)
@@ -2381,10 +2384,13 @@ def test_command_backend_sees_the_exit_through_waitid_where_there_is_no_kqueue(m
 
     started = time.monotonic()
     assert backend._exited(process, 0.05) is False
-    assert time.monotonic() - started >= 0.05
+    assert time.monotonic() - started >= 0.05, "a not-yet look waits the step"
     answer[0] = object()  # a siginfo: the process has exited
-    assert backend._exited(process, 0.0) is True
-    assert calls == [(os.P_PID, 4242, os.WEXITED | os.WNOWAIT | os.WNOHANG)] * 2
+    started = time.monotonic()
+    assert backend._exited(process, 0.05) is True
+    assert time.monotonic() - started < 0.05, "an exited command is seen before the step has passed"
+    assert calls == [(os.P_PID, 4242, os.WEXITED | os.WNOWAIT | os.WNOHANG)] * 3, (
+        "a not-yet look looks, sleeps the step, and looks once more; an exited look looks once")
     assert process.waited == [], "waitid, never Popen.wait, which reaps"
 
 
