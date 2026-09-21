@@ -402,6 +402,22 @@ local function theButton(row, model, prefix, expectShown)
 	return found[1]
 end
 
+--- Open the dialog with the model installed (`status` merged into `options`),
+--- click the row's Remove button and settle; `beforeTheClick(options)`, when
+--- given, plays what changes between the dialog opening and the click (the
+--- status the executable answers after the removal, say). Returns the row
+--- and the model.
+local function removeClicked(options, beforeTheClick)
+	options = options or {}
+	options.status = modelStatus({ installed = 'true' })
+	local contents = openSettings(options)
+	local row, model = modelRow(contents)
+	if beforeTheClick then beforeTheClick(options) end
+	theButton(row, model, 'Remove', true).action()
+	mock.settle()
+	return row, model
+end
+
 t.test('with the model absent the row shows a Download button with the model\'s name and size', function()
 	local contents = openSettings({ detection = mock.detectionText() })
 	local row, model = modelRow(contents)
@@ -432,20 +448,14 @@ t.test('with the model present the row reads Installed, greyed, and offers Remov
 end)
 
 t.test('Remove runs --remove-model and the row flips to the Download button', function()
-	local contents = openSettings({ detection = mock.detectionText(), status = modelStatus({ installed = 'true' }) })
-	local row, model = modelRow(contents)
-	theButton(row, model, 'Remove', true).action()
-	mock.settle()
+	local _, model = removeClicked({ detection = mock.detectionText() })
 	t.equals(commandsRun('--remove-model'), 1, 'Remove did not run the executable')
 	t.equals(model.phase, 'absent')
 	t.equals(#dialogsShown(false), 0, 'a message was shown for a removal that worked')
 end)
 
 t.test('a refused removal shows the message and the model stays Installed', function()
-	local contents = openSettings({ detection = mock.detectionText(), status = modelStatus({ installed = 'true' }), removeCode = 3 })
-	local row, model = modelRow(contents)
-	theButton(row, model, 'Remove', true).action()
-	mock.settle()
+	local _, model = removeClicked({ detection = mock.detectionText(), removeCode = 3 })
 	t.equals(model.phase, 'installed')
 	t.equals(#dialogsShown(false), 1, 'no message for a refused removal')
 end)
@@ -455,12 +465,9 @@ t.test('a refused removal that set the model aside shows the message and the row
 	-- cannot delete it exits 3 with the model gone from the cache: the
 	-- status is asked again after a refused removal, so the row reads what
 	-- the cache holds, and the refusal's message is still shown.
-	local options = { detection = mock.detectionText(), status = modelStatus({ installed = 'true' }), removeCode = 3 }
-	local contents = openSettings(options)
-	local row, model = modelRow(contents)
-	options.status = modelStatus()
-	theButton(row, model, 'Remove', true).action()
-	mock.settle()
+	local _, model = removeClicked({ detection = mock.detectionText(), removeCode = 3 }, function(options)
+		options.status = modelStatus()
+	end)
 	t.equals(#dialogsShown(false), 1, 'no message for a refused removal')
 	t.equals(commandsRun('--model-status'), 2, 'the status was not asked again after the refused removal')
 	t.equals(model.phase, 'absent')
@@ -471,12 +478,9 @@ t.test('a refused removal keeps the row\'s phase when the status cannot be asked
 	-- refused removal can itself fail (exit 1: the cache unreadable by
 	-- then); the row then keeps the phase it had, the message shown is the
 	-- removal's, and the status's own failure is not shown over it.
-	local options = { detection = mock.detectionText(), status = modelStatus({ installed = 'true' }), removeCode = 3 }
-	local contents = openSettings(options)
-	local row, model = modelRow(contents)
-	options.statusCode = 1
-	theButton(row, model, 'Remove', true).action()
-	mock.settle()
+	local _, model = removeClicked({ detection = mock.detectionText(), removeCode = 3 }, function(options)
+		options.statusCode = 1
+	end)
 	t.equals(commandsRun('--model-status'), 2, 'the status was not asked again after the refused removal')
 	t.equals(model.phase, 'installed', 'the row lost its phase to a status it could not ask')
 	local shown = dialogsShown(false)
