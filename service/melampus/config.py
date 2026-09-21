@@ -147,6 +147,32 @@ class ModelConfig(_Base):
                 )
         return command
 
+    @field_validator("command")
+    @classmethod
+    def _command_is_printable(cls, command: list[str]) -> list[str]:
+        """The template is printed as it is: the CLI's `loading ...` line
+        names it whole, every error the backend raises names its program
+        (the first element), and the refusals name the program. An escape
+        sequence in an element would move the cursor or erase a line on the
+        terminal, and a line break would fake a line of the log, through
+        any of them. Refused when the config loads, naming the element's
+        position and the character (str.isprintable: the one rule `plain`
+        applies to what a program wrote), so every message that carries a
+        piece of the template is printable and none of them needs its own
+        sanitizing."""
+        for position, argument in enumerate(command):
+            for character in argument:
+                if not character.isprintable():
+                    raise ValueError(
+                        f"[model] command element {position} carries a character "
+                        f"that is not printable (U+{ord(character):04X}); the template "
+                        "is printed in messages, so an escape sequence or a line "
+                        "break in it would reach the terminal and the log: remove "
+                        "it, and pass such text to the program some other way, "
+                        "such as a file it reads"
+                    )
+        return command
+
 
 class ImageConfig(_Base):
     # Long edge sent to the model.

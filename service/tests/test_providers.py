@@ -1914,6 +1914,36 @@ def test_command_template_without_a_placeholder_is_refused_at_config_load(comman
     assert f"has no argument carrying {missing}" in str(err.value), str(err.value)
 
 
+@pytest.mark.parametrize(
+    ("command", "position", "codepoint"),
+    [
+        (["fake-vlm\x1b[2J", "--image", "{image}", "--prompt", "{prompt}"], 0, "U+001B"),
+        (["fake-vlm", "--image", "{image}", "--prompt\n", "{prompt}"], 3, "U+000A"),
+        (["fake-vlm", "--image", "{image}", "--prompt", "{prompt}", "--label\x07"], 5, "U+0007"),
+    ],
+    ids=["escape-in-program", "newline-in-argument", "bell-in-last-argument"],
+)
+def test_command_template_with_a_control_character_is_refused_at_config_load(
+    command, position, codepoint
+):
+    """Codex round 18 (config.py:130), security: the template is printed as
+    it is, in the CLI's `loading ...` line, in every error message the
+    backend raises (`program`, its first element) and in the refusals
+    naming the program, so an element carrying an escape sequence, a line
+    break or a bell would reach the terminal, the log and the frame's error
+    record through them. Given an element with any character that is not
+    printable (str.isprintable, the one rule `plain` applies to what a
+    program wrote), when the config loads, then it is refused there,
+    naming the element's position and the character, in the shape the
+    placeholder refusal uses, so nothing displayed later can carry one."""
+    with pytest.raises(ValueError) as err:
+        _cfg(model={"backend": "command", "command": command})
+    clause = next(line for line in str(err.value).splitlines() if "[model] command element" in line)
+    assert f"[model] command element {position} carries a character that is not printable ({codepoint})" in clause, clause
+    assert "escape sequence" in clause and "line break" in clause, clause
+    assert all(c.isprintable() for c in clause), clause
+
+
 class _FakeRun:
     """Stands in for subprocess.Popen at the backend's process edge: records
     every call, then returns a started process whose stdout and stderr
