@@ -104,12 +104,15 @@ def _cli_sees_the_cache(monkeypatch: pytest.MonkeyPatch, cache: Path) -> None:
     monkeypatch.setattr(download.constants, "HF_HUB_CACHE", str(cache))
 
 
-def _refused_through_the_cli(capsys, flag: str, naming: str, repo: str = FAKE_REPO) -> str:
+def _refused_through_the_cli(capsys, flag: str, naming: str, *argv: str) -> str:
     """The one contract every refusal keeps through the entry point (cli.py,
     docs/config.md): exit 3, the reason on stderr naming `naming`, nothing
-    on stdout, never a traceback. Returns stderr for what else a test asks
-    of the reason."""
-    assert main([flag, "--no-local-config", "--model", repo]) == 3, flag
+    on stdout, never a traceback. `argv` is the rest of the line after the
+    flag, the way each engine names its model: the mlx way, `--no-local-config
+    --model <FAKE_REPO>`, when none is given; `--backend ollama --config
+    <settings>` for the Ollama tests. Returns stderr for what else a test
+    asks of the reason."""
+    assert main([flag, *(argv or ("--no-local-config", "--model", FAKE_REPO))]) == 3, flag
     out, err = capsys.readouterr()
     assert out == "" and naming in err and "Traceback" not in err, (flag, err)
     return err
@@ -2315,7 +2318,7 @@ def test_model_flags_exit_3_with_the_config_key_on_stderr_when_the_repo_is_not_a
     download mapped that to exit 3 naming the config key, the status and the
     removal let it out as a 19-line traceback, exit 1. All three refuse the
     same way: exit 3, the key on stderr, nothing on stdout."""
-    err = _refused_through_the_cli(capsys, flag, "[model] repo", repo="not a repo id/x/y")
+    err = _refused_through_the_cli(capsys, flag, "[model] repo", "--no-local-config", "--model", "not a repo id/x/y")
     assert "not a repo id/x/y" in err
 
 
@@ -3131,9 +3134,7 @@ def test_download_model_flag_for_ollama_exits_3_naming_the_marker_it_cannot_remo
     monkeypatch.setattr(download, "cancel_marker_path", lambda: marker)
     settings = _ollama_settings(tmp_path, f"http://127.0.0.1:{closed_port()}")
 
-    assert main(["--download-model", "--backend", "ollama", "--config", str(settings)]) == 3
-    out, err = capsys.readouterr()
-    assert out == "" and str(marker) in err and "Traceback" not in err, err
+    _refused_through_the_cli(capsys, "--download-model", str(marker), "--backend", "ollama", "--config", str(settings))
 
 
 # The model's status and removal in Ollama, for the same Settings row.
@@ -3303,10 +3304,7 @@ def test_the_model_flags_for_ollama_meet_a_reply_the_decoder_refuses_status_abse
         assert "Traceback" not in err, err
 
         for flag in ("--download-model", "--remove-model"):
-            assert main([flag, *flags]) == 3, flag
-            out, err = capsys.readouterr()
-            assert out == "", (flag, out)
-            assert "not JSON" in err and "Traceback" not in err, (flag, err)
+            _refused_through_the_cli(capsys, flag, "not JSON", *flags)
 
 
 def test_remove_deletes_the_pulled_model_from_ollama(fake_ollama: FakeOllama):
