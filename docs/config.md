@@ -146,7 +146,7 @@ the hub is asked anything.
   (`*.json`, `*.safetensors`, `*.py`, `*.model`, `*.tiktoken`, `*.txt`,
   `*.jinja`, named once as `download.MODEL_FILE_PATTERNS`), which is what
   mlx-vlm's load fetches on first use: the `.gitattributes` the hub writes
-  into every repo and the model card `README.md` are listed, counted in
+  into every repo and the model card (the repo's readme) are listed, counted in
   `bytes_total`, and not needed, so a model the first identification run
   fetched reads installed. A download stopped while the
   snapshot was being laid out, this command's or the hub library's own, which
