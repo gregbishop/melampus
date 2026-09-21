@@ -343,14 +343,16 @@ end
 -- message for an engine the plugin does not know, before the shell, and
 -- for none: a run without the preference lets the CLI decide, but every
 -- model command carries its engine (docs/plugin.md § The Download row),
--- and the one-download-at-a-time guard below is the engine's name.
+-- and the one-download-at-a-time guard below is the engine's name. What
+-- "none" is, is Rules.chosenEngine's to say: engineArguments hands its
+-- answer back as the chosen name, nil when the preference is unset.
 local function modelFlag(flag, engine)
-	if engine == nil or engine == '' then
+	local parts, chosen = engineArguments({ flag }, engine)
+	if not parts then return nil, chosen end
+	if not chosen then
 		return nil, 'Melampus needs an engine to act on its model.\n\nThe engines with a model are: '
 			.. table.concat(Rules.MODEL_ENGINES, ', ') .. '.'
 	end
-	local parts, err = engineArguments({ flag }, engine)
-	if not parts then return nil, err end
 	return table.concat(parts, ' ')
 end
 
