@@ -1989,6 +1989,107 @@ def test_remove_holds_the_locks_a_download_takes_through_the_rename_and_the_dele
     assert a_download_got_the_lock == {"at the rename": False, "at the deletion": False, "after the removal": True}
 
 
+def _forget_a_blob(cache: Path, snapshot: Path, name: str) -> Path:
+    """Make one file of the model a blob the download has not reached: its
+    pointer, its blob and its lock file gone, the way a run stopped before it
+    leaves the cache (a blob not yet fetched has no `<etag>.lock` for the
+    removal's probe to find). Returns that lock's path."""
+    pointer = snapshot / name
+    blob = pointer.resolve()
+    lock = _lock_dir(cache) / f"{blob.name}.lock"
+    pointer.unlink()
+    blob.unlink()
+    lock.unlink(missing_ok=True)
+    return lock
+
+
+def test_remove_holds_the_repo_lock_so_a_download_of_a_blob_it_has_not_seen_refuses(
+    fake_hub: FakeHub, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Codex review 9, code finding 1 and security finding 1 (download.py:775).
+    The removal held every lock file it found, but a blob the download has
+    not reached yet has no lock file: a download starting between the
+    probe and the rename created that blob's lock, opened its partial file
+    and appended to it, and the removal then set the folder aside and
+    deleted the bytes under the download's held lock. Both sides take one
+    lock for the repo (`repo.lock`, beside the per-blob locks): the
+    download for the run, the removal from the probe through the rename
+    and the deletion. A download starting at the rename or at the deletion
+    is refused (`download_model`'s own timeout on the repo's lock, shortened
+    here), the model is removed whole, and no lock or partial file of the
+    unseen blob is made; after the removal a download goes ahead, from
+    nothing, and lays the model out whole."""
+    cache = tmp_path / "hub"
+    path, _ = _fetch(fake_hub, cache)
+    unseen = _forget_a_blob(cache, path, "model.safetensors")
+    monkeypatch.setattr(download, "LOCK_TIMEOUT", 0.2)
+    downloads: dict[str, Path | DownloadError] = {}
+
+    def a_download_starts(at: str) -> None:
+        if at in downloads:
+            return  # the download's own renames, under the hook, start no other
+        downloads[at] = DownloadError("not started")
+        try:
+            downloads[at] = _fetch(fake_hub, cache)[0]
+        except DownloadError as exc:
+            downloads[at] = exc
+
+    rename, execute = Path.rename, download.DeleteCacheStrategy.execute
+
+    def rename_as_a_download_starts(self: Path, target: Path) -> Path:
+        a_download_starts("at the rename")
+        return rename(self, target)
+
+    def execute_as_a_download_starts(self) -> None:
+        a_download_starts("at the deletion")
+        execute(self)
+
+    monkeypatch.setattr(Path, "rename", rename_as_a_download_starts)
+    monkeypatch.setattr(download.DeleteCacheStrategy, "execute", execute_as_a_download_starts)
+    removed = remove_model(FAKE_REPO, cache_dir=cache)
+
+    assert removed == path.parents[1] and not removed.exists()
+    for at in ("at the rename", "at the deletion"):
+        assert isinstance(downloads[at], DownloadError), f"a download {at} went ahead under the removal"
+        assert "running" in str(downloads[at]) and FAKE_REPO in str(downloads[at]), str(downloads[at])
+    assert not unseen.exists() and _incomplete(cache) == [], "the download under the removal touched the cache"
+    a_download_starts("after the removal")
+    assert isinstance(downloads["after the removal"], Path)
+    assert snapshot_files(downloads["after the removal"]) == FAKE_FILES
+
+
+def test_remove_refuses_while_a_download_runs_before_it_has_reached_any_blob(
+    fake_hub: FakeHub, tmp_path: Path
+):
+    """Codex review 9, code finding 1 and security finding 1 (download.py:775),
+    the other side: a running download that has not yet taken any blob's
+    lock (it is planning, or between two blobs) held nothing the probe
+    could find, so a removal in that moment went ahead and the download
+    then wrote into a folder the cache no longer named. The download holds
+    the repo's lock from before it asks the hub until the model is laid
+    out: a removal at its first update, before any byte moves, is refused
+    as running, and the download completes whole."""
+    cache = tmp_path / "hub"
+    path, _ = _fetch(fake_hub, cache)
+    _forget_a_blob(cache, path, "model.safetensors")
+    removals: list[DownloadError | Path] = []
+
+    def a_removal_starts(update: Update) -> None:
+        if removals:
+            return
+        try:
+            removals.append(remove_model(FAKE_REPO, cache_dir=cache))
+        except DownloadError as exc:
+            removals.append(exc)
+
+    resumed = download_model(FAKE_REPO, endpoint=fake_hub.endpoint, cache_dir=cache, on_update=a_removal_starts)
+
+    (refused,) = removals
+    assert isinstance(refused, DownloadError), "the removal went ahead under a running download"
+    assert "running" in str(refused) and FAKE_REPO in str(refused)
+    assert resumed == path and snapshot_files(resumed) == FAKE_FILES
+
+
 def test_model_status_flag_needs_no_folder_and_prints_one_json_object_for_the_configured_repo(
     monkeypatch, capsys
 ):

@@ -43,7 +43,7 @@ import logging  # noqa: E402
 import re  # noqa: E402
 import shutil  # noqa: E402
 import signal  # noqa: E402
-from contextlib import ExitStack, contextmanager  # noqa: E402
+from contextlib import AbstractContextManager, ExitStack, contextmanager  # noqa: E402
 from dataclasses import asdict, dataclass  # noqa: E402
 from pathlib import Path  # noqa: E402
 from typing import Callable, Iterator  # noqa: E402
@@ -116,6 +116,21 @@ MODEL_FILE_PATTERNS = ("*.json", "*.safetensors", "*.py", "*.model", "*.tiktoken
 
 RERUN = "re-run melampus-id --download-model; it resumes where it stopped"
 NOT_A_HUB = "whatever answers there is not a Hugging Face hub; check HF_ENDPOINT"
+
+# The one lock the download and the removal of a repo both take, in the
+# repo's `.locks` folder beside the hub library's per-blob locks:
+# `download_model` holds it for the run, from before the hub is asked until
+# the model is laid out, and `remove_model` from its probe through the
+# rename and the deletion. The per-blob locks alone left a race: a blob the
+# download had not reached yet had no lock file for the removal's probe to
+# find, so a download starting between the probe and the rename made that
+# lock, opened its partial file and lost its bytes to the deletion. The
+# name is no etag (an etag is hex), so it cannot collide with a blob's.
+REPO_LOCK = "repo.lock"
+
+# How long a run waits at a lock another run holds, the repo's or a blob's,
+# before refusing.
+LOCK_TIMEOUT: float = 5
 
 # The query string of any URL in a piece of text: an LFS file's bytes come
 # from the CDN at a signed URL, whose query is the signature and its expiry,
@@ -474,8 +489,7 @@ def _fetch(blob: _Blob, progress: _Progress, headers: dict[str, str], lock_dir: 
     the message catches. The hub's HTTP errors, OSErrors too in the hub
     library, keep their own handling in `download_model`."""
     blob.partial.parent.mkdir(parents=True, exist_ok=True)
-    lock_dir.mkdir(parents=True, exist_ok=True)
-    with WeakFileLock(lock_dir / f"{blob.etag}.lock", timeout=5):
+    with WeakFileLock(lock_dir / f"{blob.etag}.lock", timeout=LOCK_TIMEOUT):
         with blob.partial.open("ab") as partial:
             resumed = partial.tell()
             try:
@@ -557,6 +571,14 @@ def _cache_paths(repo: str, cache_dir: Path | None) -> tuple[Path, Path, Path]:
     return cache, cache / folder, cache / ".locks" / folder
 
 
+def _repo_lock(lock_dir: Path, timeout: float) -> AbstractContextManager:
+    """The repo's lock (REPO_LOCK) in its `.locks` folder, made if absent,
+    waited for at most `timeout` seconds: the one both `download_model` and
+    `remove_model` take, said once so both take the same file."""
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    return WeakFileLock(lock_dir / REPO_LOCK, timeout=timeout)
+
+
 def download_model(
     repo: str,
     *,
@@ -578,7 +600,11 @@ def download_model(
     cannot be removed (a folder at its path) is a DownloadError naming it,
     on start before the hub is asked, on exit only when nothing else is in
     flight: a cancellation or a failure already raised is the outcome, and
-    the next run names the marker. No URL's
+    the next run names the marker. The repo's lock (REPO_LOCK, the one
+    `remove_model` takes too) is held from before the hub is asked until
+    the snapshot is laid out, so no removal of the repo starts under the
+    run; a run that finds it held, by a removal or by another download of
+    the repo, waits LOCK_TIMEOUT and is then a DownloadError saying so. No URL's
     query string reaches the message or the hub library's warnings: an LFS
     file's is the CDN's signature for it.
     """
@@ -591,23 +617,26 @@ def download_model(
             # The folders are the repo's in the cache and beside it, in `.locks`;
             # an id that is not a repo id is refused here, before the hub is asked.
             cache, storage, locks = _cache_paths(repo, cache_dir)
-            commit, blobs = _plan(repo, endpoint, cache, storage)
-            # Files with the same bytes share one etag, so one blob in the cache:
-            # its bytes move once and count once, in the total and from disk.
-            distinct: dict[str, _Blob] = {}
-            for blob in blobs:
-                distinct.setdefault(blob.etag, blob)
-            progress = _Progress(sum(b.size for b in distinct.values()), on_update, marker)
-            progress.advance(sum(b.on_disk() for b in distinct.values()))
-            # The user's token is for the hub: `_hub_client` keeps it off any
-            # request to another origin, an LFS file's bytes from the CDN included.
-            headers = build_hf_headers()
-            for blob in distinct.values():
-                if not blob.path.exists():
-                    _fetch(blob, progress, headers, locks)
-            # Every blob is complete and verified: the snapshot of the planned
-            # commit points at those blobs and nothing else.
-            path = _lay_out(storage, commit, blobs)
+            # The repo's lock is held for the whole run, so a removal cannot
+            # set the folder aside between the plan and a blob, or between blobs.
+            with _repo_lock(locks, LOCK_TIMEOUT):
+                commit, blobs = _plan(repo, endpoint, cache, storage)
+                # Files with the same bytes share one etag, so one blob in the cache:
+                # its bytes move once and count once, in the total and from disk.
+                distinct: dict[str, _Blob] = {}
+                for blob in blobs:
+                    distinct.setdefault(blob.etag, blob)
+                progress = _Progress(sum(b.size for b in distinct.values()), on_update, marker)
+                progress.advance(sum(b.on_disk() for b in distinct.values()))
+                # The user's token is for the hub: `_hub_client` keeps it off any
+                # request to another origin, an LFS file's bytes from the CDN included.
+                headers = build_hf_headers()
+                for blob in distinct.values():
+                    if not blob.path.exists():
+                        _fetch(blob, progress, headers, locks)
+                # Every blob is complete and verified: the snapshot of the planned
+                # commit points at those blobs and nothing else.
+                path = _lay_out(storage, commit, blobs)
             completed = True
         except GatedRepoError as exc:
             # A GatedRepoError is a RepositoryNotFoundError, but the repo exists:
@@ -627,6 +656,14 @@ def download_model(
             raise DownloadError(
                 f"could not reach the hub at {endpoint} ({type(exc).__name__}: {exc}): "
                 f"check the network, then {RERUN}"
+            ) from exc
+        except Timeout as exc:
+            # The repo's lock, or a blob's: a download of this model (another
+            # run of this command, or the hub library's own for mlx-vlm's
+            # load) or a removal of it holds it.
+            raise DownloadError(
+                f"another run holds {repo}: a download or a removal of it is running; "
+                f"wait for it to finish, then {RERUN} ({exc})"
             ) from exc
         except (OSError, httpx.HTTPError) as exc:
             raise DownloadError(f"download of {repo} from {endpoint} failed: {exc}; {RERUN}") from exc
@@ -764,17 +801,25 @@ def _holds(revision, listed: dict[str, int | None]) -> bool:
 
 
 def _download_running(lock_dir: Path, held: ExitStack) -> bool:
-    """Whether another process is appending to one of the repo's blobs: it
-    holds the per-file lock `_fetch` takes, under the cache's `.locks`. Each
-    lock this takes it keeps, on `held`, until the caller leaves that stack:
-    released at once, a download starting after the probe took its lock
-    and appended to a blob the removal then set aside and deleted. Held
-    through the rename and the deletion, a download starting in between
-    waits at its lock or refuses (`_fetch`'s own timeout), and one whose
-    lock is new writes into a folder the removal no longer names."""
-    for lock in lock_dir.glob("*.lock") if lock_dir.is_dir() else ():
+    """Whether a download of the repo is running: it holds the repo's lock
+    (`download_model`, for its run) or the per-file lock on the blob it is
+    appending to (`_fetch`, and the hub library's own download for
+    mlx-vlm's load, which takes no repo lock), under the cache's `.locks`.
+    Each lock this takes it keeps, on `held`, until the caller leaves that
+    stack: released at once, a download starting after the probe took its
+    lock and appended to a blob the removal then set aside and deleted.
+    The repo's lock is taken first, whether or not its file exists, and
+    then every blob's that does: a blob a download has not reached yet has
+    no lock file, so the blob locks alone let a download start between the
+    probe and the rename. Held through the rename and the deletion, a
+    download starting in between refuses (`download_model`'s own timeout
+    on the repo's lock, the one it takes first) or waits and starts from
+    nothing once the removal is done."""
+    locks = [_repo_lock(lock_dir, 0.1)]
+    locks += [WeakFileLock(lock, timeout=0.1) for lock in lock_dir.glob("*.lock") if lock.name != REPO_LOCK]
+    for lock in locks:
         try:
-            held.enter_context(WeakFileLock(lock, timeout=0.1))
+            held.enter_context(lock)
         except Timeout:
             return True
     return False
