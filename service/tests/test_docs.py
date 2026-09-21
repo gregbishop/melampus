@@ -620,7 +620,7 @@ def test_docs_name_engine_detection_where_the_default_and_the_refusal_are_descri
     and neither may still promise that detection is yet to come."""
     config_doc = CONFIG_DOC.read_text(encoding="utf-8")
     readme = README.read_text(encoding="utf-8")
-    backend_row = next(line for line in config_doc.splitlines() if line.startswith("| `backend` |"))
+    backend_row = _row(config_doc, "backend")
     assert "`--detect-engines`" in backend_row, "docs/config.md's backend row does not name --detect-engines"
     assert "turns that into" not in backend_row, "docs/config.md still says detection is yet to come"
     assert "`--detect-engines`" in readme, "readme.md does not name --detect-engines"
