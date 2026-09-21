@@ -3752,6 +3752,22 @@ def test_detection_claude_code_reports_a_status_check_that_failed_some_other_way
     assert "error: unknown command 'auth'" in verdict.reason
 
 
+@posix_only
+def test_detection_claude_code_that_cannot_be_run_says_so_in_the_systems_words(monkeypatch, tmp_path):
+    """A `claude` that PATH finds but the system cannot start (its
+    interpreter is missing: `#!/nonexistent`, the "not-runnable" case the
+    command seam has) is neither not installed nor not signed in: the
+    verdict is unavailable, says it could not be run with the system's own
+    error, and does not point at the sign-in, which would not help."""
+    _script_on_path(monkeypatch, tmp_path, CLAUDE, "#!/nonexistent\n")
+    monkeypatch.setattr(providers, "claude_code_verdict", REAL_CLAUDE_CODE_VERDICT)
+    verdict = _verdict("claude-code")
+    assert not verdict.available
+    assert "could not be run" in verdict.reason
+    assert "No such file or directory" in verdict.reason
+    assert providers.CLAUDE_CODE_SIGN_IN not in verdict.reason
+
+
 def test_detection_claude_code_not_installed_points_to_the_install(monkeypatch, tmp_path):
     """Done-when 2: not installed, then unavailable with the reason "not
     installed" and where to get it."""
