@@ -266,9 +266,15 @@ def _model_command(args: argparse.Namespace, config) -> int:
         remove = functools.partial(download.remove_model, repo)
     elif engine == OLLAMA:
         model, url = config.model.ollama_model, ollama_url(config.model.ollama_url)
-        fetch = functools.partial(download.pull_model, model, url, timeout=config.model.timeout_seconds)
-        status = functools.partial(download.ollama_status, model, url)
-        remove = functools.partial(download.remove_ollama_model, model, url)
+        # The pull and the delete wait [model] timeout_seconds, the setting
+        # their timeout message names. The list is what Settings waits on as
+        # it opens and loads no model, so it keeps the status's short bound
+        # (the hub listing's, for mlx) whatever the setting says; the status
+        # never fails, so no message names it.
+        bound = {"timeout": config.model.timeout_seconds}
+        fetch = functools.partial(download.pull_model, model, url, **bound)
+        status = functools.partial(download.ollama_status, model, url, timeout=download.STATUS_TIMEOUT)
+        remove = functools.partial(download.remove_ollama_model, model, url, **bound)
     else:
         return _fail(
             f"the {engine} engine has no model to fetch here: the engines with one are "

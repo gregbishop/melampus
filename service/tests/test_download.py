@@ -2668,18 +2668,15 @@ def test_the_ollama_calls_refuse_a_redirect_off_the_address(tmp_path: Path, olla
         assert "302" in str(outcome), outcome
 
 
-def test_the_list_gives_up_on_an_ollama_that_answers_and_never_finishes():
-    """Security: `--model-status` is what the Settings dialog waits on when
-    it opens, and its socket timeout bounds each read, not the call, so a
-    listener trickling the list a byte at a time could hold the dialog for
-    as long as it liked. The backend bounds a frame with a deadline
-    (_Deadline) for that reason; the list is one exchange like it. Given a
-    server that writes a byte every tenth of a second for longer than the
-    timeout, the call is over within it and says so."""
+def _trickling():
+    """A server that answers the list and the delete a byte every tenth of
+    a second for longer than the timeouts the tests set: the listener that
+    would hold a call for as long as it liked."""
     from conftest import QuietHandler
 
     class Trickling(QuietHandler):
         def do_GET(self):  # noqa: N802 - http.server's name
+            self.rfile.read(int(self.headers.get("Content-Length") or 0))
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
@@ -2689,7 +2686,20 @@ def test_the_list_gives_up_on_an_ollama_that_answers_and_never_finishes():
                 time.sleep(0.1)
             self.wfile.write(b'{"models": []}')
 
-    with loopback_server(Trickling, ThreadingHTTPServer) as trickler:
+        do_DELETE = do_GET  # noqa: N815 - http.server's name
+
+    return Trickling
+
+
+def test_the_list_gives_up_on_an_ollama_that_answers_and_never_finishes():
+    """Security: `--model-status` is what the Settings dialog waits on when
+    it opens, and its socket timeout bounds each read, not the call, so a
+    listener trickling the list a byte at a time could hold the dialog for
+    as long as it liked. The backend bounds a frame with a deadline
+    (_Deadline) for that reason; the list is one exchange like it. Given a
+    server that writes a byte every tenth of a second for longer than the
+    timeout, the call is over within it and says so."""
+    with loopback_server(_trickling(), ThreadingHTTPServer) as trickler:
         started = time.monotonic()
         with pytest.raises(DownloadError) as failure:
             download._ollama_request(FAKE_MODEL, f"http://127.0.0.1:{trickler.server_port}",
@@ -2697,6 +2707,26 @@ def test_the_list_gives_up_on_an_ollama_that_answers_and_never_finishes():
         took = time.monotonic() - started
     assert took < 3.0, f"the list ran past its timeout: {took:.1f}s"
     assert "did not answer within 1s" in str(failure.value), str(failure.value)
+
+
+def test_remove_gives_up_on_an_ollama_that_answers_and_never_finishes_naming_the_setting_that_bounds_it():
+    """Review round 2 (download.py:844, :861): a Remove that ran past the
+    delete's timeout said "raise [model] timeout_seconds" while the delete
+    waited a fixed ten seconds the setting did not govern. The delete is
+    one exchange like the pull, and waits as the pull does: `timeout`,
+    which the flags bind to `[model] timeout_seconds`
+    (test_the_model_flags_with_backend_ollama...). Given a server that
+    trickles the delete's reply for longer than the timeout, the remove is
+    over within it and its message names the bound that applies, the
+    setting the flags hand it."""
+    with loopback_server(_trickling(), ThreadingHTTPServer) as trickler:
+        started = time.monotonic()
+        with pytest.raises(DownloadError) as failure:
+            remove_ollama_model(FAKE_MODEL, f"http://127.0.0.1:{trickler.server_port}", timeout=1.0)
+        took = time.monotonic() - started
+    assert took < 3.0, f"the remove ran past its timeout: {took:.1f}s"
+    assert "did not answer within 1s" in str(failure.value), str(failure.value)
+    assert "raise [model] timeout_seconds" in str(failure.value), str(failure.value)
 
 
 def test_the_list_reads_at_most_the_backends_reply_bound():
@@ -2983,26 +3013,33 @@ def test_the_model_flags_with_backend_ollama_go_to_the_ollama_functions_with_the
 
     seen = []
 
-    def fake_pull(model, url, *, on_update, **_):
-        seen.append(("pull", model, url))
+    def fake_pull(model, url, *, on_update, timeout, **_):
+        seen.append(("pull", model, url, timeout))
         on_update(Update.progress(1, 2))
         return model
 
     monkeypatch.setattr(download, "pull_model", fake_pull)
-    monkeypatch.setattr(download, "ollama_status", lambda model, url: seen.append(("status", model, url)) or Status(
+    monkeypatch.setattr(download, "ollama_status", lambda model, url, *, timeout: seen.append(
+        ("status", model, url, timeout)) or Status(
         model, installed=False, bytes_total=None, bytes_done=0, path=None, cancel_path="/data/download-cancel"))
-    monkeypatch.setattr(download, "remove_ollama_model", lambda model, url: seen.append(("remove", model, url)) or model)
+    monkeypatch.setattr(download, "remove_ollama_model",
+                        lambda model, url, *, timeout: seen.append(("remove", model, url, timeout)) or model)
     settings = _ollama_settings(tmp_path, "http://127.0.0.1:11435/")
+    with settings.open("a", encoding="utf-8") as more:
+        more.write("timeout_seconds = 7.5\n")
 
     assert main(["--download-model", "--no-local-config", "--backend", "ollama"]) == 0
     assert main(["--model-status", "--backend", "ollama", "--config", str(settings)]) == 0
     assert main(["--remove-model", "--backend", "ollama", "--config", str(settings)]) == 0
 
     out = capsys.readouterr().out
+    # The pull and the delete wait `[model] timeout_seconds`, what their
+    # timeout message names; the list, which Settings waits on as it opens,
+    # keeps the short bound whatever the setting says.
     assert seen == [
-        ("pull", "qwen3-vl:8b-instruct", providers.OLLAMA_URL),
-        ("status", FAKE_MODEL, "http://127.0.0.1:11435"),
-        ("remove", FAKE_MODEL, "http://127.0.0.1:11435"),
+        ("pull", "qwen3-vl:8b-instruct", providers.OLLAMA_URL, ModelConfig().timeout_seconds),
+        ("status", FAKE_MODEL, "http://127.0.0.1:11435", download.STATUS_TIMEOUT),
+        ("remove", FAKE_MODEL, "http://127.0.0.1:11435", 7.5),
     ]
     progress, done, status_line, removed = out.splitlines()
     assert (progress, done) == ("progress 1 2", "done qwen3-vl:8b-instruct")
@@ -3052,7 +3089,7 @@ def test_the_model_flags_take_the_engine_from_the_config_file_and_detection_when
     asked = []
     monkeypatch.setattr(download, "model_status", lambda repo: asked.append(("mlx", repo)) or Status(
         repo, installed=False, bytes_total=None, bytes_done=0, path=None, cancel_path="/x"))
-    monkeypatch.setattr(download, "ollama_status", lambda model, url: asked.append(("ollama", model)) or Status(
+    monkeypatch.setattr(download, "ollama_status", lambda model, url, **_: asked.append(("ollama", model)) or Status(
         model, installed=False, bytes_total=None, bytes_done=0, path=None, cancel_path="/x"))
     monkeypatch.setattr(melampus.cli, "detect_engines", lambda ollama_at=None: machine)
     if settings is None:

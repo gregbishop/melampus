@@ -270,11 +270,17 @@ the backend speaks its chat endpoint (card #409):
   `bytes_done` and the model's name as `path`; else false with `bytes_total`
   **null** (Ollama lists sizes for held models only, so the button says
   "size unknown" until the model is there) and `bytes_done` 0. A name
-  without a tag matches Ollama's `<name>:latest`. With no server answering
-  the model is reported absent, size unknown, exit 0, so Settings opens.
+  without a tag matches Ollama's `<name>:latest`. With no server answering,
+  or none within 10 seconds (`download.STATUS_TIMEOUT`, the bound the mlx
+  status keeps for the same reason: the dialog waits for this command as it
+  opens), the model is reported absent, size unknown, exit 0, so Settings
+  opens.
 - `--remove-model` is `/api/delete` (`DELETE`, § Delete a Model) with the model's
   name: `removed <model>` and exit 0; exit 3 naming the model when Ollama
-  does not hold it, or with the not-running message.
+  does not hold it, or with the not-running message. The pull and the
+  delete wait `[model] timeout_seconds` for the server, as a frame does;
+  a server that has not finished within it is exit 3 with the backend's
+  timeout message, which names that setting.
 
 The tests prove all three against a fake Ollama on 127.0.0.1 that speaks
 those endpoints and keeps what a cut-off pull had; no model is ever pulled.

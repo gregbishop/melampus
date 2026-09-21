@@ -108,10 +108,13 @@ def cancel_marker_path() -> Path:
     return cache_file(CANCEL_MARKER)
 
 
-# How long `--model-status` waits for the hub's file listing: the hub
-# library's own request timeout. The Settings dialog runs the status as it
-# opens and waits for the exit code, so a connection the hub takes and never
-# answers must end here, not hang the dialog.
+# How long `--model-status` waits for the hub's file listing, or for Ollama's
+# list: the hub library's own request timeout. The Settings dialog runs the
+# status as it opens and waits for the exit code, so a connection the hub or
+# the server takes and never answers must end here, not hang the dialog;
+# neither call loads a model, so `[model] timeout_seconds`, which allows for
+# one loading on a frame, does not bound it (the pull and the delete wait
+# that setting: cli._model_command binds it).
 STATUS_TIMEOUT: float = constants.DEFAULT_REQUEST_TIMEOUT
 
 # The files a model's load needs: mlx-vlm's own allow patterns
@@ -1111,15 +1114,17 @@ def pull_model(
 
 
 def _ollama_request(model: str, url: str, path: str, body: dict | None = None, *,
-                    method: str = "POST", timeout: float = 10.0) -> dict:
+                    method: str = "POST", timeout: float) -> dict:
     """One JSON answer from the Ollama server at `url`: `body` sent as JSON
     when given, the reply decoded. Sent as the backend sends a frame for
     `model`, through `OllamaBackend._send`: straight to the address (no
     proxy, no redirect), the whole exchange within `timeout` of wall-clock
     time, at most `MAX_REPLY_BYTES` of the reply read. Raises DownloadError
     with the backend's words: not-running when nothing answers, the
-    timeout, `Ollama answered <status>: <its words>` for an HTTP error, a
-    reply that ran past the bound or was not HTTP."""
+    timeout (its message names `[model] timeout_seconds`, so `timeout` is
+    that setting for a call whose failure is shown: the delete's), `Ollama
+    answered <status>: <its words>` for an HTTP error, a reply that ran
+    past the bound or was not HTTP."""
     address = url.rstrip("/")
     request = urllib.request.Request(
         f"{address}{path}",
@@ -1142,16 +1147,17 @@ def _ollama_request(model: str, url: str, path: str, body: dict | None = None, *
     return reply
 
 
-def _held(model: str, url: str) -> dict | None:
+def _held(model: str, url: str, *, timeout: float = STATUS_TIMEOUT) -> dict | None:
     """The list entry for `model` in the Ollama at `url` (docs/api.md § List
     Local Models: GET /api/tags, `models` each with `name` and `size`), or
-    None when it is not held. A name without a tag is `<name>:latest`
-    there (§ Model names: the tag defaults to `latest`). The list is the
-    server's to write: one not in that shape (`models` not a list, an
-    entry's name not a string, its size not a count) is a DownloadError
-    naming it, as a malformed pull line is, never a traceback."""
+    None when it is not held, the whole exchange within `timeout`. A name
+    without a tag is `<name>:latest` there (§ Model names: the tag defaults
+    to `latest`). The list is the server's to write: one not in that shape
+    (`models` not a list, an entry's name not a string, its size not a
+    count) is a DownloadError naming it, as a malformed pull line is, never
+    a traceback."""
     names = {model, model if ":" in model else f"{model}:latest"}
-    models = _ollama_request(model, url, OLLAMA_TAGS, method="GET").get("models") or []
+    models = _ollama_request(model, url, OLLAMA_TAGS, method="GET", timeout=timeout).get("models") or []
     if not isinstance(models, list):
         raise DownloadError(f"Ollama's list from {url}{OLLAMA_TAGS} was not a list of models: {str(models)[:120]!r}")
     for entry in models:
@@ -1172,15 +1178,18 @@ def _held(model: str, url: str) -> dict | None:
     return None
 
 
-def ollama_status(model: str, url: str) -> Status:
+def ollama_status(model: str, url: str, *, timeout: float = STATUS_TIMEOUT) -> Status:
     """Whether the Ollama at `url` holds `model`, from its list endpoint:
     installed with the size it reports for both totals and the model's
     name as the path (where it lives: in Ollama, under that name, what
     `done` printed); else absent with `bytes_total` None, since the docs
     give sizes for held models only. Never fails: with no server answering
-    the model is reported absent, size unknown, so Settings opens."""
+    the model is reported absent, size unknown, so Settings opens, and a
+    server that has not answered the list within `timeout` (STATUS_TIMEOUT,
+    the short bound on what Settings waits on) reads the same, the
+    timeout's words never shown."""
     try:
-        entry = _held(model, url)
+        entry = _held(model, url, timeout=timeout)
     except DownloadError:
         entry = None
     if entry is None:
@@ -1189,14 +1198,17 @@ def ollama_status(model: str, url: str) -> Status:
     return Status(model, True, size, size, str(entry.get("name") or model), str(cancel_marker_path()))
 
 
-def remove_ollama_model(model: str, url: str) -> str:
+def remove_ollama_model(model: str, url: str, *, timeout: float = 180.0) -> str:
     """Delete `model` from the Ollama at `url` through its delete endpoint
     (docs/api.md § Delete a Model: DELETE /api/delete with the model's name;
-    200 when gone, 404 when it was not held) and return the name. Raises
-    DownloadError naming the model when nothing is held, the backend's
-    not-running words when no server answers."""
+    200 when gone, 404 when it was not held) and return the name, the
+    exchange within `timeout` as the pull's is: `[model] timeout_seconds`
+    from the flags, which the timeout's message names. Raises DownloadError
+    naming the model when nothing is held, the backend's not-running words
+    when no server answers, its timeout words when the server does not
+    finish."""
     try:
-        _ollama_request(model, url, OLLAMA_DELETE, {"model": model}, method="DELETE")
+        _ollama_request(model, url, OLLAMA_DELETE, {"model": model}, method="DELETE", timeout=timeout)
     except DownloadError as exc:
         if "Ollama answered 404" in str(exc):
             raise DownloadError(f"{model} is not in Ollama at {url}: nothing to remove ({exc})") from exc
