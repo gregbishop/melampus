@@ -2483,6 +2483,26 @@ def test_pull_stream_error_words_keep_none_of_the_servers_control_characters(err
     assert all(c.isprintable() for c in message), repr(message)
 
 
+@pytest.mark.parametrize(
+    "layer",
+    [
+        {"status": "pulling aaa", "digest": "sha256:aaa", "total": "lots"},
+        {"status": "pulling aaa", "digest": "sha256:aaa", "total": [100], "completed": 1},
+        {"status": "pulling aaa", "digest": "sha256:aaa", "total": 100, "completed": {"n": 1}},
+    ],
+    ids=["total-words", "total-list", "completed-object"],
+)
+def test_pull_stream_layer_line_with_counts_that_are_not_numbers_is_a_failure_not_a_traceback(layer: dict):
+    """A layer line's `total` and `completed` are the server's to write; one
+    that is not a number is a malformed stream, a failure named like the
+    non-JSON line, not a traceback out of --download-model."""
+    from melampus.download import pull_updates
+
+    with pytest.raises(DownloadError) as failure:
+        list(pull_updates(FAKE_MODEL, _stream({"status": "pulling manifest"}, layer)))
+    assert "not a count" in str(failure.value), str(failure.value)
+
+
 def test_pull_stream_ending_without_success_is_a_failure():
     """The connection dropped before `success`: not done, and said so."""
     from melampus.download import pull_updates

@@ -1004,7 +1004,9 @@ def pull_updates(model: str, lines: Iterable[bytes | str]) -> Iterator[Update]:
     `[model] ollama_model` when the library has no such model (`pull model
     manifest: file does not exist`, its 404), else the re-run hint, since
     Ollama keeps the layers it has and resumes them. A stream that ends
-    before `success` is a failure too.
+    before `success` is a failure too, as is a line that is not JSON or a
+    layer line whose `total` or `completed` is not a count: every line is
+    the server's to write, and a malformed one is named, never a traceback.
     """
     layers: dict[str, tuple[int, int]] = {}
     for raw in lines:
@@ -1025,7 +1027,13 @@ def pull_updates(model: str, lines: Iterable[bytes | str]) -> Iterator[Update]:
             yield Update.done(model)
             return
         if status.startswith("pulling ") and item.get("digest") and "total" in item:
-            layers[str(item["digest"])] = (int(item["total"]), int(item.get("completed") or 0))
+            try:
+                counts = (int(item["total"]), int(item.get("completed") or 0))
+            except (TypeError, ValueError) as exc:
+                raise DownloadError(
+                    f"Ollama's pull reply carried a size that is not a count: {text[:120]!r}"
+                ) from exc
+            layers[str(item["digest"])] = counts
             yield Update.progress(sum(c for _, c in layers.values()), sum(t for t, _ in layers.values()))
     raise DownloadError(f"Ollama's pull of {model} ended before it reported success; {RERUN}")
 
