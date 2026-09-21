@@ -6,7 +6,6 @@ import argparse
 import functools
 import json
 import sys
-from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
@@ -450,7 +449,12 @@ def main(argv: list[str] | None = None) -> int:
         # The address probed is the configured one, read the way the run
         # reads it (--config and --no-local-config alike), so the verdict
         # cannot disagree with what --backend ollama would talk to.
-        print(json.dumps([asdict(v) for v in detect_engines(config.model.ollama_url)], indent=2))
+        # The dialog's contract (card #404): engine, available, reason. A
+        # verdict's resolved executable is the factory's, not the dialog's.
+        print(json.dumps([
+            {"engine": v.engine, "available": v.available, "reason": v.reason}
+            for v in detect_engines(config.model.ollama_url)
+        ], indent=2))
         return 0
     if args.download_model or args.model_status or args.remove_model:
         return _model_command(args, config)

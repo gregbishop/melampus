@@ -231,6 +231,11 @@ class EngineVerdict:
     engine: str
     available: bool
     reason: str
+    #: Where the program that decides the verdict was found, when one does
+    #: (claude-code: what shutil.which resolved `claude` to), so the factory
+    #: runs what detection checked and never resolves it again. None for
+    #: the engines no program decides.
+    executable: str | None = None
 
 
 def _key_required(engine: str) -> str:
@@ -299,16 +304,21 @@ def claude_code_verdict(program: str | None = None) -> EngineVerdict:
         CLAUDE_CODE, True,
         "Claude Code is signed in" + (f" ({signed_in_as})" if signed_in_as else "")
         + "; every frame bills to that subscription, not to an API key",
+        executable=executable,
     )
 
 
-def detect_engines(ollama_at: str | None = None) -> list[EngineVerdict]:
+def detect_engines(
+    ollama_at: str | None = None, claude_code_program: str | None = None
+) -> list[EngineVerdict]:
     """One verdict per engine, in the owner's order (BACKEND_CHOICES without the
     test fake), then claude-code (card #421; the picker learns it in #423).
     This is the one place that knows whether an engine can run here: the
     refusals' "what works" list and the CLI's default both come from it, so
     they cannot disagree with what the dialog (card #405) shows. `ollama_at`
-    is the configured address, if any (`[model] ollama_url`)."""
+    is the configured address, if any (`[model] ollama_url`);
+    `claude_code_program` the configured program, if any (a `[model] command`
+    under claude-code naming its own), else the built-in `claude`."""
     apple_silicon = on_apple_silicon()
     url = ollama_url(ollama_at)
     ollama = ollama_answers(url)
@@ -324,7 +334,7 @@ def detect_engines(ollama_at: str | None = None) -> list[EngineVerdict]:
         ),
         EngineVerdict("openai", True, _key_required("openai")),
         EngineVerdict("claude", True, _key_required("claude")),
-        claude_code_verdict(),
+        claude_code_verdict(claude_code_program),
     ]
 
 
@@ -511,15 +521,21 @@ def build_primary_backend(config: MelampusConfig) -> VLMBackend:
     if kind == CLAUDE_CODE:
         # The seam configured for Claude Code: the built-in template unless
         # the user set [model] command, and the reply unwrapped from the
-        # result object. Resolved before any image is read, like `command`.
+        # result object. Resolved before any image is read, like `command`,
+        # and as `ollama` does it: one detection, on the template's program,
+        # whose claude-code verdict is the refusal's sentence and whose list
+        # is its "what works", so Claude Code is asked its status once,
+        # refused or built, and what runs is the executable that verdict
+        # resolved.
         command = list(settings.command or CLAUDE_CODE_COMMAND)
-        verdict = claude_code_verdict(command[0])
+        verdicts = detect_engines(settings.ollama_url, command[0])
+        verdict = next(v for v in verdicts if v.engine == CLAUDE_CODE)
         if not verdict.available:
-            raise _refusal(f"{verdict.reason}.", works_here=_works_here(detect_engines(settings.ollama_url)))
+            raise _refusal(f"{verdict.reason}.", works_here=_works_here(verdicts))
         from .backend import CommandBackend
 
         return CommandBackend(
-            command, executable=shutil.which(command[0]), timeout=settings.timeout_seconds,
+            command, executable=verdict.executable, timeout=settings.timeout_seconds,
             decode=claude_code_reply,
         )
 

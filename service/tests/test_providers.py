@@ -3518,6 +3518,40 @@ def test_claude_code_primary_builds_the_command_backend_on_the_built_in_template
     assert backend.executable == shutil.which(CLAUDE)
 
 
+def _status_checks(log: Path) -> list[list[str]]:
+    """The `auth status` invocations the fake `claude` logged."""
+    return [argv for argv in (json.loads(line)["argv"] for line in log.read_text(encoding="utf-8").splitlines())
+            if argv[:2] == ["auth", "status"]]
+
+
+@posix_only
+def test_claude_code_primary_asks_claude_code_once_refused_or_built(monkeypatch, tmp_path, no_ambient_ollama):
+    """One probe, one sentence, as the ollama branch does it: the factory's
+    claude-code verdict is the one out of the single detect_engines call
+    whose verdicts also make the refusal's "what works" list, so Claude
+    Code is asked its status once whether the run is refused or built (a
+    hung install costs one probe timeout, not two), and the backend runs
+    the executable that verdict resolved, not a second lookup. Detection is
+    run on the template's program, so a user's own program in [model]
+    command is the one asked, once, and the built-in `claude` is not."""
+    log = _fake_claude(monkeypatch, tmp_path, mode="not-signed-in")
+    with pytest.raises(providers.BackendUnavailable, match="not signed in"):
+        providers.build_primary_backend(_cfg(model={"backend": "claude-code"}))
+    assert _status_checks(log) == [["auth", "status", "--json"]]
+
+    log.unlink()
+    script = _fake_claude(monkeypatch, tmp_path).with_name("bin") / CLAUDE
+    backend = providers.build_primary_backend(_cfg(model={"backend": "claude-code"}))
+    assert _status_checks(log) == [["auth", "status", "--json"]]
+    assert backend.executable == str(script)
+
+    log.unlink()
+    own = [str(script), "-p", "--output-format", "json", "{image} {prompt}"]
+    backend = providers.build_primary_backend(_cfg(model={"backend": "claude-code", "command": own}))
+    assert _status_checks(log) == [["auth", "status", "--json"]], "the built-in's verdict was asked too"
+    assert backend.executable == str(script)
+
+
 @posix_only
 def test_claude_code_returns_candidates_in_the_same_shape_as_mlx_on_the_fixture(
     monkeypatch, photos, tmp_path
