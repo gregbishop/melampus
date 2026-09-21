@@ -3913,11 +3913,14 @@ def test_detection_claude_code_is_available_when_installed_and_signed_in(monkeyp
 @posix_only
 def test_detection_claude_code_not_signed_in_names_the_sign_in_command(monkeypatch, tmp_path):
     """Done-when 2: installed but not signed in, then unavailable with the
-    reason "not signed in" and the command that signs in."""
+    reason "not signed in", the check as run (flags included, like every
+    other verdict that ran one; review round 6, 1) and the command that
+    signs in."""
     _fake_claude(monkeypatch, tmp_path, mode="not-signed-in")
     verdict = _verdict("claude-code")
     assert not verdict.available
     assert "not signed in" in verdict.reason and providers.CLAUDE_CODE_SIGN_IN in verdict.reason
+    assert "`claude --restricted auth status --json`" in verdict.reason, verdict.reason
 
 
 @posix_only
@@ -4120,13 +4123,31 @@ def test_a_bare_template_is_never_signed_in_to_the_subscription(monkeypatch, tmp
     mode doesn't use your subscription login"). Probed under it, the check
     reports not signed in (measured on 2.1.278: `claude --bare auth status
     --json` on the signed-in Mac says loggedIn false, authMethod none,
-    exit 1), and the refusal names the flag it ran under."""
+    exit 1), and the refusal quotes the check it ran, `--bare` included,
+    and says to remove `--bare` from `[model] command`, never to sign in:
+    signing in cannot help a template that never reads the login (review
+    round 6, 1). The same under a key in the environment, which bare mode
+    does read (headless: "set ANTHROPIC_API_KEY ... because bare mode
+    doesn't use your subscription login"): the key to unset, and `--bare`
+    to remove."""
     log = _fake_claude(monkeypatch, tmp_path)
     template = providers.CLAUDE_CODE_COMMAND
     bare = [*template[:-1], "--bare", template[-1]]
-    with pytest.raises(providers.BackendUnavailable, match="not signed in"):
+    with pytest.raises(providers.BackendUnavailable, match="not signed in") as err:
         providers.build_primary_backend(_cfg(model={"backend": "claude-code", "command": bare}))
     assert _status_checks(log) == [["--restricted", "--bare", "auth", "status", "--json"]]
+    reason = str(err.value)
+    assert "`claude --restricted --bare auth status --json`" in reason, reason
+    assert "remove `--bare` from `[model] command`" in reason, reason
+    assert providers.CLAUDE_CODE_SIGN_IN not in reason, reason
+
+    _fake_claude(monkeypatch, tmp_path, mode="api-key")
+    with pytest.raises(providers.BackendUnavailable, match="not to a Claude subscription") as err:
+        providers.build_primary_backend(_cfg(model={"backend": "claude-code", "command": bare}))
+    reason = str(err.value)
+    assert "`claude --restricted --bare auth status --json`" in reason, reason
+    assert "unset ANTHROPIC_API_KEY" in reason and "remove `--bare` from `[model] command`" in reason, reason
+    assert providers.CLAUDE_CODE_SIGN_IN not in reason, reason
 
 
 def test_the_status_check_argv_is_derived_from_the_template():

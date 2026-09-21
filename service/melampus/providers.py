@@ -166,6 +166,18 @@ CLAUDE_CODE_SIGN_IN = "claude auth login"
 #: the settings flags of the template that will run (claude_code_status).
 CLAUDE_CODE_STATUS = ("auth", "status", "--json")
 
+#: The flag under which no sign-in can help: `--bare` (`claude --help`,
+#: 2.1.278: "OAuth and keychain are never read"; headless: "bare mode
+#: doesn't use your subscription login"). A template carrying it is never
+#: signed in to the subscription, and signing in changes nothing, so its
+#: verdicts say to remove the flag instead of naming the sign-in (review
+#: round 6, 1), the way CLAUDE_CODE_CREDENTIAL_FIX names what to remove.
+CLAUDE_CODE_BARE = "--bare"
+CLAUDE_CODE_BARE_FIX = (
+    f"remove `{CLAUDE_CODE_BARE}` from `[model] command`, since bare mode never reads the "
+    "subscription login"
+)
+
 #: The global flags that decide which settings files a run loads, and so
 #: which credential it uses, with how many values each takes: the status
 #: check carries them off the template that will run, values and order
@@ -193,7 +205,7 @@ CLAUDE_CODE_STATUS = ("auth", "status", "--json")
 #: round 3, C1 and S1). Flags that decide nothing about credentials
 #: (`--add-dir`, the tools, the prompt) are not carried.
 CLAUDE_CODE_SETTINGS_FLAGS = {
-    CLAUDE_CODE_ISOLATION: 0, "--bare": 0, "--settings": 1, "--setting-sources": 1,
+    CLAUDE_CODE_ISOLATION: 0, CLAUDE_CODE_BARE: 0, "--settings": 1, "--setting-sources": 1,
 }
 
 #: What the status object calls the subscription sign-in: `authMethod`
@@ -372,13 +384,16 @@ def claude_code_verdict(command: list[str] | None = None) -> EngineVerdict:
     settings flags (claude_code_status), must say signed in to the
     subscription. Never raises; a verdict reports. The reasons are the
     words the user sees: not installed with where to get it, not signed in
-    with the command that signs in, signed in but not to the subscription
-    with what to remove and the sign-in (CLAUDE_CODE_SUBSCRIPTION says
-    why), a check that did not answer or failed some other way (in the
-    CLI's own words), or available and billing to the subscription."""
+    with the check as run and the command that signs in, signed in but
+    not to the subscription with the check as run, what to remove and the
+    sign-in (CLAUDE_CODE_SUBSCRIPTION says why), a check that did not
+    answer or failed some other way (in the CLI's own words), or available
+    and billing to the subscription. A template carrying CLAUDE_CODE_BARE
+    is told to remove it in place of the sign-in, which cannot help it."""
     command = command or CLAUDE_CODE_COMMAND
     program = command[0]
     check = claude_code_status(command)
+    sign_in = CLAUDE_CODE_BARE_FIX if CLAUDE_CODE_BARE in check else f"sign in with `{CLAUDE_CODE_SIGN_IN}`"
     executable = shutil.which(program)
     if executable is None:
         return EngineVerdict(
@@ -417,7 +432,8 @@ def claude_code_verdict(command: list[str] | None = None) -> EngineVerdict:
         if account.get("loggedIn") is False or (status.returncode == 1 and not said):
             return EngineVerdict(
                 CLAUDE_CODE, False,
-                f"Claude Code is installed but not signed in; run `{CLAUDE_CODE_SIGN_IN}`",
+                f"Claude Code is installed but not signed in: `{program} {' '.join(check)}` "
+                f"says so; {sign_in}",
             )
         return EngineVerdict(
             CLAUDE_CODE, False,
@@ -438,8 +454,7 @@ def claude_code_verdict(command: list[str] | None = None) -> EngineVerdict:
             CLAUDE_CODE, False,
             f"Claude Code is signed in, but not to a Claude subscription: `{program} "
             f"{' '.join(check)}` says {said}, and every frame would bill that "
-            f"credential instead ({CLAUDE_CODE_AUTH_DOCS}); {fix}, then sign in with "
-            f"`{CLAUDE_CODE_SIGN_IN}`",
+            f"credential instead ({CLAUDE_CODE_AUTH_DOCS}); {fix}, then {sign_in}",
         )
     signed_in_as = ", ".join(
         str(account[key]) for key in ("authMethod", "subscriptionType") if account.get(key)

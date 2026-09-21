@@ -151,7 +151,9 @@ your own is checked under whatever it carries of `--restricted`, `--bare`,
 (`--settings file` or `--settings=file`), so one that leaves
 `--restricted` out or names a settings file with an `apiKeyHelper` is
 refused as the run would bill it, below, and one with `--bare` is never
-signed in, since bare mode never reads the login), as signed in but not to
+signed in, since bare mode never reads the login, so its verdict says to
+remove `--bare` from the command rather than to sign in, which could not
+help it; every verdict quotes the check as it ran), as signed in but not to
 the subscription when that check passes
 on another credential (`authMethod` other than `claude.ai`: an API key, an
 OAuth or bearer token from the environment, a cloud provider; or the login
