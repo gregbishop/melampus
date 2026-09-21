@@ -520,6 +520,16 @@ def _lay_out(storage: Path, commit: str, blobs: list[_Blob]) -> Path:
     return snapshot
 
 
+def _hub_at(endpoint: str | None) -> str:
+    """The hub every request of this process goes to, said once for the
+    download and the status: `endpoint`, or `HF_ENDPOINT`, and the protected
+    client (`_hub_client`, which keeps the user's token on that hub alone)
+    installed as the client the hub library makes every request with."""
+    endpoint = endpoint or constants.ENDPOINT
+    set_client_factory(lambda: _hub_client(endpoint))
+    return endpoint
+
+
 def _cache_paths(repo: str, cache_dir: Path | None) -> tuple[Path, Path, Path]:
     """Where `repo` lives in the Hugging Face cache (`HF_HOME`'s, or
     `cache_dir`), said once for the download, the status and the removal:
@@ -552,10 +562,9 @@ def download_model(
     query string reaches the message or the hub library's warnings: an LFS
     file's is the CDN's signature for it.
     """
-    endpoint = endpoint or constants.ENDPOINT
+    endpoint = _hub_at(endpoint)
     marker = cancel_marker or cancel_marker_path()
     marker.unlink(missing_ok=True)
-    set_client_factory(lambda: _hub_client(endpoint))
     with _hub_warnings_redacted():
         try:
             # The hub library's own check of the id (`namespace/name`, no URL,
@@ -638,8 +647,7 @@ def model_status(repo: str, *, endpoint: str | None = None, cache_dir: Path | No
     for the network being down. The hub is asked through `_hub_client`, as
     the download asks it: the user's token goes only where that client lets
     it go."""
-    endpoint = endpoint or constants.ENDPOINT
-    set_client_factory(lambda: _hub_client(endpoint))
+    endpoint = _hub_at(endpoint)
     cache, storage, _ = _cache_paths(repo, cache_dir)
     cached = _cached(repo, cache)
     main = next((r for r in cached.revisions if "main" in r.refs), None) if cached else None
