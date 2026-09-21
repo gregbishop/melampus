@@ -1911,7 +1911,7 @@ def test_command_template_without_a_placeholder_is_refused_at_config_load(comman
     only in the arguments after it."""
     with pytest.raises(ValueError) as err:
         _cfg(model={"backend": "command", "command": command})
-    assert missing in str(err.value), str(err.value)
+    assert f"has no argument carrying {missing}" in str(err.value), str(err.value)
 
 
 class _FakeRun:
