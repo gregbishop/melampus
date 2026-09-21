@@ -17,6 +17,7 @@ import subprocess
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import NoReturn
 from urllib.parse import urlsplit
 
 from pydantic import SecretStr
@@ -728,13 +729,22 @@ def claude_code_reply(stdout: str) -> str:
         return stdout
     result = str(reply.get("result") or "")
     if reply.get("is_error"):
-        if "not logged in" in result.lower():
-            raise CommandFailed(
-                f"Claude Code is not signed in; run `{CLAUDE_CODE_SIGN_IN}` and try again "
-                f"(it said: {result})"
-            )
-        raise CommandFailed(f"Claude Code reported an error: {result}")
+        _cli_refuse(CLAUDE_CODE_CLI, result, signed_out="not logged in" in result.lower())
     return result
+
+
+def _cli_refuse(cli: CliEngine, message: str, *, signed_out: bool) -> NoReturn:
+    """A CLI's run failed in its own words, `message`: CommandFailed (the
+    engine is broken, not the frame; the batch stops) in the user's terms.
+    `signed_out` is the decoder's reading of those words: then the refusal
+    names the command that signs in; otherwise it carries the CLI's words
+    alone. What differs between the CLIs is the title and the sign-in
+    command, the CliEngine's data."""
+    if signed_out:
+        raise CommandFailed(
+            f"{cli.title} is not signed in; run `{cli.sign_in}` and try again (it said: {message})"
+        )
+    raise CommandFailed(f"{cli.title} reported an error: {message}")
 
 
 #: Claude Code, as the one verdict and the one factory branch see it.
@@ -785,7 +795,12 @@ def codex_reply(stdout: str) -> str:
     return reply
 
 
-def _codex_refuse(message: str) -> None:
+def _codex_refuse(message: str) -> NoReturn:
+    """A failed turn's `message`, as CommandFailed: the usage limit is
+    Codex's own refusal, named with the reset time as the CLI said it
+    (measured: "... try again at Sep 19th, 2026 7:46 AM."); a 401 is not
+    signed in, and anything else is Codex's words, both through the
+    refusal shared with Claude Code."""
     lowered = message.lower()
     if "usage limit" in lowered:
         _, _, when = message.partition("try again at ")
@@ -794,12 +809,7 @@ def _codex_refuse(message: str) -> None:
             + (f", until {when.strip().rstrip('.')}" if when.strip() else "")
             + f"; wait for it to reset or switch engines (it said: {message})"
         )
-    if "401" in message or "unauthorized" in lowered:
-        raise CommandFailed(
-            f"Codex CLI is not signed in; run `{CODEX_SIGN_IN}` and try again "
-            f"(it said: {message})"
-        )
-    raise CommandFailed(f"Codex CLI reported an error: {message}")
+    _cli_refuse(CODEX_CLI, message, signed_out="401" in message or "unauthorized" in lowered)
 
 
 #: Codex CLI, as the one verdict and the one factory branch see it. Signed
