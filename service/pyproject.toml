@@ -28,6 +28,10 @@ dependencies = [
     # Exact-pinned, as pyinstaller is: what download.py leans on in the hub
     # library was read at this version.
     "huggingface_hub==1.26.0",
+    # download.py catches filelock's Timeout directly (card #408, --remove-model
+    # refused while a download holds the hub library's per-file lock); declared
+    # rather than borrowed from huggingface_hub, whose dependency it is.
+    "filelock==3.32.2",
 ]
 
 [project.optional-dependencies]

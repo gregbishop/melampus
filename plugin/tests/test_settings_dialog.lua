@@ -15,24 +15,108 @@ local PLUGIN = mock.PLUGIN
 local ENGINES = mock.loadPluginFile('MelampusRules').ENGINES
 local OLLAMA_DOWNLOAD = 'https://ollama.com/download'
 
+local REPO = 'mlx-community/Qwen3-VL-30B-A3B-Instruct-4bit'
+local CANCEL_PATH = (os.getenv('TMPDIR') or '/tmp') .. '/melampus-data/cache/download-cancel'
+
+--- The executable's --model-status answer: absent with the size by default.
+local function modelStatus(overrides)
+	local status = {
+		repo = '"' .. REPO .. '"', installed = 'false', bytes_total = '18300000000',
+		bytes_done = '0', path = 'null', cancel_path = '"' .. CANCEL_PATH .. '"',
+	}
+	for key, value in pairs(overrides or {}) do status[key] = value end
+	local parts = {}
+	for _, key in ipairs({ 'repo', 'installed', 'bytes_total', 'bytes_done', 'path', 'cancel_path' }) do
+		parts[#parts + 1] = '"' .. key .. '": ' .. status[key]
+	end
+	return '{' .. table.concat(parts, ', ') .. '}'
+end
+
+local function writeFile(path, text, mode)
+	local handle = assert(io.open(path, mode or 'w'))
+	handle:write(text)
+	handle:close()
+end
+
+local function exists(path)
+	local handle = io.open(path, 'r')
+	if handle then handle:close() return true end
+	return false
+end
+
+local function readFile(path)
+	local handle = io.open(path, 'r')
+	if not handle then return nil end
+	local text = handle:read('a')
+	handle:close()
+	return text
+end
+
+--- The fake executable playing --download-model, as the onExecute the mock
+--- calls with the command: `lines` land in the progress file (the command's
+--- stdout redirect) one per tick, each after the poller has had its turn,
+--- `stderr` in the log (its stderr redirect), and it exits `code`. `startup`
+--- is how many ticks it spends starting (the one-file unpack, the imports,
+--- the hub's listing) before the first line, the progress file empty.
+local function fakeDownload(lines, code, stderr, startup)
+	return function(command)
+		local target = string.match(command, ">'([^']+)'")
+		local log = string.match(command, "2>'([^']+)'")
+		for _ = 1, startup or 0 do mock.yield() end
+		for _, line in ipairs(lines) do
+			mock.yield()
+			writeFile(target, line .. '\n', 'a')
+		end
+		if stderr then writeFile(log, stderr, 'a') end
+		return code
+	end
+end
+
+--- The dialogs the mock recorded, the modal ones (the Settings dialog, with
+--- its view tree) when `modal` is true, else the messages shown over it.
+local function dialogsShown(modal)
+	local found = {}
+	for _, dialog in ipairs(mock.state.dialogs) do
+		if (dialog.modal or false) == modal then found[#found + 1] = dialog end
+	end
+	return found
+end
+
 --- Open the real Settings dialog under the mock. `options.detection` is what
 --- the executable prints for --detect-engines, from mock.detectionText (nil:
 --- no executable beside the plugin, told to the mock as absent by name, so
 --- the test holds after the readme's install step has put the real one
---- there); `options.onDialog` plays the user while the dialog is up.
+--- there); `options.status` what it prints for --model-status (default: the
+--- model absent); `options.download` plays --download-model: its `lines` land
+--- in the progress file one per tick, `stderr` in the log, and it exits
+--- `code`, after `startup` ticks with the file empty; `options.detectionCode` and `options.statusCode` are the exit
+--- codes of --detect-engines and --model-status (0); `options.removeCode` is
+--- --remove-model's exit code; `options.onDialog` plays the user while the
+--- dialog is up.
 local function openSettings(options)
 	options = options or {}
 	mock.loadUnderMock('MelampusSettings', {
 		prefs = mock.defaultPrefs(options.prefs),
 		existing = { [mock.EXECUTABLE] = options.detection ~= nil },
 		passwords = options.passwords,
-		onExecute = options.detection and mock.answersDetection(options.detection) or nil,
+		onExecute = function(command)
+			local target = string.match(command, ">'([^']+)'")
+			if string.find(command, '--detect-engines', 1, true) then
+				if options.detection then return mock.answersDetection(options.detection, options.detectionCode)(command) end
+			elseif string.find(command, '--model-status', 1, true) and target then
+				writeFile(target, options.status or modelStatus())
+				return options.statusCode or 0
+			elseif string.find(command, '--download-model', 1, true) and target then
+				local download = options.download or { lines = {}, code = 0 }
+				return fakeDownload(download.lines, download.code, download.stderr, download.startup)(command)
+			elseif string.find(command, '--remove-model', 1, true) then
+				return options.removeCode or 0
+			end
+			return 0
+		end,
 		onModalDialog = options.onDialog,
 	})
-	local modal = {}
-	for _, dialog in ipairs(mock.state.dialogs) do
-		if dialog.modal then modal[#modal + 1] = dialog end
-	end
+	local modal = dialogsShown(true)
 	t.equals(#modal, 1, 'expected exactly one dialog')
 	return modal[1].contents
 end
@@ -67,6 +151,18 @@ local function titlesMatching(contents, needle)
 	return out
 end
 
+--- The row of the engine group that holds the model's buttons: the one bound
+--- to a property table with a `phase`. nil when there is none.
+local function modelRow(contents)
+	for _, kind in ipairs({ 'row', 'column' }) do
+		for _, entry in ipairs(viewsOfKind(contents, kind)) do
+			local bound = entry.view.bind_to_object
+			if type(bound) == 'table' and bound.phase ~= nil then return entry.view, bound end
+		end
+	end
+	return nil
+end
+
 -- ── the picker ─────────────────────────────────────────────────────────────
 t.test('the settings dialog opens with a picker bound to prefs.engine listing the four engines in order', function()
 	local contents = openSettings({ detection = mock.detectionText() })
@@ -81,14 +177,26 @@ t.test('the settings dialog opens with a picker bound to prefs.engine listing th
 	t.equals(#values, 5)
 end)
 
-t.test('detection runs once, when the dialog opens', function()
-	openSettings({ detection = mock.detectionText() })
-	local detections = 0
+local function commandsRun(flag)
+	local count = 0
 	for _, command in ipairs(mock.state.executed or {}) do
-		if string.find(command, '--detect-engines', 1, true) then detections = detections + 1 end
+		if string.find(command, flag, 1, true) then count = count + 1 end
 	end
-	t.equals(detections, 1, 'the executable should be asked exactly once')
-	t.equals(#mock.state.executed, 1, 'nothing but detection should run')
+	return count
+end
+
+t.test('detection and the model status each run once, when the dialog opens', function()
+	openSettings({ detection = mock.detectionText() })
+	t.equals(commandsRun('--detect-engines'), 1, 'the executable should be asked once about the engines')
+	t.equals(commandsRun('--model-status'), 1, 'the executable should be asked once about the model')
+	t.equals(#mock.state.executed, 2, 'nothing but detection and the status should run')
+end)
+
+t.test('where mlx cannot run the model is not asked about and there is no download row', function()
+	local contents = openSettings({ detection = mock.detectionText({ mlx = { available = false, reason = 'needs Apple Silicon' } }) })
+	t.equals(commandsRun('--model-status'), 0, 'the model was asked about where it cannot run')
+	t.equals(#mock.state.executed, 1)
+	t.isNil(modelRow(contents), 'a download row with no mlx to use it')
 end)
 
 t.test('engines that cannot run here are greyed and their reasons shown', function()
@@ -162,14 +270,16 @@ local function keyFields(contents)
 end
 
 --- Whether a view (or the row holding it) is visible with `engine` picked,
---- through its visible binding's transform. The row sits in a column bound
---- to the preferences, but the field beside it is bound to the keys table,
---- so the binding must name the preferences itself, with the SDK's own
---- spelling (`bind_to_object`; anything else the SDK ignores).
+--- through its visible binding's transform. A view bound to another table
+--- (the key field to the keys table, the download row to the model) sits in
+--- a column bound to the preferences, so its visible binding must name the
+--- preferences itself, with the SDK's own spelling (`bind_to_object`;
+--- anything else the SDK ignores).
 local function visibleFor(entry, engine)
 	local binding = entry.view.visible or (entry.parent and entry.parent.visible)
-	t.isNotNil(binding, 'the key field has no visible binding')
-	t.equals(bindingKey(binding), 'engine', 'the key field is not shown by the engine')
+	local name = tostring(entry.view.title or entry.view.kind)
+	t.isNotNil(binding, 'no visible binding on ' .. name)
+	t.equals(bindingKey(binding), 'engine', 'the view is not shown by the engine: ' .. name)
 	t.isTrue(binding.bind_to_object == mock.state.prefs, 'the visible binding does not name the preferences as bind_to_object')
 	t.equals(type(binding.transform), 'function', 'the visible binding has no transform')
 	return binding.transform(engine, mock.state.prefs)
@@ -257,6 +367,288 @@ t.test('a stored key is shown back in its field, and an emptied one is forgotten
 	t.equals(mock.state.passwords.MELAMPUS_ANTHROPIC_KEY, '', 'clearing the field did not clear the store')
 end)
 
+-- ── the model download row (card #408) ─────────────────────────────────────
+local function buttonsTitled(row, prefix)
+	local out = {}
+	for _, entry in ipairs(viewsOfKind(row, 'push_button')) do
+		if type(entry.view.title) == 'string' and entry.view.title:sub(1, #prefix) == prefix then out[#out + 1] = entry.view end
+	end
+	return out
+end
+
+--- Whether a view of the row shows in the model's current phase, through its
+--- visible binding's transform. The binding names the model table with the
+--- SDK's own spelling (`bind_to_object`; anything else the SDK ignores).
+local function shownNow(view, model)
+	local binding = view.visible
+	t.isNotNil(binding, 'no visible binding on ' .. tostring(view.title))
+	t.equals(bindingKey(binding), 'phase')
+	t.isTrue(binding.bind_to_object == model, 'the visible binding does not name the model as bind_to_object')
+	return binding.transform(model.phase)
+end
+
+--- The progress scope the Download click most recently opened for
+--- Lightroom's own bar, asserted present.
+local function theScope()
+	local scope = mock.state.progressScopes[#mock.state.progressScopes]
+	t.isNotNil(scope, 'no progress scope for Lightroom\'s own bar')
+	return scope
+end
+
+local function theButton(row, model, prefix, expectShown)
+	local found = buttonsTitled(row, prefix)
+	t.equals(#found, 1, 'expected one button titled ' .. prefix)
+	t.equals(shownNow(found[1], model), expectShown, prefix .. ' shown in phase ' .. tostring(model.phase))
+	return found[1]
+end
+
+--- Open the dialog with the model installed (`status` merged into `options`),
+--- click the row's Remove button and settle; `beforeTheClick(options)`, when
+--- given, plays what changes between the dialog opening and the click (the
+--- status the executable answers after the removal, say). Returns the row
+--- and the model.
+local function removeClicked(options, beforeTheClick)
+	options = options or {}
+	options.status = modelStatus({ installed = 'true' })
+	local contents = openSettings(options)
+	local row, model = modelRow(contents)
+	if beforeTheClick then beforeTheClick(options) end
+	theButton(row, model, 'Remove', true).action()
+	mock.settle()
+	return row, model
+end
+
+t.test('with the model absent the row shows a Download button with the model\'s name and size', function()
+	local contents = openSettings({ detection = mock.detectionText() })
+	local row, model = modelRow(contents)
+	t.isNotNil(row, 'no download row')
+	t.equals(model.phase, 'absent')
+	local button = theButton(row, model, 'Download ' .. REPO .. ' (18.3 GB)', true)
+	t.equals(type(button.action), 'function', 'the button does nothing')
+	theButton(row, model, 'Installed', false)
+	theButton(row, model, 'Remove', false)
+	theButton(row, model, 'Cancel', false)
+end)
+
+t.test('when the hub could not be reached the button says the size is unknown', function()
+	local contents = openSettings({ detection = mock.detectionText(), status = modelStatus({ bytes_total = 'null' }) })
+	local row, model = modelRow(contents)
+	theButton(row, model, 'Download ' .. REPO .. ' (size unknown)', true)
+end)
+
+t.test('with the model present the row reads Installed, greyed, and offers Remove', function()
+	local contents = openSettings({ detection = mock.detectionText(), status = modelStatus({
+		installed = 'true', bytes_done = '18300000000', path = '"/hf/hub/models--x--y/snapshots/abc"' }) })
+	local row, model = modelRow(contents)
+	t.equals(model.phase, 'installed')
+	local installed = theButton(row, model, 'Installed', true)
+	t.isFalse(installed.enabled, 'Installed should be greyed')
+	theButton(row, model, 'Remove', true)
+	theButton(row, model, 'Download ' .. REPO, false)
+end)
+
+t.test('Remove runs --remove-model and the row flips to the Download button', function()
+	local _, model = removeClicked({ detection = mock.detectionText() })
+	t.equals(commandsRun('--remove-model'), 1, 'Remove did not run the executable')
+	t.equals(model.phase, 'absent')
+	t.equals(#dialogsShown(false), 0, 'a message was shown for a removal that worked')
+end)
+
+t.test('a refused removal shows the message and the model stays Installed', function()
+	local _, model = removeClicked({ detection = mock.detectionText(), removeCode = 3 })
+	t.equals(model.phase, 'installed')
+	t.equals(#dialogsShown(false), 1, 'no message for a refused removal')
+end)
+
+t.test('a refused removal that set the model aside shows the message and the row flips to Download', function()
+	-- Codex review 6, finding 1. A removal that moves the model aside but
+	-- cannot delete it exits 3 with the model gone from the cache: the
+	-- status is asked again after a refused removal, so the row reads what
+	-- the cache holds, and the refusal's message is still shown.
+	local _, model = removeClicked({ detection = mock.detectionText(), removeCode = 3 }, function(options)
+		options.status = modelStatus()
+	end)
+	t.equals(#dialogsShown(false), 1, 'no message for a refused removal')
+	t.equals(commandsRun('--model-status'), 2, 'the status was not asked again after the refused removal')
+	t.equals(model.phase, 'absent')
+end)
+
+t.test('a refused removal keeps the row\'s phase when the status cannot be asked after it, and shows the refusal alone', function()
+	-- Claude review 14, code finding 1. The status asked again after a
+	-- refused removal can itself fail (exit 1: the cache unreadable by
+	-- then); the row then keeps the phase it had, the message shown is the
+	-- removal's, and the status's own failure is not shown over it.
+	local _, model = removeClicked({ detection = mock.detectionText(), removeCode = 3 }, function(options)
+		options.statusCode = 1
+	end)
+	t.equals(commandsRun('--model-status'), 2, 'the status was not asked again after the refused removal')
+	t.equals(model.phase, 'installed', 'the row lost its phase to a status it could not ask')
+	local shown = dialogsShown(false)
+	t.equals(#shown, 1, 'expected one message, the removal\'s')
+	t.isNotNil(string.find(shown[1].body, 'could not remove the model (exit 3)', 1, true),
+		'the message is not the removal\'s: ' .. tostring(shown[1].body))
+end)
+
+t.test('the row shows when the picked engine is mlx, or the unset preference resolves to it', function()
+	local contents = openSettings({ detection = mock.detectionText() })
+	local row = modelRow(contents)
+	t.isTrue(visibleFor({ view = row }, 'mlx'))
+	t.isTrue(visibleFor({ view = row }, ''), 'the default on this Mac is mlx')
+	for _, engine in ipairs({ 'ollama', 'openai', 'claude' }) do
+		t.isFalse(visibleFor({ view = row }, engine), 'the row shows for ' .. engine)
+	end
+end)
+
+t.test('clicking Download runs the executable with stdout redirected, the progress follows the file, done flips to Installed', function()
+	local contents = openSettings({ detection = mock.detectionText(), download = {
+		lines = { 'progress 0 18300000000', 'progress 3100000000 18300000000', 'progress 18300000000 18300000000',
+			'done /hf/hub/models--x--y/snapshots/abc' },
+		code = 0,
+	} })
+	local row, model = modelRow(contents)
+	theButton(row, model, 'Download ' .. REPO, true).action()
+	-- In the mock's temp directory, as the CLI log is.
+	local progress = mock.state.tempDir .. '/melampus-download.progress'
+	local log = mock.state.tempDir .. '/melampus-download.log'
+	t.equals(mock.state.executed[#mock.state.executed],
+		"'" .. mock.EXECUTABLE .. "' --download-model >'" .. progress .. "' 2>'" .. log .. "'")
+	t.equals(model.phase, 'downloading')
+	theButton(row, model, 'Cancel', true)
+	theButton(row, model, 'Download ' .. REPO, false)
+	local text = viewsOfKind(row, 'static_text')
+	local bar = nil
+	for _, entry in ipairs(text) do
+		if bindingKey(entry.view.title) == 'progress' then bar = entry.view end
+	end
+	t.isNotNil(bar, 'no progress text bound to the poller')
+	t.isTrue(shownNow(bar, model), 'the progress is not shown while downloading')
+	mock.tick()
+	mock.tick()
+	t.equals(model.progress, '3.1 GB of 18.3 GB')
+	local scope = theScope()
+	t.isTrue(math.abs(scope.portions[#scope.portions] - 3100000000 / 18300000000) < 1e-9)
+	mock.settle()
+	t.equals(model.phase, 'installed')
+	t.isTrue(scope.isDone)
+	t.equals(#dialogsShown(false), 0, 'a message was shown for a download that worked')
+end)
+
+t.test('Cancel writes the marker at the path the status named', function()
+	os.remove(CANCEL_PATH)
+	local contents = openSettings({ detection = mock.detectionText(), download = {
+		lines = { 'progress 0 18300000000', 'progress 3100000000 18300000000', 'cancelled' }, code = 4,
+	} })
+	local row, model = modelRow(contents)
+	theButton(row, model, 'Download ' .. REPO, true).action()
+	mock.tick()
+	theButton(row, model, 'Cancel', true).action()
+	t.isTrue(exists(CANCEL_PATH), 'the marker was not written at ' .. CANCEL_PATH)
+	mock.settle()
+	t.equals(model.phase, 'absent', 'a cancelled download should offer Download again')
+	t.equals(#dialogsShown(false), 0, 'a cancel is not an error')
+	os.remove(CANCEL_PATH)
+end)
+
+t.test('Lightroom\'s own cancel on the progress bar writes the marker too', function()
+	-- The scope is cancelable, so the user can cancel from Lightroom's own
+	-- progress bar as well as from the row; the poller asks the scope on
+	-- each update and cancels the download the same way.
+	os.remove(CANCEL_PATH)
+	local contents = openSettings({ detection = mock.detectionText(), download = {
+		lines = { 'progress 0 18300000000', 'progress 3100000000 18300000000', 'cancelled' }, code = 4,
+	} })
+	local row, model = modelRow(contents)
+	theButton(row, model, 'Download ' .. REPO, true).action()
+	t.isFalse(exists(CANCEL_PATH), 'a marker before anything was cancelled')
+	mock.state.cancelled = true
+	mock.tick()
+	t.isTrue(exists(CANCEL_PATH), 'the progress bar\'s cancel did not write the marker at ' .. CANCEL_PATH)
+	mock.settle()
+	t.equals(model.phase, 'absent', 'a cancelled download should offer Download again')
+	t.equals(#dialogsShown(false), 0, 'a cancel is not an error')
+	os.remove(CANCEL_PATH)
+end)
+
+t.test('Lightroom\'s own cancel while the executable is still starting, the progress file empty, writes the marker on the next tick', function()
+	-- Codex review 3, finding 2 (MelampusSettings.lua:127). The scope's
+	-- cancel was asked only when a protocol line had arrived, so a cancel on
+	-- Lightroom's bar during the executable's start-up (the unpack, the
+	-- imports, the hub's listing: seconds with nothing in the progress file)
+	-- wrote no marker until progress did. The poller asks on every tick.
+	os.remove(CANCEL_PATH)
+	local contents = openSettings({ detection = mock.detectionText(), download = {
+		startup = 3, lines = { 'cancelled' }, code = 4,
+	} })
+	local row, model = modelRow(contents)
+	theButton(row, model, 'Download ' .. REPO, true).action()
+	local progress = mock.state.tempDir .. '/melampus-download.progress'
+	mock.state.cancelled = true
+	mock.tick()
+	t.equals(readFile(progress), '', 'a protocol line reached the file before the tick')
+	t.equals(model.progress, 'Starting…', 'progress reached the dialog before the tick')
+	t.isTrue(exists(CANCEL_PATH), 'the progress bar\'s cancel with nothing in the progress file did not write the marker at ' .. CANCEL_PATH)
+	mock.settle()
+	t.equals(model.phase, 'absent', 'a cancelled download should offer Download again')
+	t.equals(#dialogsShown(false), 0, 'a cancel is not an error')
+	os.remove(CANCEL_PATH)
+end)
+
+t.test('a failed download shows a message with the tail of the log and offers Download again', function()
+	local contents = openSettings({ detection = mock.detectionText(), download = {
+		lines = { 'progress 0 18300000000' }, code = 3,
+		stderr = 'could not reach the hub at http://127.0.0.1:1: check the network\n',
+	} })
+	local row, model = modelRow(contents)
+	theButton(row, model, 'Download ' .. REPO, true).action()
+	mock.settle()
+	t.equals(model.phase, 'absent')
+	t.equals(#dialogsShown(false), 1, 'no message for a failed download')
+	t.isNotNil(string.find(dialogsShown(false)[1].body, 'could not reach the hub', 1, true),
+		'the message lacks the log tail: ' .. tostring(dialogsShown(false)[1].body))
+	t.isNotNil(string.find(dialogsShown(false)[1].body, 'exit 3', 1, true))
+end)
+
+t.test('a download that cannot start, the executable gone since the dialog opened, says so once and offers Download again', function()
+	local contents = openSettings({ detection = mock.detectionText() })
+	local row, model = modelRow(contents)
+	-- The executable was beside the plugin when the dialog opened; by the
+	-- click it is gone. Absent by name, so the disk is not consulted.
+	mock.state.existing[mock.EXECUTABLE] = false
+	theButton(row, model, 'Download ' .. REPO, true).action()
+	t.equals(commandsRun('--download-model'), 0, 'ran a download with no executable to run it')
+	t.equals(model.phase, 'absent', 'a download that could not start should offer Download again')
+	local scope = theScope()
+	t.isTrue(scope.isDone, 'the progress bar was left up with nothing to download')
+	t.equals(#dialogsShown(false), 1, 'expected one message for a download that could not start')
+	t.isNotNil(string.find(dialogsShown(false)[1].body, 'a file named melampus:', 1, true),
+		'the message does not name the executable: ' .. tostring(dialogsShown(false)[1].body))
+end)
+
+-- ── a command that fails ───────────────────────────────────────────────────
+t.test('when the status exits non-zero the dialog says it could not ask about the model, and there is no row', function()
+	local contents = openSettings({ detection = mock.detectionText(), statusCode = 1 })
+	t.equals(#titlesMatching(contents, 'Melampus could not ask its analysis program about the model (exit 1).'), 1,
+		'the message does not read as a sentence: ' .. table.concat(mock.dialogStrings(contents), ' | '))
+	t.isNil(modelRow(contents), 'a download row with no status to build it from')
+end)
+
+t.test('when detection exits non-zero the note under the picker says it could not ask about the engines', function()
+	local contents = openSettings({ detection = mock.detectionText(), detectionCode = 1 })
+	t.equals(#titlesMatching(contents, 'Melampus could not ask its analysis program about the engines (exit 1).'), 1,
+		'the note does not read as a sentence: ' .. table.concat(mock.dialogStrings(contents), ' | '))
+	for _, item in ipairs(enginePicker(contents).items) do
+		t.isTrue(item.enabled, item.value .. ' was greyed with no detection to grey it')
+	end
+end)
+
+t.test('a status the dialog does not understand is said to be about the model, and names the file', function()
+	local contents = openSettings({ detection = mock.detectionText(), status = 'not json' })
+	local notes = titlesMatching(contents, 'Melampus did not understand what its analysis program said about the model')
+	t.equals(#notes, 1, table.concat(mock.dialogStrings(contents), ' | '))
+	t.isNotNil(string.find(notes[1].title, 'melampus-model-status.json', 1, true), 'the message does not name the file')
+	t.isNil(modelRow(contents))
+end)
+
 -- ── no executable ──────────────────────────────────────────────────────────
 t.test('with no executable beside the plugin the dialog still opens, nothing greyed, and says why', function()
 	local contents = openSettings({ detection = nil })
@@ -272,6 +664,172 @@ t.test('with no executable beside the plugin the dialog still opens, nothing gre
 	-- holds "melampus" wherever the repository lives, so the word alone is
 	-- satisfied by the folder assertion just above.
 	t.isTrue(#titlesMatching(contents, 'a file named melampus:') > 0, 'the missing-executable message does not name the file')
+	t.isNil(modelRow(contents), 'a download row with no executable to download with')
+end)
+
+-- ── the download plumbing (card #408) ──────────────────────────────────────
+-- LrTasks.execute blocks and returns only the exit code, so the download runs
+-- in its own task with stdout redirected to a file, a second task reads that
+-- file every second, and Cancel writes the marker the executable watches.
+-- The mock steps the two tasks: each tick the fake executable writes one
+-- more line and the poller reads what is there.
+
+--- MelampusAnalyze.lua fresh under the mock, through its loader: `existing`
+--- tells the mock which files are there; the rest are install options.
+local function loadAnalyze(options)
+	options = options or {}
+	return mock.loadUnderMock('MelampusAnalyze', { existing = options.existing }, PLUGIN, options)
+end
+
+t.test('the download command runs the executable with stdout to the progress file and stderr to the log, on both shells', function()
+	local Analyze = loadAnalyze({ existing = { [mock.EXECUTABLE] = true } })
+	local progress, log = Analyze.downloadFiles()
+	t.equals(Analyze.downloadCommand(),
+		"'" .. mock.EXECUTABLE .. "' --download-model >'" .. progress .. "' 2>'" .. log .. "'")
+
+	local exe = PLUGIN .. '\\melampus.exe'
+	Analyze = loadAnalyze({ windows = true, existing = { [exe] = true } })
+	progress, log = Analyze.downloadFiles()
+	t.equals(Analyze.downloadCommand(),
+		'""' .. exe .. '" --download-model >"' .. progress .. '" 2>"' .. log .. '""')
+	t.isNotNil(string.find(progress, 'AppData\\Local\\Temp\\', 1, true), 'the progress file is not under temp: ' .. progress)
+end)
+
+t.test('without the executable the download command is the missing-executable message', function()
+	-- Absent by name: the mock must not look at the disk, where the readme's
+	-- install step may have put the real one.
+	local Analyze = loadAnalyze({ existing = { [mock.EXECUTABLE] = false } })
+	local command, message = Analyze.downloadCommand()
+	t.isNil(command)
+	t.isNotNil(string.find(message, 'melampus', 1, true))
+	t.isNotNil(string.find(message, PLUGIN, 1, true))
+end)
+
+--- Start a download under the mock whose fake executable writes `lines` to
+--- the progress file one per tick, `stderr` to the log, and exits `code`.
+local function startDownload(lines, code, stderr)
+	local Analyze = loadAnalyze({ existing = { [mock.EXECUTABLE] = true } })
+	mock.state.onExecute = fakeDownload(lines, code, stderr)
+	local seen, finished = {}, nil
+	local handle, err = Analyze.downloadModel(CANCEL_PATH,
+		function(update) seen[#seen + 1] = update end,
+		function(exit, update, tail) finished = { code = exit, update = update, tail = tail } end)
+	t.isNotNil(handle, 'the download did not start: ' .. tostring(err))
+	return seen, function() return finished end, handle
+end
+
+t.test('the poller reports each progress line as it lands in the file, then the exit with the last line', function()
+	local seen, finished = startDownload({ 'progress 0 100', 'progress 40 100', 'progress 100 100',
+		'done /hf/hub/models--x--y/snapshots/abc' }, 0)
+	t.equals(#mock.state.executed, 1, 'the download command did not run')
+	t.isNotNil(string.find(mock.state.executed[1], '--download-model', 1, true))
+	mock.tick()
+	t.equals(#seen, 1, 'after one tick, one line read')
+	t.equals(seen[1].bytesDone, 0)
+	mock.tick()
+	t.equals(seen[#seen].bytesDone, 40)
+	t.isNil(finished(), 'finished before the executable exited')
+	mock.settle()
+	t.equals(finished().code, 0)
+	t.equals(finished().update.state, 'done')
+	t.equals(finished().update.path, '/hf/hub/models--x--y/snapshots/abc')
+	local counts = {}
+	for _, update in ipairs(seen) do if update.state == 'progress' then counts[#counts + 1] = update.bytesDone end end
+	t.equals(table.concat(counts, ','), '0,40,100')
+	t.equals(#mock.state.tasks, 0, 'tasks left running after the download finished')
+end)
+
+t.test('a download that starts from a previous run\'s file does not read stale lines', function()
+	local Analyze = loadAnalyze({ existing = { [mock.EXECUTABLE] = true } })
+	local progressFile = Analyze.downloadFiles()
+	writeFile(progressFile, 'done /previous/run\n')
+	local seen, finished = startDownload({ 'progress 0 100' }, 4)
+	mock.settle()
+	t.equals(seen[1].state, 'progress', 'the previous run\'s done line was read')
+	t.equals(finished().code, 4)
+end)
+
+t.test('Cancel writes the marker where the status said, creating its folder', function()
+	os.remove(CANCEL_PATH)
+	local seen, finished, handle = startDownload({ 'progress 0 100', 'progress 10 100', 'cancelled' }, 4)
+	mock.tick()
+	handle.cancel()
+	t.isTrue(exists(CANCEL_PATH), 'the marker was not written at ' .. CANCEL_PATH)
+	mock.settle()
+	t.equals(finished().code, 4)
+	t.equals(finished().update.state, 'cancelled')
+	os.remove(CANCEL_PATH)
+end)
+
+t.test('a Cancel clicked while the executable is still starting holds: the marker comes back on the next tick', function()
+	-- Done-when 2. The executable removes a stale marker when it starts, and
+	-- its start (the one-file unpack, the imports) takes seconds after the
+	-- click. A Cancel in that window must not be lost: the poller writes the
+	-- marker again on every tick until the command exits.
+	os.remove(CANCEL_PATH)
+	local Analyze = loadAnalyze({ existing = { [mock.EXECUTABLE] = true } })
+	local progressFile = Analyze.downloadFiles()
+	local markerAtStart = nil
+	mock.state.onExecute = function()
+		mock.yield()
+		-- What download_model does first: the marker it finds is stale.
+		markerAtStart = exists(CANCEL_PATH)
+		os.remove(CANCEL_PATH)
+		mock.yield()
+		writeFile(progressFile, 'progress 0 100\n', 'a')
+		mock.yield()
+		writeFile(progressFile, 'cancelled\n', 'a')
+		-- And on exit, whatever the outcome.
+		os.remove(CANCEL_PATH)
+		return 4
+	end
+	local finished = nil
+	local handle = Analyze.downloadModel(CANCEL_PATH, function() end,
+		function(exit, update) finished = { code = exit, update = update } end)
+	handle.cancel()
+	t.isTrue(exists(CANCEL_PATH), 'Cancel did not write the marker')
+	mock.tick()
+	t.isTrue(markerAtStart, 'the fake executable did not find the marker to remove')
+	t.isTrue(exists(CANCEL_PATH), 'the marker the executable removed on start was not written again')
+	mock.settle()
+	t.equals(finished.code, 4)
+	t.isFalse(exists(CANCEL_PATH), 'the poller kept writing the marker after the command exited')
+	os.remove(CANCEL_PATH)
+end)
+
+t.test('a cancel asked elsewhere, Lightroom\'s own bar, is looked for on every tick, one with nothing in the progress file included', function()
+	-- Codex review 3, finding 2. The dialog hands the poller a question,
+	-- `cancelAsked`, for the scope's own Cancel; the poller asks it on every
+	-- tick, before any protocol line exists, and once it says yes the cancel
+	-- is held exactly as the handle's cancel() is.
+	os.remove(CANCEL_PATH)
+	local Analyze = loadAnalyze({ existing = { [mock.EXECUTABLE] = true } })
+	mock.state.onExecute = fakeDownload({ 'cancelled' }, 4, nil, 2)
+	local asked, seen, finished = false, {}, nil
+	local handle = Analyze.downloadModel(CANCEL_PATH,
+		function(update) seen[#seen + 1] = update end,
+		function(exit, update) finished = { code = exit, update = update } end,
+		function() return asked end)
+	t.isNotNil(handle, 'the download did not start')
+	asked = true
+	mock.tick()
+	t.equals(#seen, 0, 'a line reached the poller before the tick')
+	t.isTrue(exists(CANCEL_PATH), 'a cancel asked elsewhere was not seen on a tick with nothing in the progress file')
+	mock.settle()
+	t.equals(finished.code, 4)
+	t.equals(finished.update.state, 'cancelled')
+	os.remove(CANCEL_PATH)
+end)
+
+t.test('a failed download hands back exit 3 and the tail of the log', function()
+	local Analyze = loadAnalyze({ existing = { [mock.EXECUTABLE] = true } })
+	local _, logFile = Analyze.downloadFiles()
+	os.remove(logFile)
+	local seen, finished = startDownload({ 'progress 0 100' }, 3,
+		'a warning first\ncould not reach the hub at http://127.0.0.1:1: check the network\n')
+	mock.settle()
+	t.equals(finished().code, 3)
+	t.isNotNil(string.find(finished().tail, 'could not reach the hub', 1, true), 'no log tail: ' .. tostring(finished().tail))
 end)
 
 return t.summary()

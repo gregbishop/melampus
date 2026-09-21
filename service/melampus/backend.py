@@ -70,8 +70,14 @@ class MLXBackend(VLMBackend):
         from mlx_vlm import load
         from mlx_vlm.utils import load_config
 
-        self._model, self._processor = load(self.repo)
-        self._config = load_config(self.repo)
+        from .download import load_lock
+
+        # `load` fetches what the cache does not hold of the repo, so the load
+        # takes the repo's lock the download and the removal take: a removal
+        # in the meantime is refused, one already running is waited for.
+        with load_lock(self.repo):
+            self._model, self._processor = load(self.repo)
+            self._config = load_config(self.repo)
 
     def warmup(self) -> None:
         self._ensure_loaded()

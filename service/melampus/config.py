@@ -57,7 +57,7 @@ def _data_root() -> Path:
     return base / "Melampus"
 
 
-def _cache(name: str) -> Path:
+def cache_file(name: str) -> Path:
     """One cache file: under git-ignored `.melampus_cache/` in a checkout, under
     a plain `cache/` inside the per-user directory, where a dotfile would only
     hide it."""
@@ -235,7 +235,7 @@ class OccurrenceConfig(_Base):
     # 50 km comfortably covers a refuge and its surroundings without reaching into
     # a different faunal region.
     radius_km: float = 50.0
-    cache_path: Path = Field(default_factory=lambda: _cache("occurrence.json"))
+    cache_path: Path = Field(default_factory=lambda: cache_file("occurrence.json"))
     # Below this many regional records a species is present but scarce: demote
     # gently and mark notable, rather than treating it as absent.
     notable_threshold: int = 25
@@ -312,7 +312,7 @@ class EscalationConfig(_Base):
     # Cloud answers live in their own file. Merging them into the local cache would
     # give them a foreign run fingerprint, and the next local pass would decide they
     # were stale and quietly overwrite work that was paid for.
-    cache_path: Path = Field(default_factory=lambda: _cache("escalations.jsonl"))
+    cache_path: Path = Field(default_factory=lambda: cache_file("escalations.jsonl"))
 
 
 class RunConfig(_Base):
@@ -323,7 +323,7 @@ class RunConfig(_Base):
     # token ceiling.
     profile: str = "wildlife"
     prompts_dir: Path = Field(default_factory=lambda: _repo_root() / "prompts")
-    cache_path: Path = Field(default_factory=lambda: _cache("identifications.jsonl"))
+    cache_path: Path = Field(default_factory=lambda: cache_file("identifications.jsonl"))
     # One corrective retry on schema-validation failure, per CLAUDE.md §4.2.
     max_retries: int = 1
 

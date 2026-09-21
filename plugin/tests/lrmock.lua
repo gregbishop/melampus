@@ -140,7 +140,55 @@ function M.reset(options)
 		windowsTemp = options.windowsTemp,
 		-- How many previews the plugin asked for in this run.
 		previewsRequested = 0,
+		-- The async tasks started and not yet finished, as coroutines: a
+		-- task runs until it sleeps, and M.tick() resumes every sleeping one
+		-- once. The progress scopes created, with the portions they were set to.
+		tasks = {},
+		progressScopes = {},
 	}
+end
+
+-- ── async tasks ────────────────────────────────────────────────────────────
+-- Lightroom runs LrTasks.startAsyncTask functions cooperatively: they run
+-- until they sleep or yield, and others run in between. The mock does the
+-- same with coroutines, so a test can step a download and the poller that
+-- reads its file one tick at a time. A task that never sleeps runs to
+-- completion inside startAsyncTask, exactly as before.
+
+local function inTask()
+	local co, isMain = coroutine.running()
+	return co ~= nil and not isMain
+end
+
+local function resume(task)
+	local ok, err = coroutine.resume(task)
+	if not ok then error(err, 0) end
+end
+
+--- Give the other tasks a turn, when called from inside one. What a fake
+-- executable calls between the lines it writes, so the poller reads them
+-- one at a time.
+function M.yield()
+	if inTask() then coroutine.yield() end
+end
+
+--- Resume every sleeping task once; returns how many are still alive.
+function M.tick()
+	local alive = {}
+	for _, task in ipairs(M.state.tasks) do
+		if coroutine.status(task) == 'suspended' then resume(task) end
+		if coroutine.status(task) ~= 'dead' then alive[#alive + 1] = task end
+	end
+	M.state.tasks = alive
+	return #alive
+end
+
+--- Tick until every task has finished, or `limit` ticks (default 1000).
+function M.settle(limit)
+	for _ = 1, limit or 1000 do
+		if M.tick() == 0 then return end
+	end
+	error('tasks still running after ' .. tostring(limit or 1000) .. ' ticks')
 end
 
 -- ── keyword objects ────────────────────────────────────────────────────────
@@ -501,18 +549,23 @@ namespaces.LrPathUtils = {
 namespaces.LrPrefs = { prefsForPlugin = function() return M.state.prefs end }
 
 namespaces.LrProgressScope = function(options)
-	return {
-		setCancelable = function() end,
-		setPortionComplete = function() end,
-		isCanceled = function() return M.state.cancelled end,
-		done = function() end,
-	}
+	local scope = { options = options, portions = {}, isDone = false }
+	M.state.progressScopes[#M.state.progressScopes + 1] = scope
+	scope.setCancelable = function() end
+	scope.setPortionComplete = function(_, done, total) scope.portions[#scope.portions + 1] = done / (total or 1) end
+	scope.isCanceled = function() return M.state.cancelled end
+	scope.done = function() scope.isDone = true end
+	return scope
 end
 
 namespaces.LrTasks = {
-	startAsyncTask = function(func) func() end,
+	startAsyncTask = function(func)
+		local task = coroutine.create(func)
+		M.state.tasks[#M.state.tasks + 1] = task
+		resume(task)
+	end,
 	yield = function() end,
-	sleep = function() end,
+	sleep = function() M.yield() end,
 	execute = function(cmd)
 		M.state.executed = M.state.executed or {}
 		M.state.executed[#M.state.executed + 1] = cmd

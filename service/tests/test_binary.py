@@ -324,11 +324,11 @@ def test_frozen_config_and_caches_live_in_the_per_user_data_directory(
     for platform_name in ("darwin", "win32", "linux"):
         monkeypatch.setattr(sys, "platform", platform_name)
         assert not config._data_root().is_relative_to(tmp_path / "unpack")
-        assert config._cache("x") == config._data_root() / "cache" / "x"
+        assert config.cache_file("x") == config._data_root() / "cache" / "x"
 
     monkeypatch.delattr(sys, "_MEIPASS")
     assert config._data_root() == repo
-    assert config._cache("x") == repo / ".melampus_cache" / "x"
+    assert config.cache_file("x") == repo / ".melampus_cache" / "x"
 
 
 def test_frozen_user_data_lives_in_the_per_user_directory_not_in_the_bundle(

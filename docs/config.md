@@ -105,13 +105,129 @@ message names the file and both sizes, never the hub library's own wording, whic
 after its own retry of a dropped connection names the file by the tail of its
 URL); a hub whose answers are not a hub's,
 an etag that is not a checksum or a commit that is not a hash, neither of which
-is let become a path in the cache, so check `HF_ENDPOINT`);
-**exit 4** when a signal cancelled it (`cancelled`). The signals are SIGINT
-(Ctrl+C), SIGTERM and, on Windows, Ctrl+Break: the download stops within the
-current chunk and leaves the partial file in the cache as the hub's
-`<etag>.incomplete` blob, and the next run **resumes** it, asking the hub for
-the rest by Range from the byte it has. A failed run leaves the same partial
-file, so re-running after a network drop resumes too.
+is let become a path in the cache, so check `HF_ENDPOINT`; another run holding
+the model, a download of it, an identification run loading it or a removal,
+whose lock this run waits five seconds
+for, so wait for it to finish and re-run; a cancel marker, below,
+the command cannot remove, so remove it by hand);
+**exit 4** when it was cancelled (`cancelled`), by a signal or by the cancel
+marker below. The signals are SIGINT (Ctrl+C), SIGTERM and, on Windows,
+Ctrl+Break: the download stops within the current chunk and leaves the partial
+file in the cache as the hub's `<etag>.incomplete` blob, and the next run
+**resumes** it, asking the hub for the rest by Range from the byte it has. A
+failed run leaves the same partial file, so re-running after a network drop
+resumes too.
+
+### The cancel marker
+
+The Lightroom plugin cannot signal the executable (`LrTasks.execute` blocks,
+returns only the exit code, and the SDK kills nothing), so the download also
+stops when a file named `download-cancel` appears beside the caches, under the
+per-user data directory (`~/Library/Application Support/Melampus/cache/download-cancel`
+on macOS, `%LOCALAPPDATA%\Melampus\cache\download-cancel` on Windows; in a
+checkout `.melampus_cache/download-cancel`). It is looked for before each chunk
+is counted, and its appearance ends the run exactly as a signal does:
+`cancelled`, exit 4, the partial file kept. The command removes a stale marker
+when it starts and the marker when it exits, whatever the outcome; a marker it
+cannot remove (a folder at that path, say) is **exit 3** naming the path, on
+start before the hub is asked, and on exit when the download completed (the
+model is there; remove the marker by hand: until it is gone every
+`--download-model` exits 3 naming it before the hub is asked). A cancellation
+or failure already under way is the outcome reported, and the next run names
+the marker. The name is
+`download.CANCEL_MARKER`, the path `download.cancel_marker_path()`, and
+`--model-status` reports it as `cancel_path`, so the plugin's Cancel button
+writes where the executable looks without deriving the directory itself.
+
+### `--model-status` and `--remove-model`
+
+Two more flags that need no folder and take `[model] repo` or `--model`, for
+the Settings dialog's Download button (card #408). Both refuse an id that is
+not a repo id (a pasted hub URL, a path) the way `--download-model` does:
+**exit 3**, the message on stderr naming `[model] repo` or `--model`, before
+the hub is asked anything. Both read the cache through the hub library's scan
+of it, which walks every model folder in the shared cache, other tools'
+models included; a folder the process cannot search or list (the cache
+itself, when its parent cannot be searched; or, for the status, the repo's
+own `blobs` folder it counts) is **exit 3** too, the message naming the
+cache and the folder the OS named: check that folder's permissions.
+
+- `--model-status` prints one JSON object and exits 0:
+  `{"repo", "installed", "bytes_total", "bytes_done", "path", "cancel_path"}`.
+  `installed` means whole: the snapshot the cache's `refs/main` names (from
+  the hub library's scan of the local cache) holds every file the hub's
+  listing names that the model's load needs, each at the hub's size. The
+  files the load needs are those matching mlx-vlm's own patterns
+  (`*.json`, `*.safetensors`, `*.py`, `*.model`, `*.tiktoken`, `*.txt`,
+  `*.jinja`, named once as `download.MODEL_FILE_PATTERNS`), which is what
+  mlx-vlm's load fetches on first use: the `.gitattributes` the hub writes
+  into every repo and the model card (the repo's readme) are listed, counted in
+  `bytes_total`, and not needed, so a model the first identification run
+  fetched reads installed. A download stopped while the
+  snapshot was being laid out, this command's or the hub library's own, which
+  mlx-vlm's load runs, leaves a snapshot with some of the files, which reads
+  as not installed (its blobs still count in `bytes_done`, so the next
+  download lays out the rest without fetching them again). When the hub
+  cannot be reached nothing on the machine names the files the repo should
+  hold, and `installed` is what the cache lays out: the snapshot `refs/main`
+  names, whole as far as the cache knows. `path` is the installed snapshot
+  folder, or null; `bytes_done` is
+  every byte the cache holds for the repo, complete files and the partial one
+  alike, which is what the next download starts from; `bytes_total` is the
+  whole model from the hub's file listing, **null when the hub cannot be
+  reached**, does not answer within 10 seconds (`download.STATUS_TIMEOUT`,
+  the hub library's own request timeout: the dialog waits for this command
+  as it opens, so a stalled connection ends here rather than in Lightroom),
+  or answers with something that is not a hub's answer (a captive portal's
+  page, a proxy's block page or JSON error, a listing whose files have no
+  name or a name that is not a string, whose sizes are not non-negative
+  integers of at most 2^53 (a string, a negative number, a fraction, or one
+  larger than any file, `download.MAX_SIZE`, the largest integer the
+  plugin's JSON decoder reads exactly; sizes that add up to more than it
+  count the same), or
+  whose dates or evaluation results the hub library cannot read: whatever
+  the answer does wrong), which counts as the hub not reached, `installed`
+  then what the cache lays out; the status never fails for the network
+  (the button then says "size unknown"). Example, absent:
+  `{"repo": "mlx-community/Qwen3-VL-30B-A3B-Instruct-4bit", "installed": false, "bytes_total": 18300000000, "bytes_done": 0, "path": null, "cancel_path": "~/Library/Application Support/Melampus/cache/download-cancel"}` (the path is absolute).
+- `--remove-model` deletes the repo from the cache, all or nothing from the
+  cache's point of view: the repo's folder is first set aside within the
+  cache as `<folder>.incomplete`, which the cache no longer lists as the
+  model, then deleted through the hub library's own cache deletion (every
+  revision, so the whole folder goes); it prints `removed <path>` (the
+  folder the model was in) and exits 0. It is refused with **exit 3** and
+  the reason on stderr when nothing is installed, or while another run
+  holds the model: a download of it (it holds the model's own lock,
+  `repo.lock` in the cache's `.locks` folder for the model, for the whole
+  run, and the hub library's per-file lock on the file it is fetching; the
+  removal takes the model's lock, then the per-file ones, itself and holds
+  them until the deletion is done, so no download starts on it in between:
+  one that tries is refused, or waits and starts from nothing once the
+  model is gone), an identification run loading the model (it holds the
+  same lock from the start of its load until the model is in memory,
+  mlx-vlm's load fetching what the cache lacks the while; a load starting
+  under a removal waits for it and then fetches the model from nothing),
+  or another removal. The removal cannot tell which holds the lock, so the
+  message names all three, the same sentence `--download-model` refuses
+  with, and says to wait for it to finish (cancelling a download first),
+  then remove.
+  It also exits 3, the model untouched,
+  when the repo's folder in the cache is a symbolic link (a model laid out
+  on another disk and linked into the cache, which the status accepts as
+  installed): nothing is deleted through a link, and the message names
+  where the link points, which is where to remove the model; when a lock
+  file the running-download check must open cannot be; when the set-aside
+  name is taken by the folder an earlier refused removal left (see below:
+  the message names it again, to delete by hand before removing again,
+  and nothing moves until it is gone); and when the folder
+  cannot be set aside (on Windows, while another program holds a file in
+  it open). And it exits 3 when the set-aside folder is still
+  there after the deletion: the hub library's deletion deletes what it can,
+  logs a permission error at what it cannot and carries on rather than
+  raising, so the model is gone from the cache (`--model-status` reads
+  absent, a second `--remove-model` has nothing to remove) and the message
+  names the set-aside folder: check its permissions, and on Windows that no
+  other program holds a file in it open, and delete it by hand.
 
 The bytes move over plain HTTP, through the hub library's own file download
 (its Range request, its size check, its per-file lock), and every finished file

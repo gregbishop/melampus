@@ -110,6 +110,47 @@ run on this machine. A value that is not one of the four is refused before
 anything runs, with the four named, so a stale preference never reaches the
 shell.
 
+### The Download row
+
+The MLX model is not bundled; the dialog fetches it (card #408). Where
+detection says mlx can run, the dialog asks the executable once more as it
+opens, `--model-status` (docs/config.md § Downloading the model), and shows a
+row under the picker while the picked engine is mlx, or *Let Melampus choose*
+resolves to it (the first engine detection says can run, which is the
+executable's own default):
+
+- Model absent: a button **Download `<repo>` (`<size>`)**, the size from the
+  hub, or *size unknown* when it could not be reached. Clicking it runs
+  `<executable> --download-model` with stdout redirected to
+  `melampus-download.progress` and stderr to `melampus-download.log`, both in
+  the OS temp directory like the analysis log, because `LrTasks.execute`
+  blocks and returns only the exit code: it cannot stream stdout. The command
+  runs in its own task; a second task reads the progress file every second,
+  parses its last line (`Rules.parseDownloadLine`, the mirror of the Python
+  `download.Update.parse`, both tested against
+  `service/tests/fixtures/download-lines.txt`) and shows the bytes so far in
+  the row while Lightroom's own progress bar (`LrProgressScope`) carries the
+  portion.
+- Downloading: the bytes so far and a **Cancel** button. The SDK cannot kill
+  the child, so Cancel writes the cancel marker at the path the status named
+  (`cancel_path`), which the executable watches between chunks; it exits 4
+  with `cancelled` and the partial file kept, and the row offers Download
+  again, resuming next time. The executable removes a stale marker when it
+  starts, and its start takes seconds after the click, so the poller writes
+  the marker again on every tick until the command exits: a Cancel clicked
+  in that window holds. Lightroom's own cancel on the progress bar does
+  the same: the poller asks the scope on every tick, from the first,
+  whether or not a protocol line has arrived, so a cancel during the
+  executable's start-up holds too.
+- Done (`done <path>`, exit 0): the row reads **Installed**, greyed, beside
+  **Remove**, which runs `--remove-model` and flips the row back. Exit 3 shows
+  a message with the tail of the download log. A refused removal shows its
+  message and asks `--model-status` again, so the row reads what the cache
+  holds: still **Installed** when the model is untouched, **Download** when
+  the removal set the model aside and could not delete it.
+
+`docs/settings-dialog.png` predates the row.
+
 ---
 
 ## SDK verification
@@ -171,15 +212,25 @@ truncated results file should produce a clear dialog, not a stack trace.
 The Lua tests are driven from pytest so one command covers both languages, and
 skip cleanly when no interpreter is present:
 
-- **38 rules tests** — never-overwrite for ratings, labels and flags; dry-run;
+- **43 rules tests** — never-overwrite for ratings, labels and flags; dry-run;
   idempotency; force; auto-reject staying off; the confidence and burst-agreement
   gates; range-flag routing; abstention; keyword sanitisation; graceful handling
   of sparse records; the engine preference, every value and the default; the
-  engine picker's items from detection, greyed states, reasons and links.
+  engine picker's items from detection, greyed states, reasons and links; the
+  download protocol's parser against the sample lines the Python test reads,
+  the button's title and the progress text.
 - **The settings dialog against the mock SDK** — the real `MelampusSettings.lua`
   executed: the picker's items and bindings, the greyed states from a fake
   detection, the Ollama link, the key field visible only for a cloud engine,
-  the key landing in `LrPasswords` and nowhere else, the missing executable.
+  the key landing in `LrPasswords` and nowhere else, the missing executable;
+  the Download row from a fake status (absent with the size, size unknown,
+  Installed and Remove), the download command with stdout redirected on both
+  shells, the progress stepped through the mock's tasks a line at a time,
+  Cancel writing the marker, exit 3's message with the log tail. In
+  `test_lua_plugin.py` the commands the dialog builds also run through `sh`
+  against `dist/melampus` with `HF_ENDPOINT` at the fake hub: the progress
+  file ends in `done`, the status flips to installed, and the marker written
+  where the status said ends a throttled download with `cancelled`.
 - **8 JSON tests** plus a parse of 1,093 real records.
 - **`luac -p` over every plugin file**, which has already caught a real bug.
 

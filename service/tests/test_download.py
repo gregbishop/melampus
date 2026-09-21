@@ -14,15 +14,20 @@ both directions: the lines the command prints, and the parse the plugin will do.
 
 from __future__ import annotations
 
+import contextlib
 import errno
+import json
 import os
 import shutil
 import signal
 import subprocess
 import sys
 import threading
+import tomllib
+import types
 from http.server import ThreadingHTTPServer
 from pathlib import Path
+from typing import Callable
 
 import httpx
 import pytest
@@ -36,6 +41,7 @@ from conftest import (
     FAKE_TOTAL,
     VENV_CLI,
     FakeHub,
+    QuietHandler,
     Silent,
     assert_download_completed,
     closed_port,
@@ -43,21 +49,32 @@ from conftest import (
     loopback_server,
     snapshot_files,
 )
-from huggingface_hub import constants
+from filelock import Timeout
+from huggingface_hub import constants, file_download, snapshot_download
 from huggingface_hub.constants import DOWNLOAD_CHUNK_SIZE
+from huggingface_hub.file_download import repo_folder_name
+from huggingface_hub.utils import WeakFileLock
 
 from melampus import download
+from melampus.backend import MLXBackend
 from melampus.cli import main
 from melampus.config import ModelConfig
 from melampus.download import (
+    CANCEL_MARKER,
     EXIT_CANCELLED,
+    HELD,
+    MODEL_FILE_PATTERNS,
     DownloadCancelled,
     DownloadError,
+    Status,
     Update,
     _hub_client,
     _token_may_go,
+    cancel_marker_path,
     cancel_on_signals,
     download_model,
+    model_status,
+    remove_model,
 )
 
 
@@ -71,35 +88,61 @@ def _incomplete(cache: Path) -> list[Path]:
     return sorted((cache / FAKE_FOLDER / "blobs").glob("*.incomplete"))
 
 
-@pytest.mark.parametrize(
-    ("update", "line"),
-    [
-        (Update.progress(0, 18_300_000_000), "progress 0 18300000000"),
-        (Update.progress(4_096, 4_096), "progress 4096 4096"),
-        (Update.done("/hf/hub/models--x--y/snapshots/abc"), "done /hf/hub/models--x--y/snapshots/abc"),
-        (Update.done("C:\\Users\\me\\AppData\\Local\\hf hub\\snapshots\\abc"),
-         "done C:\\Users\\me\\AppData\\Local\\hf hub\\snapshots\\abc"),
-        (Update.cancelled(), "cancelled"),
-    ],
-)
-def test_progress_protocol_prints_and_parses_the_same_line(update: Update, line: str):
+def _cli_sees_the_cache(monkeypatch: pytest.MonkeyPatch, cache: Path) -> None:
+    """The cache under tmp_path as the entry point's own (`HF_HUB_CACHE`,
+    what `_cache_paths` reads when no `cache_dir` is passed), never the
+    real one."""
+    monkeypatch.setattr(download.constants, "HF_HUB_CACHE", str(cache))
+
+
+def _refused_through_the_cli(capsys, flag: str, naming: str, repo: str = FAKE_REPO) -> str:
+    """The one contract every refusal keeps through the entry point (cli.py,
+    docs/config.md): exit 3, the reason on stderr naming `naming`, nothing
+    on stdout, never a traceback. Returns stderr for what else a test asks
+    of the reason."""
+    assert main([flag, "--no-local-config", "--model", repo]) == 3, flag
+    out, err = capsys.readouterr()
+    assert out == "" and naming in err and "Traceback" not in err, (flag, err)
+    return err
+
+
+# The sample lines both parsers are tested against, so the Lua one in the
+# plugin (Rules.parseDownloadLine, plugin/tests/test_rules.lua) cannot drift
+# from this one: `<input>\t<state>[\t<field>...]`, `rejected` for a non-update.
+SAMPLE_LINES = Path(__file__).with_name("fixtures") / "download-lines.txt"
+
+
+def sample_lines() -> list[tuple[str, list[str]]]:
+    rows = []
+    for row in SAMPLE_LINES.read_text(encoding="utf-8").splitlines():
+        if row.startswith("#"):
+            continue
+        line, *expected = row.split("\t")
+        rows.append((line, expected))
+    assert len(rows) >= 10 and any(e == ["rejected"] for _, e in rows) and any(e[0] == "done" for _, e in rows)
+    return rows
+
+
+@pytest.mark.parametrize(("line", "expected"), sample_lines(), ids=lambda value: repr(value)[:40])
+def test_progress_protocol_prints_and_parses_the_same_line(line: str, expected: list[str]):
     """One line per update, machine-readable and stable: `progress <done> <total>`
     while bytes arrive, `done <path>` once the model is complete, `cancelled`
     when a signal stopped it. A path may hold spaces, so it is the rest of the
-    line."""
+    line. The plugin must be able to tell an update from any other line."""
+    if expected == ["rejected"]:
+        with pytest.raises(ValueError):
+            Update.parse(line)
+        return
+    state, *fields = expected
+    update = {
+        "progress": lambda: Update.progress(int(fields[0]), int(fields[1])),
+        "done": lambda: Update.done(fields[0]),
+        "cancelled": lambda: Update.cancelled(),
+    }[state]()
     assert update.line() == line
     assert Update.parse(line) == update
     assert Update.parse(line + "\n") == update, "a line read from a pipe keeps its newline"
-
-
-@pytest.mark.parametrize("line", [
-    "", "progress", "progress 1", "progress one two", "progress 1 2 3",
-    "done", "cancelled now", "Downloading bytes: 100%", "engine: mlx",
-])
-def test_progress_protocol_rejects_what_is_not_an_update(line: str):
-    """The plugin must be able to tell an update from any other line."""
-    with pytest.raises(ValueError):
-        Update.parse(line)
+    assert Update.parse(line + "\r\n") == update
 
 
 def test_download_fetches_every_file_from_the_hub_and_reports_bytes_done_of_total(
@@ -710,6 +753,13 @@ def test_download_gives_up_when_the_hub_accepts_and_never_answers(monkeypatch, t
     assert endpoint in str(failure) and "network" in str(failure)
 
 
+def declared_dependency(package: str) -> list[str]:
+    """The entries of service/pyproject.toml's core dependencies (the ones
+    the lockfile installs on every platform) that name `package`."""
+    pyproject = tomllib.loads((Path(__file__).resolve().parents[1] / "pyproject.toml").read_text())
+    return [d for d in pyproject["project"]["dependencies"] if d.startswith(package)]
+
+
 def test_the_hub_library_is_a_dependency_on_every_platform_pinned_to_the_reviewed_version():
     """download.py imports huggingface_hub directly, and on Windows nothing
     else brings it (mlx-vlm is Apple Silicon only), so the executable built
@@ -719,11 +769,34 @@ def test_the_hub_library_is_a_dependency_on_every_platform_pinned_to_the_reviewe
     as pyinstaller is, so an install without the lockfile cannot pull a
     version nobody reviewed; what download.py leans on (`http_get`'s resume,
     `resolve_revision`, the client factory) was read at 1.26.0."""
-    import tomllib
-
-    pyproject = tomllib.loads((Path(__file__).resolve().parents[1] / "pyproject.toml").read_text())
-    (declared,) = [d for d in pyproject["project"]["dependencies"] if d.startswith("huggingface_hub")]
+    (declared,) = declared_dependency("huggingface_hub")
     assert declared == "huggingface_hub==1.26.0", f"not the exact reviewed version: {declared}"
+
+
+@pytest.mark.parametrize("package", ["huggingface_hub", "filelock"])
+def test_the_libraries_the_download_imports_are_dependencies_on_every_platform(package: str):
+    """download.py imports huggingface_hub directly, and on Windows nothing
+    else brings it (mlx-vlm is Apple Silicon only), so the executable built
+    there carries the command only if service/pyproject.toml names it, for
+    every platform, in the core dependencies the lockfile installs. The same
+    for filelock (card #408: `--remove-model` catches its Timeout): it is in
+    the environment today as the hub library's own dependency, and a direct
+    import of a package only a dependency brings breaks the day that
+    dependency drops it, so it is declared, not borrowed."""
+    declared = declared_dependency(package)
+    assert len(declared) == 1, f"{package} is not declared in service/pyproject.toml: {declared}"
+    assert ";" not in declared[0], f"platform-restricted: {declared[0]}"
+
+
+def test_filelock_is_pinned_to_the_reviewed_version():
+    """Security (round 2, pyproject.toml:32): a new dependency is pinned
+    exactly, as pyinstaller is and as the hub library is on the base branch
+    (its own security round), so an install without the lockfile cannot pull
+    a version nobody reviewed. `--remove-model` leans on filelock's Timeout
+    being what WeakFileLock raises; that was read at 3.32.2, the version the
+    lockfile resolves."""
+    (declared,) = declared_dependency("filelock")
+    assert declared == "filelock==3.32.2", f"not the exact reviewed version: {declared}"
 
 
 # --- the command: exit codes and signals (unit) -----------------------------
@@ -997,3 +1070,1255 @@ def test_cli_cancelled_by_a_signal_keeps_the_partial_file_and_the_next_run_resum
     assert updates[0].bytes_done == kept + len(FAKE_FILES["config.json"])
     assert snapshot_files(Path(updates[-1].path))["model.safetensors"] == big
     assert not _incomplete(Path(hub_env["HF_HOME"]) / "hub")
+
+
+# --- the cooperative cancel: a marker file (card #408) ----------------------
+#
+# The Lightroom plugin cannot signal the executable (LrTasks.execute returns
+# only the exit code), so a download also stops when the cancel marker
+# appears, checked between chunks, and ends exactly as the signal path does:
+# `cancelled`, exit 4, the partial file kept for the next run to resume.
+
+
+def _marker(tmp_path: Path) -> Path:
+    """The cancel marker under a data folder of the test's own, where
+    `cancel_marker_path` would put it under the per-user data directory."""
+    return tmp_path / "data" / "download-cancel"
+
+
+@pytest.mark.parametrize(
+    "fake_hub",
+    [{"config.json": FAKE_FILES["config.json"], "model.safetensors": fake_bytes(4 * DOWNLOAD_CHUNK_SIZE)}],
+    indirect=True, ids=["four-chunk model"],
+)
+def test_download_stops_when_the_cancel_marker_appears_and_the_next_run_resumes(
+    fake_hub: FakeHub, tmp_path: Path
+):
+    """Done-when 2 (#408) at the library: the marker is written once the first
+    chunk is on disk; the download raises DownloadCancelled (the same
+    exception a signal raises, so the entry point prints `cancelled` and
+    exits 4 through one path), the chunk stays in the cache, the marker is
+    gone on exit, and the re-run asks the host for the rest by Range."""
+    fake_hub.throttle = (64 * 1024, 0.002)
+    marker = _marker(tmp_path)
+    big = fake_hub.files["model.safetensors"]
+    seen: list[Update] = []
+
+    def cancel_after_a_chunk(update: Update) -> None:
+        seen.append(update)
+        if update.bytes_done >= DOWNLOAD_CHUNK_SIZE and not marker.exists():
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.touch()
+
+    with pytest.raises(DownloadCancelled) as cancelled:
+        download_model(FAKE_REPO, endpoint=fake_hub.endpoint, cache_dir=tmp_path / "hub",
+                       on_update=cancel_after_a_chunk, cancel_marker=marker)
+    assert CANCEL_MARKER in str(cancelled.value)
+    assert not marker.exists(), "the marker was not removed on exit"
+    (partial,) = _incomplete(tmp_path / "hub")
+    kept = partial.stat().st_size
+    assert DOWNLOAD_CHUNK_SIZE <= kept < len(big), "the partial file was not kept"
+    assert partial.read_bytes() == big[:kept]
+    assert seen[-1].bytes_done < len(big) + len(FAKE_FILES["config.json"]), "the download did not stop"
+
+    fake_hub.throttle = None
+    fake_hub.requests.clear()
+    path, updates = _fetch(fake_hub, tmp_path / "hub")
+    assert fake_hub.gets("model.safetensors") == [f"bytes={kept}-"], "the rest was not asked for by Range"
+    assert snapshot_files(path)["model.safetensors"] == big
+    assert not _incomplete(tmp_path / "hub")
+
+
+def test_a_stale_cancel_marker_is_removed_when_a_download_starts(fake_hub: FakeHub, tmp_path: Path):
+    """A marker left by an earlier click must not cancel the next download
+    before it begins: it is removed on start, and the run completes."""
+    marker = _marker(tmp_path)
+    marker.parent.mkdir(parents=True)
+    marker.touch()
+
+    path = download_model(FAKE_REPO, endpoint=fake_hub.endpoint, cache_dir=tmp_path / "hub",
+                          on_update=lambda update: None, cancel_marker=marker)
+
+    assert snapshot_files(path) == FAKE_FILES
+    assert not marker.exists()
+
+
+def test_a_cancel_marker_that_cannot_be_removed_on_start_is_a_download_error_naming_it(
+    fake_hub: FakeHub, tmp_path: Path
+):
+    """Codex review 5, code finding 1 (Claude review 12, security finding 2;
+    download.py:583). A folder at the marker's path (or any marker the OS
+    refuses to remove) made the start's unlink raise its OSError straight
+    out of download_model: a traceback, exit 1, where docs/config.md names
+    exit 3 and a reason. Left in place such a marker would cancel the next
+    download at its first chunk, so the start refuses instead: the failure
+    is a DownloadError naming the path and what to do, raised before the
+    hub is asked anything."""
+    marker = _marker(tmp_path)
+    marker.mkdir(parents=True)
+
+    with pytest.raises(DownloadError) as failure:
+        download_model(FAKE_REPO, endpoint=fake_hub.endpoint, cache_dir=tmp_path / "hub",
+                       on_update=lambda update: None, cancel_marker=marker)
+
+    message = str(failure.value)
+    assert str(marker) in message and "by hand" in message, message
+    assert not fake_hub.requests, "the hub was asked with a marker that cannot be removed in place"
+    assert marker.is_dir()
+
+
+@contextlib.contextmanager
+def _handling_an_exception_of_the_callers_own():
+    try:
+        raise ValueError("the caller's own, being handled while it downloads")
+    except ValueError:
+        yield
+
+
+@pytest.mark.parametrize("called", [
+    pytest.param(contextlib.nullcontext, id="plainly"),
+    pytest.param(_handling_an_exception_of_the_callers_own, id="from inside the caller's handler"),
+])
+def test_a_cancel_marker_that_cannot_be_removed_on_exit_is_a_download_error_naming_it_with_the_model_complete(
+    fake_hub: FakeHub, tmp_path: Path, called
+):
+    """Codex review 5, code finding 1 (Claude review 12, security finding 2;
+    download.py:628). The exit's unlink in the `finally` raised the same
+    bare OSError: a folder that appeared at the marker's path as the last
+    chunk was counted (nothing looked for it after) left the model complete
+    and the command in a traceback. The failure names the marker and what
+    to do; the snapshot is laid out and the status reads installed.
+
+    From inside the caller's handler (Claude review 13, code finding 1;
+    download.py:635): the `finally` decided "something is in flight" from
+    `sys.exc_info()`, which is the exception any enclosing `except` is
+    handling, not this `try`'s: called from inside a caller's handler, the
+    download completing with a folder at the marker's path returned the
+    snapshot and reported nothing, and the next run refused on start with
+    no warning of why. Whether the caller is handling an exception of its
+    own must not change the outcome: the same DownloadError naming the
+    marker, the model complete."""
+    marker = _marker(tmp_path)
+    marker.parent.mkdir(parents=True)
+
+    def a_folder_at_the_marker_once_complete(update: Update) -> None:
+        if update.bytes_done == update.bytes_total:
+            marker.mkdir(exist_ok=True)
+
+    with pytest.raises(DownloadError) as failure, called():
+        download_model(FAKE_REPO, endpoint=fake_hub.endpoint, cache_dir=tmp_path / "hub",
+                       on_update=a_folder_at_the_marker_once_complete, cancel_marker=marker)
+
+    message = str(failure.value)
+    assert str(marker) in message and "by hand" in message, message
+    assert marker.is_dir()
+    status = _status(fake_hub, tmp_path / "hub")
+    assert status.installed is True and status.bytes_done == FAKE_TOTAL
+
+
+def test_a_cancel_marker_that_cannot_be_removed_on_exit_does_not_mask_the_cancellation_in_flight(
+    fake_hub: FakeHub, tmp_path: Path
+):
+    """Codex review 5, code finding 1 (Claude review 12, security finding 2;
+    download.py:628). A folder appearing at the marker's path mid-download
+    is the marker appearing: the run is cancelled at the next chunk, and the
+    `finally`'s unlink, refused by the folder, must not replace that
+    DownloadCancelled (exit 4, `cancelled`, the partial kept) with its own
+    failure."""
+    marker = _marker(tmp_path)
+    marker.parent.mkdir(parents=True)
+
+    def a_folder_at_the_marker_after_the_first_chunk(update: Update) -> None:
+        if update.bytes_done:
+            marker.mkdir(exist_ok=True)
+
+    with pytest.raises(DownloadCancelled) as cancelled:
+        download_model(FAKE_REPO, endpoint=fake_hub.endpoint, cache_dir=tmp_path / "hub",
+                       on_update=a_folder_at_the_marker_after_the_first_chunk, cancel_marker=marker)
+
+    assert CANCEL_MARKER in str(cancelled.value)
+    assert marker.is_dir()
+    assert _status(fake_hub, tmp_path / "hub").installed is False
+
+
+def test_download_model_flag_exits_3_naming_the_marker_it_cannot_remove_with_nothing_on_stdout(
+    monkeypatch: pytest.MonkeyPatch, capsys, tmp_path: Path
+):
+    """Codex review 5, code finding 1 (Claude review 12, security finding 2),
+    through the entry point, as the finding measured it: a folder at the
+    path `--model-status` reports as `cancel_path`, then `--download-model`.
+    Exit 3 with the reason on stderr naming the marker, no traceback, nothing
+    on stdout, the hub (a closed port here) never asked."""
+    marker = _marker(tmp_path)
+    marker.mkdir(parents=True)
+    monkeypatch.setattr(download, "cancel_marker_path", lambda: marker)
+    monkeypatch.setattr(constants, "ENDPOINT", f"http://127.0.0.1:{closed_port()}")
+
+    _refused_through_the_cli(capsys, "--download-model", str(marker))
+
+
+def test_the_download_watches_the_documented_marker_by_default(monkeypatch, tmp_path: Path, fake_hub: FakeHub):
+    """`--download-model` passes no marker: the download watches the path
+    `--model-status` reports (the one docs/config.md documents), which is
+    what the plugin writes to."""
+    marker = _marker(tmp_path)
+    monkeypatch.setattr(download, "cancel_marker_path", lambda: marker)
+    marker.parent.mkdir(parents=True)
+    marker.touch()
+
+    _fetch(fake_hub, tmp_path / "hub")
+
+    assert not marker.exists(), "the download did not use the documented marker"
+
+
+# --- the model's status and removal, for the Settings button (card #408) ---
+#
+# Done-when 1 and 3 of card #408: the dialog must know, without downloading,
+# whether the model is present, how big it is and what it is called, and it
+# must be able to remove it. `--model-status` and `--remove-model` are the
+# executable's answers; both are proven against the fake hub and a cache
+# under tmp_path, never the real one.
+
+
+def _status(hub: FakeHub, cache: Path) -> Status:
+    return model_status(FAKE_REPO, endpoint=hub.endpoint, cache_dir=cache)
+
+
+def test_status_of_an_absent_model_reports_not_installed_with_the_size_from_the_hub(
+    fake_hub: FakeHub, tmp_path: Path
+):
+    """The button's title needs the name and the size before any byte moves:
+    the size comes from the hub's file listing, present-ness from the cache."""
+    status = _status(fake_hub, tmp_path / "hub")
+
+    assert status == Status(FAKE_REPO, installed=False, bytes_total=FAKE_TOTAL, bytes_done=0,
+                            path=None, cancel_path=str(cancel_marker_path()))
+    assert not [r for r in fake_hub.requests if r.method == "GET" and "/resolve/" in r.path], "status moved bytes"
+
+
+def test_status_of_a_partial_download_counts_the_bytes_already_in_the_cache(fake_hub: FakeHub, tmp_path: Path):
+    fake_hub.cut_after = DOWNLOAD_CHUNK_SIZE + 4096
+    with pytest.raises(DownloadError):
+        _fetch(fake_hub, tmp_path / "hub")
+
+    status = _status(fake_hub, tmp_path / "hub")
+
+    assert status.installed is False and status.path is None
+    assert status.bytes_done == DOWNLOAD_CHUNK_SIZE + len(FAKE_FILES["config.json"])
+    assert status.bytes_total == FAKE_TOTAL
+
+
+def test_status_of_an_installed_model_reports_it_with_its_path(fake_hub: FakeHub, tmp_path: Path):
+    path, _ = _fetch(fake_hub, tmp_path / "hub")
+
+    status = _status(fake_hub, tmp_path / "hub")
+
+    assert status.installed is True
+    assert status.path == str(path)
+    assert status.bytes_done == status.bytes_total == FAKE_TOTAL
+
+
+@pytest.mark.parametrize("left", [
+    pytest.param(lambda pointer: pointer.unlink(), id="a file never laid out"),
+    pytest.param(lambda pointer: (pointer.unlink(), pointer.write_bytes(FAKE_FILES[pointer.name][:1000])),
+                 id="a short copy in place of a file"),
+])
+def test_status_of_a_snapshot_missing_a_file_the_hub_lists_reports_not_installed(
+    fake_hub: FakeHub, tmp_path: Path, left
+):
+    """Codex review 3, finding 1 (download.py:659). A download stopped while
+    the snapshot was being laid out (this module's, one pointer at a time
+    once every blob is whole; or the hub library's own, which mlx-vlm's load
+    runs, a file at a time as each completes) leaves `refs/main` naming a
+    snapshot that holds some of the model, and the status said Installed of
+    it, so Settings offered Remove where the model could not load. Installed
+    means whole: every file the hub lists for the repo that the model's load
+    needs (mlx-vlm's own patterns, `download.MODEL_FILE_PATTERNS`) is in the
+    snapshot, at the hub's size. The blobs stay counted, so the next
+    download lays the snapshot out without fetching them again."""
+    path, _ = _fetch(fake_hub, tmp_path / "hub")
+    left(path / "model.safetensors")
+
+    status = _status(fake_hub, tmp_path / "hub")
+
+    assert status.installed is False and status.path is None
+    assert status.bytes_total == FAKE_TOTAL and status.bytes_done == FAKE_TOTAL
+
+
+# What the hub writes into every repo beside the model: its listing names both,
+# and mlx-vlm's load fetches neither.
+HUB_EXTRAS = {".gitattributes": b"*.safetensors filter=lfs diff=lfs merge=lfs -text\n",
+              "README.md": b"# fake model\n"}
+
+
+def _the_patterns_mlx_vlms_load_fetches() -> list[str] | None:
+    """The allow patterns mlx-vlm's `get_model_path` hands the hub library's
+    `snapshot_download`, which is what its `load` (calling `get_model_path`
+    with none of its own) lays out: recorded from a call on a repo id, the
+    fetch itself replaced. None where mlx-vlm does not import (Windows, an
+    Intel Mac: it needs Apple Silicon), which is where download.py's copy
+    of the list stands in."""
+    try:
+        from mlx_vlm import utils as mlx_vlm_utils
+    except ImportError:
+        return None
+    recorded: list[list[str]] = []
+
+    def record_instead_of_fetching(*, allow_patterns: list[str], **_) -> str:
+        recorded.append(list(allow_patterns))
+        return "/nowhere"
+
+    with pytest.MonkeyPatch.context() as patched:
+        patched.setattr(mlx_vlm_utils, "snapshot_download", record_instead_of_fetching)
+        mlx_vlm_utils.get_model_path(FAKE_REPO)
+    (patterns,) = recorded
+    return patterns
+
+
+def test_model_file_patterns_are_the_ones_mlx_vlms_load_hands_snapshot_download():
+    """Rule 7 (Claude review 12, code finding 2; download.py:110-115).
+    MODEL_FILE_PATTERNS is a copy of mlx-vlm's list, kept because mlx-vlm
+    does not import off Apple Silicon, and mlx-vlm is not pinned: a release
+    that adds or drops a pattern would make a model its load laid out read
+    not installed again, with no test to say so. Where mlx-vlm imports (the
+    Mac runner), the copy is what its `get_model_path` hands
+    `snapshot_download`; elsewhere this is skipped, not passed."""
+    patterns = _the_patterns_mlx_vlms_load_fetches()
+    if patterns is None:
+        pytest.skip("mlx-vlm does not import here: it needs Apple Silicon")
+
+    assert list(MODEL_FILE_PATTERNS) == patterns
+
+
+@pytest.mark.parametrize("fake_hub", [{**FAKE_FILES, **HUB_EXTRAS}], indirect=True, ids=["with the hub's extras"])
+def test_status_of_a_snapshot_laid_out_by_mlx_vlms_own_load_reports_installed(fake_hub: FakeHub, tmp_path: Path):
+    """Done-when 3 (Claude review 11, code finding 1; download.py:676). The
+    executable's mlx engine loads the model through mlx-vlm's `load`, whose
+    `get_model_path` runs the hub library's `snapshot_download` with
+    mlx-vlm's own allow patterns (`*.json`, `*.safetensors`, `*.py`,
+    `*.model`, `*.tiktoken`, `*.txt`, `*.jinja`), so the snapshot it lays
+    out, complete and loadable, never holds the `.gitattributes` the hub
+    writes into every repo nor the model card `README.md`, both of which
+    the hub's listing names. Installed meant every listed file, so a model
+    the first identification run fetched (the "download on first use" path
+    readme.md names) read not installed, and Settings offered Download,
+    with no Remove, for a model the engine had just used. Whole means what
+    the model's load needs: the listed files that match mlx-vlm's patterns,
+    each at the hub's size. The snapshot is laid out with the patterns
+    recorded from mlx-vlm itself where it imports, download.py's copy of
+    them only where it does not."""
+    patterns = _the_patterns_mlx_vlms_load_fetches() or list(MODEL_FILE_PATTERNS)
+    laid_out = Path(snapshot_download(FAKE_REPO, endpoint=fake_hub.endpoint, cache_dir=tmp_path / "hub",
+                                      allow_patterns=patterns))
+    assert snapshot_files(laid_out) == FAKE_FILES, "the load's snapshot does not hold the model files alone"
+
+    status = _status(fake_hub, tmp_path / "hub")
+
+    assert status.installed is True and status.path == str(laid_out)
+    assert status.bytes_total == FAKE_TOTAL + sum(len(data) for data in HUB_EXTRAS.values())
+
+
+def test_status_of_a_snapshot_missing_a_file_with_no_host_answering_says_what_the_cache_lays_out(
+    fake_hub: FakeHub, tmp_path: Path
+):
+    """With the hub unreachable nothing on the machine names the files the
+    repo should hold, so the status says what the cache lays out: the
+    snapshot `main` names, whole as far as the cache knows. The network
+    being down is not a reason to offer Download for a model that is there
+    (and Download could fetch nothing then anyway)."""
+    path, _ = _fetch(fake_hub, tmp_path / "hub")
+    (path / "model.safetensors").unlink()
+
+    status = model_status(FAKE_REPO, endpoint=f"http://127.0.0.1:{closed_port()}", cache_dir=tmp_path / "hub")
+
+    assert status.installed is True and status.path == str(path) and status.bytes_total is None
+
+
+def test_status_of_an_installed_model_with_no_host_answering_says_the_size_is_unknown_and_the_rest(
+    fake_hub: FakeHub, tmp_path: Path
+):
+    """The network being down is not a reason for Settings not to open: the
+    status still says what the cache holds, with `bytes_total` null."""
+    path, _ = _fetch(fake_hub, tmp_path / "hub")
+
+    status = model_status(FAKE_REPO, endpoint=f"http://127.0.0.1:{closed_port()}", cache_dir=tmp_path / "hub")
+
+    assert status.bytes_total is None
+    assert status.installed is True and status.path == str(path)
+    assert status.bytes_done == FAKE_TOTAL
+
+
+def test_status_of_an_absent_model_with_no_host_answering_never_fails(tmp_path: Path):
+    """With nothing in the cache and nothing answering, the status is still
+    an answer: absent, size unknown, and where to write to cancel."""
+    status = model_status("fake-org/other", endpoint=f"http://127.0.0.1:{closed_port()}", cache_dir=tmp_path / "hub")
+
+    assert status == Status("fake-org/other", installed=False, bytes_total=None, bytes_done=0,
+                            path=None, cancel_path=str(cancel_marker_path()))
+
+
+def test_status_gives_up_on_a_hub_that_accepts_the_connection_and_never_answers(monkeypatch, tmp_path: Path):
+    """The Settings dialog runs the status as it opens and waits for the exit
+    code, so a hub that takes the connection and then says nothing (a stalled
+    network, a captive portal) must end the request, not hang the dialog: the
+    listing is waited for at most STATUS_TIMEOUT, the hub library's own
+    request timeout, and then the size is unknown as when nothing answers."""
+    import time
+
+    released = threading.Event()
+
+    class Stalled(QuietHandler):
+        def do_GET(self):  # noqa: N802 - http.server's name
+            released.wait(timeout=8)
+
+    assert download.STATUS_TIMEOUT == 10, "the default is the hub library's DEFAULT_REQUEST_TIMEOUT"
+    monkeypatch.setattr(download, "STATUS_TIMEOUT", 0.5)
+    try:
+        with loopback_server(Stalled, ThreadingHTTPServer) as server:
+            started = time.monotonic()
+            status = model_status(FAKE_REPO, endpoint=f"http://127.0.0.1:{server.server_port}",
+                                  cache_dir=tmp_path / "hub")
+            waited = time.monotonic() - started
+    finally:
+        released.set()
+
+    assert waited < 5, f"the status waited {waited:.1f}s on a hub that never answered"
+    assert status == Status(FAKE_REPO, installed=False, bytes_total=None, bytes_done=0,
+                            path=None, cancel_path=str(cancel_marker_path()))
+
+
+# What a host at HF_ENDPOINT can answer 200 with that is not the hub's answer.
+_NOT_A_HUBS_ANSWER = [
+    ("not json", "text/html", b"<html><body>Sign in to the network</body></html>"),
+    ("json of another shape", "application/json", b"[1, 2, 3]"),
+    ("a json object without id", "application/json", b'{"error": "blocked"}'),
+    ("a sibling without rfilename", "application/json",
+     b'{"id": "fake-org/fake-model", "siblings": [{"size": 3}]}'),
+    ("a size that is not a number", "application/json",
+     b'{"id": "fake-org/fake-model", "siblings": [{"rfilename": "model.safetensors", "size": "big"}]}'),
+    *[(f"a size that is not a non-negative integer: {size.decode()}", "application/json",
+       b'{"id": "fake-org/fake-model", "siblings": [{"rfilename": "model.safetensors", "size": ' + size + b'}]}')
+      for size in (b"1e309", b"-1", b"1.5", b"true")],
+    *[(f"a size above the ceiling: {name}", "application/json",
+       b'{"id": "fake-org/fake-model", "siblings": [' + b", ".join(
+           b'{"rfilename": "' + filename + b'", "size": ' + size + b'}' for filename, size in files) + b']}')
+      for name, files in (
+          ("two sizes of 4300 digits, whose sum json.dumps cannot print",
+           ((b"model.safetensors", b"9" * 4300), (b"config.json", b"9" * 4300))),
+          ("one size above 2**53", ((b"model.safetensors", str(2**53 + 1).encode()),)),
+          ("two sizes of 2**53, whose sum is above it",
+           ((b"model.safetensors", str(2**53).encode()), (b"config.json", str(2**53).encode()))),
+      )],
+    ("a name that is null", "application/json",
+     b'{"id": "fake-org/fake-model", "siblings": [{"rfilename": null, "size": 3}]}'),
+    ("a name that is a number", "application/json",
+     b'{"id": "fake-org/fake-model", "siblings": [{"rfilename": 7, "size": 3}]}'),
+    ("lastModified that is a number", "application/json", b'{"id": "fake-org/fake-model", "lastModified": 5}'),
+    ("createdAt that is a number", "application/json", b'{"id": "fake-org/fake-model", "createdAt": 5}'),
+    ("evalResults that is a list of numbers", "application/json",
+     b'{"id": "fake-org/fake-model", "evalResults": [5]}'),
+]
+
+
+@pytest.mark.parametrize(("content_type", "body", "installed"), [
+    *[(content_type, body, False) for _, content_type, body in _NOT_A_HUBS_ANSWER],
+    *[(content_type, body, True) for name, content_type, body in _NOT_A_HUBS_ANSWER if name.startswith("a name")],
+], ids=[*[name for name, _, _ in _NOT_A_HUBS_ANSWER],
+        *[f"{name}, the model installed" for name, _, _ in _NOT_A_HUBS_ANSWER if name.startswith("a name")]])
+def test_status_treats_a_hub_answering_200_with_something_else_as_unreachable(
+    fake_hub: FakeHub, tmp_path: Path, content_type: str, body: bytes, installed: bool
+):
+    """Security (Claude review 9 of #16, download.py:648; Codex review 4,
+    security finding 1 and Claude review 11, security finding 1,
+    download.py:672-677; Codex review 5, security finding 1 and Claude
+    review 12, security finding 1 and code finding 1, download.py:690). A
+    host at HF_ENDPOINT that answers 200 with
+    something that is not the hub's answer (a captive portal's sign-in page,
+    a proxy's block page, a JSON of another shape) raised the library's
+    decoding error out of the status uncaught: a traceback in
+    melampus-cli.log naming source paths, and the dialog pointing at exit 1
+    instead of the row. Closed for a page and a JSON list, it stayed open
+    for a JSON object: one without `id` (a proxy's or a mirror's JSON error
+    page, the commonest non-hub JSON answer) and one whose sibling has no
+    `rfilename` raised the library's KeyError, not in the handler's tuple,
+    and a sibling whose `size` is a string passed the handler and broke the
+    sum of the sizes outside it. Closed for those, it stayed open for a
+    sibling whose `rfilename` is null or a number, which the library takes
+    unchecked and which `_holds`, run outside the handler, handed to the
+    library's `filter_repo_objects`: a ValueError exactly when the model is
+    installed (with the cache empty `_holds` never ran), so the row that
+    should read Installed became the exit-1 note; and for `lastModified`,
+    `createdAt` or `evalResults` of another shape, the library's own
+    AttributeError parsing them, not in the tuple either. And for a size
+    that is a number but not a non-negative integer (Codex review 8,
+    security finding 1, download.py:739): `1e309` is `inf` in Python, which
+    `json.dumps` writes as `Infinity`, which the plugin's decoder
+    (MelampusJson.lua) rejects, hiding the row instead of showing "size
+    unknown"; `-1` and `1.5` summed to a total that is not a size, and
+    `true` (a bool is an int in Python) to 1. And for a size that is a
+    non-negative integer above MAX_SIZE, 2**53 (Claude review 16, security
+    finding 1, download.py:743): two sizes of 4300 digits each passed the
+    check (Python's JSON decoder reads an integer of up to 4300 digits, its
+    int-to-str limit) and summed to 4301, which `json.dumps` cannot print,
+    a ValueError out of `Status.json()` that the CLI does not catch, a
+    traceback and exit 1 again; one of 4300 digits printed and the
+    plugin's decoder read it as `inf`, the button saying "(inf GB)"; and
+    above 2**53 a double, the plugin's number, rounds. No file is that
+    large, so such a size, or a total above it, is not a hub's. The status never
+    fails for the network: whatever the hub's answer does wrong, such a hub
+    is one that could not be reached, the size unknown and installed what
+    the cache lays out; through the CLI that is exit 0, the JSON on stdout
+    with `bytes_total` null, and no traceback on stderr."""
+
+    class Elsewhere(QuietHandler):
+        def do_GET(self):  # noqa: N802 - http.server's name
+            self.send_response(200)
+            self.send_header("Content-Type", content_type)
+            self.end_headers()
+            self.wfile.write(body)
+
+    cache = tmp_path / "hf" / "hub"
+    path = str(_fetch(fake_hub, cache)[0]) if installed else None
+    with loopback_server(Elsewhere) as server:
+        endpoint = f"http://127.0.0.1:{server.server_port}"
+        status = model_status(FAKE_REPO, endpoint=endpoint, cache_dir=cache)
+        proc = _cli(["--model-status", "--model", FAKE_REPO], {"HF_ENDPOINT": endpoint, "HF_HOME": str(tmp_path / "hf")})
+
+    assert status == Status(FAKE_REPO, installed=installed, bytes_total=None, bytes_done=FAKE_TOTAL if installed else 0,
+                            path=path, cancel_path=str(cancel_marker_path()))
+    assert proc.returncode == 0 and "Traceback" not in proc.stderr, proc.stderr[-3000:]
+    printed = json.loads(proc.stdout)
+    assert printed["bytes_total"] is None and printed["installed"] is installed and printed["path"] == path
+
+
+@pytest.mark.parametrize(("host", "carried"), [("127.0.0.1", True), ("hub.example", False)],
+                         ids=["loopback http", "remote http"])
+def test_status_sends_the_user_token_to_a_loopback_hub_and_never_to_a_remote_http_hub(
+    fake_hub: FakeHub, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, host: str, carried: bool
+):
+    """Security (Codex review 1 of #16, download.py:645). The status asked the
+    hub through the hub library's default client, not `_hub_client`, which
+    `download_model` installs for every request the library makes: so
+    `--model-status`, run on its own as the Settings dialog runs it, sent the
+    user's token (`hf auth login`, or HF_TOKEN) to the hub whatever its origin,
+    in cleartext to an `http://` hub on another machine. The status goes
+    through the same client, so the token's rule is one rule: carried to a
+    loopback hub, stripped from a request to a remote http one. The remote
+    name resolves to the fake hub here, in this process only, so the request
+    it records is the one that would have left the machine."""
+    import socket
+
+    from huggingface_hub import set_client_factory
+    from huggingface_hub.utils._http import default_client_factory
+
+    monkeypatch.setenv("HF_TOKEN", "synthetic-token")
+    # The client `--model-status` starts with: the library's own, before any
+    # download in this process installed the protected one.
+    set_client_factory(default_client_factory)
+    resolve = socket.getaddrinfo
+    monkeypatch.setattr(socket, "getaddrinfo", lambda name, *rest, **kw: resolve(
+        "127.0.0.1" if name == "hub.example" else name, *rest, **kw))
+    port = fake_hub.endpoint.rpartition(":")[2]
+
+    status = model_status(FAKE_REPO, endpoint=f"http://{host}:{port}", cache_dir=tmp_path / "hub")
+
+    assert status.bytes_total == FAKE_TOTAL, "the hub was not asked"
+    assert fake_hub.requests, "no request reached the hub"
+    expected = "Bearer synthetic-token" if carried else None
+    assert all(r.authorization == expected for r in fake_hub.requests), fake_hub.requests
+
+
+def test_the_cancel_marker_lives_under_the_per_user_data_directory_beside_the_caches():
+    """The plugin writes this file to cancel (docs/config.md § Downloading the
+    model); it is named once here and the status carries it, so the plugin
+    never derives the per-user directory itself."""
+    from melampus import config
+
+    marker = cancel_marker_path()
+    assert marker.name == CANCEL_MARKER == "download-cancel"
+    assert marker == config.cache_file(CANCEL_MARKER)
+    assert marker.is_relative_to(config._data_root())
+
+
+def test_remove_deletes_the_installed_model_from_the_cache(fake_hub: FakeHub, tmp_path: Path):
+    """Done-when 3 (#408), Remove: the repo's whole cache folder goes, through
+    the hub library's own deletion, and the status reads absent again."""
+    path, _ = _fetch(fake_hub, tmp_path / "hub")
+
+    removed = remove_model(FAKE_REPO, cache_dir=tmp_path / "hub")
+
+    assert removed == tmp_path / "hub" / FAKE_FOLDER
+    assert not removed.exists() and not path.exists()
+    status = _status(fake_hub, tmp_path / "hub")
+    assert status.installed is False and status.bytes_done == 0 and status.path is None
+
+
+FAKE_FORK = "fake-org/fake-fork"
+
+
+@pytest.mark.parametrize("removed", [FAKE_REPO, FAKE_FORK], ids=["the model", "its fork"])
+def test_remove_deletes_the_named_model_and_no_other_repo_at_the_same_commit(
+    fake_hub: FakeHub, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, removed: str
+):
+    """Security (Codex review 1 of #16, download.py:675). The removal named
+    the repo's revisions to the hub library's `delete_revisions`, which
+    searches the whole cache by commit hash and takes the first repo found
+    at it: a fork (or a mirror) cached at the same commit could be the one
+    deleted, the model asked for staying installed. Given the model and a
+    fork of it at the same commit in one cache, whichever of the two is
+    removed, that repo's folder goes and the other's snapshot stays. The
+    scan yields its repos in a frozenset's order, which varies by process,
+    so the case is pinned: the other repo comes first."""
+    from dataclasses import replace
+
+    kept = FAKE_FORK if removed == FAKE_REPO else FAKE_REPO
+    paths = {FAKE_REPO: _fetch(fake_hub, tmp_path / "hub")[0]}
+    with FakeHub(repo=FAKE_FORK).serve() as fork:
+        paths[FAKE_FORK] = _fetch(fork, tmp_path / "hub", repo=FAKE_FORK)[0]
+    assert paths[FAKE_REPO].name == paths[FAKE_FORK].name == FAKE_COMMIT, "the two repos do not share the commit"
+    scan = download.scan_cache_dir
+
+    def other_first(cache: Path):
+        info = scan(cache)
+        return replace(info, repos=tuple(sorted(info.repos, key=lambda r: r.repo_id != kept)))
+
+    monkeypatch.setattr(download, "scan_cache_dir", other_first)
+
+    gone = remove_model(removed, cache_dir=tmp_path / "hub")
+
+    assert gone == tmp_path / "hub" / repo_folder_name(repo_id=removed, repo_type="model")
+    assert not gone.exists() and not paths[removed].exists(), f"{removed} is still installed"
+    assert paths[kept].exists() and snapshot_files(paths[kept]) == FAKE_FILES, f"{kept} was removed instead"
+
+
+def test_remove_with_nothing_installed_says_so(fake_hub: FakeHub, tmp_path: Path):
+    with pytest.raises(DownloadError) as failure:
+        remove_model(FAKE_REPO, cache_dir=tmp_path / "hub")
+    assert FAKE_REPO in str(failure.value) and "nothing to remove" in str(failure.value)
+
+
+def _refused_removal_leaving_the_aside_folder(
+    fake_hub: FakeHub, cache: Path
+) -> tuple[Path, Path, Path, DownloadError]:
+    """The model fetched, then its removal refused by a snapshot folder it
+    cannot delete (read-only, restored once the removal has returned):
+    the repo's folder is gone from the cache under its own name and what
+    could not be deleted sits under the aside name. Returns the snapshot,
+    the repo's folder, the aside folder (`download._incomplete`, the one
+    name for the mark) and the refusal."""
+    path, _ = _fetch(fake_hub, cache)
+    folder = cache / FAKE_FOLDER
+    aside = download._incomplete(folder)
+    os.chmod(path, 0o500)
+    try:
+        with pytest.raises(DownloadError) as failure:
+            remove_model(FAKE_REPO, cache_dir=cache)
+    finally:
+        for snapshot in (path, aside / "snapshots" / path.name):
+            if snapshot.is_dir():
+                os.chmod(snapshot, 0o700)
+    return path, folder, aside, failure.value
+
+
+@pytest.mark.skipif(sys.platform == "win32" or getattr(os, "geteuid", lambda: 1)() == 0,
+                    reason="a read-only folder does not stop a deletion here")
+def test_remove_refused_by_a_folder_it_cannot_delete_leaves_the_model_gone_from_the_cache_and_set_aside(
+    fake_hub: FakeHub, tmp_path: Path
+):
+    """Done-when 3 (Codex review 2, finding 1; Claude review 9, code finding 1;
+    Claude review 10, code finding 1; download.py:696). The hub library's
+    deletion strategy is one rmtree, which deletes what it can and stops at
+    the first entry it cannot; the library catches the PermissionError, logs
+    it and returns. The removal then said "the folder is still there" of a
+    model whose blobs and refs were gone: the row stayed Installed, a second
+    removal said "nothing to remove" with the folder still in the cache, and
+    the next download fetched everything again. The invariant: after a
+    refused removal the model is whole, or gone from the cache's view, never
+    both. Here it is gone: the repo's folder was set aside within the cache
+    before the deletion, so what could not be deleted sits under the aside
+    name, the message names it for the owner to delete by hand, the status
+    reads absent, a second removal has nothing to remove, and once the aside
+    folder is deleted by hand a download installs the model whole again."""
+    path, folder, aside, failure = _refused_removal_leaving_the_aside_folder(fake_hub, tmp_path / "hub")
+
+    assert FAKE_REPO in str(failure) and str(aside) in str(failure)
+    assert "by hand" in str(failure), failure
+    assert not folder.exists(), "the repo's folder is still in the cache under its own name"
+    assert aside.is_dir(), "what could not be deleted is not where the message says"
+    status = _status(fake_hub, tmp_path / "hub")
+    assert status.installed is False and status.bytes_done == 0 and status.path is None
+    with pytest.raises(DownloadError, match="nothing to remove"):
+        remove_model(FAKE_REPO, cache_dir=tmp_path / "hub")
+    shutil.rmtree(aside)
+    path, _ = _fetch(fake_hub, tmp_path / "hub")
+    assert snapshot_files(path) == FAKE_FILES and _status(fake_hub, tmp_path / "hub").installed is True
+
+
+@pytest.mark.skipif(sys.platform == "win32" or getattr(os, "geteuid", lambda: 1)() == 0,
+                    reason="a read-only folder does not stop a deletion here")
+def test_remove_refuses_while_an_earlier_refused_removal_left_its_set_aside_folder_naming_it_and_the_model_untouched(
+    fake_hub: FakeHub, tmp_path: Path
+):
+    """Done-when 3 (Claude review 11, code finding 2; download.py:740-746).
+    The set-aside name is one fixed name, and a refused removal leaves the
+    folder under it for the owner to delete by hand. An owner who instead
+    downloads the model again (the row reads Download) and later clicks
+    Remove had the rename onto that folder refused with the OS's errno line
+    (`[Errno 66] Directory not empty`, on Windows `[WinError 183]` even for
+    an empty one), the same on every Remove after, saying neither the
+    reason nor what to do. Given the aside folder of an earlier refused
+    removal, the removal is refused before anything moves: the message
+    names the folder as left by an earlier refused removal, says to delete
+    it by hand, and the model is untouched; once it is gone, Remove goes
+    ahead."""
+    path, folder, aside, _ = _refused_removal_leaving_the_aside_folder(fake_hub, tmp_path / "hub")
+    assert aside.is_dir() and not folder.exists()
+    path, _ = _fetch(fake_hub, tmp_path / "hub")
+    assert _status(fake_hub, tmp_path / "hub").installed is True
+
+    with pytest.raises(DownloadError) as failure:
+        remove_model(FAKE_REPO, cache_dir=tmp_path / "hub")
+
+    message = str(failure.value)
+    assert FAKE_REPO in message and str(aside) in message, message
+    assert "earlier" in message and "refused" in message and "by hand" in message, message
+    assert "untouched" in message and "Errno" not in message, message
+    assert folder.is_dir() and aside.is_dir() and snapshot_files(path) == FAKE_FILES
+    assert _status(fake_hub, tmp_path / "hub").installed is True
+    shutil.rmtree(aside)
+    assert remove_model(FAKE_REPO, cache_dir=tmp_path / "hub") == folder
+    assert not folder.exists() and not aside.exists()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="a symlink to a folder needs a privilege here")
+def test_remove_refuses_a_repo_folder_that_is_a_link_with_exit_3_leaving_the_link_and_its_target(
+    fake_hub: FakeHub, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+):
+    """Security (Claude review 10, security finding 1; download.py:696). A
+    repo folder that is a symbolic link (one big model moved to another disk
+    and linked back, a layout the hub library's scan accepts and the status
+    reports installed) made the removal end in a 26-line traceback, exit 1:
+    rmtree refuses a link with a plain OSError, the one deletion failure the
+    library's strategy does not swallow, and the CLI mapped DownloadError
+    alone. The refusal is right, never delete through a link; its shape is
+    a DownloadError naming the link and where to remove the model instead,
+    exit 3 from the CLI, nothing on stdout, no traceback on stderr, and the
+    link and its target untouched."""
+    elsewhere = tmp_path / "elsewhere"
+    path, _ = _fetch(fake_hub, elsewhere)
+    cache = tmp_path / "hub"
+    cache.mkdir()
+    link = cache / FAKE_FOLDER
+    link.symlink_to(elsewhere / FAKE_FOLDER, target_is_directory=True)
+    assert _status(fake_hub, cache).installed is True, "the scan does not accept the link"
+
+    with pytest.raises(DownloadError) as failure:
+        remove_model(FAKE_REPO, cache_dir=cache)
+
+    assert FAKE_REPO in str(failure.value) and str(link) in str(failure.value) and "link" in str(failure.value)
+    assert link.is_symlink() and snapshot_files(path) == FAKE_FILES, "the link or its target was touched"
+
+    _cli_sees_the_cache(monkeypatch, cache)
+    _refused_through_the_cli(capsys, "--remove-model", str(link))
+    assert link.is_symlink() and snapshot_files(path) == FAKE_FILES, "the link or its target was touched"
+
+
+@pytest.mark.skipif(sys.platform == "win32" or getattr(os, "geteuid", lambda: 1)() == 0,
+                    reason="an unreadable file does not stop a probe here")
+def test_remove_refuses_with_the_reason_when_a_lock_it_probes_cannot_be_opened(fake_hub: FakeHub, tmp_path: Path):
+    """Security (Claude review 10, security finding 1). The probe for a
+    running download opens each of the repo's lock files; one it cannot open
+    raised the OSError through the CLI as a traceback. It is a DownloadError
+    naming the lock, exit 3, and the model stays."""
+    path, _ = _fetch(fake_hub, tmp_path / "hub")
+    lock = _lock_dir(tmp_path / "hub") / "abc.lock"
+    lock.touch()
+    os.chmod(lock, 0)
+    try:
+        with pytest.raises(DownloadError) as failure:
+            remove_model(FAKE_REPO, cache_dir=tmp_path / "hub")
+    finally:
+        os.chmod(lock, 0o600)
+
+    assert FAKE_REPO in str(failure.value) and str(lock) in str(failure.value)
+    assert path.exists() and snapshot_files(path) == FAKE_FILES, "the model was removed"
+
+
+def _made(folder: Path) -> Path:
+    folder.mkdir()
+    return folder
+
+
+@pytest.mark.skipif(sys.platform == "win32" or getattr(os, "geteuid", lambda: 1)() == 0,
+                    reason="an unsearchable folder does not stop a scan here")
+@pytest.mark.parametrize("unsearchable", [
+    pytest.param(lambda cache: _made(cache / "models--other--repo"), id="another repo in the cache"),
+    pytest.param(lambda cache: cache.parent, id="the cache's parent"),
+])
+def test_status_and_remove_refuse_with_the_reason_when_a_folder_of_the_cache_cannot_be_searched(
+    fake_hub: FakeHub, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys, unsearchable
+):
+    """Security (Claude review 13, security finding 1; download.py:655-665).
+    The hub library's scan of the cache walks every repo folder in it, other
+    tools' models included; one the process cannot search raised its
+    PermissionError through `--model-status` and `--remove-model` as a
+    traceback, exit 1, naming the build machine's source paths, where the
+    contract is exit 3 with a reason. It is a DownloadError naming the
+    cache and the folder the OS named, from both, and through the CLI exit
+    3 with the folder on stderr, nothing on stdout, no traceback; the model
+    stays.
+
+    The cache's parent (Codex review 7, code finding 1; Claude review 14,
+    security finding 1; download.py:664): the cache's own `is_dir` guard
+    ran before the bound round 13 put around the scan: a cache whose
+    parent the process cannot search (`HF_HOME` at mode 000, or the folder
+    `--cache` names under one) raised its PermissionError from
+    `Path.is_dir` through both as a traceback, exit 1. It is the one
+    DownloadError every read of the cache says, naming the cache."""
+    cache = tmp_path / "hf" / "hub"
+    path, _ = _fetch(fake_hub, cache)
+    folder = unsearchable(cache)
+    os.chmod(folder, 0)
+    try:
+        for ask in (lambda: _status(fake_hub, cache), lambda: remove_model(FAKE_REPO, cache_dir=cache)):
+            with pytest.raises(DownloadError) as failure:
+                ask()
+            message = str(failure.value)
+            assert str(cache) in message and str(folder) in message and "permissions" in message, message
+        _cli_sees_the_cache(monkeypatch, cache)
+        for flag in ("--model-status", "--remove-model"):
+            _refused_through_the_cli(capsys, flag, str(folder))
+    finally:
+        os.chmod(folder, 0o700)
+    assert snapshot_files(path) == FAKE_FILES, "the model was removed"
+
+
+@pytest.mark.skipif(sys.platform == "win32" or getattr(os, "geteuid", lambda: 1)() == 0,
+                    reason="an unsearchable folder does not stop a count here")
+def test_status_refuses_with_the_reason_when_the_repo_blobs_cannot_be_counted(
+    fake_hub: FakeHub, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+):
+    """Security (Claude review 13, security finding 1; download.py:668-671).
+    The status counts the repo's bytes by listing and stat-ing its `blobs`
+    folder; one the process cannot search raised the PermissionError as a
+    traceback, exit 1. It is a DownloadError naming the cache and the
+    folder, exit 3 through the CLI with the folder on stderr, nothing on
+    stdout, no traceback. The snapshot's files are copies of the blobs
+    here, the layout the hub library makes where it cannot link, so the
+    scan (which stats the snapshot's files) reads them and the count is
+    what meets the folder."""
+    cache = tmp_path / "hub"
+    path, _ = _fetch(fake_hub, cache)
+    for file in path.iterdir():
+        blob = file.resolve()
+        file.unlink()
+        shutil.copyfile(blob, file)
+    blobs = cache / FAKE_FOLDER / "blobs"
+    os.chmod(blobs, 0)
+    try:
+        with pytest.raises(DownloadError) as failure:
+            _status(fake_hub, cache)
+        message = str(failure.value)
+        assert str(cache) in message and str(blobs) in message and "permissions" in message, message
+        _cli_sees_the_cache(monkeypatch, cache)
+        _refused_through_the_cli(capsys, "--model-status", str(blobs))
+    finally:
+        os.chmod(blobs, 0o700)
+
+
+def _lock_dir(cache: Path) -> Path:
+    """The cache's locks folder for the fake repo, where a running download
+    holds the hub library's per-file lock on the blob it is appending to (the
+    one `_fetch` takes)."""
+    lock_dir = cache / ".locks" / FAKE_FOLDER
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    return lock_dir
+
+
+def test_remove_refuses_while_a_download_holds_the_lock(fake_hub: FakeHub, tmp_path: Path):
+    """Removing the model out from under a running download is refused, exit
+    3 from the CLI, and the model stays."""
+    path, _ = _fetch(fake_hub, tmp_path / "hub")
+    with WeakFileLock(_lock_dir(tmp_path / "hub") / "abc.lock"):
+        with pytest.raises(DownloadError) as failure:
+            remove_model(FAKE_REPO, cache_dir=tmp_path / "hub")
+    assert "running" in str(failure.value) and FAKE_REPO in str(failure.value)
+    assert path.exists(), "the model was removed under a running download"
+
+
+def test_remove_and_download_refusals_name_every_holder_of_the_repos_lock(
+    fake_hub: FakeHub, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Claude review 18, code finding 1 (download.py:925). The removal's
+    refusal named one holder of the repo's lock, "a download", and told the
+    user to cancel it, when the holder may be an identification run loading
+    the model (`load_lock`, held from the start of its load until the model
+    is in memory; the Settings row then shows Download or Installed, no
+    Cancel) or another removal. Both refusals, the removal's and the
+    download's, name every holder in one shared sentence; the removal's
+    says what to do (wait, cancelling a download first, then remove), the
+    download's says to re-run."""
+    cache = tmp_path / "hub"
+    path, _ = _fetch(fake_hub, cache)
+    monkeypatch.setattr(download, "LOCK_TIMEOUT", 0.2)
+    held = f"another run holds {FAKE_REPO}: a download, an identification run loading it or a removal of it is running"
+    with WeakFileLock(_lock_dir(cache) / download.REPO_LOCK):
+        with pytest.raises(DownloadError) as removal:
+            remove_model(FAKE_REPO, cache_dir=cache)
+        with pytest.raises(DownloadError) as a_download:
+            _fetch(fake_hub, cache)
+
+    assert str(removal.value).startswith(held), str(removal.value)
+    assert str(removal.value).endswith("wait for it to finish (cancel a download first), then remove"), str(removal.value)
+    assert str(a_download.value).startswith(held), str(a_download.value)
+    assert path.exists(), "the model was removed under the held lock"
+
+
+def test_remove_goes_ahead_once_the_download_has_released_the_lock(fake_hub: FakeHub, tmp_path: Path):
+    """A lock file left behind by a download that finished is not a running
+    download: the removal takes the lock itself and goes ahead."""
+    _fetch(fake_hub, tmp_path / "hub")
+    with WeakFileLock(_lock_dir(tmp_path / "hub") / "abc.lock"):
+        pass
+
+    assert remove_model(FAKE_REPO, cache_dir=tmp_path / "hub").exists() is False, "the lock outlived its holder"
+
+
+def _remove_as_another_run_starts(
+    monkeypatch: pytest.MonkeyPatch, cache: Path, another_run_starts: Callable[[str], None]
+) -> Path:
+    """`remove_model(FAKE_REPO)` from `cache` with another run of the model
+    starting at each moment a removal must hold its locks through: the
+    rename of the repo's folder (`another_run_starts("at the rename")`, from
+    under `Path.rename`) and the deletion (`"at the deletion"`, from under
+    the library's deletion strategy). What the run is, a download or a
+    lock it would take, and what it records, is the test's own. Returns
+    what the removal returns, the folder the model was in."""
+    rename, execute = Path.rename, download.DeleteCacheStrategy.execute
+
+    def rename_as_another_run_starts(self: Path, target: Path) -> Path:
+        another_run_starts("at the rename")
+        return rename(self, target)
+
+    def execute_as_another_run_starts(self) -> None:
+        another_run_starts("at the deletion")
+        execute(self)
+
+    monkeypatch.setattr(Path, "rename", rename_as_another_run_starts)
+    monkeypatch.setattr(download.DeleteCacheStrategy, "execute", execute_as_another_run_starts)
+    return remove_model(FAKE_REPO, cache_dir=cache)
+
+
+def test_remove_holds_the_locks_a_download_takes_through_the_rename_and_the_deletion(
+    fake_hub: FakeHub, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Codex review 8, code finding 1 (download.py:765). The probe for a
+    running download took each of the repo's locks and released it at once,
+    so a download starting after the probe and before the rename took its
+    lock (the one `_fetch` takes on the blob it appends to) and appended
+    to a blob the removal then set aside and deleted: the model removed
+    under a running download, its partial file lost, where the contract
+    is the refusal. The removal holds every lock the download would take
+    from the probe through the rename and the deletion: a download
+    starting at either moment finds its lock held (as the probe finds a
+    download's: `_fetch`'s own timeout refuses it, or it waits), and the
+    lock is free once the removal has returned."""
+    path, _ = _fetch(fake_hub, tmp_path / "hub")
+    lock = _lock_dir(tmp_path / "hub") / "abc.lock"
+    lock.touch()
+    a_download_got_the_lock: dict[str, bool] = {}
+
+    def a_download_starts(at: str) -> None:
+        try:
+            with WeakFileLock(lock, timeout=0.2):
+                a_download_got_the_lock[at] = True
+        except Timeout:
+            a_download_got_the_lock[at] = False
+
+    removed = _remove_as_another_run_starts(monkeypatch, tmp_path / "hub", a_download_starts)
+    a_download_starts("after the removal")
+
+    assert removed == path.parents[1] and not removed.exists()
+    assert a_download_got_the_lock == {"at the rename": False, "at the deletion": False, "after the removal": True}
+
+
+def _forget_a_blob(cache: Path, snapshot: Path, name: str) -> Path:
+    """Make one file of the model a blob the download has not reached: its
+    pointer, its blob and its lock file gone, the way a run stopped before it
+    leaves the cache (a blob not yet fetched has no `<etag>.lock` for the
+    removal's probe to find). Returns that lock's path."""
+    pointer = snapshot / name
+    blob = pointer.resolve()
+    lock = _lock_dir(cache) / f"{blob.name}.lock"
+    pointer.unlink()
+    blob.unlink()
+    lock.unlink(missing_ok=True)
+    return lock
+
+
+def test_remove_holds_the_repo_lock_so_a_download_of_a_blob_it_has_not_seen_refuses(
+    fake_hub: FakeHub, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Codex review 9, code finding 1 and security finding 1 (download.py:775).
+    The removal held every lock file it found, but a blob the download has
+    not reached yet has no lock file: a download starting between the
+    probe and the rename created that blob's lock, opened its partial file
+    and appended to it, and the removal then set the folder aside and
+    deleted the bytes under the download's held lock. Both sides take one
+    lock for the repo (`repo.lock`, beside the per-blob locks): the
+    download for the run, the removal from the probe through the rename
+    and the deletion. A download starting at the rename or at the deletion
+    is refused (`download_model`'s own timeout on the repo's lock, shortened
+    here), the model is removed whole, and no lock or partial file of the
+    unseen blob is made; after the removal a download goes ahead, from
+    nothing, and lays the model out whole."""
+    cache = tmp_path / "hub"
+    path, _ = _fetch(fake_hub, cache)
+    unseen = _forget_a_blob(cache, path, "model.safetensors")
+    monkeypatch.setattr(download, "LOCK_TIMEOUT", 0.2)
+    downloads: dict[str, Path | DownloadError] = {}
+
+    def a_download_starts(at: str) -> None:
+        if at in downloads:
+            return  # the download's own renames, under the hook, start no other
+        downloads[at] = DownloadError("not started")
+        try:
+            downloads[at] = _fetch(fake_hub, cache)[0]
+        except DownloadError as exc:
+            downloads[at] = exc
+
+    removed = _remove_as_another_run_starts(monkeypatch, cache, a_download_starts)
+
+    assert removed == path.parents[1] and not removed.exists()
+    for at in ("at the rename", "at the deletion"):
+        assert isinstance(downloads[at], DownloadError), f"a download {at} went ahead under the removal"
+        assert "running" in str(downloads[at]) and FAKE_REPO in str(downloads[at]), str(downloads[at])
+    assert not unseen.exists() and _incomplete(cache) == [], "the download under the removal touched the cache"
+    a_download_starts("after the removal")
+    assert isinstance(downloads["after the removal"], Path)
+    assert snapshot_files(downloads["after the removal"]) == FAKE_FILES
+
+
+def test_remove_refuses_while_a_download_runs_before_it_has_reached_any_blob(
+    fake_hub: FakeHub, tmp_path: Path
+):
+    """Codex review 9, code finding 1 and security finding 1 (download.py:775),
+    the other side: a running download that has not yet taken any blob's
+    lock (it is planning, or between two blobs) held nothing the probe
+    could find, so a removal in that moment went ahead and the download
+    then wrote into a folder the cache no longer named. The download holds
+    the repo's lock from before it asks the hub until the model is laid
+    out: a removal at its first update, before any byte moves, is refused
+    as running, and the download completes whole."""
+    cache = tmp_path / "hub"
+    path, _ = _fetch(fake_hub, cache)
+    _forget_a_blob(cache, path, "model.safetensors")
+    removals: list[DownloadError | Path] = []
+
+    def a_removal_starts(update: Update) -> None:
+        if removals:
+            return
+        try:
+            removals.append(remove_model(FAKE_REPO, cache_dir=cache))
+        except DownloadError as exc:
+            removals.append(exc)
+
+    resumed = download_model(FAKE_REPO, endpoint=fake_hub.endpoint, cache_dir=cache, on_update=a_removal_starts)
+
+    (refused,) = removals
+    assert isinstance(refused, DownloadError), "the removal went ahead under a running download"
+    assert "running" in str(refused) and FAKE_REPO in str(refused)
+    assert resumed == path and snapshot_files(resumed) == FAKE_FILES
+
+
+def _mlx_vlm_loading_through_the_hub(monkeypatch: pytest.MonkeyPatch, hub: FakeHub) -> threading.Event:
+    """mlx-vlm as `MLXBackend._ensure_loaded` imports it, a stand-in here and
+    where the real one does not import (Windows, an Intel Mac): its `load`
+    does what the real load's `get_model_path` does, takes a folder on disk
+    as it is and otherwise runs the hub library's `snapshot_download` from
+    `hub` with mlx-vlm's own allow patterns into the cache `_cache_paths`
+    reads (`HF_HUB_CACHE`, pointed under tmp_path by `_cli_sees_the_cache`),
+    and returns a model and a processor that are no weights; its
+    `load_config` reads nothing. Returns the event `load` sets as it
+    begins."""
+    loading = threading.Event()
+    mlx_vlm, utils = types.ModuleType("mlx_vlm"), types.ModuleType("mlx_vlm.utils")
+
+    def load(repo: str) -> tuple[str, str]:
+        loading.set()
+        if not Path(repo).exists():
+            repo = snapshot_download(repo, endpoint=hub.endpoint, allow_patterns=list(MODEL_FILE_PATTERNS))
+        return f"model at {repo}", "processor"
+
+    mlx_vlm.load, mlx_vlm.utils, utils.load_config = load, utils, lambda repo: {}
+    monkeypatch.setitem(sys.modules, "mlx_vlm", mlx_vlm)
+    monkeypatch.setitem(sys.modules, "mlx_vlm.utils", utils)
+    return loading
+
+
+def test_remove_refuses_while_the_models_load_fetches_a_blob_it_has_not_seen(
+    fake_hub: FakeHub, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Codex review 10, code finding 1 and security finding 1 (download.py:833).
+    The executable's mlx engine loads the model through mlx-vlm's `load`,
+    whose `snapshot_download` fetches what the cache does not hold under
+    the hub library's per-blob locks alone, so a load fetching a blob the
+    download had not reached (no lock file yet for the removal's probe to
+    find) took no lock the probe could see: a removal in that moment went
+    ahead, set the folder aside and deleted the blob under the load. The
+    load holds the repo's lock (`download.load_lock`, the one the download
+    and the removal take) for its whole run: a removal at the moment the
+    load takes the unseen blob's lock is refused as running, the model is
+    whole once the load returns, and a removal after it goes ahead."""
+    cache = tmp_path / "hub"
+    path, _ = _fetch(fake_hub, cache)
+    _forget_a_blob(cache, path, "model.safetensors")
+    _cli_sees_the_cache(monkeypatch, cache)
+    _mlx_vlm_loading_through_the_hub(monkeypatch, fake_hub)
+    removals: dict[str, Path | DownloadError] = {}
+    blob_lock = file_download.WeakFileLock
+
+    def a_removal_starts_at_the_blobs_lock(lock_file, **kwargs):
+        if "at the blob's lock" not in removals:
+            try:
+                removals["at the blob's lock"] = remove_model(FAKE_REPO, cache_dir=cache)
+            except DownloadError as exc:
+                removals["at the blob's lock"] = exc
+        return blob_lock(lock_file, **kwargs)
+
+    monkeypatch.setattr(file_download, "WeakFileLock", a_removal_starts_at_the_blobs_lock)
+    MLXBackend(FAKE_REPO).warmup()
+
+    refused = removals["at the blob's lock"]
+    assert isinstance(refused, DownloadError), "the removal went ahead under the load"
+    assert "running" in str(refused) and FAKE_REPO in str(refused), str(refused)
+    assert snapshot_files(path) == FAKE_FILES, "the load did not leave the model whole"
+    assert not remove_model(FAKE_REPO, cache_dir=cache).exists(), "the load's lock outlived it"
+
+
+def test_the_models_load_waits_for_a_removal_and_then_lays_the_model_out_from_nothing(
+    fake_hub: FakeHub, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Codex review 10, code finding 1 and security finding 1 (download.py:833),
+    the other side: a load starting under a removal, at the rename or at
+    the deletion, fetched into a folder the removal was setting aside and
+    deleting. The load waits at the repo's lock, as the hub library's own
+    download waits at a blob's, without bound: it fetches nothing until
+    the removal has returned, then lays the model out from nothing."""
+    cache = tmp_path / "hub"
+    _fetch(fake_hub, cache)
+    _cli_sees_the_cache(monkeypatch, cache)
+    loading = _mlx_vlm_loading_through_the_hub(monkeypatch, fake_hub)
+    loads: dict[str, threading.Thread] = {}
+    loaded_under_the_removal: dict[str, bool] = {}
+
+    def a_load_starts(at: str) -> None:
+        if at in loads:
+            return  # the load's own renames, under the hook, start no other
+        loads[at] = threading.Thread(target=MLXBackend(FAKE_REPO).warmup)
+        loads[at].start()
+        loaded_under_the_removal[at] = loading.wait(timeout=1)
+
+    removed = _remove_as_another_run_starts(monkeypatch, cache, a_load_starts)
+    for load in loads.values():
+        load.join(timeout=30)
+
+    assert removed == cache / FAKE_FOLDER
+    assert loaded_under_the_removal == {"at the rename": False, "at the deletion": False}
+    assert not any(load.is_alive() for load in loads.values()), "a load never returned"
+    assert snapshot_files(cache / FAKE_FOLDER / "snapshots" / FAKE_COMMIT) == FAKE_FILES
+
+
+def test_the_load_of_a_folder_of_weights_on_disk_takes_no_lock(
+    fake_hub: FakeHub, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """`[model] repo` may name a folder of weights on disk, which mlx-vlm's
+    load takes as it is, fetching nothing: it is in no cache, so there is
+    no repo's lock to take and no id for the cache to refuse."""
+    cache, weights = tmp_path / "hub", tmp_path / "weights"
+    weights.mkdir()
+    _cli_sees_the_cache(monkeypatch, cache)
+    loading = _mlx_vlm_loading_through_the_hub(monkeypatch, fake_hub)
+
+    MLXBackend(str(weights)).warmup()
+
+    assert loading.is_set() and fake_hub.requests == []
+    assert not cache.exists(), "the load of a folder on disk touched the cache"
+
+
+def test_model_status_flag_needs_no_folder_and_prints_one_json_object_for_the_configured_repo(
+    monkeypatch, capsys
+):
+    """Like --download-model: no folder, [model] repo (or --model), and the
+    status as one JSON object on stdout, exit 0."""
+    asked = []
+    monkeypatch.setattr(download, "model_status", lambda repo: asked.append(repo) or Status(
+        repo, installed=False, bytes_total=None, bytes_done=0, path=None, cancel_path="/data/download-cancel"))
+
+    assert main(["--model-status", "--no-local-config"]) == 0
+
+    assert asked == [ModelConfig().repo]
+    (status_line,) = capsys.readouterr().out.splitlines()
+    assert json.loads(status_line) == {
+        "repo": ModelConfig().repo, "installed": False, "bytes_total": None,
+        "bytes_done": 0, "path": None, "cancel_path": "/data/download-cancel"}
+
+
+def test_remove_model_flag_takes_model_and_prints_removed_with_the_path(monkeypatch, capsys, tmp_path):
+    asked = []
+    monkeypatch.setattr(download, "remove_model", lambda repo: asked.append(repo) or tmp_path / "gone")
+
+    assert main(["--remove-model", "--no-local-config", "--model", "fake-org/other"]) == 0
+
+    assert asked == ["fake-org/other"]
+    assert capsys.readouterr().out.splitlines() == [f"removed {tmp_path / 'gone'}"]
+
+
+def test_remove_model_flag_exits_3_with_the_refusal_on_stderr_and_nothing_on_stdout(monkeypatch, capsys):
+    def refuse(repo):
+        raise DownloadError(HELD.format(repo="x"))
+
+    monkeypatch.setattr(download, "remove_model", refuse)
+
+    _refused_through_the_cli(capsys, "--remove-model", "another run holds x")
+
+
+@pytest.mark.parametrize("flag", ["--download-model", "--model-status", "--remove-model"])
+def test_model_flags_exit_3_with_the_config_key_on_stderr_when_the_repo_is_not_a_repo_id(capsys, flag: str):
+    """Security (Claude review 9 of #16, download.py:643 and :675). A `[model]
+    repo` (or `--model`) that is not a repo id (a URL, a path) is refused by
+    the hub library's own check before the hub is asked anything; the
+    download mapped that to exit 3 naming the config key, the status and the
+    removal let it out as a 19-line traceback, exit 1. All three refuse the
+    same way: exit 3, the key on stderr, nothing on stdout."""
+    err = _refused_through_the_cli(capsys, flag, "[model] repo", repo="not a repo id/x/y")
+    assert "not a repo id/x/y" in err
+
+
+def test_cli_reports_absent_then_installed_then_removed_against_the_fake_hub(
+    fake_hub: FakeHub, hub_env: dict[str, str]
+):
+    """Done-when 1 and 3 (#408) through the entry point, in the order the
+    Settings dialog will see them: absent with the size, installed with the
+    path after `--download-model`, absent again after `--remove-model`."""
+    before = _cli(["--model-status", "--model", FAKE_REPO], hub_env)
+    assert before.returncode == 0, before.stderr[-3000:]
+    status = json.loads(before.stdout)
+    assert status["repo"] == FAKE_REPO and status["installed"] is False
+    assert status["bytes_total"] == FAKE_TOTAL and status["bytes_done"] == 0 and status["path"] is None
+    assert status["cancel_path"].endswith(CANCEL_MARKER)
+
+    downloaded = _cli(["--download-model", "--model", FAKE_REPO], hub_env)
+    assert downloaded.returncode == 0, downloaded.stderr[-3000:]
+    snapshot = Update.parse(downloaded.stdout.splitlines()[-1]).path
+
+    after = _cli(["--model-status", "--model", FAKE_REPO], hub_env)
+    assert after.returncode == 0, after.stderr[-3000:]
+    status = json.loads(after.stdout)
+    assert status["installed"] is True and status["path"] == snapshot
+    assert status["bytes_done"] == status["bytes_total"] == FAKE_TOTAL
+
+    removed = _cli(["--remove-model", "--model", FAKE_REPO], hub_env)
+    assert removed.returncode == 0, removed.stderr[-3000:]
+    assert removed.stdout.startswith("removed ") and not Path(snapshot).exists()
+    assert json.loads(_cli(["--model-status", "--model", FAKE_REPO], hub_env).stdout)["installed"] is False

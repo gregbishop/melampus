@@ -185,7 +185,8 @@ def _download_model(repo: str) -> int:
     """--download-model (card #407): fetch the MLX model with progress on
     stdout in the protocol the plugin parses (docs/config.md § Downloading the
     model). Exit 0 once complete, 3 on a failure with the fix on stderr, and
-    EXIT_CANCELLED when a signal stopped it with the partial file kept."""
+    EXIT_CANCELLED when a signal or the cancel marker (card #408) stopped it
+    with the partial file kept: one path for both."""
     from .download import EXIT_CANCELLED, DownloadCancelled, DownloadError, Update, cancel_on_signals, download_model
 
     def emit(update: Update) -> None:
@@ -200,6 +201,37 @@ def _download_model(repo: str) -> int:
     except DownloadError as exc:
         return _fail(str(exc))
     emit(Update.done(str(path)))
+    return 0
+
+
+def _model_status(repo: str) -> int:
+    """--model-status (card #408): one JSON object on stdout saying whether the
+    MLX model is in the cache, its size, and where the plugin writes to
+    cancel a download. Never fails for the network: the size is null then.
+    Exit 3 with the reason on stderr for a repo that is not a repo id, or a
+    cache it cannot read."""
+    from .download import DownloadError, model_status
+
+    try:
+        status = model_status(repo)
+    except DownloadError as exc:
+        return _fail(str(exc))
+    print(status.json())
+    return 0
+
+
+def _remove_model(repo: str) -> int:
+    """--remove-model (card #408): delete the MLX model from the cache, exit 0
+    with `removed <path>`; exit 3 with the reason on stderr when the removal
+    is refused (the causes: docs/config.md § `--model-status` and
+    `--remove-model`, and `download.remove_model`)."""
+    from .download import DownloadError, remove_model
+
+    try:
+        path = remove_model(repo)
+    except DownloadError as exc:
+        return _fail(str(exc))
+    print(f"removed {path}")
     return 0
 
 
@@ -245,7 +277,19 @@ def main(argv: list[str] | None = None) -> int:
                     help="fetch the MLX model ([model] repo, or --model) into the "
                          "Hugging Face cache, one 'progress <bytes done> <bytes total>' "
                          "line per update on stdout and 'done <path>' at the end, "
-                         "then exit; resumes an interrupted download; needs no folder")
+                         "then exit; resumes an interrupted download; stops, exit 4, "
+                         "on a signal or when the cancel file --model-status names "
+                         "appears; needs no folder")
+    ap.add_argument("--model-status", action="store_true",
+                    help="print, as one JSON object, whether the MLX model ([model] repo, "
+                         "or --model) is in the Hugging Face cache, its size and path, "
+                         "then exit; needs no folder or network")
+    ap.add_argument("--remove-model", action="store_true",
+                    help="delete the MLX model ([model] repo, or --model) from the "
+                         "Hugging Face cache and print 'removed <path>', then exit; "
+                         "refused, exit 3 with the reason, for the causes docs/config.md "
+                         "lists (a download of it running, nothing installed, ...); "
+                         "needs no folder")
     ap.add_argument("--yes", action="store_true",
                     help="skip the cost confirmation when the primary backend is a "
                          "cloud provider (for non-interactive callers)")
@@ -317,6 +361,10 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.download_model:
         return _download_model(config.model.repo)
+    if args.model_status:
+        return _model_status(config.model.repo)
+    if args.remove_model:
+        return _remove_model(config.model.repo)
     if args.folder is None:
         ap.error("the following arguments are required: folder")
 
