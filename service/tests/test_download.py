@@ -2488,20 +2488,36 @@ def test_pull_stream_error_words_keep_none_of_the_servers_control_characters(err
 @pytest.mark.parametrize(
     "layer",
     [
-        {"status": "pulling aaa", "digest": "sha256:aaa", "total": "lots"},
-        {"status": "pulling aaa", "digest": "sha256:aaa", "total": [100], "completed": 1},
-        {"status": "pulling aaa", "digest": "sha256:aaa", "total": 100, "completed": {"n": 1}},
+        '{"status": "pulling aaa", "digest": "sha256:aaa", "total": "lots"}',
+        '{"status": "pulling aaa", "digest": "sha256:aaa", "total": [100], "completed": 1}',
+        '{"status": "pulling aaa", "digest": "sha256:aaa", "total": 100, "completed": {"n": 1}}',
+        '{"status": "pulling aaa", "digest": "sha256:aaa", "total": 1e309}',
+        '{"status": "pulling aaa", "digest": "sha256:aaa", "total": 100, "completed": 1e309}',
+        '{"status": "pulling aaa", "digest": "sha256:aaa", "total": -1}',
+        '{"status": "pulling aaa", "digest": "sha256:aaa", "total": 1.5}',
+        '{"status": "pulling aaa", "digest": "sha256:aaa", "total": true}',
+        '{"status": "pulling aaa", "digest": "sha256:aaa", "total": 100, "completed": true}',
+        '{"status": "pulling aaa", "digest": "sha256:aaa", "total": %d}' % (download.MAX_SIZE + 1),
+        '{"status": "pulling aaa", "digest": "sha256:aaa", "total": %d, "completed": %d}'
+        % (download.MAX_SIZE, download.MAX_SIZE + 1),
     ],
-    ids=["total-words", "total-list", "completed-object"],
+    ids=["total-words", "total-list", "completed-object", "total-1e309", "completed-1e309", "total-negative",
+         "total-fraction", "total-bool", "completed-bool", "total-above-MAX_SIZE", "completed-above-MAX_SIZE"],
 )
-def test_pull_stream_layer_line_with_counts_that_are_not_numbers_is_a_failure_not_a_traceback(layer: dict):
+def test_pull_stream_layer_line_with_counts_that_are_not_counts_is_a_failure_not_a_traceback(layer: str):
     """A layer line's `total` and `completed` are the server's to write; one
-    that is not a number is a malformed stream, a failure named like the
-    non-JSON line, not a traceback out of --download-model."""
+    that is not a count is a malformed stream, a failure named like the
+    non-JSON line, not a traceback out of --download-model. A count is what
+    the MLX status takes as a file's size (Codex review 8 and Claude review
+    16 there): a non-negative integer of at most MAX_SIZE, not a bool, not
+    a fraction, not `1e309`, which Python reads as the float `inf` and
+    `int()` refuses with an OverflowError, not a ValueError (Codex review,
+    opposing vendor, round 1, security finding 1, download.py:1043: a
+    traceback out of --download-model, in the plugin's log)."""
     from melampus.download import pull_updates
 
     with pytest.raises(DownloadError) as failure:
-        list(pull_updates(FAKE_MODEL, _stream({"status": "pulling manifest"}, layer)))
+        list(pull_updates(FAKE_MODEL, _stream({"status": "pulling manifest"}) + [layer.encode("utf-8") + b"\n"]))
     assert "not a count" in str(failure.value), str(failure.value)
 
 
@@ -3144,8 +3160,15 @@ def test_status_with_no_ollama_answering_says_absent_and_never_fails():
     ({"models": [{"name": "other:latest", "model": [FAKE_MODEL]}]}, "whose model is not a string"),
     ({"models": [{"name": FAKE_MODEL, "size": "large"}]}, "a size that is not a count"),
     ({"models": [{"name": FAKE_MODEL, "size": [1]}]}, "a size that is not a count"),
+    (b'{"models": [{"name": "%s", "size": 1e309}]}' % FAKE_MODEL.encode(), "a size that is not a count"),
+    (b'{"models": [{"name": "%s", "size": -1}]}' % FAKE_MODEL.encode(), "a size that is not a count"),
+    (b'{"models": [{"name": "%s", "size": 1.5}]}' % FAKE_MODEL.encode(), "a size that is not a count"),
+    (b'{"models": [{"name": "%s", "size": true}]}' % FAKE_MODEL.encode(), "a size that is not a count"),
+    (b'{"models": [{"name": "%s", "size": %d}]}' % (FAKE_MODEL.encode(), download.MAX_SIZE + 1),
+     "a size that is not a count"),
 ], ids=["not-an-object", "models-not-a-list", "models-entry-not-an-object", "name-not-a-string",
-        "model-not-a-string", "size-words", "size-a-list"])
+        "model-not-a-string", "size-words", "size-a-list", "size-1e309", "size-negative", "size-fraction",
+        "size-bool", "size-above-MAX_SIZE"])
 def test_status_with_an_ollama_answering_the_list_in_the_wrong_shape_says_absent_and_never_fails(reply, named):
     """Security: the list is whatever listens at the address writes it, and
     `--model-status` is what the Settings dialog waits on when it opens, so
@@ -3158,7 +3181,14 @@ def test_status_with_an_ollama_answering_the_list_in_the_wrong_shape_says_absent
     message says which field is wrong, the `name` or the `model`, not
     "no name" for an entry that has one; round 4 (download.py:894-899): an
     entry that is not an object is named as such, not for a name it has no
-    field to hold."""
+    field to hold. A size that is a number but not a count (Codex review,
+    opposing vendor, round 1, security finding 1, download.py:1194): `1e309`
+    is the float `inf` in Python, which `int()` refuses with an
+    OverflowError, not a ValueError, a traceback out of --model-status; a
+    count is what the MLX status takes as a file's size, a non-negative
+    integer of at most MAX_SIZE, not a bool, not a fraction. Those replies
+    are the bytes as the server writes them (`json.dumps` cannot write
+    `1e309`)."""
     from conftest import QuietHandler
 
     class WrongShape(QuietHandler):
@@ -3166,7 +3196,7 @@ def test_status_with_an_ollama_answering_the_list_in_the_wrong_shape_says_absent
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
-            self.wfile.write(json.dumps(reply).encode("utf-8"))
+            self.wfile.write(reply if isinstance(reply, bytes) else json.dumps(reply).encode("utf-8"))
 
     with loopback_server(WrongShape) as squatter:
         address = f"http://127.0.0.1:{squatter.server_port}"

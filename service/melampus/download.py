@@ -162,6 +162,17 @@ PROBE_TIMEOUT: float = 0.1
 # not), and the plugin reads a shorter one as `inf` or as a rounded number.
 MAX_SIZE = 2**53
 
+
+def _is_count(value: object) -> bool:
+    """Whether `value` is a count of bytes as a listing or a stream may
+    carry one: a non-negative integer of at most MAX_SIZE. A bool is an int
+    in Python and is not one; `1e309` is a float, `inf`, which `int()`
+    refuses with an OverflowError, not a ValueError, and which the plugin's
+    JSON decoder rejects as `Infinity`; above MAX_SIZE a count is one
+    `json.dumps` or the plugin's decoder cannot carry. One rule for the
+    hub's file sizes, Ollama's pull counts and its list's sizes."""
+    return type(value) is int and 0 <= value <= MAX_SIZE
+
 # The query string of any URL in a piece of text: an LFS file's bytes come
 # from the CDN at a signed URL, whose query is the signature and its expiry,
 # a credential for that file. Nothing this command prints carries it.
@@ -826,10 +837,7 @@ def model_status(repo: str, *, endpoint: str | None = None, cache_dir: Path | No
         listed: dict[str, int | None] = {f.rfilename: f.size for f in info.siblings or []}
         if not all(isinstance(name, str) for name in listed):
             raise TypeError("a file name in the listing is not a string")
-        # A bool is an int in Python; 1e309 is a float, inf, which the plugin's
-        # JSON decoder rejects as `Infinity`; above MAX_SIZE, a size or the
-        # total is one `json.dumps` or the plugin's decoder cannot carry.
-        if not all(size is None or (type(size) is int and 0 <= size <= MAX_SIZE) for size in listed.values()):
+        if not all(size is None or _is_count(size) for size in listed.values()):
             raise TypeError("a file size in the listing is not a non-negative integer, or is above MAX_SIZE")
         total: int | None = sum(size or 0 for size in listed.values())
         if total > MAX_SIZE:
@@ -1016,9 +1024,12 @@ def pull_updates(model: str, lines: Iterable[bytes | str]) -> Iterator[Update]:
     manifest: file does not exist`, its 404), else the re-run hint, since
     Ollama keeps the layers it has and resumes them. A stream that ends
     before `success` is a failure too, as is a line that is not JSON, a
-    layer line whose `total` or `completed` is not a count, a digest longer
-    than MAX_DIGEST_CHARS or a layer past MAX_PULL_LAYERS: every line is
-    the server's to write, and a malformed one is named, never a traceback.
+    layer line whose `total` or `completed` is not a count (`_is_count`:
+    the hub's rule for a file's size, so `1e309`, a fraction, a negative
+    number, a bool or an integer above MAX_SIZE is named, never converted),
+    a digest longer than MAX_DIGEST_CHARS or a layer past MAX_PULL_LAYERS:
+    every line is the server's to write, and a malformed one is named,
+    never a traceback.
     """
     layers: dict[str, tuple[int, int]] = {}
     for raw in lines:
@@ -1039,12 +1050,9 @@ def pull_updates(model: str, lines: Iterable[bytes | str]) -> Iterator[Update]:
             yield Update.done(model)
             return
         if status.startswith("pulling ") and item.get("digest") and "total" in item:
-            try:
-                counts = (int(item["total"]), int(item.get("completed") or 0))
-            except (TypeError, ValueError) as exc:
-                raise DownloadError(
-                    f"Ollama's pull reply carried a size that is not a count: {text[:120]!r}"
-                ) from exc
+            counts = (item["total"], item.get("completed", 0))
+            if not all(_is_count(count) for count in counts):
+                raise DownloadError(f"Ollama's pull reply carried a size that is not a count: {text[:120]!r}")
             digest = str(item["digest"])
             if len(digest) > MAX_DIGEST_CHARS:
                 raise DownloadError(
@@ -1177,8 +1185,9 @@ def _held(model: str, url: str, *, timeout: float = STATUS_TIMEOUT) -> tuple[str
     exchange within `timeout`. A name without a tag is `<name>:latest`
     there (§ Model names: the tag defaults to `latest`). The list is the
     server's to write: one not in that shape (`models` not a list, an
-    entry not an object, its name not a string, its size not a count) is a DownloadError
-    naming it, as a malformed pull line is, never a traceback."""
+    entry not an object, its name not a string, its size not a count by
+    the hub's rule, `_is_count`) is a DownloadError naming it, as a
+    malformed pull line is, never a traceback."""
     names = {model, model if ":" in model else f"{model}:latest"}
     models = _ollama_request(model, url, OLLAMA_TAGS, method="GET", timeout=timeout).get("models") or []
     if not isinstance(models, list):
@@ -1202,13 +1211,12 @@ def _held(model: str, url: str, *, timeout: float = STATUS_TIMEOUT) -> tuple[str
                 f"{str(entry)[:120]!r}"
             )
         if names & {name, alias}:
-            try:
-                size = int(entry.get("size") or 0)
-            except (TypeError, ValueError) as exc:
+            size = entry.get("size", 0)
+            if not _is_count(size):
                 raise DownloadError(
                     f"Ollama's list from {url}{OLLAMA_TAGS} carried a size that is not a count: "
                     f"{str(entry)[:120]!r}"
-                ) from exc
+                )
             return name, size
     return None
 
