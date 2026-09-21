@@ -1185,9 +1185,10 @@ def test_status_of_a_snapshot_missing_a_file_the_hub_lists_reports_not_installed
     runs, a file at a time as each completes) leaves `refs/main` naming a
     snapshot that holds some of the model, and the status said Installed of
     it, so Settings offered Remove where the model could not load. Installed
-    means whole: every file the hub lists for the repo is in the snapshot,
-    at the hub's size. The blobs stay counted, so the next download lays the
-    snapshot out without fetching them again."""
+    means whole: every file the hub lists for the repo that the model's load
+    needs (mlx-vlm's own patterns, `download.MODEL_FILE_PATTERNS`) is in the
+    snapshot, at the hub's size. The blobs stay counted, so the next
+    download lays the snapshot out without fetching them again."""
     path, _ = _fetch(fake_hub, tmp_path / "hub")
     left(path / "model.safetensors")
 
@@ -1195,6 +1196,41 @@ def test_status_of_a_snapshot_missing_a_file_the_hub_lists_reports_not_installed
 
     assert status.installed is False and status.path is None
     assert status.bytes_total == FAKE_TOTAL and status.bytes_done == FAKE_TOTAL
+
+
+# What the hub writes into every repo beside the model: its listing names both,
+# and mlx-vlm's load fetches neither.
+HUB_EXTRAS = {".gitattributes": b"*.safetensors filter=lfs diff=lfs merge=lfs -text\n",
+              "README.md": b"# fake model\n"}
+
+
+@pytest.mark.parametrize("fake_hub", [{**FAKE_FILES, **HUB_EXTRAS}], indirect=True, ids=["with the hub's extras"])
+def test_status_of_a_snapshot_laid_out_by_mlx_vlms_own_load_reports_installed(fake_hub: FakeHub, tmp_path: Path):
+    """Done-when 3 (Claude review 11, code finding 1; download.py:676). The
+    executable's mlx engine loads the model through mlx-vlm's `load`, whose
+    `get_model_path` runs the hub library's `snapshot_download` with
+    mlx-vlm's own allow patterns (`*.json`, `*.safetensors`, `*.py`,
+    `*.model`, `*.tiktoken`, `*.txt`, `*.jinja`), so the snapshot it lays
+    out, complete and loadable, never holds the `.gitattributes` the hub
+    writes into every repo nor the model card `README.md`, both of which
+    the hub's listing names. Installed meant every listed file, so a model
+    the first identification run fetched (the "download on first use" path
+    readme.md names) read not installed, and Settings offered Download,
+    with no Remove, for a model the engine had just used. Whole means what
+    the model's load needs: the listed files that match mlx-vlm's patterns,
+    each at the hub's size."""
+    from huggingface_hub import snapshot_download
+
+    from melampus.download import MODEL_FILE_PATTERNS
+
+    laid_out = Path(snapshot_download(FAKE_REPO, endpoint=fake_hub.endpoint, cache_dir=tmp_path / "hub",
+                                      allow_patterns=list(MODEL_FILE_PATTERNS)))
+    assert snapshot_files(laid_out) == FAKE_FILES, "the load's snapshot does not hold the model files alone"
+
+    status = _status(fake_hub, tmp_path / "hub")
+
+    assert status.installed is True and status.path == str(laid_out)
+    assert status.bytes_total == FAKE_TOTAL + sum(len(data) for data in HUB_EXTRAS.values())
 
 
 def test_status_of_a_snapshot_missing_a_file_with_no_host_answering_says_what_the_cache_lays_out(

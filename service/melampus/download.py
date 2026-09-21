@@ -76,7 +76,7 @@ from huggingface_hub.file_download import (  # noqa: E402
     repo_folder_name,
 )
 from huggingface_hub.hf_api import RepoFile  # noqa: E402
-from huggingface_hub.utils import WeakFileLock, build_hf_headers  # noqa: E402
+from huggingface_hub.utils import WeakFileLock, build_hf_headers, filter_repo_objects  # noqa: E402
 from huggingface_hub.utils import logging as hub_logging  # noqa: E402 - the library's own logger, where its warnings go
 from huggingface_hub.utils._http import default_client_factory  # noqa: E402 - the library's own client, not a copy of it
 
@@ -106,6 +106,13 @@ def cancel_marker_path() -> Path:
 # opens and waits for the exit code, so a connection the hub takes and never
 # answers must end here, not hang the dialog.
 STATUS_TIMEOUT: float = constants.DEFAULT_REQUEST_TIMEOUT
+
+# The files a model's load needs: mlx-vlm's own allow patterns
+# (mlx_vlm.utils.get_model_path, mlx-vlm 0.6.8), which its `load` hands the
+# hub library's snapshot_download, so the snapshot it lays out holds these
+# and not the rest of what the hub lists (`.gitattributes`, the model card).
+# Named here, once, because mlx-vlm is not importable off Apple Silicon.
+MODEL_FILE_PATTERNS = ("*.json", "*.safetensors", "*.py", "*.model", "*.tiktoken", "*.txt", "*.jinja")
 
 RERUN = "re-run melampus-id --download-model; it resumes where it stopped"
 NOT_A_HUB = "whatever answers there is not a Hugging Face hub; check HF_ENDPOINT"
@@ -657,12 +664,15 @@ def model_status(repo: str, *, endpoint: str | None = None, cache_dir: Path | No
     asks it: the user's token goes only where that client lets it go.
 
     Installed means whole: the snapshot `main` names in the cache holds
-    every file the hub lists, each at the hub's size. A download stopped
-    while the snapshot was being laid out (this module's, or the hub
-    library's own, which mlx-vlm's load runs) leaves `refs/main` naming a
-    snapshot with some of the files, which mlx-vlm cannot load; the blobs
-    stay counted in `bytes_done`, so the next download lays the rest out
-    without fetching them again. When the hub cannot answer, nothing on the
+    every file the hub lists that the model's load needs (those matching
+    MODEL_FILE_PATTERNS, mlx-vlm's own; the hub's `.gitattributes` and the
+    model card are listed but not needed, and mlx-vlm's load never fetches
+    them), each at the hub's size. A download stopped while the snapshot
+    was being laid out (this module's, or the hub library's own, which
+    mlx-vlm's load runs) leaves `refs/main` naming a snapshot with some of
+    the files, which mlx-vlm cannot load; the blobs stay counted in
+    `bytes_done`, so the next download lays the rest out without fetching
+    them again. When the hub cannot answer, nothing on the
     machine names the files the repo should hold, and installed is what the
     cache lays out: the snapshot `main` names, whole as far as the cache
     knows (the network being down is no reason to offer Download for a
@@ -685,11 +695,14 @@ def model_status(repo: str, *, endpoint: str | None = None, cache_dir: Path | No
 def _holds(revision, listed: dict[str, int | None]) -> bool:
     """Whether the cached revision's snapshot holds every file `listed` (the
     hub's file names, at the repo's root as the hub spells them, to their
-    sizes; a size the hub did not give asks the name alone), each at the
-    hub's size. The scan's `size_on_disk` is the blob's size, a pointer's
-    target or a copy's own, so a copy cut short is not the file."""
+    sizes; a size the hub did not give asks the name alone) that the
+    model's load needs (MODEL_FILE_PATTERNS, matched as the hub library's
+    snapshot_download matches them), each at the hub's size. The scan's
+    `size_on_disk` is the blob's size, a pointer's target or a copy's own,
+    so a copy cut short is not the file."""
     on_disk = {f.file_path.relative_to(revision.snapshot_path).as_posix(): f.size_on_disk for f in revision.files}
-    return all(name in on_disk and (size is None or on_disk[name] == size) for name, size in listed.items())
+    needed = filter_repo_objects(listed, allow_patterns=list(MODEL_FILE_PATTERNS))
+    return all(name in on_disk and (listed[name] is None or on_disk[name] == listed[name]) for name in needed)
 
 
 def _download_running(lock_dir: Path) -> bool:

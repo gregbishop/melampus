@@ -141,7 +141,14 @@ the hub is asked anything.
   `{"repo", "installed", "bytes_total", "bytes_done", "path", "cancel_path"}`.
   `installed` means whole: the snapshot the cache's `refs/main` names (from
   the hub library's scan of the local cache) holds every file the hub's
-  listing names, each at the hub's size. A download stopped while the
+  listing names that the model's load needs, each at the hub's size. The
+  files the load needs are those matching mlx-vlm's own patterns
+  (`*.json`, `*.safetensors`, `*.py`, `*.model`, `*.tiktoken`, `*.txt`,
+  `*.jinja`, named once as `download.MODEL_FILE_PATTERNS`), which is what
+  mlx-vlm's load fetches on first use: the `.gitattributes` the hub writes
+  into every repo and the model card `README.md` are listed, counted in
+  `bytes_total`, and not needed, so a model the first identification run
+  fetched reads installed. A download stopped while the
   snapshot was being laid out, this command's or the hub library's own, which
   mlx-vlm's load runs, leaves a snapshot with some of the files, which reads
   as not installed (its blobs still count in `bytes_done`, so the next
