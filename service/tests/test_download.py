@@ -62,6 +62,7 @@ from melampus.config import ModelConfig
 from melampus.download import (
     CANCEL_MARKER,
     EXIT_CANCELLED,
+    HELD,
     MODEL_FILE_PATTERNS,
     DownloadCancelled,
     DownloadError,
@@ -2275,11 +2276,11 @@ def test_remove_model_flag_takes_model_and_prints_removed_with_the_path(monkeypa
 
 def test_remove_model_flag_exits_3_with_the_refusal_on_stderr_and_nothing_on_stdout(monkeypatch, capsys):
     def refuse(repo):
-        raise DownloadError("a download of x is running; cancel it first")
+        raise DownloadError(HELD.format(repo="x"))
 
     monkeypatch.setattr(download, "remove_model", refuse)
 
-    _refused_through_the_cli(capsys, "--remove-model", "cancel it first")
+    _refused_through_the_cli(capsys, "--remove-model", "another run holds x")
 
 
 @pytest.mark.parametrize("flag", ["--download-model", "--model-status", "--remove-model"])
