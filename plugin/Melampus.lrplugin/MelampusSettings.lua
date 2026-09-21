@@ -97,7 +97,9 @@ LrTasks.startAsyncTask(function()
 		-- or the unset preference resolves to it. The executable's
 		-- --download-model, --model-status and --remove-model take the engine
 		-- as --backend and do the right thing for it: the hub for mlx, Ollama's
-		-- own pull for ollama.
+		-- own pull for ollama. One download at a time across the rows: the
+		-- controller (Analyze.downloadModel) refuses a second while one runs,
+		-- and the row shows its message as for any download that cannot start.
 		local function phaseOf(answer) return answer.installed == true and 'installed' or 'absent' end
 		local function modelRow(engine, status)
 			local model = LrBinding.makePropertyTable(context)

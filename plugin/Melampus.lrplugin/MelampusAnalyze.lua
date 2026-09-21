@@ -413,11 +413,21 @@ end
 -- caller's other way of cancelling (Lightroom's own progress bar): the
 -- poller asks it on every tick, whether or not a protocol line has
 -- arrived, and once it says so the cancel is held exactly as cancel()
--- holds it.
+-- holds it. One download runs at a time, whichever engine's row asks: the
+-- progress file, the log and the marker are one set, so a second command
+-- would truncate the first's files, both pollers would read the second's
+-- lines and either Cancel would stop it; while one runs, another is nil
+-- plus a message naming the engine whose model is still downloading.
+local downloading = nil
 function Analyze.downloadModel(engine, cancelPath, onProgress, onFinish, cancelAsked)
+	if downloading then
+		return nil, 'The ' .. tostring(downloading) .. ' model is still downloading.\n\n'
+			.. 'Wait for it to finish, or cancel it, before downloading another.'
+	end
 	local command, err = Analyze.downloadCommand(engine)
 	if not command then return nil, err end
 	local progressFile, logFile = Analyze.downloadFiles()
+	downloading = engine
 	-- Start clean: the shell truncates the file when the command starts,
 	-- but the poller may read before that, and a previous run's `done`
 	-- must not read as this run's.
@@ -443,6 +453,7 @@ function Analyze.downloadModel(engine, cancelPath, onProgress, onFinish, cancelA
 			local update = Rules.latestDownloadUpdate(LrFileUtils.readFile(progressFile))
 			if update then onProgress(update) end
 		end
+		downloading = nil
 		local update = Rules.latestDownloadUpdate(LrFileUtils.readFile(progressFile))
 		Log.info('download exit ' .. tostring(code) .. ': ' .. tostring(update and update.state))
 		onFinish(code, update, Rules.tail(LrFileUtils.readFile(logFile)))

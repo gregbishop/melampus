@@ -673,6 +673,47 @@ for _, case in ipairs(MODEL_ENGINES) do
 	end)
 end
 
+t.test('a Download clicked for the other engine while one download runs is refused, naming the engine still downloading, and the first goes on', function()
+	-- Codex review (opposing vendor) round 1, code finding 1
+	-- (MelampusSettings.lua:118). Both rows share one progress file, one log
+	-- (Analyze.downloadFiles) and one cancel marker (--model-status's
+	-- cancel_path), so a Download clicked on the other engine's row, the
+	-- picker switched mid-download, started a second command that truncated
+	-- the first's files; both pollers then read the second's progress, and
+	-- Cancel on either row stopped whichever was running. One download at a
+	-- time: the second click runs nothing, says which engine's model is still
+	-- downloading, its row offers Download again, and the first download goes
+	-- on to Installed. Proven in both orders, mlx then ollama and the reverse.
+	for _, order in ipairs({ { MODEL_ENGINES[1], MODEL_ENGINES[2] }, { MODEL_ENGINES[2], MODEL_ENGINES[1] } }) do
+		local first, second = order[1], order[2]
+		local contents = openSettings({
+			detection = mock.detectionText({ ollama = OLLAMA_UP }),
+			download = { lines = { 'progress 0 100', 'progress 40 100', 'progress 100 100', 'done ' .. first.name }, code = 0 },
+		})
+		local firstRow, firstModel = modelRow(contents, first.engine)
+		local secondRow, secondModel = modelRow(contents, second.engine)
+		theButton(firstRow, firstModel, 'Download ' .. first.name, true).action()
+		mock.tick()
+		t.equals(firstModel.phase, 'downloading')
+		-- The picker switched to the other engine: its row shows, with Download.
+		theButton(secondRow, secondModel, 'Download ' .. second.name, true).action()
+		t.equals(commandsRun('--download-model'), 1, 'a second download ran while the first was running (' .. first.engine .. ' then ' .. second.engine .. ')')
+		t.equals(secondModel.phase, 'absent', 'the refused row should offer Download again')
+		t.equals(firstModel.phase, 'downloading', 'the first download was disturbed')
+		local shown = dialogsShown(false)
+		t.equals(#shown, 1, 'expected one message, the refusal')
+		t.isNotNil(string.find(shown[1].body, first.engine, 1, true),
+			'the refusal does not name the engine still downloading: ' .. tostring(shown[1].body))
+		t.isNotNil(string.find(shown[1].body, 'still downloading', 1, true), tostring(shown[1].body))
+		mock.settle()
+		t.equals(firstModel.phase, 'installed', 'the first download did not finish')
+		t.equals(secondModel.phase, 'absent')
+		t.equals(commandsRun('--download-model'), 1)
+		t.equals(readFile(mock.state.tempDir .. '/melampus-download.progress'), 'progress 0 100\nprogress 40 100\nprogress 100 100\ndone ' .. first.name .. '\n',
+			'the progress file is not the first download\'s alone')
+	end
+end)
+
 t.test('a download that cannot start, the executable gone since the dialog opened, says so once and offers Download again', function()
 	local contents = openSettings({ detection = mock.detectionText() })
 	local row, model = modelRow(contents)
@@ -815,6 +856,32 @@ t.test('the poller reports each progress line as it lands in the file, then the 
 	for _, update in ipairs(seen) do if update.state == 'progress' then counts[#counts + 1] = update.bytesDone end end
 	t.equals(table.concat(counts, ','), '0,40,100')
 	t.equals(#mock.state.tasks, 0, 'tasks left running after the download finished')
+end)
+
+t.test('a second download asked while one runs is refused, naming the engine, and starts once the first has exited', function()
+	-- Codex review (opposing vendor) round 1, code finding 1
+	-- (MelampusSettings.lua:118), at the controller: the progress file, the
+	-- log and the marker are one set (downloadFiles, the status's
+	-- cancel_path), so downloadModel runs one download at a time, whichever
+	-- row asks; a second is nil plus a message naming the engine whose model
+	-- is still downloading, nothing run, and the next one starts once the
+	-- first has exited.
+	local Analyze = loadAnalyze({ existing = { [mock.EXECUTABLE] = true } })
+	mock.state.onExecute = fakeDownload({ 'progress 0 100', 'done /hf/hub/models--x--y/snapshots/abc' }, 0)
+	local finished = nil
+	local handle = Analyze.downloadModel('mlx', CANCEL_PATH, function() end, function(exit) finished = exit end)
+	t.isNotNil(handle, 'the first download did not start')
+	mock.tick()
+	local second, message = Analyze.downloadModel('ollama', CANCEL_PATH, function() end, function() end)
+	t.isNil(second, 'a second download started while the first was running')
+	t.isNotNil(string.find(tostring(message), 'mlx', 1, true), 'the refusal does not name the engine: ' .. tostring(message))
+	t.equals(#mock.state.executed, 1, 'the second download ran the executable')
+	mock.settle()
+	t.equals(finished, 0)
+	local third, why = Analyze.downloadModel('ollama', CANCEL_PATH, function() end, function() end)
+	t.isNotNil(third, 'no download can start after the first exited: ' .. tostring(why))
+	t.equals(#mock.state.executed, 2)
+	mock.settle()
 end)
 
 t.test('a download that starts from a previous run\'s file does not read stale lines', function()
