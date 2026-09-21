@@ -389,17 +389,19 @@ def claude_code_verdict(command: list[str] | None = None) -> EngineVerdict:
     sign-in (CLAUDE_CODE_SUBSCRIPTION says why), a check that did not
     answer or failed some other way (in the CLI's own words), or available
     and billing to the subscription. A template carrying CLAUDE_CODE_BARE
-    is told to remove it in place of the sign-in, which cannot help it."""
+    is told to remove it in place of the sign-in, which cannot help it, in
+    every verdict that would name the sign-in, the not-installed one
+    included (review round 7, 1)."""
     command = command or CLAUDE_CODE_COMMAND
     program = command[0]
     check = claude_code_status(command)
-    sign_in = CLAUDE_CODE_BARE_FIX if CLAUDE_CODE_BARE in check else f"sign in with `{CLAUDE_CODE_SIGN_IN}`"
+    next_step = CLAUDE_CODE_BARE_FIX if CLAUDE_CODE_BARE in check else f"sign in with `{CLAUDE_CODE_SIGN_IN}`"
     executable = shutil.which(program)
     if executable is None:
         return EngineVerdict(
             CLAUDE_CODE, False,
             f"Claude Code is not installed: nothing on PATH is called '{program}'; "
-            f"install it from {CLAUDE_CODE_INSTALL}, then sign in with `{CLAUDE_CODE_SIGN_IN}`",
+            f"install it from {CLAUDE_CODE_INSTALL}, then {next_step}",
         )
     try:
         status = subprocess.run(
@@ -433,7 +435,7 @@ def claude_code_verdict(command: list[str] | None = None) -> EngineVerdict:
             return EngineVerdict(
                 CLAUDE_CODE, False,
                 f"Claude Code is installed but not signed in: `{program} {' '.join(check)}` "
-                f"says so; {sign_in}",
+                f"says so; {next_step}",
             )
         return EngineVerdict(
             CLAUDE_CODE, False,
@@ -454,7 +456,7 @@ def claude_code_verdict(command: list[str] | None = None) -> EngineVerdict:
             CLAUDE_CODE, False,
             f"Claude Code is signed in, but not to a Claude subscription: `{program} "
             f"{' '.join(check)}` says {said}, and every frame would bill that "
-            f"credential instead ({CLAUDE_CODE_AUTH_DOCS}); {fix}, then {sign_in}",
+            f"credential instead ({CLAUDE_CODE_AUTH_DOCS}); {fix}, then {next_step}",
         )
     signed_in_as = ", ".join(
         str(account[key]) for key in ("authMethod", "subscriptionType") if account.get(key)

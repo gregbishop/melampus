@@ -3969,11 +3969,24 @@ def test_detection_claude_code_that_cannot_be_run_says_so_in_the_systems_words(m
 
 def test_detection_claude_code_not_installed_points_to_the_install(monkeypatch, tmp_path):
     """Done-when 2: not installed, then unavailable with the reason "not
-    installed" and where to get it."""
+    installed" and where to get it, then the sign-in; for a template
+    carrying `--bare`, which no sign-in can help (review round 6, 1), the
+    next step after installing is to remove the flag, not to sign in
+    (review round 7, 1), so one round trip tells the whole story."""
     _no_claude(monkeypatch, tmp_path)
     verdict = _verdict("claude-code")
     assert not verdict.available
     assert "not installed" in verdict.reason and providers.CLAUDE_CODE_INSTALL in verdict.reason
+    assert f"then sign in with `{providers.CLAUDE_CODE_SIGN_IN}`" in verdict.reason
+
+    template = providers.CLAUDE_CODE_COMMAND
+    bare = [*template[:-1], providers.CLAUDE_CODE_BARE, template[-1]]
+    with pytest.raises(providers.BackendUnavailable, match="not installed") as err:
+        providers.build_primary_backend(_cfg(model={"backend": "claude-code", "command": bare}))
+    reason = str(err.value)
+    assert providers.CLAUDE_CODE_INSTALL in reason, reason
+    assert f"then {providers.CLAUDE_CODE_BARE_FIX}" in reason, reason
+    assert providers.CLAUDE_CODE_SIGN_IN not in reason, reason
 
 
 @posix_only
