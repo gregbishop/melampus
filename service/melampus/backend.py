@@ -336,7 +336,8 @@ class OpenAIBackend(VLMBackend):
 
 
 def _hang_up(line, expired: threading.Event) -> None:
-    """The deadline, from its timer. `line` is the _Deadline holding the
+    """The deadline, from its timer, or the cancellation, from its watcher
+    (`expired` is whichever event says which). `line` is the _Deadline holding the
     exchange's socket as `sock`, handed over the moment `_Noted` makes it
     and again, for https, as the wrapped socket before the handshake. Not
     close(): the response being read holds the socket's file object, and
@@ -370,23 +371,49 @@ class _Deadline:
     fired while the caller was still connecting found nothing to hang up,
     so `on()` hangs up then, and the reads after a late handshake are not
     left bounded per byte only. Leaving the block cancels the timer;
-    `again()` starts the count over, for a stream's next line."""
+    `again()` starts the count over, for a stream's next line.
 
-    def __init__(self, seconds: float) -> None:
+    `cancel`, when given, is a predicate looked at every WATCH seconds from
+    a thread of the timer's kind, for a stream whose caller may need it
+    ended while a read blocks (the pull's cancel marker, download.py:
+    looked for between lines, it waited on a stalled Ollama for the whole
+    timeout). Its turning true hangs the socket up as the timer does and
+    sets `cancelled`, which the caller reads as it reads `expired`: the
+    read ends within WATCH whatever the server is writing, and whatever
+    shape the ended read takes is the cancellation, not that shape's
+    error. Leaving the block ends the watcher too."""
+
+    WATCH = 0.25
+
+    def __init__(self, seconds: float, cancel: Callable[[], bool] | None = None) -> None:
         self.seconds = seconds
         self.sock: socket.socket | None = None
         self.expired = threading.Event()
+        self.cancelled = threading.Event()
+        self._over = threading.Event()
         self._timer = self._counting()
+        self._watcher = threading.Thread(target=self._watching, args=[cancel], daemon=True) if cancel else None
 
     def _counting(self) -> threading.Timer:
         return threading.Timer(self.seconds, _hang_up, [self, self.expired])
 
+    def _watching(self, cancel: Callable[[], bool]) -> None:
+        while not self._over.wait(self.WATCH):
+            if cancel():
+                _hang_up(self, self.cancelled)
+                return
+
     def __enter__(self) -> _Deadline:
         self._timer.start()
+        if self._watcher is not None:
+            self._watcher.start()
         return self
 
     def __exit__(self, *_exc) -> None:
         self._timer.cancel()
+        self._over.set()
+        if self._watcher is not None:
+            self._watcher.join()
 
     def again(self) -> None:
         """The bound over again from now, for the next line of a stream
@@ -401,8 +428,9 @@ class _Deadline:
 
     def on(self, sock: socket.socket | None) -> None:
         self.sock = sock
-        if self.expired.is_set():
-            _hang_up(self, self.expired)
+        for event in (self.expired, self.cancelled):
+            if event.is_set():
+                _hang_up(self, event)
 
 
 class _StayPut(urllib.request.HTTPRedirectHandler):
@@ -612,7 +640,8 @@ class OllamaBackend(VLMBackend):
             raw = self._exchange(request)
         return self._within_bound(raw)
 
-    def stream(self, request: urllib.request.Request) -> Iterator[bytes]:
+    def stream(self, request: urllib.request.Request, *,
+               cancel: Callable[[], bool] | None = None) -> Iterator[bytes]:
         """The reply's lines as the server writes them, for the model pull
         (card #409, download.pull_model), each within `timeout` of wall-clock
         time: the stream has no one exchange to bound, since a pull runs as
@@ -626,30 +655,40 @@ class OllamaBackend(VLMBackend):
         loop, however it is left, which is how Ollama learns to stop. Every
         failure is named as `send` names one (`_naming`): the status with
         Ollama's words, nothing answering, the timeout, a reply that is not
-        HTTP."""
-        with self._bounded(request) as deadline, self._naming(), \
+        HTTP. `cancel`, when given, is the caller's predicate (the pull's
+        cancel marker), looked at every _Deadline.WATCH seconds while a
+        read blocks: its turning true ends the stream, cleanly, within that
+        period, whatever the server is writing; the caller, whose predicate
+        it is, knows why the stream ended."""
+        with self._bounded(request, cancel) as deadline, self._naming(), \
                 self._urlopen(request, timeout=self.timeout) as response:
             while True:
                 deadline.again()
                 line = response.readline(self.MAX_REPLY_BYTES + 1)
-                if not line or deadline.expired.is_set():
+                if not line or deadline.expired.is_set() or deadline.cancelled.is_set():
                     return
                 yield self._within_bound(line)
 
     @contextlib.contextmanager
-    def _bounded(self, request: urllib.request.Request) -> Iterator[_Deadline]:
+    def _bounded(self, request: urllib.request.Request,
+                 cancel: Callable[[], bool] | None = None) -> Iterator[_Deadline]:
         """The block within `timeout` of wall-clock time: a _Deadline on the
         request, for the connection _Bounded opens for it, that hangs up the
         socket when the time is up. Whatever the block then looks like (a
         body cut short, a status line that never finished, a reset, or a
-        return with what arrived) is the timeout, not that shape's error."""
-        with _Deadline(self.timeout) as deadline:
+        return with what arrived) is the timeout, not that shape's error.
+        With `cancel` (a stream's), the deadline hangs the socket up for
+        the predicate too, and whatever the block then looks like is the
+        cancellation: the block ends, and nothing is raised for its shape."""
+        with _Deadline(self.timeout, cancel) as deadline:
             request.deadline = deadline
             try:
                 yield deadline
             except Exception as exc:
                 if deadline.expired.is_set():
                     raise self._timed_out() from exc
+                if deadline.cancelled.is_set():
+                    return
                 raise
         if deadline.expired.is_set():
             raise self._timed_out()

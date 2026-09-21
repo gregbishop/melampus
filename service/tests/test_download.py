@@ -3053,6 +3053,45 @@ def test_a_pull_resumed_after_a_cancel_in_its_second_layer_counts_the_first_laye
     assert ollama.models == {FAKE_MODEL: 4000}
 
 
+def _stalling_pull(then: Callable[[], None] = lambda: None):
+    """A listener answering the pull's stream with one layer line, chunked as
+    Ollama writes it, and then nothing: the pull's next read blocks."""
+    from conftest import stalling_handler
+
+    chunk = b'{"status": "pulling aaa", "digest": "sha256:aaa", "total": 100}\n'
+    answer = (b"HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\n"
+              b"Transfer-Encoding: chunked\r\n\r\n"
+              + f"{len(chunk):x}".encode() + b"\r\n" + chunk + b"\r\n")
+    return stalling_handler(answer, then)
+
+
+def test_the_cancel_marker_ends_a_pull_whose_stream_has_stalled_within_a_second_not_at_the_timeout(tmp_path: Path):
+    """Codex review (opposing vendor) round 2, code finding 1
+    (download.py:1079). The marker was looked for between lines only, so
+    with Ollama stalled mid-stream Cancel waited for the read to end: the
+    timeout, exit 3 with its message, the marker removed without
+    `cancelled` ever printed, and the dialog told of a failure it did not
+    have. The pull's stream watches the marker while a read blocks (the
+    backend's deadline thread, on a short period, hanging the socket up as
+    it does for the timeout), so the marker cancels the pull within about
+    a second whether Ollama writes or not. Given a listener writing one
+    layer line and then nothing, and the marker written once that line is
+    reported, the pull raises DownloadCancelled well within its 10 s
+    timeout, the marker removed on exit."""
+    marker = tmp_path / "data" / "download-cancel"
+    marker.parent.mkdir(parents=True)
+
+    with loopback_server(_stalling_pull(), ThreadingHTTPServer) as stalled:
+        started = time.monotonic()
+        with pytest.raises(DownloadCancelled) as cancelled:
+            pull_model(FAKE_MODEL, f"http://127.0.0.1:{stalled.server_port}", on_update=lambda update: marker.touch(),
+                       cancel_marker=marker, timeout=10.0)
+        took = time.monotonic() - started
+    assert CANCEL_MARKER in str(cancelled.value)
+    assert took < 3.0, f"the cancel waited on the stalled read: {took:.1f}s"
+    assert not marker.exists(), "the marker was not removed on exit"
+
+
 def test_a_stale_cancel_marker_is_removed_when_a_pull_starts(fake_ollama: FakeOllama, tmp_path: Path):
     marker = tmp_path / "data" / "download-cancel"
     marker.parent.mkdir(parents=True)
@@ -3417,9 +3456,14 @@ def test_remove_whose_reply_is_reset_names_the_address():
 # list and the delete endpoints answer; for mlx the hub as before.
 
 
-def _ollama_settings(tmp_path: Path, url: str, model: str = FAKE_MODEL) -> Path:
+def _ollama_settings(tmp_path: Path, url: str, model: str = FAKE_MODEL, timeout_seconds: float | None = None) -> Path:
+    """A settings file naming the Ollama at `url` and `model`, and `[model]
+    timeout_seconds` when a test bounds the pull or the delete itself."""
     settings = tmp_path / "settings.toml"
-    settings.write_text(f'[model]\nollama_url = "{url}"\nollama_model = "{model}"\n', encoding="utf-8")
+    lines = [f'ollama_url = "{url}"', f'ollama_model = "{model}"']
+    if timeout_seconds is not None:
+        lines.append(f"timeout_seconds = {timeout_seconds:g}")
+    settings.write_text("[model]\n" + "\n".join(lines) + "\n", encoding="utf-8")
     return settings
 
 
@@ -3445,9 +3489,7 @@ def test_the_model_flags_with_backend_ollama_go_to_the_ollama_functions_with_the
         model, installed=False, bytes_total=None, bytes_done=0, path=None, cancel_path="/data/download-cancel"))
     monkeypatch.setattr(download, "remove_ollama_model",
                         lambda model, url, *, timeout: seen.append(("remove", model, url, timeout)) or model)
-    settings = _ollama_settings(tmp_path, "http://127.0.0.1:11435/")
-    with settings.open("a", encoding="utf-8") as more:
-        more.write("timeout_seconds = 7.5\n")
+    settings = _ollama_settings(tmp_path, "http://127.0.0.1:11435/", timeout_seconds=7.5)
 
     assert main(["--download-model", "--no-local-config", "--backend", "ollama"]) == 0
     assert main(["--model-status", "--backend", "ollama", "--config", str(settings)]) == 0
@@ -3626,3 +3668,54 @@ def test_cli_pull_cancelled_by_a_signal_prints_cancelled_exit_4_and_the_next_pul
         updates = [Update.parse(line) for line in again.stdout.splitlines()]
         assert updates[0].bytes_done >= kept, "the second pull did not start from what was kept"
         assert updates[-1] == Update.done(FAKE_MODEL) and ollama.models == {FAKE_MODEL: size}
+
+
+def test_cli_pull_cancelled_by_the_marker_while_its_stream_has_stalled_prints_cancelled_and_exits_4(
+    monkeypatch: pytest.MonkeyPatch, capsys, tmp_path: Path
+):
+    """Codex review (opposing vendor) round 2, code finding 1
+    (download.py:1079), through the entry point, as the plugin's Cancel
+    button does it: the marker written at `cancel_path` while Ollama has
+    stalled after its first line. `cancelled` on stdout, exit 4, well
+    within `[model] timeout_seconds` (10 s here), no traceback."""
+    marker = _marker(tmp_path)
+    marker.parent.mkdir(parents=True)
+    monkeypatch.setattr(download, "cancel_marker_path", lambda: marker)
+
+    def the_marker_once_the_line_is_read() -> None:
+        time.sleep(0.2)
+        marker.touch()
+
+    with loopback_server(_stalling_pull(the_marker_once_the_line_is_read), ThreadingHTTPServer) as stalled:
+        settings = _ollama_settings(tmp_path, f"http://127.0.0.1:{stalled.server_port}", timeout_seconds=10.0)
+        started = time.monotonic()
+        code = main(["--download-model", "--backend", "ollama", "--config", str(settings)])
+        took = time.monotonic() - started
+    out, err = capsys.readouterr()
+    assert code == EXIT_CANCELLED, (code, err[-3000:])
+    assert out.splitlines()[-1] == "cancelled", out
+    assert took < 3.0, f"the cancel waited on the stalled read: {took:.1f}s"
+    assert "Traceback" not in err, err[-3000:]
+    assert not marker.exists()
+
+
+def test_cli_pull_cancelled_by_a_signal_while_its_stream_has_stalled_prints_cancelled_and_exits_4(tmp_path: Path):
+    """The signal path against the same stalled stream: SIGINT while the
+    read blocks ends the pull as it ends a chunk of the MLX download, within
+    the read, not at the timeout: `cancelled`, exit 4."""
+    flags = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if sys.platform == "win32" else {}
+    with loopback_server(_stalling_pull(), ThreadingHTTPServer) as stalled:
+        settings = _ollama_settings(tmp_path, f"http://127.0.0.1:{stalled.server_port}", timeout_seconds=10.0)
+        proc = subprocess.Popen([*VENV_CLI, "--download-model", "--backend", "ollama", "--config", str(settings)],
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, **flags)
+        assert Update.parse(proc.stdout.readline()) == Update.progress(0, 100)
+        started = time.monotonic()
+        _interrupt(proc)
+        rest = proc.stdout.read()
+        stderr = proc.stderr.read()
+        code = proc.wait(timeout=60)
+        took = time.monotonic() - started
+    assert code == EXIT_CANCELLED, (code, stderr[-3000:])
+    assert rest.splitlines() == ["cancelled"], rest
+    assert took < 3.0, f"the cancel waited on the stalled read: {took:.1f}s"
+    assert "Traceback" not in stderr, stderr[-3000:]

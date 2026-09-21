@@ -48,7 +48,7 @@ import sys
 import threading
 import time
 import urllib.request
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from pathlib import Path
 from types import ModuleType
@@ -256,27 +256,55 @@ class BadStatusLine(socketserver.BaseRequestHandler):
             self.request.sendall(b"\x1b[31mHTTP/9.9 OK\r\x07fake log line\r\n\r\n")
 
 
+def read_request(connection: socket.socket) -> None:
+    """The whole request off `connection`, for a raw listener that answers
+    it: the head to its blank line and then Content-Length bytes of body.
+    http.client sends the two in two `send` calls, and a listener answering
+    after the head alone answers before the body is sent, so a client's
+    failure would be the body's send (EPIPE, a URLError to urllib) and not
+    the read it is meant to be."""
+    with connection.makefile("rb") as request:
+        request.readline()
+        headers = http.client.parse_headers(request)
+        request.read(int(headers.get("Content-Length") or 0))
+
+
+def stalling_handler(answer: bytes, then: Callable[[], None] = lambda: None) -> type[socketserver.BaseRequestHandler]:
+    """A listener that answers whatever it is asked with `answer`, calls
+    `then`, and then writes nothing more, holding the connection open until
+    the client hangs up: an Ollama that stalls mid-pull (a registry that
+    stops answering it, a proxy holding the stream), the shape in which a
+    read blocks for as long as the caller's timeout allows. Served threaded,
+    it does not hold `loopback_server`'s shutdown while a client is still
+    reading."""
+
+    class Stalling(socketserver.BaseRequestHandler):
+        def handle(self) -> None:
+            with contextlib.suppress(OSError):
+                read_request(self.request)
+                self.request.sendall(answer)
+                then()
+                while self.request.recv(65536):
+                    pass
+
+    return Stalling
+
+
 def resetting_handler(answer: bytes) -> type[socketserver.BaseRequestHandler]:
     """A listener that answers whatever it is asked with `answer` and then
     resets the connection (SO_LINGER at zero makes the close an RST, not a
     FIN, so the client's next read is a ConnectionResetError, the raw
     socket error urllib lets through unwrapped): Ollama killed, or a
     listener hanging up, while the reply is being read. The whole request
-    is read first, the head to its blank line and then Content-Length
-    bytes of body: http.client sends the two in two `send` calls, and a
-    listener answering after the head alone resets before the body is
-    sent, so the client's failure is the body's send (EPIPE, a URLError
-    to urllib) and not the read it is meant to be. The socket is closed
-    here, ahead of the server's own shutdown, so the reset is what the
-    client sees, not the orderly close."""
+    is read first (`read_request`), so the reset is what the client reads,
+    whatever segments the request arrives in. The socket is closed here,
+    ahead of the server's own shutdown, so the reset is what the client
+    sees, not the orderly close."""
 
     class Resetting(socketserver.BaseRequestHandler):
         def handle(self) -> None:
             with contextlib.suppress(OSError):
-                with self.request.makefile("rb") as request:
-                    request.readline()
-                    headers = http.client.parse_headers(request)
-                    request.read(int(headers.get("Content-Length") or 0))
+                read_request(self.request)
                 self.request.sendall(answer)
                 self.request.setsockopt(
                     socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))

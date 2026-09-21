@@ -261,7 +261,9 @@ the backend speaks its chat endpoint (card #409):
   `[model] ollama_model`; no server answering is the backend's own
   not-running message, naming `[model] ollama_url`. A signal or the cancel
   marker ends it as for `mlx`, **exit 4** and `cancelled`, by closing the
-  stream, which is how Ollama learns to stop; Ollama keeps the layers it has
+  stream, which is how Ollama learns to stop, within a quarter second
+  whether Ollama is writing or has stalled (the marker is watched while a
+  read blocks, not only between lines); Ollama keeps the layers it has
   and the next pull resumes them by itself (the docs: "Cancelled pulls are
   resumed from where they left off"), so the next `progress` line starts
   from what was kept.

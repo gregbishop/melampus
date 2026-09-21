@@ -1097,13 +1097,21 @@ def _lines_until_cancelled(lines: Iterable[bytes], marker: Path) -> Iterator[byt
     """The stream's lines (OllamaBackend.stream: each within the backend's
     deadline and its reply bound, since it is whatever listens at the
     address that writes them), looking for the cancel marker before each
-    one is handed on: its appearance raises DownloadCancelled exactly as a
-    signal does, and closing the stream is how Ollama learns to stop (the
-    request's context is cancelled; it keeps the layers it has)."""
+    one is handed on and once the stream has ended: its appearance raises
+    DownloadCancelled exactly as a signal does, and closing the stream is
+    how Ollama learns to stop (the request's context is cancelled; it
+    keeps the layers it has). The stream watches the marker while a read
+    blocks (`cancel=marker.exists` in pull_model: the backend's deadline
+    thread hangs the socket up for it within _Deadline.WATCH) and ends
+    when it appears, whatever Ollama was writing, so a stalled Ollama
+    holds Cancel for a quarter second, not the timeout; the marker there
+    once the stream has ended is that cancellation."""
     for line in lines:
         if marker.exists():
             raise DownloadCancelled(CANCEL_MARKER)
         yield line
+    if marker.exists():
+        raise DownloadCancelled(CANCEL_MARKER)
 
 
 def pull_model(
@@ -1143,7 +1151,7 @@ def pull_model(
         request = ollama_request(url, OLLAMA_PULL, {"model": model, "stream": True})
         backend = OllamaBackend(model, url, timeout=timeout)
         try:
-            with closing(backend.stream(request)) as lines:
+            with closing(backend.stream(request, cancel=marker.exists)) as lines:
                 for update in pull_updates(model, _lines_until_cancelled(lines, marker)):
                     # The stream's `done` proves success was seen; the entry point
                     # prints the protocol's `done` from the return, as for mlx.
