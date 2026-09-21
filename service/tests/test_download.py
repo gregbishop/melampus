@@ -1624,6 +1624,29 @@ def test_remove_with_nothing_installed_says_so(fake_hub: FakeHub, tmp_path: Path
     assert FAKE_REPO in str(failure.value) and "nothing to remove" in str(failure.value)
 
 
+def _refused_removal_leaving_the_aside_folder(
+    fake_hub: FakeHub, cache: Path
+) -> tuple[Path, Path, Path, DownloadError]:
+    """The model fetched, then its removal refused by a snapshot folder it
+    cannot delete (read-only, restored once the removal has returned):
+    the repo's folder is gone from the cache under its own name and what
+    could not be deleted sits under the aside name. Returns the snapshot,
+    the repo's folder, the aside folder (`download._incomplete`, the one
+    name for the mark) and the refusal."""
+    path, _ = _fetch(fake_hub, cache)
+    folder = cache / FAKE_FOLDER
+    aside = download._incomplete(folder)
+    os.chmod(path, 0o500)
+    try:
+        with pytest.raises(DownloadError) as failure:
+            remove_model(FAKE_REPO, cache_dir=cache)
+    finally:
+        for snapshot in (path, aside / "snapshots" / path.name):
+            if snapshot.is_dir():
+                os.chmod(snapshot, 0o700)
+    return path, folder, aside, failure.value
+
+
 @pytest.mark.skipif(sys.platform == "win32" or getattr(os, "geteuid", lambda: 1)() == 0,
                     reason="a read-only folder does not stop a deletion here")
 def test_remove_refused_by_a_folder_it_cannot_delete_leaves_the_model_gone_from_the_cache_and_set_aside(
@@ -1643,20 +1666,10 @@ def test_remove_refused_by_a_folder_it_cannot_delete_leaves_the_model_gone_from_
     name, the message names it for the owner to delete by hand, the status
     reads absent, a second removal has nothing to remove, and once the aside
     folder is deleted by hand a download installs the model whole again."""
-    path, _ = _fetch(fake_hub, tmp_path / "hub")
-    folder = tmp_path / "hub" / FAKE_FOLDER
-    aside = folder.with_name(f"{folder.name}.incomplete")
-    os.chmod(path, 0o500)
-    try:
-        with pytest.raises(DownloadError) as failure:
-            remove_model(FAKE_REPO, cache_dir=tmp_path / "hub")
-    finally:
-        for snapshot in (path, aside / "snapshots" / path.name):
-            if snapshot.is_dir():
-                os.chmod(snapshot, 0o700)
+    path, folder, aside, failure = _refused_removal_leaving_the_aside_folder(fake_hub, tmp_path / "hub")
 
-    assert FAKE_REPO in str(failure.value) and str(aside) in str(failure.value)
-    assert "by hand" in str(failure.value), failure.value
+    assert FAKE_REPO in str(failure) and str(aside) in str(failure)
+    assert "by hand" in str(failure), failure
     assert not folder.exists(), "the repo's folder is still in the cache under its own name"
     assert aside.is_dir(), "what could not be deleted is not where the message says"
     status = _status(fake_hub, tmp_path / "hub")
@@ -1685,15 +1698,7 @@ def test_remove_refuses_while_an_earlier_refused_removal_left_its_set_aside_fold
     names the folder as left by an earlier refused removal, says to delete
     it by hand, and the model is untouched; once it is gone, Remove goes
     ahead."""
-    path, _ = _fetch(fake_hub, tmp_path / "hub")
-    folder = tmp_path / "hub" / FAKE_FOLDER
-    aside = folder.with_name(f"{folder.name}.incomplete")
-    os.chmod(path, 0o500)
-    try:
-        with pytest.raises(DownloadError):
-            remove_model(FAKE_REPO, cache_dir=tmp_path / "hub")
-    finally:
-        os.chmod(aside / "snapshots" / path.name, 0o700)
+    path, folder, aside, _ = _refused_removal_leaving_the_aside_folder(fake_hub, tmp_path / "hub")
     assert aside.is_dir() and not folder.exists()
     path, _ = _fetch(fake_hub, tmp_path / "hub")
     assert _status(fake_hub, tmp_path / "hub").installed is True
