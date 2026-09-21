@@ -14,6 +14,7 @@ import http.client
 import io
 import json
 import os
+import shlex
 import shutil
 import signal
 import socket
@@ -2032,7 +2033,7 @@ def test_command_backend_reads_stdout_into_a_completion(tmp_path):
     assert completion.prompt_tokens is None and completion.generated_tokens is None
     assert completion.refused is False
     assert completion.seconds >= 0
-    assert backend.name == "fake-vlm --image {image} --prompt {prompt} --quiet"
+    assert backend.name == "fake-vlm --image '{image}' --prompt '{prompt}' --quiet"
 
 
 @pytest.mark.parametrize(
@@ -2064,6 +2065,35 @@ def test_command_backend_maps_each_failure_to_a_plain_error(tmp_path, run, expec
         backend.complete(image, "prompt", 10)
     assert said in str(err.value), str(err.value)
     assert not isinstance(err.value, subprocess.SubprocessError)
+
+
+def test_command_templates_that_differ_only_in_argument_boundaries_cannot_share_cached_answers():
+    """`["--label", "bird --mode precise"]` (one argument) and `["--label",
+    "bird", "--mode", "precise"]` (three) run the program differently, so
+    their answers are different answers. The backend's name is what the
+    run fingerprint carries for the engine (identify.py), so it has to keep
+    the argument boundaries: joined with plain spaces, both templates were
+    one name, one fingerprint, and a run under the second re-served the
+    first's cached answers. shlex.join keeps the boundaries (an argument
+    with a space is quoted, and `shlex.split` gives the list back) and
+    stays a readable command line for the `loading ...` line and
+    `result["model"]`."""
+    from melampus.identify import Identifier
+
+    one_argument = [*COMMAND, "--label", "bird --mode precise"]
+    three_arguments = [*COMMAND, "--label", "bird", "--mode", "precise"]
+    config = _cfg(model={"backend": "command", "command": one_argument})
+
+    fingerprints = {
+        Identifier(_command_backend(_FakeRun(), template), config).fingerprint
+        for template in (one_argument, three_arguments)
+    }
+
+    assert len(fingerprints) == 2, "the two templates share a run fingerprint"
+    assert _command_backend(_FakeRun(), one_argument).name == (
+        "fake-vlm --image '{image}' --prompt '{prompt}' --quiet --label 'bird --mode precise'")
+    assert shlex.split(_command_backend(_FakeRun(), three_arguments).name) == [
+        "fake-vlm", *three_arguments[1:]]
 
 
 def test_command_backend_stops_the_whole_process_tree_on_timeout(tmp_path):
@@ -2169,7 +2199,7 @@ def test_command_primary_builds_the_backend_from_the_model_settings(monkeypatch)
     assert backend.command == COMMAND
     assert backend.executable == "/opt/fake/bin/fake-vlm"
     assert backend.timeout == 30.0
-    assert backend.name == " ".join(COMMAND)
+    assert backend.name == shlex.join(COMMAND)
 
 
 FAKE_CLI = "fake-vlm"
@@ -2270,11 +2300,11 @@ def test_command_backend_returns_candidates_in_the_same_shape_as_mlx_on_the_fixt
     backend = providers.build_primary_backend(config)
     result = Identifier(backend, config).identify(photos / PHOTO)
     expected = Identifier(
-        ScriptedBackend([ROUTING_OK, ID_OK], name=" ".join(command)), config
+        ScriptedBackend([ROUTING_OK, ID_OK], name=shlex.join(command)), config
     ).identify(photos / PHOTO)
 
     assert result.status == "ok", result.error
-    assert result.model == " ".join(command)
+    assert result.model == shlex.join(command)
     assert result.identification == expected.identification
     assert result.taxon_routing == expected.taxon_routing
     assert [c.common_name for c in result.identification.ranked()] == [
@@ -2395,11 +2425,11 @@ def test_cli_backend_command_writes_a_json_result_from_the_configured_template(
 
     err = capsys.readouterr().err
     assert code == 0, err
-    assert f"loading {' '.join(command)}" in err, err
+    assert f"loading {shlex.join(command)}" in err, err
     assert "cloud default" not in err, f"command is local; nothing was retuned for a cloud:\n{err}"
     (result,) = json.loads(out.read_text(encoding="utf-8"))
     assert result["file"] == PHOTO
     assert result["status"] == "ok"
-    assert result["model"] == " ".join(command)
+    assert result["model"] == shlex.join(command)
     assert [c["common_name"] for c in result["identification"]["candidates"]] == [
         "Tricolored Heron", "Little Blue Heron"]

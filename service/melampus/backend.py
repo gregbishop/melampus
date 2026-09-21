@@ -13,6 +13,7 @@ import functools
 import http.client
 import json
 import os
+import shlex
 import signal
 import socket
 import subprocess
@@ -900,8 +901,11 @@ class CommandBackend(VLMBackend):
     ) -> None:
         self.command = list(command)
         # The template, so a changed flag is a changed run fingerprint and the
-        # cache cannot re-serve the old template's answers.
-        self.name = " ".join(self.command)
+        # cache cannot re-serve the old template's answers. shlex.join keeps
+        # the argument boundaries: `--label 'bird --mode precise'` (one
+        # argument) is not `--label bird --mode precise` (three), and they
+        # run the program differently, so they must not share a fingerprint.
+        self.name = shlex.join(self.command)
         self.executable = executable or self.command[0]
         self.timeout = timeout
         # Shaped like subprocess.Popen(argv, **kwargs): the tests hand in a
