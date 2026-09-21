@@ -17,7 +17,6 @@ import socket
 import socketserver
 import ssl
 import sys
-import threading
 import time
 import types
 import urllib.error
