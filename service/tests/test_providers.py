@@ -15,6 +15,7 @@ import io
 import json
 import socket
 import socketserver
+import signal
 import ssl
 import subprocess
 import sys
@@ -957,6 +958,9 @@ print(json.dumps(ended_with))
 """
 
 
+@pytest.mark.skipif(not hasattr(signal, "SIGALRM"),
+                    reason="SIGALRM and setitimer are POSIX; the window this pins is the thread module's, "
+                           "the same on every platform, and the pull's handler on Windows is SIGBREAK's")
 def test_deadline_again_under_a_signal_handlers_exception_leaves_that_exception_alone_and_nothing_on_stderr():
     """Code review round 12 (backend.py:419), Done-when 1's signal path: the
     pull runs under `cancel_on_signals`, whose handler raises wherever the
