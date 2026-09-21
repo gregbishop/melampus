@@ -115,6 +115,11 @@ STATUS_TIMEOUT: float = constants.DEFAULT_REQUEST_TIMEOUT
 MODEL_FILE_PATTERNS = ("*.json", "*.safetensors", "*.py", "*.model", "*.tiktoken", "*.txt", "*.jinja")
 
 RERUN = "re-run melampus-id --download-model; it resumes where it stopped"
+# The refusal when the repo's lock (REPO_LOCK) is held, said once for the
+# download and the removal: whichever of the lock's three takers holds it,
+# the message names all three, since the probe cannot tell them apart.
+HELD = "another run holds {repo}: a download, an identification run loading it or a removal of it is running; " \
+       "wait for it to finish"
 NOT_A_HUB = "whatever answers there is not a Hugging Face hub; check HF_ENDPOINT"
 
 # The one lock the download, the load and the removal of a repo all take,
@@ -135,8 +140,8 @@ REPO_LOCK = "repo.lock"
 LOCK_TIMEOUT: float = 5
 
 # How long the removal's probe waits at each lock it tries, the repo's and
-# every blob's: it asks whether a download holds one, it does not wait for
-# the download to finish.
+# every blob's: it asks whether another run holds one, it does not wait for
+# that run to finish.
 PROBE_TIMEOUT: float = 0.1
 
 # The largest size, of a file or of the model, the status takes from the
@@ -573,7 +578,7 @@ def _cache_paths(repo: str, cache_dir: Path | None) -> tuple[Path, Path, Path]:
     `cache_dir`), said once for the download, the status and the removal:
     the cache, the repo's storage folder in it (the hub library's own
     layout, `models--org--name`), and the `.locks` folder holding the
-    per-file locks `_fetch` takes and `_download_running` tries. The hub
+    per-file locks `_fetch` takes and `_repo_held` tries. The hub
     library's own check of the id (`namespace/name`, no URL, no path under
     it) runs here, before the hub is asked anything, so the three refuse an
     id that is not one the same way: a DownloadError naming the config key."""
@@ -700,10 +705,7 @@ def download_model(
             # The repo's lock, or a blob's: a download of this model (another
             # run of this command), a load of it (the hub library's own
             # download for mlx-vlm's load) or a removal of it holds it.
-            raise DownloadError(
-                f"another run holds {repo}: a download, a load or a removal of it is running; "
-                f"wait for it to finish, then {RERUN} ({exc})"
-            ) from exc
+            raise DownloadError(f"{HELD.format(repo=repo)}, then {RERUN} ({exc})") from exc
         except (OSError, httpx.HTTPError) as exc:
             raise DownloadError(f"download of {repo} from {endpoint} failed: {exc}; {RERUN}") from exc
         finally:
@@ -844,11 +846,14 @@ def _holds(revision, listed: dict[str, int | None]) -> bool:
     return all(name in on_disk and (listed[name] is None or on_disk[name] == listed[name]) for name in needed)
 
 
-def _download_running(lock_dir: Path, held: ExitStack) -> bool:
-    """Whether a download of the repo is running: it holds the repo's lock
-    (`download_model` for its run, the model's load for the load, whose
-    `snapshot_download` fetches what the cache lacks) or the per-file lock
-    on the blob it is appending to (`_fetch`), under the cache's `.locks`.
+def _repo_held(lock_dir: Path, held: ExitStack) -> bool:
+    """Whether another run holds the repo: the repo's lock (`download_model`
+    for its run, the model's load (`load_lock`) from its start until the
+    model is in memory, whose `snapshot_download` fetches what the cache
+    lacks, or another removal from its probe through the deletion) or the
+    per-file lock on the blob a download is appending to (`_fetch`), under
+    the cache's `.locks`. The probe cannot tell the holders apart, so the
+    refusal (HELD) names all three.
     Each lock this takes it keeps, on `held`, until the caller leaves that
     stack: released at once, a download starting after the probe took its
     lock and appended to a blob the removal then set aside and deleted.
@@ -884,8 +889,10 @@ def remove_model(repo: str, *, cache_dir: Path | None = None) -> Path:
     symbolic link (a model laid out on another disk and linked into the
     cache, which the scan accepts: nothing is deleted through a link, and
     rmtree would refuse it with the one OSError the library's deletion does
-    not catch; the model is removed where the link points), a download of
-    it is running, the set-aside name is taken by the folder an earlier
+    not catch; the model is removed where the link points), another run
+    holds it (a download, an identification run loading it or another
+    removal; the message names all three, since the probe cannot tell them
+    apart), the set-aside name is taken by the folder an earlier
     refused removal left (the message named it then for the owner to
     delete by hand, and names it again: the rename onto it would fail with
     the OS's errno line, on every removal after, and say neither why nor
@@ -917,12 +924,12 @@ def remove_model(repo: str, *, cache_dir: Path | None = None) -> Path:
         raise DownloadError(f"could not remove {repo} from {cache}: {aside} is still there, left by an earlier "
                             f"removal that was refused; delete that folder by hand, then remove again; "
                             "the model is untouched")
-    # The locks the probe takes are held until the deletion is done: a
-    # download cannot start on this model between the probe and the end.
+    # The locks the probe takes are held until the deletion is done: no
+    # download or load can start on this model between the probe and the end.
     with ExitStack() as held:
         try:
-            if _download_running(locks, held):
-                raise DownloadError(f"a download of {repo} is running; cancel it first, then remove")
+            if _repo_held(locks, held):
+                raise DownloadError(f"{HELD.format(repo=repo)} (cancel a download first), then remove")
             cached.repo_path.rename(aside)
         except OSError as exc:
             raise DownloadError(f"could not remove {repo} from {cache}: {exc}; the model is untouched") from exc

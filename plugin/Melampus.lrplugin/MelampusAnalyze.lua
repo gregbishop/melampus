@@ -332,7 +332,8 @@ end
 
 --- Remove the MLX model from the cache: `--remove-model` (card #408), exit
 -- 0 once it is gone. Returns true, or false plus a message with the CLI
--- log's tail (a download of it is running, or nothing is installed).
+-- log's tail (another run holds it: a download, an identification run
+-- loading it or another removal; or nothing is installed).
 function Analyze.removeModel()
 	local code, target, cliLog = runFlag('--remove-model', 'melampus-removed.txt', 'removal file')
 	if not code then return false, target end

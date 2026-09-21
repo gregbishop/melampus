@@ -1947,6 +1947,34 @@ def test_remove_refuses_while_a_download_holds_the_lock(fake_hub: FakeHub, tmp_p
     assert path.exists(), "the model was removed under a running download"
 
 
+def test_remove_and_download_refusals_name_every_holder_of_the_repos_lock(
+    fake_hub: FakeHub, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Claude review 18, code finding 1 (download.py:925). The removal's
+    refusal named one holder of the repo's lock, "a download", and told the
+    user to cancel it, when the holder may be an identification run loading
+    the model (`load_lock`, held from the start of its load until the model
+    is in memory; the Settings row then shows Download or Installed, no
+    Cancel) or another removal. Both refusals, the removal's and the
+    download's, name every holder in one shared sentence; the removal's
+    says what to do (wait, cancelling a download first, then remove), the
+    download's says to re-run."""
+    cache = tmp_path / "hub"
+    path, _ = _fetch(fake_hub, cache)
+    monkeypatch.setattr(download, "LOCK_TIMEOUT", 0.2)
+    held = f"another run holds {FAKE_REPO}: a download, an identification run loading it or a removal of it is running"
+    with WeakFileLock(_lock_dir(cache) / download.REPO_LOCK):
+        with pytest.raises(DownloadError) as removal:
+            remove_model(FAKE_REPO, cache_dir=cache)
+        with pytest.raises(DownloadError) as a_download:
+            _fetch(fake_hub, cache)
+
+    assert str(removal.value).startswith(held), str(removal.value)
+    assert str(removal.value).endswith("wait for it to finish (cancel a download first), then remove"), str(removal.value)
+    assert str(a_download.value).startswith(held), str(a_download.value)
+    assert path.exists(), "the model was removed under the held lock"
+
+
 def test_remove_goes_ahead_once_the_download_has_released_the_lock(fake_hub: FakeHub, tmp_path: Path):
     """A lock file left behind by a download that finished is not a running
     download: the removal takes the lock itself and goes ahead."""

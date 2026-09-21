@@ -196,18 +196,21 @@ cache and the folder the OS named: check that folder's permissions.
   model, then deleted through the hub library's own cache deletion (every
   revision, so the whole folder goes); it prints `removed <path>` (the
   folder the model was in) and exits 0. It is refused with **exit 3** and
-  the reason on stderr when nothing is installed, or while a download of
-  the model is running (it holds the model's own lock, `repo.lock` in the
-  cache's `.locks` folder for the model, for the whole run, and the hub
-  library's per-file lock on the file it is fetching; the removal takes
-  the model's lock, then the per-file ones, itself and holds them until
-  the deletion is done, so no download starts on it in between: one that
-  tries is refused, or waits and starts from nothing once the model is
-  gone): cancel the download first. An identification run loading the
-  model holds the same lock from the start of its load until the model is
-  in memory (mlx-vlm's load fetches what the cache lacks the while), so a
-  removal in that time is refused as running too, and a load starting
-  under a removal waits for it and then fetches the model from nothing.
+  the reason on stderr when nothing is installed, or while another run
+  holds the model: a download of it (it holds the model's own lock,
+  `repo.lock` in the cache's `.locks` folder for the model, for the whole
+  run, and the hub library's per-file lock on the file it is fetching; the
+  removal takes the model's lock, then the per-file ones, itself and holds
+  them until the deletion is done, so no download starts on it in between:
+  one that tries is refused, or waits and starts from nothing once the
+  model is gone), an identification run loading the model (it holds the
+  same lock from the start of its load until the model is in memory,
+  mlx-vlm's load fetching what the cache lacks the while; a load starting
+  under a removal waits for it and then fetches the model from nothing),
+  or another removal. The removal cannot tell which holds the lock, so the
+  message names all three, the same sentence `--download-model` refuses
+  with, and says to wait for it to finish (cancelling a download first),
+  then remove.
   It also exits 3, the model untouched,
   when the repo's folder in the cache is a symbolic link (a model laid out
   on another disk and linked into the cache, which the status accepts as
