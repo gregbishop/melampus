@@ -717,6 +717,29 @@ def test_config_doc_names_the_command_output_ceiling():
     assert "4 MiB" in command_row, "docs/config.md's command row does not name the output ceiling"
 
 
+def test_config_doc_says_the_commands_exit_ends_its_answer_and_stops_what_it_started():
+    """Card #420: the command's exit ends its answer, and everything it
+    started is stopped the moment it exits, so a helper it leaves holding
+    stdout or stderr is stopped rather than waited on; past the timeout the
+    program and everything it started are stopped too. An operator whose
+    CLI starts a helper meant to outlive the call (a server it keeps warm)
+    finds it stopped after every completion, so docs/config.md's `command`
+    row must say so, and its `timeout_seconds` row must say the stop
+    reaches everything the program started, not the program alone."""
+    model = re.search(r"^## `\[model\]`\n(.*?)^## ", CONFIG_DOC.read_text(encoding="utf-8"),
+                      re.MULTILINE | re.DOTALL).group(1)  # [escalation] has a timeout_seconds row of its own
+    rows = {line.split(" | ")[0]: line for line in model.splitlines() if line.startswith("| `")}
+    command_row, timeout_row = rows["| `command`"], rows["| `timeout_seconds`"]
+    assert "exit ends its answer" in command_row, (
+        "docs/config.md's command row does not say the command's exit ends its answer")
+    assert "everything it started is stopped" in command_row, (
+        "docs/config.md's command row does not say everything the command started is stopped at its exit")
+    assert "not waited" in command_row, (
+        "docs/config.md's command row does not say a helper left holding a stream is stopped, not waited on")
+    assert "and everything it started" in timeout_row, (
+        "docs/config.md's timeout_seconds row does not say the stop reaches everything the program started")
+
+
 def test_docs_say_the_command_runs_once_per_completion():
     """Card #420: the `command` backend runs its program once per
     completion, not once per frame: a frame is at least two completions
