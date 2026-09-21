@@ -171,6 +171,29 @@ def test_the_plugin_names_the_engines_the_cli_accepts(tmp_path: Path):
     assert proc.stdout.split("\n") == engines
 
 
+def test_the_plugin_offers_a_download_row_for_exactly_the_engines_the_cli_fetches_a_model_for(tmp_path: Path):
+    """Card #409: the engines with a local model to fetch are spelled once
+    per language, in `Rules.MODEL_ENGINES` for the plugin (one Download row
+    each) and `cli.MODEL_ENGINES` for the executable (the engines the three
+    model flags act for), and this is what binds them, the way the #403 test
+    above binds the engine names: the plugin's list, read through lua, is the
+    CLI's list in the same order. An engine added on one side alone would
+    otherwise get a Download row the executable refuses, or a dispatch the
+    dialog never shows."""
+    from melampus import cli
+
+    script = tmp_path / "model-engines.lua"
+    script.write_text(
+        "local Rules = require('MelampusRules')\n"
+        "io.write(table.concat(Rules.MODEL_ENGINES, '\\n'))\n",
+        encoding="utf-8",
+    )
+    proc = run_lua(script)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+    assert proc.stdout.split("\n") == list(cli.MODEL_ENGINES)
+
+
 def test_the_plugin_stores_each_key_under_the_variable_the_executable_reads(tmp_path: Path):
     """Card #405, Done-when 2: the variable a cloud engine's key travels in is
     spelled once per language, in `Rules.KEY_VARIABLES` for the plugin and
