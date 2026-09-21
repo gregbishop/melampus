@@ -81,6 +81,24 @@ def _incomplete(cache: Path) -> list[Path]:
     return sorted((cache / FAKE_FOLDER / "blobs").glob("*.incomplete"))
 
 
+def _cli_sees_the_cache(monkeypatch: pytest.MonkeyPatch, cache: Path) -> None:
+    """The cache under tmp_path as the entry point's own (`HF_HUB_CACHE`,
+    what `_cache_paths` reads when no `cache_dir` is passed), never the
+    real one."""
+    monkeypatch.setattr(download.constants, "HF_HUB_CACHE", str(cache))
+
+
+def _refused_through_the_cli(capsys, flag: str, naming: str, repo: str = FAKE_REPO) -> str:
+    """The one contract every refusal keeps through the entry point (cli.py,
+    docs/config.md): exit 3, the reason on stderr naming `naming`, nothing
+    on stdout, never a traceback. Returns stderr for what else a test asks
+    of the reason."""
+    assert main([flag, "--no-local-config", "--model", repo]) == 3, flag
+    out, err = capsys.readouterr()
+    assert out == "" and naming in err and "Traceback" not in err, (flag, err)
+    return err
+
+
 # The sample lines both parsers are tested against, so the Lua one in the
 # plugin (Rules.parseDownloadLine, plugin/tests/test_rules.lua) cannot drift
 # from this one: `<input>\t<state>[\t<field>...]`, `rejected` for a non-update.
@@ -1229,10 +1247,7 @@ def test_download_model_flag_exits_3_naming_the_marker_it_cannot_remove_with_not
     monkeypatch.setattr(download, "cancel_marker_path", lambda: marker)
     monkeypatch.setattr(constants, "ENDPOINT", f"http://127.0.0.1:{closed_port()}")
 
-    assert main(["--download-model", "--no-local-config", "--model", FAKE_REPO]) == 3
-
-    out, err = capsys.readouterr()
-    assert out == "" and str(marker) in err and "Traceback" not in err, err
+    _refused_through_the_cli(capsys, "--download-model", str(marker))
 
 
 def test_the_download_watches_the_documented_marker_by_default(monkeypatch, tmp_path: Path, fake_hub: FakeHub):
@@ -1775,10 +1790,8 @@ def test_remove_refuses_a_repo_folder_that_is_a_link_with_exit_3_leaving_the_lin
     assert FAKE_REPO in str(failure.value) and str(link) in str(failure.value) and "link" in str(failure.value)
     assert link.is_symlink() and snapshot_files(path) == FAKE_FILES, "the link or its target was touched"
 
-    monkeypatch.setattr(download.constants, "HF_HUB_CACHE", str(cache))
-    assert main(["--remove-model", "--no-local-config", "--model", FAKE_REPO]) == 3
-    out, err = capsys.readouterr()
-    assert out == "" and str(link) in err and "Traceback" not in err
+    _cli_sees_the_cache(monkeypatch, cache)
+    _refused_through_the_cli(capsys, "--remove-model", str(link))
     assert link.is_symlink() and snapshot_files(path) == FAKE_FILES, "the link or its target was touched"
 
 
@@ -1828,11 +1841,9 @@ def test_status_and_remove_refuse_with_the_reason_when_another_repo_in_the_cache
                 ask()
             message = str(failure.value)
             assert str(cache) in message and str(other) in message and "permissions" in message, message
-        monkeypatch.setattr(download.constants, "HF_HUB_CACHE", str(cache))
+        _cli_sees_the_cache(monkeypatch, cache)
         for flag in ("--model-status", "--remove-model"):
-            assert main([flag, "--no-local-config", "--model", FAKE_REPO]) == 3, flag
-            out, err = capsys.readouterr()
-            assert out == "" and str(other) in err and "Traceback" not in err, (flag, err)
+            _refused_through_the_cli(capsys, flag, str(other))
     finally:
         os.chmod(other, 0o700)
     assert snapshot_files(path) == FAKE_FILES, "the model was removed"
@@ -1861,11 +1872,9 @@ def test_status_and_remove_refuse_with_the_reason_when_the_cache_itself_cannot_b
                 ask()
             message = str(failure.value)
             assert str(cache) in message and "permissions" in message, message
-        monkeypatch.setattr(download.constants, "HF_HUB_CACHE", str(cache))
+        _cli_sees_the_cache(monkeypatch, cache)
         for flag in ("--model-status", "--remove-model"):
-            assert main([flag, "--no-local-config", "--model", FAKE_REPO]) == 3, flag
-            out, err = capsys.readouterr()
-            assert out == "" and str(cache) in err and "Traceback" not in err, (flag, err)
+            _refused_through_the_cli(capsys, flag, str(cache))
     finally:
         os.chmod(cache.parent, 0o700)
     assert snapshot_files(path) == FAKE_FILES, "the model was removed"
@@ -1898,10 +1907,8 @@ def test_status_refuses_with_the_reason_when_the_repo_blobs_cannot_be_counted(
             _status(fake_hub, cache)
         message = str(failure.value)
         assert str(cache) in message and str(blobs) in message and "permissions" in message, message
-        monkeypatch.setattr(download.constants, "HF_HUB_CACHE", str(cache))
-        assert main(["--model-status", "--no-local-config", "--model", FAKE_REPO]) == 3
-        out, err = capsys.readouterr()
-        assert out == "" and str(blobs) in err and "Traceback" not in err, err
+        _cli_sees_the_cache(monkeypatch, cache)
+        _refused_through_the_cli(capsys, "--model-status", str(blobs))
     finally:
         os.chmod(blobs, 0o700)
 
@@ -1988,11 +1995,8 @@ def test_model_flags_exit_3_with_the_config_key_on_stderr_when_the_repo_is_not_a
     download mapped that to exit 3 naming the config key, the status and the
     removal let it out as a 19-line traceback, exit 1. All three refuse the
     same way: exit 3, the key on stderr, nothing on stdout."""
-    assert main([flag, "--no-local-config", "--model", "not a repo id/x/y"]) == 3
-
-    out, err = capsys.readouterr()
-    assert out == ""
-    assert "not a repo id/x/y" in err and "[model] repo" in err and "Traceback" not in err
+    err = _refused_through_the_cli(capsys, flag, "[model] repo", repo="not a repo id/x/y")
+    assert "not a repo id/x/y" in err
 
 
 def test_cli_reports_absent_then_installed_then_removed_against_the_fake_hub(
