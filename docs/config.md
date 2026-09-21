@@ -277,9 +277,12 @@ the backend speaks its chat endpoint (card #409):
   opens.
 - `--remove-model` is `/api/delete` (`DELETE`, § Delete a Model) with the model's
   name: `removed <model>` and exit 0; exit 3 naming the model when Ollama
-  does not hold it, or with the not-running message. The pull and the
-  delete wait `[model] timeout_seconds` for the server, as a frame does;
-  a server that has not finished within it is exit 3 with the backend's
+  does not hold it, or with the not-running message. Both wait
+  `[model] timeout_seconds` for the server, as a frame does: the delete
+  for its one exchange; the pull for each line of its stream, since a
+  pull runs as long as the model is large, so a large model pulls past
+  the setting and succeeds. A delete not finished within it, or a line
+  of the pull not written within it, is exit 3 with the backend's
   timeout message, which names that setting.
 
 The tests prove all three against a fake Ollama on 127.0.0.1 that speaks
