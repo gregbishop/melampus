@@ -2838,8 +2838,8 @@ def test_the_pull_watches_the_documented_marker_by_default(monkeypatch, tmp_path
 # The model's status and removal in Ollama, for the same Settings row.
 
 
-def _ollama_status(ollama: FakeOllama | None, model: str = FAKE_MODEL, port: int | None = None) -> Status:
-    return ollama_status(model, ollama.endpoint if ollama else f"http://127.0.0.1:{port}")
+def _ollama_status(ollama: FakeOllama, model: str = FAKE_MODEL) -> Status:
+    return ollama_status(model, ollama.endpoint)
 
 
 def test_status_of_a_model_ollama_does_not_hold_reports_absent_with_no_size(fake_ollama: FakeOllama):
@@ -2883,7 +2883,7 @@ def test_status_with_no_ollama_answering_says_absent_and_never_fails():
     """Settings must open with Ollama down: absent, size unknown, exit 0."""
     port = closed_port()
 
-    status = _ollama_status(None, port=port)
+    status = ollama_status(FAKE_MODEL, f"http://127.0.0.1:{port}")
 
     assert status == Status(FAKE_MODEL, installed=False, bytes_total=None, bytes_done=0,
                             path=None, cancel_path=str(cancel_marker_path()))
