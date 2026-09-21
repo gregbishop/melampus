@@ -2255,8 +2255,10 @@ def test_command_backend_stops_a_tree_on_posix_by_the_group_the_command_heads(mo
     id is the command's pid (OWN_GROUP started it in its own session). A
     group already gone (ESRCH) and one holding nothing but the command's
     own exited process (EPERM, macOS's answer) are nothing to do; any
-    other failure is raised. Runs on every platform: os.killpg is faked."""
+    other failure is raised. Runs on every platform: os.killpg is faked,
+    and SIGKILL is given where there is none."""
     monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(signal, "SIGKILL", getattr(signal, "SIGKILL", 9), raising=False)
     calls: list[tuple[int, int]] = []
     answer: list[BaseException | None] = [None]
 
@@ -2372,9 +2374,12 @@ def test_command_backend_sees_the_exit_through_waitid_where_there_is_no_kqueue(m
     already exited is seen at once (as the kqueue and Windows looks see
     it), and only when the command has not exited sleeps the step and
     looks once more, so an exit during the step is seen at its end.
-    Runs on every platform: kqueue is taken away and waitid faked."""
+    Runs on every platform: kqueue is taken away, waitid is faked, and its
+    constants are given where there are none."""
     monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.delattr(select, "kqueue", raising=False)
+    for name, value in (("P_PID", 1), ("WEXITED", 4), ("WNOWAIT", 0x1000000), ("WNOHANG", 1)):
+        monkeypatch.setattr(os, name, getattr(os, name, value), raising=False)
     calls: list[tuple[int, int, int]] = []
     answer: list[object] = [None]
 
