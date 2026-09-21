@@ -895,16 +895,19 @@ class CommandBackend(VLMBackend):
     MAX_OUTPUT_BYTES = 4 << 20
     #: One read from a pipe.
     CHUNK_BYTES = 1 << 16
-    #: The command runs in its own session (POSIX: setsid, so its process
-    #: group id is its pid and os.killpg reaches every worker it forked) or
-    #: its own process group (Windows, where `taskkill /T` walks the tree),
-    #: so a timeout stops everything it started and not just the first
-    #: process: a CLI that hands the work to a worker would otherwise leave
-    #: that worker running, one per timed-out frame, while the batch goes on.
-    OWN_GROUP = (
-        {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if sys.platform == "win32"
-        else {"start_new_session": True}
-    )
+    @property
+    def OWN_GROUP(self) -> dict:
+        """The Popen arguments that give the command its own session (POSIX:
+        setsid, so its process group id is its pid and os.killpg reaches
+        every worker it forked) or its own process group (Windows, where
+        `taskkill /T` walks the tree), so a stop reaches everything it
+        started and not just the first process: a CLI that hands the work
+        to a worker would otherwise leave that worker running, one per
+        timed-out frame, while the batch goes on. Read at each start, so
+        the Windows shape can be asserted from any platform."""
+        if sys.platform == "win32":
+            return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+        return {"start_new_session": True}
 
     def __init__(
         self,

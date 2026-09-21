@@ -14,6 +14,7 @@ import http.client
 import io
 import json
 import os
+import select
 import shlex
 import shutil
 import signal
@@ -2251,6 +2252,92 @@ def test_command_backend_stops_a_tree_on_windows_with_the_system_taskkill(monkey
     assert kwargs["check"] is False and kwargs["capture_output"] is True
 
 
+def test_command_backend_stops_a_tree_on_posix_by_the_group_the_command_heads(monkeypatch):
+    """`_stop_tree` on POSIX: SIGKILL through os.killpg to the group whose
+    id is the command's pid (OWN_GROUP started it in its own session). A
+    group already gone (ESRCH) and one holding nothing but the command's
+    own exited process (EPERM, macOS's answer) are nothing to do; any
+    other failure is raised. Runs on every platform: os.killpg is faked."""
+    monkeypatch.setattr(sys, "platform", "linux")
+    calls: list[tuple[int, int]] = []
+    answer: list[BaseException | None] = [None]
+
+    def killpg(pgid, sig):
+        calls.append((pgid, sig))
+        if answer[0] is not None:
+            raise answer[0]
+    monkeypatch.setattr(os, "killpg", killpg, raising=False)
+    backend = CommandBackend(["fake-vlm", "{image}", "{prompt}"])
+
+    backend._stop_tree(4242)
+    assert calls == [(4242, signal.SIGKILL)]
+    for answer[0] in (ProcessLookupError(3, "No such process"), PermissionError(1, "Operation not permitted")):
+        backend._stop_tree(4242)
+    assert calls == [(4242, signal.SIGKILL)] * 3
+    answer[0] = OSError(22, "Invalid argument")
+    with pytest.raises(OSError):
+        backend._stop_tree(4242)
+
+
+def test_command_backend_starts_the_command_in_its_own_process_group_on_windows(monkeypatch, tmp_path):
+    """OWN_GROUP on Windows: the command is started with
+    CREATE_NEW_PROCESS_GROUP, the flag `taskkill /T` walks from, and not
+    with start_new_session, which Windows has no idea of. Runs on every
+    platform: the platform and the flag are faked."""
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200, raising=False)
+    image = tmp_path / "image.jpg"
+    image.write_bytes(b"jpeg")
+    run = _FakeRun(stdout=ID_OK)
+
+    _command_backend(run).complete(image, "prompt", 10)
+
+    ((_, kwargs),) = run.calls
+    assert kwargs["creationflags"] == 0x200
+    assert "start_new_session" not in kwargs
+
+
+def test_command_backend_sees_the_exit_through_wait_on_windows(monkeypatch):
+    """`_exited` on Windows is Popen.wait with the step as its timeout: the
+    Popen handle keeps the pid reserved, so reaping there is safe and the
+    order does not matter. Runs on every platform: the platform is faked
+    and the process is the fake."""
+    monkeypatch.setattr(sys, "platform", "win32")
+    backend = CommandBackend(["fake-vlm", "{image}", "{prompt}"])
+    ended = _FakeProcess([], _FakeRun())
+    hung = _FakeProcess([], _FakeRun(hangs=True))
+
+    assert backend._exited(ended, 0.01) is True
+    assert backend._exited(hung, 0.01) is False
+    assert ended.waited == [0.01] and hung.waited == [0.01]
+
+
+def test_command_backend_sees_the_exit_through_waitid_where_there_is_no_kqueue(monkeypatch):
+    """`_exited` on a POSIX without kqueue (Linux) asks waitid for the
+    command by pid with WEXITED, WNOWAIT (seen, not reaped) and WNOHANG
+    after sleeping the step: None is not yet, anything else is exited.
+    Runs on every platform: kqueue is taken away and waitid faked."""
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.delattr(select, "kqueue", raising=False)
+    calls: list[tuple[int, int, int]] = []
+    answer: list[object] = [None]
+
+    def waitid(idtype, pid, options):
+        calls.append((idtype, pid, options))
+        return answer[0]
+    monkeypatch.setattr(os, "waitid", waitid, raising=False)
+    backend = CommandBackend(["fake-vlm", "{image}", "{prompt}"])
+    process = _FakeProcess([], _FakeRun())
+
+    started = time.monotonic()
+    assert backend._exited(process, 0.05) is False
+    assert time.monotonic() - started >= 0.05
+    answer[0] = object()  # a siginfo: the process has exited
+    assert backend._exited(process, 0.0) is True
+    assert calls == [(os.P_PID, 4242, os.WEXITED | os.WNOWAIT | os.WNOHANG)] * 2
+    assert process.waited == [], "waitid, never Popen.wait, which reaps"
+
+
 def test_command_is_selectable_by_config_and_flag_but_not_a_picker_choice():
     """`[model] backend = "command"` and `--backend command` select the seam;
     the plugin's picker learns it in card #423, so BACKEND_CHOICES, the
@@ -2557,9 +2644,9 @@ def test_command_backend_sees_the_exit_without_reaping_the_command():
     its group's until the backend reaps it last); on Windows the Popen
     handle keeps the pid reserved and the look may reap."""
     backend = CommandBackend(["fake-vlm", "{image}", "{prompt}"])
-    ended = subprocess.Popen([sys.executable, "-c", "pass"], **CommandBackend.OWN_GROUP)
+    ended = subprocess.Popen([sys.executable, "-c", "pass"], **backend.OWN_GROUP)
     running = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"],
-                               **CommandBackend.OWN_GROUP)
+                               **backend.OWN_GROUP)
     try:
         assert backend._exited(ended, 10.0) is True
         if sys.platform != "win32":
