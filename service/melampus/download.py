@@ -1147,15 +1147,15 @@ def _ollama_request(model: str, url: str, path: str, body: dict | None = None, *
     return reply
 
 
-def _held(model: str, url: str, *, timeout: float = STATUS_TIMEOUT) -> dict | None:
-    """The list entry for `model` in the Ollama at `url` (docs/api.md § List
-    Local Models: GET /api/tags, `models` each with `name` and `size`), or
-    None when it is not held, the whole exchange within `timeout`. A name
-    without a tag is `<name>:latest` there (§ Model names: the tag defaults
-    to `latest`). The list is the server's to write: one not in that shape
-    (`models` not a list, an entry's name not a string, its size not a
-    count) is a DownloadError naming it, as a malformed pull line is, never
-    a traceback."""
+def _held(model: str, url: str, *, timeout: float = STATUS_TIMEOUT) -> tuple[str, int] | None:
+    """The name and size the Ollama at `url` lists `model` under (docs/api.md
+    § List Local Models: GET /api/tags, `models` each with `name` and
+    `size`), parsed here once, or None when it is not held, the whole
+    exchange within `timeout`. A name without a tag is `<name>:latest`
+    there (§ Model names: the tag defaults to `latest`). The list is the
+    server's to write: one not in that shape (`models` not a list, an
+    entry's name not a string, its size not a count) is a DownloadError
+    naming it, as a malformed pull line is, never a traceback."""
     names = {model, model if ":" in model else f"{model}:latest"}
     models = _ollama_request(model, url, OLLAMA_TAGS, method="GET", timeout=timeout).get("models") or []
     if not isinstance(models, list):
@@ -1168,13 +1168,13 @@ def _held(model: str, url: str, *, timeout: float = STATUS_TIMEOUT) -> dict | No
             )
         if names & set(listed):
             try:
-                int(entry.get("size") or 0)
+                size = int(entry.get("size") or 0)
             except (TypeError, ValueError) as exc:
                 raise DownloadError(
                     f"Ollama's list from {url}{OLLAMA_TAGS} carried a size that is not a count: "
                     f"{str(entry)[:120]!r}"
                 ) from exc
-            return entry
+            return listed[0], size
     return None
 
 
@@ -1189,13 +1189,13 @@ def ollama_status(model: str, url: str, *, timeout: float = STATUS_TIMEOUT) -> S
     the short bound on what Settings waits on) reads the same, the
     timeout's words never shown."""
     try:
-        entry = _held(model, url, timeout=timeout)
+        held = _held(model, url, timeout=timeout)
     except DownloadError:
-        entry = None
-    if entry is None:
+        held = None
+    if held is None:
         return Status(model, False, None, 0, None, str(cancel_marker_path()))
-    size = int(entry.get("size") or 0)
-    return Status(model, True, size, size, str(entry.get("name") or model), str(cancel_marker_path()))
+    name, size = held
+    return Status(model, True, size, size, name, str(cancel_marker_path()))
 
 
 def remove_ollama_model(model: str, url: str, *, timeout: float = 180.0) -> str:
