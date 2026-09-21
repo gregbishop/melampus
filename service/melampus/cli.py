@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import sys
 from dataclasses import asdict
@@ -287,29 +288,25 @@ def _pick_model_engine(args: argparse.Namespace, config) -> str:
     the first engine with a model that detection says can run here, else
     mlx, whose hub download works on every platform (card #407). `--model`
     names a hub repo, so it means mlx whatever is running."""
-    if "backend" in config.model.model_fields_set:
-        return config.model.backend
-    if args.model:
-        config.model.backend = "mlx"
-    else:
+
+    def first_with_a_model() -> str:
+        if args.model:
+            return "mlx"
         available = {v.engine for v in detect_engines(config.model.ollama_url) if v.available}
-        config.model.backend = next((e for e in MODEL_ENGINES if e in available), "mlx")
-    print(
-        f"engine: {config.model.backend} (the first with a model that can run here; "
-        "--backend or [model] backend chooses, --detect-engines explains)",
-        file=sys.stderr,
-    )
-    return config.model.backend
+        return next((e for e in MODEL_ENGINES if e in available), "mlx")
+
+    return _pick_engine(config, first_with_a_model, "the first with a model that can run here")
 
 
-def _pick_engine(config) -> str:
+def _pick_engine(config, choose: Callable[[], str], why: str) -> str:
     """The engine a command acts for when nothing named one: neither
-    --backend nor [model] backend. The first that can run here answers
-    (card #404), said on stderr, before anything reads the choice."""
+    --backend nor [model] backend. `choose` answers then (a run: the first
+    that can run here, card #404; the model flags: the first with a model),
+    said on stderr with `why`, before anything reads the choice."""
     if "backend" not in config.model.model_fields_set:
-        config.model.backend = default_engine(config.model.ollama_url)
+        config.model.backend = choose()
         print(
-            f"engine: {config.model.backend} (the first that can run here; "
+            f"engine: {config.model.backend} ({why}; "
             "--backend or [model] backend chooses, --detect-engines explains)",
             file=sys.stderr,
         )
@@ -452,7 +449,8 @@ def main(argv: list[str] | None = None) -> int:
     # Nothing named an engine: neither --backend nor [model] backend. The
     # first that can run here answers (card #404), before anything reads
     # the choice: the cloud retuning below, the cache file, the refusals.
-    _pick_engine(config)
+    _pick_engine(config, functools.partial(default_engine, config.model.ollama_url),
+                 "the first that can run here")
 
     cloud_primary = is_cloud_primary(config)
     if cloud_primary:
