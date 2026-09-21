@@ -340,8 +340,15 @@ end
 --- The model flags act for an engine (card #409): `flag --backend <engine>`,
 -- the engine a run passes (engineArguments), so the executable fetches
 -- the MLX model from the hub or asks Ollama to pull its model. nil plus a
--- message for an engine the plugin does not know, before the shell.
+-- message for an engine the plugin does not know, before the shell, and
+-- for none: a run without the preference lets the CLI decide, but every
+-- model command carries its engine (docs/plugin.md § The Download row),
+-- and the one-download-at-a-time guard below is the engine's name.
 local function modelFlag(flag, engine)
+	if engine == nil or engine == '' then
+		return nil, 'Melampus needs an engine to act on its model.\n\nThe engines with a model are: '
+			.. table.concat(Rules.MODEL_ENGINES, ', ') .. '.'
+	end
 	local parts, err = engineArguments({ flag }, engine)
 	if not parts then return nil, err end
 	return table.concat(parts, ' ')
