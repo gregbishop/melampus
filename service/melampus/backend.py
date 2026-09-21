@@ -958,7 +958,12 @@ class CommandBackend(VLMBackend):
         # argument) is not `--label bird --mode precise` (three), and they
         # run the program differently, so they must not share a fingerprint.
         self.name = shlex.join(self.command)
-        self.executable = executable or self.command[0]
+        executable = executable or self.command[0]
+        # What runs, decided once: a program named by a path (`./tools/vlm`,
+        # which shutil.which hands back as given) is made absolute here,
+        # against melampus's cwd, because the run moves into the staged
+        # image's folder. A bare name is left for PATH.
+        self.executable = os.path.abspath(executable) if os.path.dirname(executable) else executable
         self.timeout = timeout
         # Shaped like subprocess.Popen(argv, **kwargs): the tests hand in a
         # fake at this edge, the way the other backends take a client.
@@ -980,12 +985,7 @@ class CommandBackend(VLMBackend):
             argument.replace("{image}", image).replace("{prompt}", prompt)
             for argument in self.command
         ]
-        # A program named by a path (`./tools/vlm`, which shutil.which hands
-        # back as given) is made absolute here, against melampus's cwd,
-        # because the run below moves into the staged image's folder. A bare
-        # name is left for PATH.
-        program = os.path.abspath(self.executable) if os.path.dirname(self.executable) else self.executable
-        return [program, *expanded[1:]]
+        return [self.executable, *expanded[1:]]
 
     def _stop_tree(self, pid: int) -> None:
         """Stop the process tree the command with `pid` heads (OWN_GROUP):
