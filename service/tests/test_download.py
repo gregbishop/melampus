@@ -24,6 +24,7 @@ import subprocess
 import sys
 import threading
 import tomllib
+import types
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 from typing import Callable
@@ -49,12 +50,13 @@ from conftest import (
     snapshot_files,
 )
 from filelock import Timeout
-from huggingface_hub import constants
+from huggingface_hub import constants, file_download
 from huggingface_hub.constants import DOWNLOAD_CHUNK_SIZE
 from huggingface_hub.file_download import repo_folder_name
 from huggingface_hub.utils import WeakFileLock
 
 from melampus import download
+from melampus.backend import MLXBackend
 from melampus.cli import main
 from melampus.config import ModelConfig
 from melampus.download import (
@@ -2100,6 +2102,123 @@ def test_remove_refuses_while_a_download_runs_before_it_has_reached_any_blob(
     assert isinstance(refused, DownloadError), "the removal went ahead under a running download"
     assert "running" in str(refused) and FAKE_REPO in str(refused)
     assert resumed == path and snapshot_files(resumed) == FAKE_FILES
+
+
+def _mlx_vlm_loading_through_the_hub(monkeypatch: pytest.MonkeyPatch, hub: FakeHub) -> threading.Event:
+    """mlx-vlm as `MLXBackend._ensure_loaded` imports it, a stand-in here and
+    where the real one does not import (Windows, an Intel Mac): its `load`
+    does what the real load's `get_model_path` does, takes a folder on disk
+    as it is and otherwise runs the hub library's `snapshot_download` from
+    `hub` with mlx-vlm's own allow patterns into the cache `_cache_paths`
+    reads (`HF_HUB_CACHE`, pointed under tmp_path by `_cli_sees_the_cache`),
+    and returns a model and a processor that are no weights; its
+    `load_config` reads nothing. Returns the event `load` sets as it
+    begins."""
+    from huggingface_hub import snapshot_download
+
+    loading = threading.Event()
+    mlx_vlm, utils = types.ModuleType("mlx_vlm"), types.ModuleType("mlx_vlm.utils")
+
+    def load(repo: str) -> tuple[str, str]:
+        loading.set()
+        if not Path(repo).exists():
+            repo = snapshot_download(repo, endpoint=hub.endpoint, allow_patterns=list(MODEL_FILE_PATTERNS))
+        return f"model at {repo}", "processor"
+
+    mlx_vlm.load, mlx_vlm.utils, utils.load_config = load, utils, lambda repo: {}
+    monkeypatch.setitem(sys.modules, "mlx_vlm", mlx_vlm)
+    monkeypatch.setitem(sys.modules, "mlx_vlm.utils", utils)
+    return loading
+
+
+def test_remove_refuses_while_the_models_load_fetches_a_blob_it_has_not_seen(
+    fake_hub: FakeHub, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Codex review 10, code finding 1 and security finding 1 (download.py:833).
+    The executable's mlx engine loads the model through mlx-vlm's `load`,
+    whose `snapshot_download` fetches what the cache does not hold under
+    the hub library's per-blob locks alone, so a load fetching a blob the
+    download had not reached (no lock file yet for the removal's probe to
+    find) took no lock the probe could see: a removal in that moment went
+    ahead, set the folder aside and deleted the blob under the load. The
+    load holds the repo's lock (`download.load_lock`, the one the download
+    and the removal take) for its whole run: a removal at the moment the
+    load takes the unseen blob's lock is refused as running, the model is
+    whole once the load returns, and a removal after it goes ahead."""
+    cache = tmp_path / "hub"
+    path, _ = _fetch(fake_hub, cache)
+    _forget_a_blob(cache, path, "model.safetensors")
+    _cli_sees_the_cache(monkeypatch, cache)
+    _mlx_vlm_loading_through_the_hub(monkeypatch, fake_hub)
+    removals: dict[str, Path | DownloadError] = {}
+    blob_lock = file_download.WeakFileLock
+
+    def a_removal_starts_at_the_blobs_lock(lock_file, **kwargs):
+        if "at the blob's lock" not in removals:
+            try:
+                removals["at the blob's lock"] = remove_model(FAKE_REPO, cache_dir=cache)
+            except DownloadError as exc:
+                removals["at the blob's lock"] = exc
+        return blob_lock(lock_file, **kwargs)
+
+    monkeypatch.setattr(file_download, "WeakFileLock", a_removal_starts_at_the_blobs_lock)
+    MLXBackend(FAKE_REPO).warmup()
+
+    refused = removals["at the blob's lock"]
+    assert isinstance(refused, DownloadError), "the removal went ahead under the load"
+    assert "running" in str(refused) and FAKE_REPO in str(refused), str(refused)
+    assert snapshot_files(path) == FAKE_FILES, "the load did not leave the model whole"
+    assert not remove_model(FAKE_REPO, cache_dir=cache).exists(), "the load's lock outlived it"
+
+
+def test_the_models_load_waits_for_a_removal_and_then_lays_the_model_out_from_nothing(
+    fake_hub: FakeHub, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Codex review 10, code finding 1 and security finding 1 (download.py:833),
+    the other side: a load starting under a removal, at the rename or at
+    the deletion, fetched into a folder the removal was setting aside and
+    deleting. The load waits at the repo's lock, as the hub library's own
+    download waits at a blob's, without bound: it fetches nothing until
+    the removal has returned, then lays the model out from nothing."""
+    cache = tmp_path / "hub"
+    _fetch(fake_hub, cache)
+    _cli_sees_the_cache(monkeypatch, cache)
+    loading = _mlx_vlm_loading_through_the_hub(monkeypatch, fake_hub)
+    loads: dict[str, threading.Thread] = {}
+    loaded_under_the_removal: dict[str, bool] = {}
+
+    def a_load_starts(at: str) -> None:
+        if at in loads:
+            return  # the load's own renames, under the hook, start no other
+        loads[at] = threading.Thread(target=MLXBackend(FAKE_REPO).warmup)
+        loads[at].start()
+        loaded_under_the_removal[at] = loading.wait(timeout=1)
+
+    removed = _remove_as_another_run_starts(monkeypatch, cache, a_load_starts)
+    for load in loads.values():
+        load.join(timeout=30)
+
+    assert removed == cache / FAKE_FOLDER
+    assert loaded_under_the_removal == {"at the rename": False, "at the deletion": False}
+    assert not any(load.is_alive() for load in loads.values()), "a load never returned"
+    assert snapshot_files(cache / FAKE_FOLDER / "snapshots" / FAKE_COMMIT) == FAKE_FILES
+
+
+def test_the_load_of_a_folder_of_weights_on_disk_takes_no_lock(
+    fake_hub: FakeHub, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """`[model] repo` may name a folder of weights on disk, which mlx-vlm's
+    load takes as it is, fetching nothing: it is in no cache, so there is
+    no repo's lock to take and no id for the cache to refuse."""
+    cache, weights = tmp_path / "hub", tmp_path / "weights"
+    weights.mkdir()
+    _cli_sees_the_cache(monkeypatch, cache)
+    loading = _mlx_vlm_loading_through_the_hub(monkeypatch, fake_hub)
+
+    MLXBackend(str(weights)).warmup()
+
+    assert loading.is_set() and fake_hub.requests == []
+    assert not cache.exists(), "the load of a folder on disk touched the cache"
 
 
 def test_model_status_flag_needs_no_folder_and_prints_one_json_object_for_the_configured_repo(

@@ -43,7 +43,7 @@ import logging  # noqa: E402
 import re  # noqa: E402
 import shutil  # noqa: E402
 import signal  # noqa: E402
-from contextlib import AbstractContextManager, ExitStack, contextmanager  # noqa: E402
+from contextlib import AbstractContextManager, ExitStack, contextmanager, nullcontext  # noqa: E402
 from dataclasses import asdict, dataclass  # noqa: E402
 from pathlib import Path  # noqa: E402
 from typing import Callable, Iterator  # noqa: E402
@@ -117,15 +117,17 @@ MODEL_FILE_PATTERNS = ("*.json", "*.safetensors", "*.py", "*.model", "*.tiktoken
 RERUN = "re-run melampus-id --download-model; it resumes where it stopped"
 NOT_A_HUB = "whatever answers there is not a Hugging Face hub; check HF_ENDPOINT"
 
-# The one lock the download and the removal of a repo both take, in the
-# repo's `.locks` folder beside the hub library's per-blob locks:
+# The one lock the download, the load and the removal of a repo all take,
+# in the repo's `.locks` folder beside the hub library's per-blob locks:
 # `download_model` holds it for the run, from before the hub is asked until
-# the model is laid out, and `remove_model` from its probe through the
-# rename and the deletion. The per-blob locks alone left a race: a blob the
-# download had not reached yet had no lock file for the removal's probe to
-# find, so a download starting between the probe and the rename made that
-# lock, opened its partial file and lost its bytes to the deletion. The
-# name is no etag (an etag is hex), so it cannot collide with a blob's.
+# the model is laid out, the model's load (`load_lock`) from its start
+# until the model is in memory, and `remove_model` from its probe through
+# the rename and the deletion. The per-blob locks alone left a race: a
+# blob the download had not reached yet had no lock file for the removal's
+# probe to find, so a download starting between the probe and the rename
+# made that lock, opened its partial file and lost its bytes to the
+# deletion. The name is no etag (an etag is hex), so it cannot collide
+# with a blob's.
 REPO_LOCK = "repo.lock"
 
 # How long a run waits at a lock another run holds, the repo's or a blob's,
@@ -586,12 +588,33 @@ def _cache_paths(repo: str, cache_dir: Path | None) -> tuple[Path, Path, Path]:
     return cache, cache / folder, cache / ".locks" / folder
 
 
-def _repo_lock(lock_dir: Path, timeout: float) -> AbstractContextManager:
+def _repo_lock(lock_dir: Path, timeout: float | None) -> AbstractContextManager:
     """The repo's lock (REPO_LOCK) in its `.locks` folder, made if absent,
-    waited for at most `timeout` seconds: the one both `download_model` and
-    `remove_model` take, said once so both take the same file."""
+    waited for at most `timeout` seconds (None: without bound): the one
+    `download_model`, `remove_model` and the model's load (`load_lock`)
+    take, said once so all take the same file."""
     lock_dir.mkdir(parents=True, exist_ok=True)
     return WeakFileLock(lock_dir / REPO_LOCK, timeout=timeout)
+
+
+def load_lock(repo: str) -> AbstractContextManager:
+    """The repo's lock for the model's load (`MLXBackend._ensure_loaded`):
+    mlx-vlm's `load` runs the hub library's `snapshot_download` for what
+    the cache (`HF_HUB_CACHE`, the one `_cache_paths` reads) does not hold,
+    under the library's per-blob locks alone, so a removal's probe could
+    find nothing held for a blob the load had not reached and delete the
+    load's files under it. Held for the whole load, the lock makes a
+    removal in that time refuse as running, and a load starting under a
+    removal wait for it, without bound as the library's own download
+    waits at a blob's lock, then fetch from nothing. A `repo` that is a
+    folder on disk (weights mlx-vlm's `get_model_path` loads as they are,
+    fetching nothing) is in no cache: nothing to lock, and no id for the
+    cache to refuse. Said here, beside the lock's other two takers, so the
+    backend names one thing of the cache and none of its layout."""
+    if Path(repo).exists():
+        return nullcontext()
+    _, _, locks = _cache_paths(repo, None)
+    return _repo_lock(locks, None)
 
 
 def download_model(
@@ -618,8 +641,9 @@ def download_model(
     the next run names the marker. The repo's lock (REPO_LOCK, the one
     `remove_model` takes too) is held from before the hub is asked until
     the snapshot is laid out, so no removal of the repo starts under the
-    run; a run that finds it held, by a removal or by another download of
-    the repo, waits LOCK_TIMEOUT and is then a DownloadError saying so. No URL's
+    run; a run that finds it held, by a removal, by the model's load or by
+    another download of the repo, waits LOCK_TIMEOUT and is then a
+    DownloadError saying so. No URL's
     query string reaches the message or the hub library's warnings: an LFS
     file's is the CDN's signature for it.
     """
@@ -674,10 +698,10 @@ def download_model(
             ) from exc
         except Timeout as exc:
             # The repo's lock, or a blob's: a download of this model (another
-            # run of this command, or the hub library's own for mlx-vlm's
-            # load) or a removal of it holds it.
+            # run of this command), a load of it (the hub library's own
+            # download for mlx-vlm's load) or a removal of it holds it.
             raise DownloadError(
-                f"another run holds {repo}: a download or a removal of it is running; "
+                f"another run holds {repo}: a download, a load or a removal of it is running; "
                 f"wait for it to finish, then {RERUN} ({exc})"
             ) from exc
         except (OSError, httpx.HTTPError) as exc:
@@ -822,9 +846,9 @@ def _holds(revision, listed: dict[str, int | None]) -> bool:
 
 def _download_running(lock_dir: Path, held: ExitStack) -> bool:
     """Whether a download of the repo is running: it holds the repo's lock
-    (`download_model`, for its run) or the per-file lock on the blob it is
-    appending to (`_fetch`, and the hub library's own download for
-    mlx-vlm's load, which takes no repo lock), under the cache's `.locks`.
+    (`download_model` for its run, the model's load for the load, whose
+    `snapshot_download` fetches what the cache lacks) or the per-file lock
+    on the blob it is appending to (`_fetch`), under the cache's `.locks`.
     Each lock this takes it keeps, on `held`, until the caller leaves that
     stack: released at once, a download starting after the probe took its
     lock and appended to a blob the removal then set aside and deleted.

@@ -106,7 +106,8 @@ after its own retry of a dropped connection names the file by the tail of its
 URL); a hub whose answers are not a hub's,
 an etag that is not a checksum or a commit that is not a hash, neither of which
 is let become a path in the cache, so check `HF_ENDPOINT`; another run holding
-the model, a download of it or a removal, whose lock this run waits five seconds
+the model, a download of it, an identification run loading it or a removal,
+whose lock this run waits five seconds
 for, so wait for it to finish and re-run; a cancel marker, below,
 the command cannot remove, so remove it by hand);
 **exit 4** when it was cancelled (`cancelled`), by a signal or by the cancel
@@ -202,7 +203,12 @@ cache and the folder the OS named: check that folder's permissions.
   the model's lock, then the per-file ones, itself and holds them until
   the deletion is done, so no download starts on it in between: one that
   tries is refused, or waits and starts from nothing once the model is
-  gone): cancel the download first. It also exits 3, the model untouched,
+  gone): cancel the download first. An identification run loading the
+  model holds the same lock from the start of its load until the model is
+  in memory (mlx-vlm's load fetches what the cache lacks the while), so a
+  removal in that time is refused as running too, and a load starting
+  under a removal waits for it and then fetches the model from nothing.
+  It also exits 3, the model untouched,
   when the repo's folder in the cache is a symbolic link (a model laid out
   on another disk and linked into the cache, which the status accepts as
   installed): nothing is deleted through a link, and the message names
