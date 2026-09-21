@@ -2204,7 +2204,8 @@ def test_command_not_installed_fires_before_any_image_is_read(tmp_path, capsys, 
     this machine is called, and the folder's one image is a link to
     nowhere, so opening it would fail loudly. The CLI exits 3 on the
     not-installed message, naming the command, and never mentions the file:
-    the check ran before any image was read."""
+    the check ran before any image was read. `--no-local-config` keeps a
+    developer's own melampus.local.toml keys out of the run (Done-when 3)."""
     from melampus.cli import main
 
     folder = tmp_path / "photos"
@@ -2212,7 +2213,8 @@ def test_command_not_installed_fires_before_any_image_is_read(tmp_path, capsys, 
     (folder / "nowhere.jpg").symlink_to(tmp_path / "does-not-exist.jpg")
     settings = _command_settings(tmp_path, ["melampus-no-such-command-420", "{image}", "{prompt}"])
 
-    code = main([str(folder), "--config", str(settings), "--cache", str(tmp_path / "cache.jsonl")])
+    code = main([str(folder), "--config", str(settings), "--no-local-config",
+                 "--cache", str(tmp_path / "cache.jsonl")])
 
     err = capsys.readouterr().err
     assert code == 3, err
@@ -2229,13 +2231,17 @@ def test_cli_backend_command_exits_3_when_the_command_exits_non_zero(
     service analyzes, then the run stops at exit 3 on a message naming the
     command, its exit code and what it said on stderr, like the other
     backend failures, rather than recording the same failure on every
-    frame in turn. Nothing is cached for the frame in flight."""
+    frame in turn. Nothing is cached for the frame in flight.
+    `--no-local-config` keeps a developer's own melampus.local.toml keys
+    (a `[run] profile`, a `[model] timeout_seconds`) out of the fake's run
+    (Done-when 3)."""
     from melampus.cli import main
 
     command = _fake_cli(monkeypatch, tmp_path, exit_code=2, stderr="not signed in\nrun fake-vlm login")
     out = tmp_path / "results.json"
 
     code = main([str(photos), "--backend", "command", "--config", str(_command_settings(tmp_path, command)),
+                 "--no-local-config",
                  "--cache", str(tmp_path / "cache.jsonl"), "--json-out", str(out)])
 
     err = capsys.readouterr().err
@@ -2252,13 +2258,17 @@ def test_cli_backend_command_writes_a_json_result_from_the_configured_template(
     """Acceptance for Done-when 1: `melampus-id FOLDER --config FILE` with
     `[model] backend = "command"` and the fake CLI's template in the file,
     on the committed fixture, runs the whole pipeline and writes a JSON
-    result with the candidates, attributed to the template."""
+    result with the candidates, attributed to the template.
+    `--no-local-config` keeps a developer's own melampus.local.toml keys out
+    of the run: a `[run] profile` there would swap the routing prompt for one
+    the fake does not recognise (Done-when 3)."""
     from melampus.cli import main
 
     command = _fake_cli(monkeypatch, tmp_path)
     out = tmp_path / "results.json"
 
     code = main([str(photos), "--config", str(_command_settings(tmp_path, command)),
+                 "--no-local-config",
                  "--cache", str(tmp_path / "cache.jsonl"), "--json-out", str(out)])
 
     err = capsys.readouterr().err
