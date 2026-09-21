@@ -32,7 +32,9 @@ from conftest import (
     fake_platform,
     loopback_server,
     ollama_chat_reply,
+    proxy_in_the_environment,
     recording_handler,
+    redirecting_handler,
 )
 from test_pipeline import ID_OK, ROUTING_OK
 
@@ -926,13 +928,7 @@ def test_ollama_probe_stays_on_loopback_whatever_proxy_the_environment_names(mon
     unavailable and the proxy never hears from it."""
     seen: list[str] = []
     monkeypatch.setattr(providers, "OLLAMA_URL", f"http://127.0.0.1:{closed_port()}")
-    for name in ("no_proxy", "NO_PROXY"):
-        monkeypatch.delenv(name, raising=False)
-    # urlopen builds its default opener once, reading the proxy variables then;
-    # start it fresh so the environment set here is the one it would see.
-    monkeypatch.setattr(urllib.request, "_opener", None)
-    with loopback_server(recording_handler(seen)) as proxy:
-        monkeypatch.setenv("http_proxy", f"http://127.0.0.1:{proxy.server_port}")
+    with proxy_in_the_environment(monkeypatch, seen):
         assert providers.ollama_answers() is False
     assert seen == [], f"the probe left the machine through the proxy: {seen}"
 
@@ -948,15 +944,8 @@ def test_ollama_probe_refuses_a_redirect_off_loopback(monkeypatch):
     redirected destination never hears from it."""
     seen: list[str] = []
     with loopback_server(recording_handler(seen)) as destination:
-        elsewhere = f"http://127.0.0.1:{destination.server_port}/api/version"
-
-        class Redirecting(QuietHandler):
-            def do_GET(self):  # noqa: N802 - http.server's name
-                self.send_response(302)
-                self.send_header("Location", elsewhere)
-                self.end_headers()
-
-        with _ollama_served_by(monkeypatch, Redirecting):
+        elsewhere = f"http://127.0.0.1:{destination.server_port}"
+        with _ollama_served_by(monkeypatch, redirecting_handler(elsewhere)):
             answered = providers.ollama_answers()
     assert seen == [], f"the probe followed the redirect off loopback: {seen}"
     assert answered is False
@@ -1354,15 +1343,9 @@ def test_ollama_backend_stays_at_the_address_whatever_proxy_the_environment_name
     everything and nothing at the address, the frame fails as not-running
     and the proxy never hears from it."""
     seen: list[str] = []
-    for name in ("no_proxy", "NO_PROXY"):
-        monkeypatch.delenv(name, raising=False)
-    # urlopen builds its default opener once, reading the proxy variables then;
-    # start it fresh so the environment set here is the one it would see.
-    monkeypatch.setattr(urllib.request, "_opener", None)
     image = tmp_path / "image.jpg"
     image.write_bytes(b"jpeg")
-    with loopback_server(recording_handler(seen)) as proxy:
-        monkeypatch.setenv("http_proxy", f"http://127.0.0.1:{proxy.server_port}")
+    with proxy_in_the_environment(monkeypatch, seen):
         backend = OllamaBackend(
             "qwen3-vl:8b-instruct", f"http://127.0.0.1:{closed_port()}", timeout=5.0)
         with pytest.raises(ConnectionError):
@@ -1382,16 +1365,8 @@ def test_ollama_backend_refuses_a_redirect_off_the_address(tmp_path):
     image = tmp_path / "image.jpg"
     image.write_bytes(b"jpeg")
     with loopback_server(recording_handler(seen)) as destination:
-        elsewhere = f"http://127.0.0.1:{destination.server_port}/api/chat"
-
-        class Redirecting(QuietHandler):
-            def do_POST(self):  # noqa: N802 - http.server's name
-                self.rfile.read(int(self.headers["Content-Length"]))
-                self.send_response(302)
-                self.send_header("Location", elsewhere)
-                self.end_headers()
-
-        with loopback_server(Redirecting) as squatter:
+        elsewhere = f"http://127.0.0.1:{destination.server_port}"
+        with loopback_server(redirecting_handler(elsewhere)) as squatter:
             backend = OllamaBackend(
                 "qwen3-vl:8b-instruct", f"http://127.0.0.1:{squatter.server_port}", timeout=5.0)
             with pytest.raises(RuntimeError) as err:

@@ -45,6 +45,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.request
 from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from pathlib import Path
@@ -182,6 +183,40 @@ def recording_handler(seen: list[str]) -> type[QuietHandler]:
         do_DELETE = do_POST  # noqa: N815 - http.server's name
 
     return Recording
+
+
+def redirecting_handler(elsewhere: str) -> type[QuietHandler]:
+    """A handler that answers 302 to any GET, POST or DELETE with a Location
+    at `elsewhere` (a server's root) plus the path it was asked: the squatter
+    a test stands up at the address to prove the client under test never
+    follows a redirect off it, `elsewhere` being a recording server's."""
+
+    class Redirecting(QuietHandler):
+        def do_GET(self) -> None:  # noqa: N802 - http.server's name
+            self.rfile.read(int(self.headers.get("Content-Length") or 0))
+            self.send_response(302)
+            self.send_header("Location", f"{elsewhere}{self.path}")
+            self.end_headers()
+
+        do_POST = do_DELETE = do_GET  # noqa: N815 - http.server's names
+
+    return Redirecting
+
+
+@contextlib.contextmanager
+def proxy_in_the_environment(monkeypatch: pytest.MonkeyPatch, seen: list[str]) -> Iterator[HTTPServer]:
+    """A proxy on loopback recording every request it is asked to `seen`,
+    named by `http_proxy` for the block with no bypass list in the way: what
+    urlopen's default opener would send a request through. That opener is
+    built once, reading the proxy variables then, so it is started fresh
+    for the environment set here. A client that stays at its address
+    leaves `seen` empty."""
+    for name in ("no_proxy", "NO_PROXY"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(urllib.request, "_opener", None)
+    with loopback_server(recording_handler(seen)) as proxy:
+        monkeypatch.setenv("http_proxy", f"http://127.0.0.1:{proxy.server_port}")
+        yield proxy
 
 
 class Silent(socketserver.BaseRequestHandler):

@@ -26,7 +26,6 @@ import threading
 import time
 import tomllib
 import types
-import urllib.request
 from collections.abc import Iterator
 from http.server import ThreadingHTTPServer
 from pathlib import Path
@@ -2614,16 +2613,10 @@ def test_the_ollama_calls_stay_at_the_address_whatever_proxy_the_environment_nam
     `--model-status`. Given a proxy in the environment that answers 200 to
     everything and nothing at the address, each call fails as not-running
     (the status reads absent) and the proxy never hears from it."""
-    from conftest import recording_handler
+    from conftest import proxy_in_the_environment
 
     seen: list[str] = []
-    for name in ("no_proxy", "NO_PROXY"):
-        monkeypatch.delenv(name, raising=False)
-    # urlopen builds its default opener once, reading the proxy variables then;
-    # start it fresh so the environment set here is the one it would see.
-    monkeypatch.setattr(urllib.request, "_opener", None)
-    with loopback_server(recording_handler(seen)) as proxy:
-        monkeypatch.setenv("http_proxy", f"http://127.0.0.1:{proxy.server_port}")
+    with proxy_in_the_environment(monkeypatch, seen):
         outcome = _through(ollama_call, f"http://127.0.0.1:{closed_port()}", tmp_path)
     assert seen == [], f"the {ollama_call} left the machine through the proxy: {seen}"
     if ollama_call == "status":
@@ -2644,22 +2637,12 @@ def test_the_ollama_calls_refuse_a_redirect_off_the_address(tmp_path: Path, olla
     second server that records every request, each call fails on the
     status (the status reads absent) and the destination never hears from
     it."""
-    from conftest import QuietHandler, recording_handler
+    from conftest import recording_handler, redirecting_handler
 
     seen: list[str] = []
     with loopback_server(recording_handler(seen)) as destination:
         elsewhere = f"http://127.0.0.1:{destination.server_port}"
-
-        class Redirecting(QuietHandler):
-            def do_GET(self):  # noqa: N802 - http.server's name
-                self.rfile.read(int(self.headers.get("Content-Length") or 0))
-                self.send_response(302)
-                self.send_header("Location", f"{elsewhere}{self.path}")
-                self.end_headers()
-
-            do_POST = do_DELETE = do_GET  # noqa: N815 - http.server's names
-
-        with loopback_server(Redirecting) as squatter:
+        with loopback_server(redirecting_handler(elsewhere)) as squatter:
             outcome = _through(ollama_call, f"http://127.0.0.1:{squatter.server_port}", tmp_path)
     assert seen == [], f"the {ollama_call} followed the redirect off the address: {seen}"
     if ollama_call == "status":
