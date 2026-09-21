@@ -28,9 +28,9 @@ import threading
 import time
 import types
 import urllib.error
-from pathlib import Path
 import urllib.request
 from http.server import ThreadingHTTPServer
+from pathlib import Path
 
 import pytest
 from conftest import (
