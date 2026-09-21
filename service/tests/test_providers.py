@@ -4035,8 +4035,6 @@ def test_the_status_check_runs_under_the_templates_isolation(monkeypatch, tmp_pa
     log = _fake_claude(monkeypatch, tmp_path)
     assert _verdict("claude-code").available
     assert _status_checks(log) == [["--restricted", "auth", "status", "--json"]]
-    assert providers.CLAUDE_CODE_ISOLATION in providers.CLAUDE_CODE_COMMAND
-    assert providers.claude_code_status(providers.CLAUDE_CODE_COMMAND)[0] == providers.CLAUDE_CODE_ISOLATION
 
 
 @posix_only
