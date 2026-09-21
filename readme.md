@@ -115,8 +115,9 @@ the signal's default in the launcher); a CLI not signed in, likewise,
 naming the sign-in command; Claude Code signed in but not to the subscription
 (an API key in the environment, which its print mode would bill instead),
 likewise, naming what to unset; a Codex signed in with an API key,
-likewise, since that bills per call, not to the plan; a Codex plan at its
-usage limit stops the batch at the first reply, naming when the limit resets.
+likewise, since that bills per call, not to the plan, and so is one whose
+status check names anything but the ChatGPT plan; a Codex plan at its usage
+limit stops the batch at the first reply, naming when the limit resets.
 
 **Cloud.** The same two backends the Mac uses for escalation, promoted to
 answering everything. Same prompts, same schema validation, same corrective

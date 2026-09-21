@@ -3634,10 +3634,12 @@ in ("Logged in using ChatGPT" on stderr) and 1 when not ("Not logged in").
 MODE: "signed-in" answers; "api-key" answers too, but the status check
 says "Logged in using an API key - " and a masked fragment of the key,
 first eight characters, `***`, last five (measured on 0.155.1 after
-`codex login --with-api-key`); "not-signed-in" fails the status check and
-every run the measured way (401); "usage-limit" passes the status check
-and fails every run with the measured usage-limit reply; "hung" never
-answers the status check."""
+`codex login --with-api-key`); "other-account" passes the status check
+with OTHER_STATUS, a line the test supplies that no version measured
+(what a future Codex might print); "not-signed-in" fails the status check
+and every run the measured way (401); "usage-limit" passes the status
+check and fails every run with the measured usage-limit reply; "hung"
+never answers the status check."""
 import json
 import os
 import sys
@@ -3649,6 +3651,7 @@ LOG = {log!r}
 USAGE_LIMIT = {usage_limit!r}
 UNAUTHORIZED = {unauthorized!r}
 API_KEY_FRAGMENT = {api_key_fragment!r}
+OTHER_STATUS = {other_status!r}
 
 argv = sys.argv[1:]
 with open(LOG, "a", encoding="utf-8") as log:
@@ -3663,6 +3666,9 @@ if argv[:2] == ["login", "status"]:
         sys.exit(1)
     if MODE == "api-key":
         print("Logged in using an API key - " + API_KEY_FRAGMENT, file=sys.stderr)
+        sys.exit(0)
+    if MODE == "other-account":
+        print(OTHER_STATUS, file=sys.stderr)
         sys.exit(0)
     print("Logged in using ChatGPT", file=sys.stderr)
     sys.exit(0)
@@ -3769,19 +3775,21 @@ _FAKES = {
 
 
 def _fake_engine_cli(
-    monkeypatch, tmp_path, cli: providers.CliEngine, *, mode: str = "signed-in"
+    monkeypatch, tmp_path, cli: providers.CliEngine, *, mode: str = "signed-in",
+    other_status: str = "",
 ) -> Path:
     """Put a `cli.program` that imitates the real CLI's documented interface
     on PATH, ahead of any real one, with a settings folder of the test's
     own (empty until a test writes into it) so no test reads a developer's
-    real one, and the real detection restored against it. Returns the log
-    it appends each invocation's argv and cwd to."""
+    real one, and the real detection restored against it. `other_status`
+    is the status line the fake codex's "other-account" mode prints.
+    Returns the log it appends each invocation's argv and cwd to."""
     fake = _FAKES[cli.engine]
     log = tmp_path / f"{cli.program}-calls.jsonl"
     _script_on_path(monkeypatch, tmp_path, cli.program, fake.script.format(
         python=sys.executable, mode=mode, routing=ROUTING_OK, identification=ID_OK, log=str(log),
         usage_limit=_CODEX_USAGE_LIMIT, unauthorized=_CODEX_UNAUTHORIZED,
-        api_key_fragment=_CODEX_API_KEY_FRAGMENT,
+        api_key_fragment=_CODEX_API_KEY_FRAGMENT, other_status=other_status,
     ))
     config_dir = tmp_path / f"{cli.program}-config"
     config_dir.mkdir(exist_ok=True)
@@ -4871,6 +4879,43 @@ def test_detection_codex_signed_in_with_an_api_key_is_refused_naming_the_kind_an
     assert providers.CODEX_SIGN_IN in verdict.reason
     for key_material in (_CODEX_API_KEY_FRAGMENT, "syntheti", "a-key", "***"):
         assert key_material not in verdict.reason, f"key material in a verdict: {verdict.reason}"
+    assert "codex" not in providers._works_here(providers.detect_engines())
+
+
+@posix_only
+@pytest.mark.parametrize(
+    "status_line",
+    [
+        "Logged in using API key " + _CODEX_API_KEY_FRAGMENT,
+        "Logged in using a kind this test made up",
+        "Signed in.",
+    ],
+    ids=["api-key-reworded", "unknown-kind", "unparseable"],
+)
+def test_detection_codex_signed_in_to_anything_but_chatgpt_is_refused_without_quoting_it(
+    monkeypatch, tmp_path, status_line
+):
+    """The billing guard fails closed. `codex login status` is an
+    unversioned CLI's human-readable stderr, and the API-key wording the
+    guard knows was measured on one version (0.155.1). If a later Codex
+    words it differently, moves the line, or names a kind melampus has
+    never seen, the status check still exits 0 and the guard must refuse,
+    not pass: a passed check naming anything but the ChatGPT plan (or
+    naming nothing the parser reads) is unavailable, says to run `codex
+    login`, and does not quote the line it could not place, since an
+    account kind melampus does not know may carry key material the way
+    the measured API-key line does. Three lines no version measured: the
+    API-key wording without its " - " separator (the fragment would
+    otherwise ride into the reason), an invented kind, and a line the
+    parser does not read at all."""
+    _fake_engine_cli(monkeypatch, tmp_path, providers.CODEX_CLI, mode="other-account",
+                     other_status=status_line)
+    verdict = _verdict("codex")
+    assert not verdict.available, verdict.reason
+    assert providers.CODEX_SIGN_IN in verdict.reason and "per call" in verdict.reason
+    for not_quoted in (_CODEX_API_KEY_FRAGMENT, "syntheti", "a-key", "***", "made up",
+                       "Signed in."):
+        assert not_quoted not in verdict.reason, f"the status line is quoted: {verdict.reason}"
     assert "codex" not in providers._works_here(providers.detect_engines())
 
 

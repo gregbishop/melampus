@@ -111,9 +111,11 @@ melampus from a shell, or restore the signal's default in the launcher; and
 Claude Code and Codex CLI are refused as not installed or, by their own `claude
 auth status` and `codex login status`, as not signed in, or as signed in but not
 to the subscription (Claude Code's login set aside for a key; an account that
-bills per call, `CliEngine.bills_per_call`: Codex's API-key sign-in). The one
-failure that stops a batch rather than being recorded on the frame is a command
-exiting
+bills per call, `CliEngine.bills_per_call`: Codex's API-key sign-in; one the
+status check does not name as the subscription, `CliEngine.subscriptions`:
+Codex's is ChatGPT, and the guard fails closed on a wording it has not
+measured, and does not quote it). The one failure that stops a batch rather
+than being recorded on the frame is a command exiting
 non-zero (`CommandFailed`): that is a broken engine, not a bad file, and every
 frame would fail the same way. A CLI's decoder raises the same before the
 exit code is judged, so a plan at its usage limit (Codex fails the turn on

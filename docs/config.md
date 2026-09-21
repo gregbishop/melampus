@@ -234,8 +234,12 @@ called `codex`, as not signed in when `codex login status` exits non-zero
 the sign-in is an API key (`codex login --with-api-key`: that account
 bills per call, which none of the cloud guards would watch here, so the
 reason names the kind, never the key, and says to run `codex login` for the
-plan), and otherwise as available, naming the account kind; a run asked for
-`codex` is refused the same way before any image is read, exit 3. The plan's
+plan), as refused when it says anything else than "Logged in using ChatGPT"
+(the guard fails closed: that line is one version's wording, and an account
+melampus cannot place may bill per call, so the reason says the check did
+not name the plan and does not quote it), and otherwise as available,
+naming the account kind; a run asked for `codex` is refused the same way
+before any image is read, exit 3. The plan's
 usage limit is not knowable
 without a model call (the status check does not report it, nor does
 `codex doctor`), so detection does not try: a plan at its limit is caught

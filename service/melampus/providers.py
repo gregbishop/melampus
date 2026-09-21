@@ -667,8 +667,8 @@ def codex_verdict(command: list[str] | None = None) -> EngineVerdict:
     """Whether Codex CLI can be the engine here (card #422): the program
     `command` (CODEX_COMMAND unless the user set a template) names on PATH
     and `codex login status` saying signed in to the ChatGPT plan (an
-    API-key sign-in bills per call and is refused), under
-    CODEX_PROBE_SECONDS. Never raises; a verdict reports. Whether the plan
+    API-key sign-in bills per call and is refused; so is any account the
+    check does not name as ChatGPT), under CODEX_PROBE_SECONDS. Never raises; a verdict reports. Whether the plan
     is at its usage limit is not knowable here without a model call; the
     first run says, and the batch stops on it naming the reset time
     (codex_reply)."""
@@ -816,12 +816,17 @@ def _codex_refuse(message: str) -> NoReturn:
 #: in with an API key (`codex login --with-api-key`; the status check says
 #: "Logged in using an API key", measured on 0.155.1), every frame would
 #: bill the OpenAI API per token with none of the cloud guards, so that
-#: account kind is refused: this engine runs on the ChatGPT plan only.
+#: account kind is refused by name: this engine runs on the ChatGPT plan
+#: only ("Logged in using ChatGPT", measured on 0.154.0 and 0.155.1), and
+#: a status line naming anything else, or nothing _codex_account reads, is
+#: refused too, since the wording is one version's and the guard is
+#: about money.
 CODEX_CLI = CliEngine(
     CODEX, "Codex CLI", CODEX_PROGRAM, CODEX_INSTALL, CODEX_SIGN_IN,
     CODEX_STATUS, CODEX_COMMAND, codex_reply,
     status_check=lambda command: list(CODEX_STATUS), signed_out=_codex_signed_out,
     account=_codex_account, subscription="the ChatGPT plan", bills_per_call=("an API key",),
+    subscriptions=("ChatGPT",),
 )
 
 #: The subscription CLIs, in the owner's order: the verdicts after the
