@@ -644,3 +644,30 @@ def test_docs_describe_the_engine_picker_and_where_the_key_lives():
     # key is kept is said in platform-neutral words, as the dialog says it.
     assert "keychain" not in section.lower(), (
         "readme.md's Lightroom section says keychain, which Windows has not")
+
+
+def test_docs_name_the_download_command_where_the_model_and_the_protocol_are_described():
+    """Card #407: the model arrives by `melampus-id --download-model`, not by
+    a manual `hf download` the user must read the readme for. readme.md's
+    Install section names the flag and no longer the manual line (the
+    environment note moves to docs/troubleshooting.md, which keeps `hf
+    download` as the diagnosis it is); docs/config.md documents the flag,
+    its exit codes and the progress protocol the plugin parses, in the words
+    the code prints, and architecture.md's module table has the module."""
+    from melampus.download import CANCELLED, DONE, EXIT_CANCELLED, PROGRESS
+
+    readme = README.read_text(encoding="utf-8")
+    install = re.search(r"^## Install\n(.*?)^## ", readme, re.MULTILINE | re.DOTALL).group(1)
+    assert "`--download-model`" in install or "--download-model" in "\n".join(_fenced_commands(install)), (
+        "readme.md § Install does not name --download-model")
+    assert "hf download" not in install, "readme.md § Install still tells the user to run hf download by hand"
+
+    config_doc = CONFIG_DOC.read_text(encoding="utf-8")
+    section = re.search(r"^## Downloading the model\n(.*?)(?:^## |\Z)", config_doc, re.MULTILINE | re.DOTALL)
+    assert section, "docs/config.md has no `## Downloading the model` section"
+    for promise in ("`--download-model`", f"`{PROGRESS} <bytes_done> <bytes_total>`", f"`{DONE} <path>`",
+                    f"`{CANCELLED}`", f"exit {EXIT_CANCELLED}", "exit 3", "exit 0", "stderr", "resume", "checksum"):
+        assert promise in section.group(1), f"docs/config.md § Downloading the model does not say {promise}"
+
+    architecture = (REPO / "docs" / "architecture.md").read_text(encoding="utf-8")
+    assert "| `download.py` |" in architecture, "docs/architecture.md's module table lacks download.py"

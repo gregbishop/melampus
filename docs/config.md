@@ -72,6 +72,82 @@ If you switch to a smaller model and see a spike in `unprocessed`, this is the c
 
 ---
 
+## Downloading the model
+
+The flag `--download-model` (`melampus-id --download-model`, no folder
+needed) fetches `[model] repo`, or the repo `--model` names, into the
+HuggingFace cache: `HF_HOME`, the same cache `mlx` loads from. The Lightroom
+plugin's download button (card #408) drives it, so what it prints on stdout is
+a protocol, defined once in `download.py` (`Update`) and stable:
+
+| Line | When |
+|---|---|
+| `progress <bytes_done> <bytes_total>` | One per chunk received (the hub library's 10 MiB), and one before any byte moves so the total is known at once. `bytes_total` is the whole model as the hub serves it: two files with the same bytes share one etag, so one blob in the cache, counted once; `bytes_done` counts what the cache already holds, complete files and the partial one being resumed included, so a re-run of a finished model prints one line with both equal. `bytes_done` never exceeds `bytes_total`: when a host answers the resume's Range request with the whole file instead, one update steps back by the partial's bytes before the file is counted from byte zero. |
+| `done <path>` | Last line on success: the snapshot folder in the cache. The path is the rest of the line; it may hold spaces. |
+| `cancelled` | Last line when a signal stopped it. |
+
+Nothing else goes to stdout; errors and the hub library's own warnings go to
+stderr, and a URL in either is named by its path alone: the hub serves a
+weights file's bytes from its CDN at a signed URL, whose query is a credential
+for that file, and neither the library's retry warning nor the failure message
+carries it. Exit codes: **exit 0** once the model is complete (`done`); **exit 3**
+on a failure, with a message on stderr naming the fix (the repo the hub does not
+have, or an id that is not a repo id at all, a pasted hub URL say, so check
+`[model] repo` or `--model`; a gated repo, so request access to
+it on the hub and sign in with `hf auth login` or `HF_TOKEN`; the network, so
+check it and re-run, a hub that accepts the connection and never answers
+included, since every request to it is bounded by the hub library's own
+metadata timeout, `HF_HUB_ETAG_TIMEOUT`, ten seconds;
+a file whose bytes do not match the checksum the hub names for it, so its partial
+is discarded and the re-run fetches it whole; a file that arrived at a size other
+than the one the hub named, so its partial is kept and the re-run resumes it (the
+message names the file and both sizes, never the hub library's own wording, which
+after its own retry of a dropped connection names the file by the tail of its
+URL); a hub whose answers are not a hub's,
+an etag that is not a checksum or a commit that is not a hash, neither of which
+is let become a path in the cache, so check `HF_ENDPOINT`);
+**exit 4** when a signal cancelled it (`cancelled`). The signals are SIGINT
+(Ctrl+C), SIGTERM and, on Windows, Ctrl+Break: the download stops within the
+current chunk and leaves the partial file in the cache as the hub's
+`<etag>.incomplete` blob, and the next run **resumes** it, asking the hub for
+the rest by Range from the byte it has. A failed run leaves the same partial
+file, so re-running after a network drop resumes too.
+
+The bytes move over plain HTTP, through the hub library's own file download
+(its Range request, its size check, its per-file lock), and every finished file
+is checked against the checksum the hub names in its etag (the sha256 of a
+weights file, git's blob sha1 of a regular one) before it becomes a blob in
+the cache, never through the Xet
+transfer that stalls on some networks (docs/troubleshooting.md); the command
+sets `HF_HUB_DISABLE_XET=1` for itself. It also sets
+`HF_HUB_DISABLE_TELEMETRY=1` for itself (a value you set, or `DO_NOT_TRACK`,
+stands): the hub library would otherwise ask the hub which AI coding agents
+exist and name the one it runs under, and the torch version, in every
+request; the command sends the hub nothing about the machine but the
+requests the download needs. The commit `main` points at is
+resolved once, at the start, and recorded in the cache's `refs/main`; every
+file is fetched at that commit, so a branch that moves during the run changes
+nothing. Once every file is in the cache and checked, the command lays out the
+snapshot of that commit from those checked files alone, its pointers made by
+the hub library's own helper exactly as `mlx` will look for them (where
+symlinks are unavailable, Windows without developer mode, the helper copies
+each file into the snapshot instead: the copy is made under a staging name
+and renamed into place once whole, so a cancel or a full disk mid-copy leaves
+nothing under the file's name, and a short copy an earlier run left is
+replaced, never taken as complete); the hub is
+asked nothing more, so what it answers after the plan (another etag for a
+file, say) reaches no path in the cache. A file name the listing gives that
+is a path (absolute, a drive, or traversing) is refused the same way an etag
+that is not a checksum is.
+`HF_ENDPOINT` points the command at another hub,
+which is how the tests prove it against a fake on 127.0.0.1 without ever
+fetching real weights. The user's hub token (`hf auth login`, or `HF_TOKEN`)
+goes only to that hub's own origin, and only over `https://` or to a loopback
+host (127.0.0.1, ::1, localhost): an `http://` hub on another machine gets
+every request without it, rather than the token in cleartext on the wire.
+
+---
+
 ## `[image]`
 
 | Key | Default | Why |

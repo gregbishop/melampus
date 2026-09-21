@@ -41,8 +41,12 @@ test process (is this Apple Silicon; does a server answer at OLLAMA_URL over
 loopback), so a developer's running Ollama decides nothing the test did not
 measure too.
 
+Card #407: `--download-model` from the executable fetches the model with
+progress on stdout, from a fake hub on loopback, on every platform's build.
+
 Nothing here downloads a model: the MLX check stops at the point where the
-executable goes looking for weights.
+executable goes looking for weights, and the download test's host is the fake
+in conftest.py, so no real weights are ever fetched.
 """
 
 from __future__ import annotations
@@ -57,7 +61,14 @@ import types
 from pathlib import Path
 
 import pytest
-from conftest import PHOTO, closed_port, fake_platform
+from conftest import (
+    FAKE_REPO,
+    PHOTO,
+    VENV_CLI,
+    assert_download_completed,
+    closed_port,
+    fake_platform,
+)
 
 from melampus import config
 from melampus.backend import ScriptedBackend
@@ -66,9 +77,6 @@ from melampus.identify import Identifier
 from melampus.providers import on_apple_silicon
 
 CONFTEST = Path(__file__).with_name("conftest.py")
-# What `.venv/bin/melampus-id` runs, spelled so it works from any interpreter
-# that has the package installed (CI has no root .venv).
-VENV_CLI = [sys.executable, "-m", "melampus.cli"]
 
 
 def no_python_environment(tmp_path: Path) -> dict[str, str]:
@@ -669,3 +677,21 @@ def test_executable_detects_engines_as_json_with_no_python_on_the_path(
         assert by_engine[engine]["available"] is True
         assert "API key required" in by_engine[engine]["reason"]
         assert providers.KEY_VARIABLES[engine][0] in by_engine[engine]["reason"]
+
+
+def test_executable_downloads_the_model_from_the_hub_with_no_python_on_the_path(
+    built_executable: Path, hub_env: dict[str, str], tmp_path: Path
+):
+    """Card #407, from the executable alone, on whichever platform built it:
+    the hub library is in the bundle (on Windows only because pyproject names
+    it), the protocol lines come out on stdout, exit 0 with `done <path>`, and
+    the path under HF_HOME holds the fake host's files byte for byte."""
+    env = no_python_environment(tmp_path) | hub_env
+    proc = subprocess.run(
+        [str(built_executable), "--download-model", "--model", FAKE_REPO],
+        env=env, capture_output=True, text=True, timeout=600,
+    )
+    tail = proc.stderr[-3000:]
+    _assert_no_missing_module(tail, "the executable does not carry the hub library")
+    assert proc.returncode == 0, f"exit {proc.returncode}:\n{tail}"
+    assert_download_completed(proc.stdout, hub_env)

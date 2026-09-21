@@ -51,14 +51,21 @@ from too; `--locked` fails rather than re-resolve if the lock has drifted from
 `service/pyproject.toml`.
 
 Model weights are **not bundled**. They download on first use into the standard
-HuggingFace cache, or fetch them ahead of time:
+HuggingFace cache, or fetch them ahead of time with the command the Lightroom
+plugin will drive (card #408):
 
 ```bash
-HF_HUB_DISABLE_XET=1 .venv/bin/hf download mlx-community/Qwen3-VL-30B-A3B-Instruct-4bit
+.venv/bin/melampus-id --download-model
 ```
 
-`HF_HUB_DISABLE_XET=1` is not optional on some networks — see
-[docs/troubleshooting.md](docs/troubleshooting.md).
+It fetches `[model] repo` (the default, or `--model` names another) into the
+HuggingFace cache, prints `progress <bytes done> <bytes total>` as it goes and
+`done <path>` at the end, and resumes where it stopped if interrupted (Ctrl+C
+prints `cancelled`, exit 4); the format, the exit codes and what it does about
+the Xet stall are in [docs/config.md](docs/config.md) § Downloading the model.
+Some networks stall the HuggingFace Xet transfer — see
+[docs/troubleshooting.md](docs/troubleshooting.md); the command downloads over
+plain HTTP, so it is not affected.
 
 ## Windows (Ollama, or cloud inference)
 

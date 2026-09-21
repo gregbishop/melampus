@@ -27,6 +27,7 @@ import pytest
 from conftest import (
     PHOTO,
     QuietHandler,
+    Silent,
     closed_port,
     fake_platform,
     loopback_server,
@@ -872,16 +873,6 @@ def test_ollama_probe_gives_up_at_its_deadline_when_the_headers_trickle(monkeypa
     answered, elapsed = _timed_probe(monkeypatch, Trickling)
     assert elapsed < deadline + SCHEDULING_SLACK, f"the probe read past its deadline: {elapsed:.2f}s"
     assert answered is False
-
-
-class Silent(socketserver.BaseRequestHandler):
-    """A listener that accepts the TCP connection and never speaks: a TLS
-    handshake against it waits for a ServerHello that never comes."""
-
-    def handle(self) -> None:
-        with contextlib.suppress(OSError):
-            self.request.recv(65536)
-            self.request.recv(65536)
 
 
 def _hold_connect(monkeypatch, seconds: float) -> None:
