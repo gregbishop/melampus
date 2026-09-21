@@ -950,7 +950,7 @@ class CommandBackend(VLMBackend):
         return [self.executable, *expanded[1:]]
 
     def _stderr_lines(self, stderr: str) -> str:
-        lines = [line for line in (stderr or "").splitlines() if line.strip()]
+        lines = [line for line in stderr.splitlines() if line.strip()]
         return " / ".join(lines[: self.STDERR_LINES])
 
     def _stop_tree(self, pid: int) -> None:
@@ -1126,7 +1126,7 @@ class CommandBackend(VLMBackend):
                 f"{self.program} exited {process.returncode}"
                 + (f": {said}" if said else " with nothing on stderr")
             )
-        if not (stdout or "").strip():
+        if not stdout.strip():
             said = self._stderr_lines(stderr)
             raise RuntimeError(
                 f"{self.program} printed nothing on stdout"
