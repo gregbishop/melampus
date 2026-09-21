@@ -965,6 +965,16 @@ def remove_model(repo: str, *, cache_dir: Path | None = None) -> Path:
 OLLAMA_PULL = "/api/pull"
 OLLAMA_TAGS = "/api/tags"
 OLLAMA_DELETE = "/api/delete"
+#: The most layers a pull's stream may report, and the longest digest a layer
+#: line may name: the table summing the layers (pull_updates) keeps one entry
+#: per digest, and it is whatever listens at the address that writes the
+#: lines, so with no bound a listener naming a fresh digest on every line
+#: grows the process by a line's worth per line until it dies. A model's
+#: manifest holds a handful of layers (the weights, the template, the
+#: parameters, the license), each a `sha256:` digest of 71 characters
+#: (Ollama's server/layer.go); the table holds at most the product.
+MAX_PULL_LAYERS = 1024
+MAX_DIGEST_CHARS = 256
 
 
 def _pull_error(model: str, error: object) -> DownloadError:
@@ -1005,8 +1015,9 @@ def pull_updates(model: str, lines: Iterable[bytes | str]) -> Iterator[Update]:
     `[model] ollama_model` when the library has no such model (`pull model
     manifest: file does not exist`, its 404), else the re-run hint, since
     Ollama keeps the layers it has and resumes them. A stream that ends
-    before `success` is a failure too, as is a line that is not JSON or a
-    layer line whose `total` or `completed` is not a count: every line is
+    before `success` is a failure too, as is a line that is not JSON, a
+    layer line whose `total` or `completed` is not a count, a digest longer
+    than MAX_DIGEST_CHARS or a layer past MAX_PULL_LAYERS: every line is
     the server's to write, and a malformed one is named, never a traceback.
     """
     layers: dict[str, tuple[int, int]] = {}
@@ -1034,7 +1045,16 @@ def pull_updates(model: str, lines: Iterable[bytes | str]) -> Iterator[Update]:
                 raise DownloadError(
                     f"Ollama's pull reply carried a size that is not a count: {text[:120]!r}"
                 ) from exc
-            layers[str(item["digest"])] = counts
+            digest = str(item["digest"])
+            if len(digest) > MAX_DIGEST_CHARS:
+                raise DownloadError(
+                    f"Ollama's pull reply named a digest longer than one is: {text[:120]!r}"
+                )
+            if digest not in layers and len(layers) >= MAX_PULL_LAYERS:
+                raise DownloadError(
+                    f"Ollama's pull of {model} reported more than {MAX_PULL_LAYERS} layers; {RERUN}"
+                )
+            layers[digest] = counts
             yield Update.progress(sum(c for _, c in layers.values()), sum(t for t, _ in layers.values()))
     raise DownloadError(f"Ollama's pull of {model} ended before it reported success; {RERUN}")
 

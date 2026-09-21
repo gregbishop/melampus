@@ -2504,6 +2504,36 @@ def test_pull_stream_layer_line_with_counts_that_are_not_numbers_is_a_failure_no
     assert "not a count" in str(failure.value), str(failure.value)
 
 
+@pytest.mark.parametrize(
+    ("layers", "named"),
+    [
+        ([{"status": "pulling x", "digest": "sha256:" + "a" * download.MAX_DIGEST_CHARS, "total": 1}],
+         "a digest longer than one is"),
+        ([{"status": f"pulling {i}", "digest": f"sha256:{i:064x}", "total": 1}
+          for i in range(download.MAX_PULL_LAYERS + 1)],
+         f"more than {download.MAX_PULL_LAYERS} layers"),
+    ],
+    ids=["digest-past-the-bound", "layers-past-the-bound"],
+)
+def test_pull_stream_naming_more_layers_or_a_longer_digest_than_a_model_has_is_a_failure_not_a_memory_leak(
+    layers: list, named: str
+):
+    """Security review (PR #19, round 5): the stream reader bounds each line
+    (round 1) and each line's time (round 4), but the table summing the
+    layers kept every digest the listener named, so a squatter on the
+    port naming a fresh, in-bound digest on every line grew --download-model
+    by a line's worth per line, with no end but a MemoryError traceback or
+    the OS. A model's manifest holds a handful of layers, each a `sha256:`
+    digest of 71 characters: a digest past MAX_DIGEST_CHARS, or a layer past
+    MAX_PULL_LAYERS, is a malformed stream, named like a count that is not
+    one, and the table holds at most their product."""
+    from melampus.download import pull_updates
+
+    with pytest.raises(DownloadError) as failure:
+        list(pull_updates(FAKE_MODEL, _stream({"status": "pulling manifest"}, *layers)))
+    assert named in str(failure.value), str(failure.value)
+
+
 def test_pull_stream_ending_without_success_is_a_failure():
     """The connection dropped before `success`: not done, and said so."""
     from melampus.download import pull_updates
