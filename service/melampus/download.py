@@ -679,11 +679,15 @@ def model_status(repo: str, *, endpoint: str | None = None, cache_dir: Path | No
     call that takes a timeout: STATUS_TIMEOUT) and, when it cannot answer,
     does not within that time, or answers with something that is not a hub's
     answer (a captive portal's page, a proxy's block page, a JSON error page
-    or a listing of another shape: the library's ValueError or TypeError
-    decoding it, its KeyError reading the repo id or a file's name, or the
-    TypeError of adding up sizes that are not numbers), `bytes_total` is
-    None and the listing is as if the hub had not answered: the status
-    never fails for the network. It raises DownloadError for a `repo` that is
+    or a listing of another shape: a file's name that is not a string, a
+    size that is not a number, a date or an evaluation result the library
+    cannot read, a repo id or a name missing, a page that is not JSON at
+    all), `bytes_total` is None and the listing is as if the hub had not
+    answered: the status never fails for the network. Whatever the answer
+    does wrong is caught as one class, every exception the library's
+    request, its constructor or the reading of the listing raises, since
+    what the library's parsing can raise is the library's to enumerate, not
+    this module's. It raises DownloadError for a `repo` that is
     not a repo id. The hub is asked through `_hub_client`, as the download
     asks it: the user's token goes only where that client lets it go.
 
@@ -707,11 +711,13 @@ def model_status(repo: str, *, endpoint: str | None = None, cache_dir: Path | No
     main = next((r for r in cached.revisions if "main" in r.refs), None) if cached else None
     try:
         info = HfApi(endpoint=endpoint).model_info(repo, files_metadata=True, timeout=STATUS_TIMEOUT)
-        listed: dict[str, int | None] | None = {f.rfilename: f.size for f in info.siblings or []}
-        total = sum(size or 0 for size in listed.values())
-    except (RepositoryNotFoundError, httpx.HTTPError, OSError, ValueError, TypeError, LookupError):
-        listed = total = None
-    installed = main is not None and (listed is None or _holds(main, listed))
+        listed: dict[str, int | None] = {f.rfilename: f.size for f in info.siblings or []}
+        if not all(isinstance(name, str) for name in listed):
+            raise TypeError("a file name in the listing is not a string")
+        total: int | None = sum(size or 0 for size in listed.values())
+        installed = main is not None and _holds(main, listed)
+    except Exception:  # noqa: BLE001 - the hub's answer, whatever it did wrong, is as if it had not answered
+        total, installed = None, main is not None
     path = str(main.snapshot_path) if installed else None
     return Status(repo, installed, total, _bytes_in_cache(storage), path, str(cancel_marker_path()))
 

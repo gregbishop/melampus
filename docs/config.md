@@ -171,9 +171,11 @@ the hub is asked anything.
   as it opens, so a stalled connection ends here rather than in Lightroom),
   or answers with something that is not a hub's answer (a captive portal's
   page, a proxy's block page or JSON error, a listing whose files have no
-  name or whose sizes are not numbers), which counts as the hub not
-  reached; the status never fails for the network (the button then says
-  "size unknown"). Example, absent:
+  name or a name that is not a string, whose sizes are not numbers, or
+  whose dates or evaluation results the hub library cannot read: whatever
+  the answer does wrong), which counts as the hub not reached, `installed`
+  then what the cache lays out; the status never fails for the network
+  (the button then says "size unknown"). Example, absent:
   `{"repo": "mlx-community/Qwen3-VL-30B-A3B-Instruct-4bit", "installed": false, "bytes_total": 18300000000, "bytes_done": 0, "path": null, "cancel_path": "~/Library/Application Support/Melampus/cache/download-cancel"}` (the path is absolute).
 - `--remove-model` deletes the repo from the cache, all or nothing from the
   cache's point of view: the repo's folder is first set aside within the

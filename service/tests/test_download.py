@@ -1400,20 +1400,39 @@ def test_status_gives_up_on_a_hub_that_accepts_the_connection_and_never_answers(
                             path=None, cancel_path=str(cancel_marker_path()))
 
 
-@pytest.mark.parametrize(("content_type", "body"), [
-    ("text/html", b"<html><body>Sign in to the network</body></html>"),
-    ("application/json", b"[1, 2, 3]"),
-    ("application/json", b'{"error": "blocked"}'),
-    ("application/json", b'{"id": "fake-org/fake-model", "siblings": [{"size": 3}]}'),
-    ("application/json", b'{"id": "fake-org/fake-model", "siblings": [{"rfilename": "model.safetensors", "size": "big"}]}'),
-], ids=["not json", "json of another shape", "a json object without id", "a sibling without rfilename",
-        "a size that is not a number"])
+# What a host at HF_ENDPOINT can answer 200 with that is not the hub's answer.
+_NOT_A_HUBS_ANSWER = [
+    ("not json", "text/html", b"<html><body>Sign in to the network</body></html>"),
+    ("json of another shape", "application/json", b"[1, 2, 3]"),
+    ("a json object without id", "application/json", b'{"error": "blocked"}'),
+    ("a sibling without rfilename", "application/json",
+     b'{"id": "fake-org/fake-model", "siblings": [{"size": 3}]}'),
+    ("a size that is not a number", "application/json",
+     b'{"id": "fake-org/fake-model", "siblings": [{"rfilename": "model.safetensors", "size": "big"}]}'),
+    ("a name that is null", "application/json",
+     b'{"id": "fake-org/fake-model", "siblings": [{"rfilename": null, "size": 3}]}'),
+    ("a name that is a number", "application/json",
+     b'{"id": "fake-org/fake-model", "siblings": [{"rfilename": 7, "size": 3}]}'),
+    ("lastModified that is a number", "application/json", b'{"id": "fake-org/fake-model", "lastModified": 5}'),
+    ("createdAt that is a number", "application/json", b'{"id": "fake-org/fake-model", "createdAt": 5}'),
+    ("evalResults that is a list of numbers", "application/json",
+     b'{"id": "fake-org/fake-model", "evalResults": [5]}'),
+]
+
+
+@pytest.mark.parametrize(("content_type", "body", "installed"), [
+    *[(content_type, body, False) for _, content_type, body in _NOT_A_HUBS_ANSWER],
+    *[(content_type, body, True) for name, content_type, body in _NOT_A_HUBS_ANSWER if name.startswith("a name")],
+], ids=[*[name for name, _, _ in _NOT_A_HUBS_ANSWER],
+        *[f"{name}, the model installed" for name, _, _ in _NOT_A_HUBS_ANSWER if name.startswith("a name")]])
 def test_status_treats_a_hub_answering_200_with_something_else_as_unreachable(
-    tmp_path: Path, content_type: str, body: bytes
+    fake_hub: FakeHub, tmp_path: Path, content_type: str, body: bytes, installed: bool
 ):
     """Security (Claude review 9 of #16, download.py:648; Codex review 4,
     security finding 1 and Claude review 11, security finding 1,
-    download.py:672-677). A host at HF_ENDPOINT that answers 200 with
+    download.py:672-677; Codex review 5, security finding 1 and Claude
+    review 12, security finding 1 and code finding 1, download.py:690). A
+    host at HF_ENDPOINT that answers 200 with
     something that is not the hub's answer (a captive portal's sign-in page,
     a proxy's block page, a JSON of another shape) raised the library's
     decoding error out of the status uncaught: a traceback in
@@ -1423,10 +1442,18 @@ def test_status_treats_a_hub_answering_200_with_something_else_as_unreachable(
     page, the commonest non-hub JSON answer) and one whose sibling has no
     `rfilename` raised the library's KeyError, not in the handler's tuple,
     and a sibling whose `size` is a string passed the handler and broke the
-    sum of the sizes outside it. The status never fails for the network:
-    whatever the hub's answer does wrong, such a hub is one that could not
-    be reached, the size unknown; through the CLI that is exit 0, the JSON
-    on stdout with `bytes_total` null, and no traceback on stderr."""
+    sum of the sizes outside it. Closed for those, it stayed open for a
+    sibling whose `rfilename` is null or a number, which the library takes
+    unchecked and which `_holds`, run outside the handler, handed to the
+    library's `filter_repo_objects`: a ValueError exactly when the model is
+    installed (with the cache empty `_holds` never ran), so the row that
+    should read Installed became the exit-1 note; and for `lastModified`,
+    `createdAt` or `evalResults` of another shape, the library's own
+    AttributeError parsing them, not in the tuple either. The status never
+    fails for the network: whatever the hub's answer does wrong, such a hub
+    is one that could not be reached, the size unknown and installed what
+    the cache lays out; through the CLI that is exit 0, the JSON on stdout
+    with `bytes_total` null, and no traceback on stderr."""
     from conftest import QuietHandler, loopback_server
 
     class Elsewhere(QuietHandler):
@@ -1436,15 +1463,18 @@ def test_status_treats_a_hub_answering_200_with_something_else_as_unreachable(
             self.end_headers()
             self.wfile.write(body)
 
+    cache = tmp_path / "hf" / "hub"
+    path = str(_fetch(fake_hub, cache)[0]) if installed else None
     with loopback_server(Elsewhere) as server:
         endpoint = f"http://127.0.0.1:{server.server_port}"
-        status = model_status(FAKE_REPO, endpoint=endpoint, cache_dir=tmp_path / "hub")
+        status = model_status(FAKE_REPO, endpoint=endpoint, cache_dir=cache)
         proc = _cli(["--model-status", "--model", FAKE_REPO], {"HF_ENDPOINT": endpoint, "HF_HOME": str(tmp_path / "hf")})
 
-    assert status == Status(FAKE_REPO, installed=False, bytes_total=None, bytes_done=0,
-                            path=None, cancel_path=str(cancel_marker_path()))
+    assert status == Status(FAKE_REPO, installed=installed, bytes_total=None, bytes_done=FAKE_TOTAL if installed else 0,
+                            path=path, cancel_path=str(cancel_marker_path()))
     assert proc.returncode == 0 and "Traceback" not in proc.stderr, proc.stderr[-3000:]
-    assert json.loads(proc.stdout)["bytes_total"] is None and json.loads(proc.stdout)["installed"] is False
+    printed = json.loads(proc.stdout)
+    assert printed["bytes_total"] is None and printed["installed"] is installed and printed["path"] == path
 
 
 @pytest.mark.parametrize(("host", "carried"), [("127.0.0.1", True), ("hub.example", False)],
