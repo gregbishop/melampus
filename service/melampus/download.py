@@ -1011,6 +1011,26 @@ def _pull_error(model: str, error: object) -> DownloadError:
     return DownloadError(f"Ollama could not pull {model}: {words}; {RERUN}")
 
 
+def _json_object(raw: bytes | str, named: str) -> dict:
+    """`raw`, a JSON object the server wrote (one line of the pull's stream,
+    the list's or the delete's reply), decoded; else a DownloadError naming
+    it as `named`, bounded to its first 120 bytes: "was not JSON" for what
+    the decoder refuses, whatever it raises for it, "was not a JSON object"
+    for JSON of another shape (`[1]`, `"text"`, `5`), the words the chat's
+    `complete` uses for its reply. The decoder raises a JSONDecodeError, a
+    UnicodeDecodeError for bytes that are not UTF-8 (or the UTF-16 or -32
+    a leading byte order mark names) and a plain ValueError for an integer
+    literal past Python's 4300-digit limit: all three are ValueErrors, and
+    all three mean the reply is not JSON."""
+    try:
+        item = json.loads(raw)
+    except ValueError as exc:
+        raise DownloadError(f"{named} was not JSON: {raw[:120]!r}") from exc
+    if not isinstance(item, dict):
+        raise DownloadError(f"{named} was not a JSON object: {raw[:120]!r}")
+    return item
+
+
 def pull_updates(model: str, lines: Iterable[bytes | str]) -> Iterator[Update]:
     """Ollama's pull stream as protocol updates. `lines` are the response's
     lines, one JSON object each (docs/api.md § Streaming responses; the
@@ -1031,7 +1051,8 @@ def pull_updates(model: str, lines: Iterable[bytes | str]) -> Iterator[Update]:
     `[model] ollama_model` when the library has no such model (`pull model
     manifest: file does not exist`, its 404), else the re-run hint, since
     Ollama keeps the layers it has and resumes them. A stream that ends
-    before `success` is a failure too, as is a line that is not JSON, a
+    before `success` is a failure too, as is a line that is not a JSON
+    object (`_json_object`, the list's and the delete's decoder too), a
     layer line whose `total` or `completed` is not a count (`_is_count`:
     the hub's rule for a file's size, so `1e309`, a fraction, a negative
     number, a bool or an integer above MAX_SIZE is named, never converted),
@@ -1044,14 +1065,7 @@ def pull_updates(model: str, lines: Iterable[bytes | str]) -> Iterator[Update]:
         text = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else raw
         if not text.strip():
             continue
-        try:
-            item = json.loads(text)
-        except ValueError as exc:
-            # The decoder's JSONDecodeError, and the plain ValueError it
-            # raises for an integer literal past Python's 4300-digit limit.
-            raise DownloadError(f"Ollama's pull reply was not JSON: {text[:120]!r}") from exc
-        if not isinstance(item, dict):
-            raise DownloadError(f"Ollama's pull reply was not JSON: {text[:120]!r}")
+        item = _json_object(text, "Ollama's pull reply")
         error = item.get("error")
         if error:
             raise _pull_error(model, error)
@@ -1165,24 +1179,14 @@ def _ollama_request(model: str, url: str, path: str, body: dict | None = None, *
     socket error, named `the connection to Ollama at <url> ended`); and
     its own, bounded to the reply's first 120 bytes, for a reply the
     decoder refuses, whatever it raises for it (not JSON, not UTF-8, an
-    integer past Python's digit limit), or that is not a JSON object."""
+    integer past Python's digit limit), or that is not a JSON object
+    (`_json_object`, the pull line's decoder too)."""
     request = ollama_request(url, path, body, method=method)
     try:
         raw = OllamaBackend(model, url, timeout=timeout).send(request)
     except (RuntimeError, ConnectionError, TimeoutError) as exc:
         raise DownloadError(str(exc)) from exc
-    try:
-        reply = json.loads(raw or b"{}")
-    except ValueError as exc:
-        # The decoder's JSONDecodeError, the UnicodeDecodeError for bytes
-        # that are not UTF-8 (or the UTF-16 or -32 a leading byte order
-        # mark names) and the plain ValueError for an integer literal past
-        # Python's 4300-digit limit: all three are ValueErrors, and all
-        # three mean the reply is not JSON.
-        raise DownloadError(f"Ollama's reply from {url}{path} was not JSON: {raw[:120]!r}") from exc
-    if not isinstance(reply, dict):
-        raise DownloadError(f"Ollama's reply from {url}{path} was not a JSON object: {raw[:120]!r}")
-    return reply
+    return _json_object(raw or b"{}", f"Ollama's reply from {url}{path}")
 
 
 def _held(model: str, url: str, *, timeout: float = STATUS_TIMEOUT) -> tuple[str, int] | None:

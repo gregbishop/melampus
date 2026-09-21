@@ -2477,6 +2477,19 @@ def test_pull_stream_that_is_not_json_is_a_failure_not_a_traceback(line: bytes):
     assert len(str(failure.value)) < 400, "the message is not bounded"
 
 
+@pytest.mark.parametrize("line", [b"[1]", b'"text"', b"5"], ids=["a-list", "a-string", "a-number"])
+def test_pull_stream_line_that_is_json_but_not_an_object_is_named_as_such(line: bytes):
+    """Review round 9 (download.py:1040, :1177): a line that is JSON but not
+    an object was named "not JSON", which it is; the list's and the delete's
+    reply of the same shape is named "not a JSON object", the words the
+    chat's `complete` uses too. One decoder, one message for the one case."""
+    from melampus.download import pull_updates
+
+    with pytest.raises(DownloadError) as failure:
+        list(pull_updates(FAKE_MODEL, [line + b"\n"]))
+    assert "not a JSON object" in str(failure.value), str(failure.value)
+
+
 @pytest.mark.parametrize(
     "error",
     ["pull model manifest: file does not exist\x1b[2K\rfake log line", "boom\x1b[31m\r\nfake log line\x07"],
