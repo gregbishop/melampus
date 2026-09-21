@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import errno
 import http.client
 import io
 import json
@@ -2321,10 +2322,9 @@ def test_command_backend_sees_the_exit_through_kqueue_and_names_what_each_event_
     An EV_ERROR event carrying any other errno is that error, raised as
     the OSError it is, never counted as the exit. Runs on every platform:
     kqueue and kevent are faked, with the constants where there are none."""
-    import errno
     monkeypatch.setattr(sys, "platform", "darwin")
-    for name, value in (("KQ_FILTER_PROC", -5), ("KQ_EV_ADD", 1), ("KQ_EV_ONESHOT", 0x10),
-                        ("KQ_EV_ERROR", 0x4000), ("KQ_NOTE_EXIT", 0x80000000)):
+    for name, value in (("KQ_FILTER_PROC", -5), ("KQ_EV_ADD", 1), ("KQ_EV_ONESHOT", 0x10), ("KQ_EV_CLEAR", 0x20),
+                        ("KQ_EV_EOF", 0x8000), ("KQ_EV_ERROR", 0x4000), ("KQ_NOTE_EXIT", 0x80000000)):
         monkeypatch.setattr(select, name, value, raising=False)
     monkeypatch.setattr(select, "kevent", lambda *fields: types.SimpleNamespace(fields=fields), raising=False)
     controls: list[tuple[list, int, float]] = []
@@ -2343,7 +2343,10 @@ def test_command_backend_sees_the_exit_through_kqueue_and_names_what_each_event_
     process = _FakeProcess([], _FakeRun())
 
     assert backend._exited(process, 0.05) is False, "no event is not yet"
-    answer[0] = [types.SimpleNamespace(flags=0x8031, fflags=select.KQ_NOTE_EXIT, data=0)]
+    # The flags a real NOTE_EXIT event carries (0x8031 on macOS): the registration's own ADD and
+    # ONESHOT, CLEAR and EOF set by the kernel, and no EV_ERROR, which is all the branch reads of them.
+    answer[0] = [types.SimpleNamespace(flags=select.KQ_EV_ADD | select.KQ_EV_ONESHOT | select.KQ_EV_CLEAR
+                                       | select.KQ_EV_EOF, fflags=select.KQ_NOTE_EXIT, data=0)]
     assert backend._exited(process, 0.05) is True, "NOTE_EXIT is the exit, seen during the wait"
     answer[0] = [types.SimpleNamespace(flags=select.KQ_EV_ERROR | select.KQ_EV_ONESHOT, fflags=0,
                                        data=errno.ESRCH)]
