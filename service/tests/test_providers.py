@@ -2887,6 +2887,13 @@ def _script_on_path(monkeypatch, tmp_path, name: str, text: str) -> Path:
     return script
 
 
+def _real_detection(monkeypatch) -> None:
+    """Run the real Claude Code detection against what this test put on
+    PATH: conftest's autouse fixture stubs it out for every test, so one
+    that has placed its own `claude` (or none) restores the real one."""
+    monkeypatch.setattr(providers, "claude_code_verdict", REAL_CLAUDE_CODE_VERDICT)
+
+
 def _fake_cli(monkeypatch, tmp_path, *, exit_code: int = 0, stderr: str = "",
               script: str = _FAKE_CLI_SCRIPT, **fields) -> list[str]:
     """Put FAKE_CLI on PATH and return the config template that runs it by
@@ -3428,9 +3435,7 @@ def _fake_claude(monkeypatch, tmp_path, *, mode: str = "signed-in") -> Path:
     _script_on_path(monkeypatch, tmp_path, CLAUDE, _FAKE_CLAUDE_SCRIPT.format(
         python=sys.executable, mode=mode, routing=ROUTING_OK, identification=ID_OK, log=str(log),
     ))
-    # conftest's autouse fixture stubs detection out; this test wants the
-    # real one, against the fake.
-    monkeypatch.setattr(providers, "claude_code_verdict", REAL_CLAUDE_CODE_VERDICT)
+    _real_detection(monkeypatch)
     return log
 
 
@@ -3440,7 +3445,7 @@ def _no_claude(monkeypatch, tmp_path) -> None:
     empty = tmp_path / "empty-bin"
     empty.mkdir(exist_ok=True)
     monkeypatch.setenv("PATH", f"{empty}{os.pathsep}{Path(sys.executable).parent}")
-    monkeypatch.setattr(providers, "claude_code_verdict", REAL_CLAUDE_CODE_VERDICT)
+    _real_detection(monkeypatch)
     assert shutil.which(CLAUDE) is None, "a real claude is still on the test PATH"
 
 
@@ -3760,7 +3765,7 @@ def test_detection_claude_code_that_cannot_be_run_says_so_in_the_systems_words(m
     verdict is unavailable, says it could not be run with the system's own
     error, and does not point at the sign-in, which would not help."""
     _script_on_path(monkeypatch, tmp_path, CLAUDE, "#!/nonexistent\n")
-    monkeypatch.setattr(providers, "claude_code_verdict", REAL_CLAUDE_CODE_VERDICT)
+    _real_detection(monkeypatch)
     verdict = _verdict("claude-code")
     assert not verdict.available
     assert "could not be run" in verdict.reason
