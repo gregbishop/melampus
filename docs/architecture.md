@@ -93,7 +93,8 @@ corrective retry live above the seam and are the same whoever answers.
 engine can run on this machine at all is `providers.detect_engines`' question,
 answered before any image is read; an Ollama that is not running is refused
 there with the address tried and where to install it, and a command that
-`shutil.which` cannot find is refused the same way, naming it. The one failure
+`shutil.which` cannot find, or resolves to a `.cmd`/`.bat` file that Windows
+would hand to cmd.exe, is refused the same way, naming it. The one failure
 that stops a batch rather than being recorded on the frame is a command exiting
 non-zero (`CommandFailed`): that is a broken engine, not a bad file, and every
 frame would fail the same way.

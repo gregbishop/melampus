@@ -857,9 +857,10 @@ class CommandBackend(VLMBackend):
 
     `executable` is what shutil.which resolved the template's first element
     to (providers.build_primary_backend does that before any image is read,
-    so a missing program is refused up front): it replaces the bare name in
-    the argv, which is what lets an npm-installed `.cmd` shim run on Windows
-    without a shell. The child gets the parent's environment as it is, so the
+    so a missing program is refused up front, and so is one that resolves to
+    a `.cmd` or `.bat` file, which Windows would run through cmd.exe): it
+    replaces the bare name in the argv, so what was checked is what runs.
+    The child gets the parent's environment as it is, so the
     program finds its own sign-in; nothing is added to it and no secret
     crosses the command line. As with every backend, the image is the staged,
     metadata-free file and only its path travels. `max_tokens` has no

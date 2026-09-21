@@ -94,7 +94,9 @@ such as Claude Code or Codex CLI, is vision with no API key
 ([docs/config.md](docs/config.md) § `[model]`). The seam is generic; the
 configured templates for Claude Code (card #421) and Codex (card #422) ship
 separately, and the plugin's picker learns the name in card #423. A program
-that is not installed is refused before any image is read, naming it.
+that is not installed is refused before any image is read, naming it; so is
+one whose name resolves to a `.cmd` or `.bat` shim on Windows, since cmd.exe
+would parse the prompt (name the `.exe`, or `node` and the script, instead).
 
 **Cloud.** The same two backends the Mac uses for escalation, promoted to
 answering everything. Same prompts, same schema validation, same corrective

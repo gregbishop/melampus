@@ -72,6 +72,13 @@ OLLAMA_INSTALL = "https://ollama.com/download"
 #: detection about it, so it is not in BACKEND_CHOICES.
 COMMAND = "command"
 
+#: What a `command` may not resolve to: Windows launches a batch file through
+#: cmd.exe regardless of what subprocess is told (Python's subprocess docs,
+#: Security Considerations), and cmd.exe would parse the prompt, newlines,
+#: quotes and braces included, instead of passing it as one argument. An
+#: npm-installed CLI is such a shim; its real entry is the fix.
+BATCH_SUFFIXES = (".cmd", ".bat")
+
 #: The backends that run on this machine and bill nobody per call.
 LOCAL_BACKENDS = ("mlx", OLLAMA, COMMAND, SCRIPTED)
 
@@ -286,7 +293,8 @@ def build_primary_backend(config: MelampusConfig) -> VLMBackend:
     if kind == COMMAND:
         # Resolved here, before any image is read: a program that is not
         # there fails once, up front, with the fix, rather than once per
-        # frame mid-run. The resolved path is what runs (backend.py says why).
+        # frame mid-run. The resolved path is what runs, so the check and
+        # the run agree on the program.
         if not settings.command:
             raise _refusal(
                 "The command backend needs [model] command: the program to run, as "
@@ -301,6 +309,15 @@ def build_primary_backend(config: MelampusConfig) -> VLMBackend:
                 f"The command '{program}' is not installed or not on PATH. Install "
                 "it, make sure the shell melampus runs from can find it, or name "
                 "its full path in [model] command.",
+                works_here=_works_here(detect_engines(settings.ollama_url)),
+            )
+        if executable.lower().endswith(BATCH_SUFFIXES):
+            raise _refusal(
+                f"The command '{program}' resolves to {executable}, a batch file "
+                "that Windows runs through cmd.exe whatever it is told, so the "
+                "prompt would be parsed as shell text rather than passed as one "
+                "argument. Name the program's real entry in [model] command "
+                "instead: its .exe, or node and the script the shim wraps.",
                 works_here=_works_here(detect_engines(settings.ollama_url)),
             )
         from .backend import CommandBackend

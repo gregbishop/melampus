@@ -1930,8 +1930,8 @@ def test_command_backend_expands_the_template_into_one_argv(tmp_path):
     given (absolute, the staged file), each with `{prompt}` the prompt in
     full as one argument, spaces, quotes and newlines included, and every
     other argument is passed untouched. The resolved executable stands in
-    for the bare name (shutil.which found it; on Windows that is how a
-    `.cmd` shim runs without a shell). subprocess.run is given the list, no
+    for the bare name (shutil.which found it, so what was checked is what
+    runs). subprocess.run is given the list, no
     shell, the reply as text, the config's timeout, stdout and stderr
     captured, and nothing on stdin, so a program that reads it cannot hang."""
     image = tmp_path / "image.jpg"
@@ -2072,6 +2072,30 @@ def test_command_not_installed_is_refused_before_any_image_is_read_and_names_the
     assert "install" in message.lower() and "PATH" in message
     for works_here in ("claude", "openai", "scripted"):
         assert works_here in message, f"{works_here!r} is not named as working here:\n{message}"
+    assert "--backend" in message
+
+
+@pytest.mark.parametrize("shim", [r"C:\Users\me\AppData\Roaming\npm\fake-vlm.cmd",
+                                  r"C:\Tools\fake-vlm.BAT"], ids=["cmd", "bat"])
+def test_command_resolving_to_a_batch_shim_is_refused_and_names_the_real_entry(
+    monkeypatch, no_ambient_keys, no_ambient_ollama, shim
+):
+    """Given the template's first element resolves to a `.cmd` or `.bat`
+    file (an npm-installed shim; any case), when the backend is asked for,
+    then it is refused up front through the same shape, naming the file
+    found and the fix: name the program's real entry in `[model] command`,
+    its `.exe` or `node` and the script the shim wraps. Windows launches a
+    batch file through cmd.exe whatever subprocess is told (Python's own
+    subprocess docs, Security Considerations), so the prompt, with its
+    newlines, quotes and braces, would be parsed by a shell rather than
+    delivered as one argument, which is the promise the argv list makes."""
+    monkeypatch.setattr(providers.shutil, "which", lambda name: shim)
+    with pytest.raises(providers.BackendUnavailable) as err:
+        providers.build_primary_backend(_cfg(model={"backend": "command", "command": COMMAND}))
+    message = str(err.value)
+    assert shim in message, message
+    assert "cmd.exe" in message, message
+    assert "[model] command" in message and ".exe" in message and "node" in message, message
     assert "--backend" in message
 
 
