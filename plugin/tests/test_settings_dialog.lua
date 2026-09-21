@@ -450,6 +450,22 @@ t.test('a refused removal shows the message and the model stays Installed', func
 	t.equals(#dialogsShown(false), 1, 'no message for a refused removal')
 end)
 
+t.test('a refused removal that set the model aside shows the message and the row flips to Download', function()
+	-- Codex review 6, finding 1. A removal that moves the model aside but
+	-- cannot delete it exits 3 with the model gone from the cache: the
+	-- status is asked again after a refused removal, so the row reads what
+	-- the cache holds, and the refusal's message is still shown.
+	local options = { detection = mock.detectionText(), status = modelStatus({ installed = 'true' }), removeCode = 3 }
+	local contents = openSettings(options)
+	local row, model = modelRow(contents)
+	options.status = modelStatus()
+	theButton(row, model, 'Remove', true).action()
+	mock.settle()
+	t.equals(#dialogsShown(false), 1, 'no message for a refused removal')
+	t.equals(commandsRun('--model-status'), 2, 'the status was not asked again after the refused removal')
+	t.equals(model.phase, 'absent')
+end)
+
 t.test('the row shows when the picked engine is mlx, or the unset preference resolves to it', function()
 	local contents = openSettings({ detection = mock.detectionText() })
 	local row = modelRow(contents)

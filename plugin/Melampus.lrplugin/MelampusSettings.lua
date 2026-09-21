@@ -91,8 +91,9 @@ LrTasks.startAsyncTask(function()
 		-- it, named with the model and its size; while it downloads, the
 		-- bytes so far (Lightroom's own progress bar carries the portion) and
 		-- Cancel; once present, Installed and Remove. The status is asked
-		-- once, now, and only where mlx can run at all; the row shows when
-		-- the picked engine is mlx, or the unset preference resolves to it.
+		-- now, and again after a refused removal, only where mlx can run at
+		-- all; the row shows when the picked engine is mlx, or the unset
+		-- preference resolves to it.
 		local status, statusProblem
 		if Rules.canRun(verdicts, 'mlx') then status, statusProblem = Analyze.modelStatus() end
 		if statusProblem then
@@ -101,8 +102,9 @@ LrTasks.startAsyncTask(function()
 			}
 		end
 		if status then
+			local function phaseOf(answer) return answer.installed == true and 'installed' or 'absent' end
 			local model = LrBinding.makePropertyTable(context)
-			model.phase = status.installed == true and 'installed' or 'absent'
+			model.phase = phaseOf(status)
 			model.progress = ''
 			local function inPhase(name)
 				return bind { key = 'phase', bind_to_object = model, transform = function(value) return value == name end }
@@ -152,7 +154,17 @@ LrTasks.startAsyncTask(function()
 			local function removeModel()
 				LrTasks.startAsyncTask(function()
 					local ok, message = Analyze.removeModel()
-					if ok then model.phase = 'absent' else LrDialogs.message('Melampus', message, 'critical') end
+					if ok then
+						model.phase = 'absent'
+						return
+					end
+					-- A refused removal can still have set the model aside (the
+					-- folder it could not delete is no longer the model): the
+					-- row reads what the cache holds now, and keeps its phase
+					-- when the status cannot be asked.
+					local refreshed = Analyze.modelStatus()
+					if refreshed then model.phase = phaseOf(refreshed) end
+					LrDialogs.message('Melampus', message, 'critical')
 				end)
 			end
 

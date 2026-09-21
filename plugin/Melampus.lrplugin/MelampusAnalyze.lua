@@ -324,7 +324,7 @@ end
 --- Ask the executable about the MLX model: `--model-status` (card #408)
 -- prints one JSON object { repo, installed, bytes_total, bytes_done, path,
 -- cancel_path }; bytes_total is null when the hub could not be reached. The
--- Settings dialog calls it once, when it opens.
+-- Settings dialog calls it when it opens, and again after a refused removal.
 function Analyze.modelStatus()
 	return askJson('--model-status', 'melampus-model-status.json', 'about the model',
 		'model status file', function(status) return type(status) == 'table' and type(status.repo) == 'string' end)

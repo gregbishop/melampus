@@ -144,7 +144,10 @@ executable's own default):
   executable's start-up holds too.
 - Done (`done <path>`, exit 0): the row reads **Installed**, greyed, beside
   **Remove**, which runs `--remove-model` and flips the row back. Exit 3 shows
-  a message with the tail of the download log.
+  a message with the tail of the download log. A refused removal shows its
+  message and asks `--model-status` again, so the row reads what the cache
+  holds: still **Installed** when the model is untouched, **Download** when
+  the removal set the model aside and could not delete it.
 
 `docs/settings-dialog.png` predates the row.
 
