@@ -3681,7 +3681,6 @@ ap.add_argument("--ignore-user-config", action="store_true")
 ap.add_argument("-s", "--sandbox", choices=["read-only", "workspace-write", "danger-full-access"])
 ap.add_argument("-c", "--config", action="append", default=[])
 ap.add_argument("--color", choices=["always", "never", "auto"], default="auto")
-ap.add_argument("-o", "--output-last-message")
 ap.add_argument("-m", "--model")
 ap.add_argument("prompt", nargs="?")
 args = ap.parse_args(argv[1:])
@@ -3702,8 +3701,6 @@ def fail(message):
     event(type="turn.started")
     event(type="error", message=message)
     event(type="turn.failed", error={{"message": message}})
-    if not args.json:
-        print("ERROR: " + message, file=sys.stderr)
     sys.exit(1)
 
 
@@ -3722,9 +3719,6 @@ event(type="turn.completed", usage={{"input_tokens": 1620, "cached_input_tokens"
                                     "output_tokens": 61, "reasoning_output_tokens": 0}})
 if not args.json:
     print(answer)
-if args.output_last_message:
-    with open(args.output_last_message, "w", encoding="utf-8") as last:
-        last.write(answer)
 '''
 
 
@@ -4901,3 +4895,31 @@ def test_codex_at_its_usage_limit_stops_the_batch_at_the_first_reply(
     assert code == 3, err
     assert "usage limit" in err and "Sep 19th, 2026 7:46 AM" in err
     assert not out.exists() and not (tmp_path / "cache.jsonl").exists()
+
+
+@posix_only
+def test_a_users_own_codex_command_without_json_passes_the_reply_through(
+    monkeypatch, photos, tmp_path
+):
+    """A user's own `[model] command` need not say `--json`: `codex exec`
+    then prints only the final message (non-interactive-mode docs), and
+    codex_reply, seeing no event stream, passes it through untouched to
+    the shared JSON extraction. At the real boundary: the fake `codex` in
+    text mode, a template with a model flag and no `--json`, and the
+    Identifier's candidates on the committed fixture equal the built-in
+    template's."""
+    from melampus.identify import Identifier
+
+    log = _fake_engine_cli(monkeypatch, tmp_path, providers.CODEX_CLI)
+    own = [providers.CODEX_PROGRAM, "exec", "-m", "gpt-5", "--image", "{image}",
+           "--skip-git-repo-check", "{prompt}"]
+    config = _cfg(model={"backend": "codex", "command": own})
+    result = Identifier(providers.build_primary_backend(config), config).identify(photos / PHOTO)
+
+    assert result.status == "ok", result.error
+    assert result.model == shlex.join(own)
+    assert [c.common_name for c in result.identification.ranked()] == [
+        "Tricolored Heron", "Little Blue Heron"]
+    calls = [json.loads(line)["argv"] for line in log.read_text(encoding="utf-8").splitlines()]
+    runs = [argv for argv in calls if argv[:1] == ["exec"]]
+    assert len(runs) == 2 and all("--json" not in argv for argv in runs), calls
