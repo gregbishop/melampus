@@ -50,6 +50,7 @@ from filelock import Timeout
 from huggingface_hub import constants
 from huggingface_hub.constants import DOWNLOAD_CHUNK_SIZE
 from huggingface_hub.file_download import repo_folder_name
+from huggingface_hub.utils import WeakFileLock
 
 from melampus import download
 from melampus.cli import main
@@ -1939,8 +1940,6 @@ def _lock_dir(cache: Path) -> Path:
 def test_remove_refuses_while_a_download_holds_the_lock(fake_hub: FakeHub, tmp_path: Path):
     """Removing the model out from under a running download is refused, exit
     3 from the CLI, and the model stays."""
-    from huggingface_hub.utils import WeakFileLock
-
     path, _ = _fetch(fake_hub, tmp_path / "hub")
     with WeakFileLock(_lock_dir(tmp_path / "hub") / "abc.lock"):
         with pytest.raises(DownloadError) as failure:
@@ -1952,8 +1951,6 @@ def test_remove_refuses_while_a_download_holds_the_lock(fake_hub: FakeHub, tmp_p
 def test_remove_goes_ahead_once_the_download_has_released_the_lock(fake_hub: FakeHub, tmp_path: Path):
     """A lock file left behind by a download that finished is not a running
     download: the removal takes the lock itself and goes ahead."""
-    from huggingface_hub.utils import WeakFileLock
-
     _fetch(fake_hub, tmp_path / "hub")
     with WeakFileLock(_lock_dir(tmp_path / "hub") / "abc.lock"):
         pass
@@ -1975,8 +1972,6 @@ def test_remove_holds_the_locks_a_download_takes_through_the_rename_and_the_dele
     starting at either moment finds its lock held (as the probe finds a
     download's: `_fetch`'s own timeout refuses it, or it waits), and the
     lock is free once the removal has returned."""
-    from huggingface_hub.utils import WeakFileLock
-
     path, _ = _fetch(fake_hub, tmp_path / "hub")
     lock = _lock_dir(tmp_path / "hub") / "abc.lock"
     lock.touch()
