@@ -2221,6 +2221,36 @@ def test_command_backend_uses_the_reply_of_a_command_that_exited_leaving_its_pip
     assert process.returncode == 0, "the command was reaped last"
 
 
+@pytest.mark.parametrize("system_root", [r"D:\Win", None], ids=["SystemRoot", "default"])
+def test_command_backend_stops_a_tree_on_windows_with_the_system_taskkill(monkeypatch, system_root):
+    """`_stop_tree` on Windows runs taskkill by its absolute path under
+    System32 (SystemRoot's, or C:\\Windows's), never by bare name, which
+    CreateProcess would look for in the current directory before System32:
+    a taskkill.exe planted where melampus was started from would run with
+    its rights the first time a command timed out. `/T /F /PID <pid>`,
+    nothing on stdin, the exit code not checked (a tree already gone is
+    nothing to do). Runs on every platform: the platform and the run are
+    faked."""
+    monkeypatch.setattr(sys, "platform", "win32")
+    if system_root is None:
+        monkeypatch.delenv("SystemRoot", raising=False)
+    else:
+        monkeypatch.setenv("SystemRoot", system_root)
+    calls: list[tuple[list[str], dict]] = []
+
+    def run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return subprocess.CompletedProcess(argv, 128, b"", b"ERROR: The process \"4242\" not found.")
+    monkeypatch.setattr(subprocess, "run", run)
+
+    CommandBackend(["fake-vlm", "{image}", "{prompt}"])._stop_tree(4242)
+
+    ((argv, kwargs),) = calls
+    assert argv == [rf"{system_root or r'C:\Windows'}\System32\taskkill.exe", "/T", "/F", "/PID", "4242"]
+    assert kwargs["stdin"] is subprocess.DEVNULL
+    assert kwargs["check"] is False and kwargs["capture_output"] is True
+
+
 def test_command_is_selectable_by_config_and_flag_but_not_a_picker_choice():
     """`[model] backend = "command"` and `--backend command` select the seam;
     the plugin's picker learns it in card #423, so BACKEND_CHOICES, the

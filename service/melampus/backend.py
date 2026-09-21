@@ -952,8 +952,13 @@ class CommandBackend(VLMBackend):
         gone is nothing to do; so is one holding nothing but the command's
         own exited process, which macOS answers with EPERM."""
         if sys.platform == "win32":
+            # taskkill by its absolute path: run by bare name, CreateProcess
+            # would look in the current directory before System32, and a
+            # taskkill.exe planted there would run with this process's
+            # rights the first time a command timed out.
+            taskkill = os.environ.get("SystemRoot", r"C:\Windows") + r"\System32\taskkill.exe"
             subprocess.run(
-                ["taskkill", "/T", "/F", "/PID", str(pid)],
+                [taskkill, "/T", "/F", "/PID", str(pid)],
                 stdin=subprocess.DEVNULL, capture_output=True, check=False,
             )
         else:
