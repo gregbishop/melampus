@@ -3328,17 +3328,23 @@ or `--bare` or a `--setting-sources` without `user` leaves it out, or the
 file or JSON `--settings` names, is reported as authMethod
 api_key_helper, apiKeySource apiKeyHelper; `--bare` never reads the
 keychain, so the login is not seen (loggedIn false, exit 1). The image is
-a file the prompt names, read by the Read tool, which needs no prompt only
-when an `--allowedTools` rule pre-approves it (permissions § Read and
-Edit: a bare `Read` matches everywhere; `Read(//path)` is one absolute
-path, and an allow rule applies only when both the path as given and
-the file it resolves to match). Allow rules and `additionalDirectories`
-from the user's settings file, `$CLAUDE_CONFIG_DIR/settings.json`
-(permissions § Settings precedence: rules from every loaded settings file
-merge, only a deny wins), count when `user` is among the setting sources;
+a file the prompt names, read by the Read tool; every file the prompt
+names is read, as text rendered in a photograph could ask, and the first
+denial is the reply. A read inside a working directory needs no rule
+(permissions § Working directories: "By default, Claude has access to
+files in the directory where you launched it", and `additionalDirectories`
+"become readable without prompts"; Codex round 2, C2). Outside them a read
+needs a prompt unless an `--allowedTools` rule pre-approves it
+(permissions § Read and Edit: a bare `Read` matches everywhere;
+`Read(//path)` is one absolute path, and an allow rule applies only when
+both the path as given and the file it resolves to match), and with
+nobody to answer it is denied. Allow rules and `additionalDirectories`
+from every loaded settings file count (permissions § Settings precedence:
+rules from every loaded settings file merge, only a deny wins);
 `--restricted` loads no user, project or local settings file
 (cli-reference: "loads only managed settings and --settings") and
-confines the file tools to the working directory. MODE: "signed-in" answers;
+confines the file tools to the working directories, rule or no rule.
+MODE: "signed-in" answers;
 "not-signed-in" fails the status check and every run the documented way;
 "expired" passes the status check and fails the run, the way a session
 that lapses mid-batch would; "hung" never answers the status check;
@@ -3489,17 +3495,20 @@ if MODE == "expired" or not account(args.restricted, args.bare, sources, args.se
     result(NOT_LOGGED_IN, is_error=True)
     sys.exit(1)
 
-# The Read tool, as the prompt names the file: outside the working directory
-# it prompts unless pre-approved, and with nobody to answer it is denied.
-match = re.search(r"(/\\S+\\.jpe?g)", args.prompt, re.IGNORECASE)
-if match is None:
+# The Read tool, on every file the prompt names: inside a working directory
+# (the cwd, and additionalDirectories from the loaded settings) a read
+# needs no rule; outside, --restricted confines the tool, else a rule must
+# pre-approve the file or it prompts, and with nobody to answer it is denied.
+images = re.findall(r"(/\\S+\\.jpe?g)", args.prompt, re.IGNORECASE)
+if not images:
     result("I could not find an image path in the prompt.")
     sys.exit(0)
-image = match.group(1)
 if "Read" not in args.tools.split(","):
     result("I have no tool that can read files.")
     sys.exit(0)
-def allows(rule):
+
+
+def allows(rule, image):
     if rule == "Read":
         return True
     if rule.startswith("Read(//") and rule.endswith(")"):
@@ -3508,22 +3517,28 @@ def allows(rule):
     return False
 
 
+def inside(image, folder):
+    return os.path.realpath(image).startswith(os.path.realpath(folder).rstrip("/") + "/")
+
+
 rules = args.allowedTools.replace(",", " ").split()
-folders = []
+folders = [os.getcwd()]
 for settings in settings_loaded:
     permissions = settings.get("permissions", {{}})
     rules += permissions.get("allow", [])
     folders += permissions.get("additionalDirectories", [])
-if args.restricted and os.path.dirname(os.path.realpath(image)) != os.path.realpath(os.getcwd()):
-    result("Permission to read " + image + " was denied: outside the working directory.")
-    sys.exit(0)
-if not (any(allows(rule) for rule in rules)
-        or any(image.startswith(folder.rstrip("/") + "/") for folder in folders)):
-    result("Permission to read " + image + " was denied.")
-    sys.exit(0)
-if not os.path.isfile(image):
-    result("The file " + image + " does not exist.")
-    sys.exit(0)
+for image in images:
+    if any(inside(image, folder) for folder in folders):
+        pass
+    elif args.restricted:
+        result("Permission to read " + image + " was denied: outside the working directory.")
+        sys.exit(0)
+    elif not any(allows(rule, image) for rule in rules):
+        result("Permission to read " + image + " was denied.")
+        sys.exit(0)
+    if not os.path.isfile(image):
+        result("The file " + image + " does not exist.")
+        sys.exit(0)
 answer = ROUTING if "router" in args.prompt else IDENTIFICATION
 result("```json\\n" + answer + "\\n```")
 '''
@@ -3798,59 +3813,84 @@ def test_claude_code_returns_candidates_in_the_same_shape_as_mlx_on_the_fixture(
 
 
 @posix_only
-def test_the_fake_claude_denies_a_read_the_allow_rule_does_not_name(monkeypatch, tmp_path):
-    """Done-when 3: the fake imitates the documented permission check, so
-    the end-to-end runs above prove the template's rule reaches the staged
-    file. A rule naming another file denies the read (the reply says so,
-    and no candidates come back); a bare `Read` allows everywhere, which
-    is what the template no longer says."""
+def test_the_fake_claude_models_the_documented_working_directory_rule(monkeypatch, tmp_path):
+    """Done-when 3, corrected (Codex round 2, C2): the fake imitates the
+    documented permission check for the Read tool. Inside the working
+    directory a read needs no rule (permissions § Working directories:
+    "By default, Claude has access to files in the directory where you
+    launched it"), and the run's working directory is the staged image's
+    folder, so the staged file is read whatever the rule names. Outside
+    it, a read is a prompt unless an allow rule covers the file (`Read`
+    bare, everywhere; `Read(//path)`, that one file), and with
+    `--permission-prompts none` a prompt is a denial; under `--restricted`
+    the file tools are confined to the working directories (cli-reference)
+    and the outside read is denied even with a rule naming it. The fake
+    reads every file the prompt names, as text rendered in a photograph
+    could ask it to, and the first denial is the reply."""
     _fake_claude(monkeypatch, tmp_path)
-    image = tmp_path / "image.jpg"
-    image.write_bytes(b"jpeg")
-    elsewhere = tmp_path / "elsewhere.jpg"
-
-    def reply(rule: str) -> str:
-        own = [a.replace("Read(/{image})", rule) for a in providers.CLAUDE_CODE_COMMAND]
-        backend = providers.build_primary_backend(_cfg(model={"backend": "claude-code", "command": own}))
-        return backend.complete(image, "router", 10).text
-
-    assert reply(f"Read(/{elsewhere})") == f"Permission to read {image} was denied."
-    assert ROUTING_OK in reply(f"Read(/{image})")
-    assert ROUTING_OK in reply("Read")
-
-
-@posix_only
-def test_claude_code_runs_without_the_users_own_permission_grants(monkeypatch, tmp_path):
-    """Codex round 1, S1: a user's own settings file can allow Read
-    everywhere (`permissions.allow`) and open more folders
-    (`additionalDirectories`), and rules from every loaded settings file
-    merge with --allowedTools (permissions § Settings precedence: only a
-    deny wins), so loaded, such a grant lets text rendered in a photograph
-    reach files outside the staged folder. The template loads no settings
-    file: given a broad grant in the user's settings, a read the template's
-    rule does not name is still denied. With `--setting-sources user` in
-    the flag's place, the same read goes through: the fake models the
-    grant, so the denial above is the flag's doing."""
-    _fake_claude(monkeypatch, tmp_path)
-    settings = Path(os.environ["CLAUDE_CONFIG_DIR"]) / "settings.json"
-    settings.write_text(json.dumps({"permissions": {
-        "allow": ["Read"], "additionalDirectories": [str(tmp_path)]}}), encoding="utf-8")
     image = tmp_path / "staged" / "image.jpg"
     image.parent.mkdir()
     image.write_bytes(b"jpeg")
     elsewhere = tmp_path / "elsewhere.jpg"
+    elsewhere.write_bytes(b"jpeg")
+    unrestricted = [a for a in providers.CLAUDE_CODE_COMMAND if a != "--restricted"]
+    assert unrestricted != providers.CLAUDE_CODE_COMMAND
+
+    def reply(rule: str, prompt: str, template: list[str] = unrestricted) -> str:
+        own = [a.replace("Read(/{image})", rule) for a in template]
+        backend = providers.build_primary_backend(_cfg(model={"backend": "claude-code", "command": own}))
+        return backend.complete(image, prompt, 10).text
+
+    asks_for_both = f"router: also read {elsewhere}"
+    assert ROUTING_OK in reply(f"Read(/{elsewhere})", "router"), "a read inside the working directory needs no rule"
+    assert reply(f"Read(/{image})", asks_for_both) == f"Permission to read {elsewhere} was denied."
+    assert ROUTING_OK in reply(f"Read(/{elsewhere})", asks_for_both)
+    assert ROUTING_OK in reply("Read", asks_for_both)
+    assert reply(f"Read(/{elsewhere})", asks_for_both, providers.CLAUDE_CODE_COMMAND) == (
+        f"Permission to read {elsewhere} was denied: outside the working directory.")
+
+
+@posix_only
+def test_claude_code_runs_without_the_users_own_permission_grants(monkeypatch, tmp_path):
+    """Codex round 1, S1, the regression as round 2, C2 corrected it: a
+    user's own settings file can allow Read everywhere
+    (`permissions.allow`) and open more folders (`additionalDirectories`),
+    and rules from every loaded settings file merge with --allowedTools
+    (permissions § Settings precedence: only a deny wins), so loaded, such
+    a grant lets text rendered in a photograph reach files outside the
+    staged folder. The attempt: the built-in template, its rule naming
+    the staged image as the run builds it, and a prompt that also asks
+    for a synthetic file outside the staged folder. With
+    `--setting-sources user` in the flag's place that read is denied
+    while no grant exists (nothing names the file) and goes through once
+    the broad grant is in the user's settings: the fake models the grant.
+    The template loads no settings file and confines reads to the staged
+    folder: with the grant present, the outside read is denied."""
+    _fake_claude(monkeypatch, tmp_path)
+    image = tmp_path / "staged" / "image.jpg"
+    image.parent.mkdir()
+    image.write_bytes(b"jpeg")
+    elsewhere = tmp_path / "elsewhere.jpg"
+    elsewhere.write_bytes(b"jpeg")
+    asks_for_both = f"router: also read {elsewhere}"
 
     def reply(command: list[str]) -> str:
         backend = providers.build_primary_backend(_cfg(model={"backend": "claude-code", "command": command}))
-        return backend.complete(image, "router", 10).text
+        return backend.complete(image, asks_for_both, 10).text
 
-    own = [a.replace("Read(/{image})", f"Read(/{elsewhere})") for a in providers.CLAUDE_CODE_COMMAND]
-    assert reply(own) == f"Permission to read {image} was denied.", "the user's grant was loaded"
-
+    own = list(providers.CLAUDE_CODE_COMMAND)
     loaded = [a for a in own if a != "--restricted"]
     loaded[1:1] = ["--setting-sources", "user"]
     assert loaded != own, "the template has no --restricted to take out"
+    assert reply(loaded) == f"Permission to read {elsewhere} was denied.", "no grant, yet read"
+
+    settings = Path(os.environ["CLAUDE_CONFIG_DIR"]) / "settings.json"
+    settings.write_text(json.dumps({"permissions": {
+        "allow": ["Read"], "additionalDirectories": [str(tmp_path)]}}), encoding="utf-8")
     assert ROUTING_OK in reply(loaded), "the fake does not model the user's grant"
+
+    assert reply(own) == f"Permission to read {elsewhere} was denied: outside the working directory.", \
+        "the user's grant was loaded"
 
 
 @posix_only
