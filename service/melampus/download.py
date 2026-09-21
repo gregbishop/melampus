@@ -733,8 +733,13 @@ def remove_model(repo: str, *, cache_dir: Path | None = None) -> Path:
     cache, which the scan accepts: nothing is deleted through a link, and
     rmtree would refuse it with the one OSError the library's deletion does
     not catch; the model is removed where the link points), a download of
-    it is running, the folder cannot be set aside (Windows refuses while
-    another program holds a file in it open; the model is then untouched),
+    it is running, the set-aside name is taken by the folder an earlier
+    refused removal left (the message named it then for the owner to
+    delete by hand, and names it again: the rename onto it would fail with
+    the OS's errno line, on every removal after, and say neither why nor
+    what to do; the model is untouched), the folder cannot be set aside
+    (Windows refuses while another program holds a file in it open; the
+    model is then untouched),
     or the set-aside folder is still there after the deletion: the library's
     deletion is one rmtree, which deletes what it can and stops at the first
     entry it cannot, and the library catches its PermissionError, logs it
@@ -754,6 +759,10 @@ def remove_model(repo: str, *, cache_dir: Path | None = None) -> Path:
         raise DownloadError(f"could not remove {repo} from {cache}: {cached.repo_path} is a link, not a folder; "
                             f"remove the model where the link points ({cached.repo_path.resolve()})")
     aside = _incomplete(cached.repo_path)
+    if aside.exists():
+        raise DownloadError(f"could not remove {repo} from {cache}: {aside} is still there, left by an earlier "
+                            f"removal that was refused; delete that folder by hand, then remove again; "
+                            "the model is untouched")
     try:
         if _download_running(locks):
             raise DownloadError(f"a download of {repo} is running; cancel it first, then remove")

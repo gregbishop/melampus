@@ -182,7 +182,10 @@ the hub is asked anything.
   on another disk and linked into the cache, which the status accepts as
   installed): nothing is deleted through a link, and the message names
   where the link points, which is where to remove the model; when a lock
-  file the running-download check must open cannot be; and when the folder
+  file the running-download check must open cannot be; when the set-aside
+  name is taken by the folder an earlier refused removal left (see below:
+  the message names it again, to delete by hand before removing again,
+  and nothing moves until it is gone); and when the folder
   cannot be set aside (on Windows, while another program holds a file in
   it open). And it exits 3 when the set-aside folder is still
   there after the deletion: the hub library's deletion deletes what it can,

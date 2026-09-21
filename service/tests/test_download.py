@@ -1503,6 +1503,50 @@ def test_remove_refused_by_a_folder_it_cannot_delete_leaves_the_model_gone_from_
     assert snapshot_files(path) == FAKE_FILES and _status(fake_hub, tmp_path / "hub").installed is True
 
 
+@pytest.mark.skipif(sys.platform == "win32" or getattr(os, "geteuid", lambda: 1)() == 0,
+                    reason="a read-only folder does not stop a deletion here")
+def test_remove_refuses_while_an_earlier_refused_removal_left_its_set_aside_folder_naming_it_and_the_model_untouched(
+    fake_hub: FakeHub, tmp_path: Path
+):
+    """Done-when 3 (Claude review 11, code finding 2; download.py:740-746).
+    The set-aside name is one fixed name, and a refused removal leaves the
+    folder under it for the owner to delete by hand. An owner who instead
+    downloads the model again (the row reads Download) and later clicks
+    Remove had the rename onto that folder refused with the OS's errno line
+    (`[Errno 66] Directory not empty`, on Windows `[WinError 183]` even for
+    an empty one), the same on every Remove after, saying neither the
+    reason nor what to do. Given the aside folder of an earlier refused
+    removal, the removal is refused before anything moves: the message
+    names the folder as left by an earlier refused removal, says to delete
+    it by hand, and the model is untouched; once it is gone, Remove goes
+    ahead."""
+    path, _ = _fetch(fake_hub, tmp_path / "hub")
+    folder = tmp_path / "hub" / FAKE_FOLDER
+    aside = folder.with_name(f"{folder.name}.incomplete")
+    os.chmod(path, 0o500)
+    try:
+        with pytest.raises(DownloadError):
+            remove_model(FAKE_REPO, cache_dir=tmp_path / "hub")
+    finally:
+        os.chmod(aside / "snapshots" / path.name, 0o700)
+    assert aside.is_dir() and not folder.exists()
+    path, _ = _fetch(fake_hub, tmp_path / "hub")
+    assert _status(fake_hub, tmp_path / "hub").installed is True
+
+    with pytest.raises(DownloadError) as failure:
+        remove_model(FAKE_REPO, cache_dir=tmp_path / "hub")
+
+    message = str(failure.value)
+    assert FAKE_REPO in message and str(aside) in message, message
+    assert "earlier" in message and "refused" in message and "by hand" in message, message
+    assert "untouched" in message and "Errno" not in message, message
+    assert folder.is_dir() and aside.is_dir() and snapshot_files(path) == FAKE_FILES
+    assert _status(fake_hub, tmp_path / "hub").installed is True
+    shutil.rmtree(aside)
+    assert remove_model(FAKE_REPO, cache_dir=tmp_path / "hub") == folder
+    assert not folder.exists() and not aside.exists()
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="a symlink to a folder needs a privilege here")
 def test_remove_refuses_a_repo_folder_that_is_a_link_with_exit_3_leaving_the_link_and_its_target(
     fake_hub: FakeHub, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
