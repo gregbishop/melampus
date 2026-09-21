@@ -1450,6 +1450,62 @@ def test_remove_refused_by_a_folder_it_cannot_delete_leaves_the_model_gone_from_
     assert snapshot_files(path) == FAKE_FILES and _status(fake_hub, tmp_path / "hub").installed is True
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="a symlink to a folder needs a privilege here")
+def test_remove_refuses_a_repo_folder_that_is_a_link_with_exit_3_leaving_the_link_and_its_target(
+    fake_hub: FakeHub, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+):
+    """Security (Claude review 10, security finding 1; download.py:696). A
+    repo folder that is a symbolic link (one big model moved to another disk
+    and linked back, a layout the hub library's scan accepts and the status
+    reports installed) made the removal end in a 26-line traceback, exit 1:
+    rmtree refuses a link with a plain OSError, the one deletion failure the
+    library's strategy does not swallow, and the CLI mapped DownloadError
+    alone. The refusal is right, never delete through a link; its shape is
+    a DownloadError naming the link and where to remove the model instead,
+    exit 3 from the CLI, nothing on stdout, no traceback on stderr, and the
+    link and its target untouched."""
+    elsewhere = tmp_path / "elsewhere"
+    path, _ = _fetch(fake_hub, elsewhere)
+    cache = tmp_path / "hub"
+    cache.mkdir()
+    link = cache / FAKE_FOLDER
+    link.symlink_to(elsewhere / FAKE_FOLDER, target_is_directory=True)
+    assert _status(fake_hub, cache).installed is True, "the scan does not accept the link"
+
+    with pytest.raises(DownloadError) as failure:
+        remove_model(FAKE_REPO, cache_dir=cache)
+
+    assert FAKE_REPO in str(failure.value) and str(link) in str(failure.value) and "link" in str(failure.value)
+    assert link.is_symlink() and snapshot_files(path) == FAKE_FILES, "the link or its target was touched"
+
+    monkeypatch.setattr(download.constants, "HF_HUB_CACHE", str(cache))
+    assert main(["--remove-model", "--no-local-config", "--model", FAKE_REPO]) == 3
+    out, err = capsys.readouterr()
+    assert out == "" and str(link) in err and "Traceback" not in err
+    assert link.is_symlink() and snapshot_files(path) == FAKE_FILES, "the link or its target was touched"
+
+
+@pytest.mark.skipif(sys.platform == "win32" or getattr(os, "geteuid", lambda: 1)() == 0,
+                    reason="an unreadable file does not stop a probe here")
+def test_remove_refuses_with_the_reason_when_a_lock_it_probes_cannot_be_opened(fake_hub: FakeHub, tmp_path: Path):
+    """Security (Claude review 10, security finding 1). The probe for a
+    running download opens each of the repo's lock files; one it cannot open
+    raised the OSError through the CLI as a traceback. It is a DownloadError
+    naming the lock, exit 3, and the model stays."""
+    path, _ = _fetch(fake_hub, tmp_path / "hub")
+    lock = _lock_dir(tmp_path / "hub") / "abc.lock"
+    lock.touch()
+    os.chmod(lock, 0)
+    try:
+        with pytest.raises(DownloadError) as failure:
+            remove_model(FAKE_REPO, cache_dir=tmp_path / "hub")
+    finally:
+        os.chmod(lock, 0o600)
+
+    assert FAKE_REPO in str(failure.value) and str(lock) in str(failure.value)
+    assert path.exists() and snapshot_files(path) == FAKE_FILES, "the model was removed"
+
+
 def _lock_dir(cache: Path) -> Path:
     """The cache's locks folder for the fake repo, where a running download
     holds the hub library's per-file lock on the blob it is appending to (the

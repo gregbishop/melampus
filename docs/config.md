@@ -167,9 +167,14 @@ the hub is asked anything.
   folder the model was in) and exits 0. It is refused with **exit 3** and
   the reason on stderr when nothing is installed, or while a download of
   the model is running (it holds the hub library's per-file lock the fetch
-  takes): cancel the download first. It also exits 3 when the folder cannot
-  be set aside (on Windows, while another program holds a file in it open;
-  the model is then untouched), and when the set-aside folder is still
+  takes): cancel the download first. It also exits 3, the model untouched,
+  when the repo's folder in the cache is a symbolic link (a model laid out
+  on another disk and linked into the cache, which the status accepts as
+  installed): nothing is deleted through a link, and the message names
+  where the link points, which is where to remove the model; when a lock
+  file the running-download check must open cannot be; and when the folder
+  cannot be set aside (on Windows, while another program holds a file in
+  it open). And it exits 3 when the set-aside folder is still
   there after the deletion: the hub library's deletion deletes what it can,
   logs a permission error at what it cannot and carries on rather than
   raising, so the model is gone from the cache (`--model-status` reads

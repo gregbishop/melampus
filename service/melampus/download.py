@@ -712,33 +712,46 @@ def remove_model(repo: str, *, cache_dir: Path | None = None) -> Path:
     cache by commit hash and takes the first repo found at one, which can be
     a fork cached at the same commit, leaving `repo` installed.
 
-    Raises DownloadError when nothing is installed, a download of it is
-    running, the folder cannot be set aside (Windows refuses while another
-    program holds a file in it open; the model is then untouched), or the
-    set-aside folder is still there after the deletion: the library's
+    Raises DownloadError when nothing is installed, the repo's folder is a
+    symbolic link (a model laid out on another disk and linked into the
+    cache, which the scan accepts: nothing is deleted through a link, and
+    rmtree would refuse it with the one OSError the library's deletion does
+    not catch; the model is removed where the link points), a download of
+    it is running, the folder cannot be set aside (Windows refuses while
+    another program holds a file in it open; the model is then untouched),
+    or the set-aside folder is still there after the deletion: the library's
     deletion is one rmtree, which deletes what it can and stops at the first
     entry it cannot, and the library catches its PermissionError, logs it
     and returns, so the folder is the one signal it leaves. Deleted under
     the repo's own name, that left the model half there, listed by nothing
     and loadable by nothing; set aside, the model is gone from the cache
     (the status reads absent, a second removal has nothing to remove), and
-    the message names the folder for the owner to delete by hand."""
+    the message names the folder for the owner to delete by hand. Any other
+    OSError of the lock probe or the deletion (a lock file that cannot be
+    opened) is a DownloadError naming it too, as `download_model` bounds its
+    own: the CLI maps DownloadError to exit 3 and lets nothing else out."""
     cache, _, locks = _cache_paths(repo, cache_dir)
     cached = _cached(repo, cache)
     if cached is None:
         raise DownloadError(f"{repo} is not in the cache at {cache}: nothing to remove")
-    if _download_running(locks):
-        raise DownloadError(f"a download of {repo} is running; cancel it first, then remove")
+    if cached.repo_path.is_symlink():
+        raise DownloadError(f"could not remove {repo} from {cache}: {cached.repo_path} is a link, not a folder; "
+                            f"remove the model where the link points ({cached.repo_path.resolve()})")
     aside = _incomplete(cached.repo_path)
     try:
+        if _download_running(locks):
+            raise DownloadError(f"a download of {repo} is running; cancel it first, then remove")
         cached.repo_path.rename(aside)
     except OSError as exc:
-        raise DownloadError(f"could not remove {repo} from {cache}: {cached.repo_path} could not be set aside "
-                            f"as {aside} ({exc}); the model is untouched") from exc
-    DeleteCacheStrategy(expected_freed_size=cached.size_on_disk, blobs=frozenset(), refs=frozenset(),
-                        repos=frozenset({aside}), snapshots=frozenset()).execute()
+        raise DownloadError(f"could not remove {repo} from {cache}: {exc}; the model is untouched") from exc
+    left = (f"could not remove {repo} from {cache} whole: the cache no longer lists it, and what could not be "
+            f"deleted is set aside at {aside}; check that folder's permissions (on Windows, that no other "
+            "program holds a file in it open) and delete it by hand")
+    try:
+        DeleteCacheStrategy(expected_freed_size=cached.size_on_disk, blobs=frozenset(), refs=frozenset(),
+                            repos=frozenset({aside}), snapshots=frozenset()).execute()
+    except OSError as exc:
+        raise DownloadError(f"{left} ({exc})") from exc
     if aside.exists():
-        raise DownloadError(f"could not remove {repo} from {cache} whole: the cache no longer lists it, and what "
-                            f"could not be deleted is set aside at {aside}; check that folder's permissions "
-                            "(on Windows, that no other program holds a file in it open) and delete it by hand")
+        raise DownloadError(left)
     return cached.repo_path
