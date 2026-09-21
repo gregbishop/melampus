@@ -47,7 +47,7 @@ import logging  # noqa: E402
 import re  # noqa: E402
 import shutil  # noqa: E402
 import signal  # noqa: E402
-from contextlib import AbstractContextManager, ExitStack, closing, contextmanager, nullcontext  # noqa: E402
+from contextlib import AbstractContextManager, ExitStack, closing, contextmanager, nullcontext, suppress  # noqa: E402
 from dataclasses import asdict, dataclass  # noqa: E402
 from pathlib import Path  # noqa: E402
 from typing import Callable, Iterable, Iterator  # noqa: E402
@@ -673,9 +673,7 @@ def download_model(
     """
     endpoint = _hub_at(endpoint)
     marker = cancel_marker or cancel_marker_path()
-    _remove_marker(marker)
-    completed = False
-    with _hub_warnings_redacted():
+    with _marker_cleared(marker), _hub_warnings_redacted():
         try:
             # The folders are the repo's in the cache and beside it, in `.locks`;
             # an id that is not a repo id is refused here, before the hub is asked.
@@ -700,7 +698,6 @@ def download_model(
                 # Every blob is complete and verified: the snapshot of the planned
                 # commit points at those blobs and nothing else.
                 path = _lay_out(storage, commit, blobs)
-            completed = True
         except GatedRepoError as exc:
             # A GatedRepoError is a RepositoryNotFoundError, but the repo exists:
             # what is missing is the user's access to it.
@@ -727,16 +724,6 @@ def download_model(
             raise DownloadError(f"{HELD.format(repo=repo)}, then {RERUN} ({exc})") from exc
         except (OSError, httpx.HTTPError) as exc:
             raise DownloadError(f"download of {repo} from {endpoint} failed: {exc}; {RERUN}") from exc
-        finally:
-            # A cancellation or failure already in flight is the outcome; a
-            # marker that then cannot be removed is the next run's to name.
-            # Whether one is in flight is this try's own (`completed`), not
-            # sys.exc_info(), which is whatever the caller is handling.
-            try:
-                _remove_marker(marker)
-            except DownloadError:
-                if completed:
-                    raise
     return path
 
 
@@ -751,6 +738,27 @@ def _remove_marker(marker: Path) -> None:
         raise DownloadError(
             f"the cancel marker at {marker} could not be removed ({exc}): remove it by hand, then {RERUN}"
         ) from exc
+
+
+@contextmanager
+def _marker_cleared(marker: Path) -> Iterator[None]:
+    """The cancel marker's lifecycle around one run, the MLX download's and
+    the Ollama pull's alike: `_remove_marker` on entry, before the hub or
+    Ollama is asked, its DownloadError raised; and again on exit, whatever
+    the outcome, its DownloadError raised only when nothing else is in
+    flight. A cancellation or failure leaving the block is the outcome; a
+    marker that then cannot be removed is the next run's to name. Whether
+    one is in flight is this block's own: with @contextmanager the
+    exception thrown at the `yield` is the one leaving the block, not
+    sys.exc_info(), which is whatever the caller is handling."""
+    _remove_marker(marker)
+    try:
+        yield
+    except BaseException:
+        with suppress(DownloadError):
+            _remove_marker(marker)
+        raise
+    _remove_marker(marker)
 
 
 def _cached(repo: str, cache: Path):
@@ -1109,45 +1117,34 @@ def pull_model(
     an error line within it. DownloadCancelled from a signal, or
     from `cancel_marker` (the documented path by default) appearing between
     lines, passes through with the stream closed; a stale marker is removed
-    on start and the marker on exit, as the MLX download does, and one that
-    cannot be removed is a DownloadError naming it by the download's rule
-    (`_remove_marker`): on start before Ollama is asked, on exit only when
-    nothing else is in flight.
+    on start and the marker on exit, by the download's own lifecycle
+    (`_marker_cleared`), and one that cannot be removed is a DownloadError
+    naming it: on start before Ollama is asked, on exit only when nothing
+    else is in flight.
     """
     marker = cancel_marker or cancel_marker_path()
-    _remove_marker(marker)
-    request = ollama_request(url, OLLAMA_PULL, {"model": model, "stream": True})
-    backend = OllamaBackend(model, url, timeout=timeout)
-    completed = False
-    try:
-        with closing(backend.stream(request)) as lines:
-            for update in pull_updates(model, _lines_until_cancelled(lines, marker)):
-                # The stream's `done` proves success was seen; the entry point
-                # prints the protocol's `done` from the return, as for mlx.
-                if update.state != DONE:
-                    on_update(update)
-        completed = True
-    except RuntimeError as exc:
-        # The backend's words for the status (a 3xx from the address is an
-        # answer from the wrong place, and says so), a reply that is not
-        # HTTP, one past its bound, or a connection that ended mid-stream
-        # (a reset: Ollama killed); Ollama's own error inside them.
-        raise _pull_error(model, exc) from exc
-    except (ConnectionError, TimeoutError) as exc:
-        # The backend's not-running failure, the one ConnectionError it
-        # raises (a raw socket error is named a RuntimeError above), and
-        # its timeout for a line not written within `timeout`: each in
-        # the backend's words alone, as `_ollama_request` gives the delete's.
-        raise DownloadError(str(exc)) from exc
-    finally:
-        # As the download's exit: a cancellation or failure already in
-        # flight is the outcome, and whether one is in flight is this
-        # try's own (`completed`), not sys.exc_info().
+    with _marker_cleared(marker):
+        request = ollama_request(url, OLLAMA_PULL, {"model": model, "stream": True})
+        backend = OllamaBackend(model, url, timeout=timeout)
         try:
-            _remove_marker(marker)
-        except DownloadError:
-            if completed:
-                raise
+            with closing(backend.stream(request)) as lines:
+                for update in pull_updates(model, _lines_until_cancelled(lines, marker)):
+                    # The stream's `done` proves success was seen; the entry point
+                    # prints the protocol's `done` from the return, as for mlx.
+                    if update.state != DONE:
+                        on_update(update)
+        except RuntimeError as exc:
+            # The backend's words for the status (a 3xx from the address is an
+            # answer from the wrong place, and says so), a reply that is not
+            # HTTP, one past its bound, or a connection that ended mid-stream
+            # (a reset: Ollama killed); Ollama's own error inside them.
+            raise _pull_error(model, exc) from exc
+        except (ConnectionError, TimeoutError) as exc:
+            # The backend's not-running failure, the one ConnectionError it
+            # raises (a raw socket error is named a RuntimeError above), and
+            # its timeout for a line not written within `timeout`: each in
+            # the backend's words alone, as `_ollama_request` gives the delete's.
+            raise DownloadError(str(exc)) from exc
     return model
 
 
