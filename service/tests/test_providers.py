@@ -3320,8 +3320,14 @@ the program's own source: `claude.ai` is the subscription sign-in and
 carries `subscriptionType`; `api_key`, `oauth_token` and `third_party` are
 other credentials; `apiKeySource` names a key the login is set aside for,
 and then `subscriptionType` is null and `--text` says "not in use"), and
-takes the global flags (`--restricted`) before the subcommand, as the real
-one does. The image is
+takes the global flags before the subcommand, as the real one does, the
+settings-deciding ones deciding what the check reports (Codex round 2,
+C1, each measured on 2.1.278): an `apiKeyHelper` in a loaded settings
+file, the user's `$CLAUDE_CONFIG_DIR/settings.json` unless `--restricted`
+or `--bare` or a `--setting-sources` without `user` leaves it out, or the
+file or JSON `--settings` names, is reported as authMethod
+api_key_helper, apiKeySource apiKeyHelper; `--bare` never reads the
+keychain, so the login is not seen (loggedIn false, exit 1). The image is
 a file the prompt names, read by the Read tool, which needs no prompt only
 when an `--allowedTools` rule pre-approves it (permissions § Read and
 Edit: a bare `Read` matches everywhere; `Read(//path)` is one absolute
@@ -3370,8 +3376,61 @@ argv = sys.argv[1:]
 with open(LOG, "a", encoding="utf-8") as log:
     log.write(json.dumps({{"argv": argv, "cwd": os.getcwd()}}) + "\\n")
 
-# The global flags the real CLI takes before a subcommand.
-command = [a for a in argv if a != "--restricted"]
+
+def loaded_settings(restricted, bare, sources, named):
+    """The settings the real CLI would load: the user's file when `user`
+    is among the sources and neither --restricted nor --bare leaves it
+    out, then the file or JSON string --settings names, which "still
+    appl[ies]" under --restricted (`claude --help`)."""
+    loaded = []
+    if "user" in sources and not restricted and not bare:
+        path = os.path.join(os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude"),
+                            "settings.json")
+        try:
+            with open(path, encoding="utf-8") as f:
+                loaded.append(json.load(f))
+        except (OSError, ValueError):
+            pass
+    if named:
+        try:
+            if named.lstrip().startswith("{{"):
+                loaded.append(json.loads(named))
+            else:
+                with open(named, encoding="utf-8") as f:
+                    loaded.append(json.load(f))
+        except (OSError, ValueError):
+            sys.exit("Error: --settings could not be read: " + named)
+    return loaded
+
+
+def account(restricted, bare, sources, named):
+    """What `auth status` reports under these flags: MODE's status, unless
+    a loaded settings file names an apiKeyHelper (measured: reported over
+    the login) or --bare leaves the keychain unread (measured: loggedIn
+    false on the signed-in Mac; an environment key is still seen)."""
+    if any("apiKeyHelper" in settings for settings in loaded_settings(restricted, bare, sources, named)):
+        return {{"loggedIn": True, "authMethod": "api_key_helper", "apiProvider": "firstParty",
+                "apiKeySource": "apiKeyHelper"}}
+    status = STATUS.get(MODE, STATUS["signed-in"])
+    if bare and status["authMethod"] in ("claude.ai", "oauth_token"):
+        return STATUS["not-signed-in"]
+    return status
+
+
+# The global flags the real CLI takes before a subcommand, the
+# settings-deciding ones read off; a print-mode run parses argv whole below.
+command = list(argv)
+global_flags = {{"restricted": False, "bare": False, "sources": ["user", "project", "local"], "named": None}}
+while command and command[0].startswith("--"):
+    flag = command.pop(0)
+    if flag == "--restricted":
+        global_flags["restricted"] = True
+    elif flag == "--bare":
+        global_flags["bare"] = True
+    elif flag == "--setting-sources":
+        global_flags["sources"] = command.pop(0).split(",")
+    elif flag == "--settings":
+        global_flags["named"] = command.pop(0)
 if command[:2] == ["auth", "status"]:
     if MODE == "hung":
         import time
@@ -3382,7 +3441,7 @@ if command[:2] == ["auth", "status"]:
         sys.exit(2)
     if MODE == "silent-not-signed-in":
         sys.exit(1)
-    status = STATUS.get(MODE, STATUS["signed-in"])
+    status = account(**global_flags)
     logged_in = status["loggedIn"]
     if "--text" in command:
         print("Login method: Claude Max account" if logged_in
@@ -3402,7 +3461,9 @@ ap.add_argument("--permission-prompts", choices=["host", "none"], default="host"
 ap.add_argument("--no-session-persistence", action="store_true")
 ap.add_argument("--strict-mcp-config", action="store_true")
 ap.add_argument("--setting-sources", default="user,project,local")
+ap.add_argument("--settings")
 ap.add_argument("--restricted", action="store_true")
+ap.add_argument("--bare", action="store_true")
 ap.add_argument("prompt")
 args = ap.parse_args()
 if not args.print:
@@ -3412,8 +3473,7 @@ for source in sources:
     if source not in ("user", "project", "local"):
         sys.exit(f"Error processing --setting-sources: Invalid setting source: {{source}}. "
                  "Valid options are: user, project, local")
-if args.restricted:
-    sources = []
+settings_loaded = loaded_settings(args.restricted, args.bare, sources, args.settings)
 
 
 def result(text, is_error=False):
@@ -3425,7 +3485,7 @@ def result(text, is_error=False):
         print(text)
 
 
-if MODE == "expired" or not STATUS.get(MODE, {{}}).get("loggedIn"):
+if MODE == "expired" or not account(args.restricted, args.bare, sources, args.settings)["loggedIn"]:
     result(NOT_LOGGED_IN, is_error=True)
     sys.exit(1)
 
@@ -3450,14 +3510,8 @@ def allows(rule):
 
 rules = args.allowedTools.replace(",", " ").split()
 folders = []
-if "user" in sources:
-    settings = os.path.join(os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude"),
-                            "settings.json")
-    try:
-        with open(settings, encoding="utf-8") as f:
-            permissions = json.load(f).get("permissions", {{}})
-    except (OSError, ValueError):
-        permissions = {{}}
+for settings in settings_loaded:
+    permissions = settings.get("permissions", {{}})
     rules += permissions.get("allow", [])
     folders += permissions.get("additionalDirectories", [])
 if args.restricted and os.path.dirname(os.path.realpath(image)) != os.path.realpath(os.getcwd()):
@@ -3680,21 +3734,22 @@ def test_claude_code_primary_asks_claude_code_once_refused_or_built(monkeypatch,
     the executable that verdict resolved, not a second lookup. Detection is
     run on the template's program, so a user's own program in [model]
     command is the one asked, once, and the built-in `claude` is not."""
+    built_in = providers.claude_code_status(providers.CLAUDE_CODE_COMMAND)
     log = _fake_claude(monkeypatch, tmp_path, mode="not-signed-in")
     with pytest.raises(providers.BackendUnavailable, match="not signed in"):
         providers.build_primary_backend(_cfg(model={"backend": "claude-code"}))
-    assert _status_checks(log) == [list(providers.CLAUDE_CODE_STATUS)]
+    assert _status_checks(log) == [built_in]
 
     log.unlink()
     _fake_claude(monkeypatch, tmp_path)
     backend = providers.build_primary_backend(_cfg(model={"backend": "claude-code"}))
-    assert _status_checks(log) == [list(providers.CLAUDE_CODE_STATUS)]
+    assert _status_checks(log) == [built_in]
     assert backend.executable == shutil.which(CLAUDE)
 
     log.unlink()
     own = [shutil.which(CLAUDE), "-p", "--output-format", "json", "{image} {prompt}"]
     backend = providers.build_primary_backend(_cfg(model={"backend": "claude-code", "command": own}))
-    assert _status_checks(log) == [list(providers.CLAUDE_CODE_STATUS)], "the built-in's verdict was asked too"
+    assert _status_checks(log) == [providers.claude_code_status(own)], "the built-in's verdict was asked too"
     assert backend.executable == shutil.which(CLAUDE)
 
 
@@ -3810,7 +3865,7 @@ def test_detection_claude_code_is_available_when_installed_and_signed_in(monkeyp
     assert verdict.available, verdict.reason
     assert "subscription" in verdict.reason
     calls = [json.loads(line)["argv"] for line in log.read_text(encoding="utf-8").splitlines()]
-    assert calls == [list(providers.CLAUDE_CODE_STATUS)]
+    assert calls == [providers.claude_code_status(providers.CLAUDE_CODE_COMMAND)]
 
 
 @posix_only
@@ -3936,7 +3991,133 @@ def test_the_status_check_runs_under_the_templates_isolation(monkeypatch, tmp_pa
     assert _verdict("claude-code").available
     assert _status_checks(log) == [["--restricted", "auth", "status", "--json"]]
     assert providers.CLAUDE_CODE_ISOLATION in providers.CLAUDE_CODE_COMMAND
-    assert providers.CLAUDE_CODE_STATUS[0] == providers.CLAUDE_CODE_ISOLATION
+    assert providers.claude_code_status(providers.CLAUDE_CODE_COMMAND)[0] == providers.CLAUDE_CODE_ISOLATION
+
+
+@posix_only
+def test_the_status_check_is_probed_under_the_templates_own_settings_flags(monkeypatch, tmp_path):
+    """Codex round 2, C1: a `[model] command` of the user's own under
+    claude-code can leave out `--restricted` or add `--settings` naming an
+    `apiKeyHelper`, and a print-mode run then bills that helper's key
+    (authentication § Authentication precedence: apiKeyHelper ranks above
+    "Subscription OAuth credentials from /login"); a status check under
+    fixed flags reports the subscription. So the check carries the
+    template's own settings-deciding global flags (`--restricted`,
+    `--bare`, `--settings`, `--setting-sources`, values included, in the
+    template's order) before `auth status --json`, and the verdict is the
+    run's configuration whatever the template. Measured on 2.1.278, no
+    model call: `claude --restricted --settings '{"apiKeyHelper": ...}'
+    auth status --json` reports authMethod api_key_helper, apiKeySource
+    apiKeyHelper; a user settings file with apiKeyHelper reports the same
+    with no flag and authMethod none under `--restricted`."""
+    log = _fake_claude(monkeypatch, tmp_path)
+    helper = tmp_path / "helper.json"
+    helper.write_text(json.dumps({"apiKeyHelper": "/usr/bin/true"}), encoding="utf-8")
+    template = providers.CLAUDE_CODE_COMMAND
+
+    def build(command: list[str]):
+        log.write_text("", encoding="utf-8")
+        return providers.build_primary_backend(_cfg(model={"backend": "claude-code", "command": command}))
+
+    def refused(command: list[str]) -> str:
+        with pytest.raises(providers.BackendUnavailable) as err:
+            build(command)
+        reason = str(err.value)
+        assert "not to a Claude subscription" in reason, reason
+        assert "apiKeySource apiKeyHelper" in reason and "remove apiKeyHelper from the settings" in reason
+        return reason
+
+    # `--settings` added to the built-in template: the helper is loaded even
+    # under --restricted ("managed settings and --settings still apply").
+    own = [*template[:-1], "--settings", str(helper), template[-1]]
+    reason = refused(own)
+    assert f"claude --restricted --settings {helper} auth status --json" in reason
+    assert _status_checks(log) == [["--restricted", "--settings", str(helper), "auth", "status", "--json"]]
+
+    # The user's settings file names the helper: the built-in template loads
+    # no settings file and is available; a template without --restricted
+    # loads it and is refused; one with `--setting-sources user` in the
+    # flag's place, likewise; one carrying both keeps --restricted's
+    # exclusion (measured on 2.1.278, in either order: authMethod none).
+    (Path(os.environ["CLAUDE_CONFIG_DIR"]) / "settings.json").write_text(
+        json.dumps({"apiKeyHelper": "/usr/bin/true"}), encoding="utf-8")
+    assert build(list(template)).executable == shutil.which(CLAUDE)
+    assert _status_checks(log) == [["--restricted", "auth", "status", "--json"]]
+
+    without = [a for a in template if a != "--restricted"]
+    refused(without)
+    assert _status_checks(log) == [["auth", "status", "--json"]]
+
+    user = [*without[:-1], "--setting-sources", "user", without[-1]]
+    refused(user)
+    assert _status_checks(log) == [["--setting-sources", "user", "auth", "status", "--json"]]
+
+    both = [*template[:-1], "--setting-sources", "user", template[-1]]
+    assert build(both).executable == shutil.which(CLAUDE)
+    assert _status_checks(log) == [["--restricted", "--setting-sources", "user", "auth", "status", "--json"]]
+
+
+@posix_only
+def test_a_bare_template_is_never_signed_in_to_the_subscription(monkeypatch, tmp_path):
+    """C1, the other way a template can leave the subscription: `--bare`
+    (`claude --help`: "OAuth and keychain are never read"; headless: "bare
+    mode doesn't use your subscription login"). Probed under it, the check
+    reports not signed in (measured on 2.1.278: `claude --bare auth status
+    --json` on the signed-in Mac says loggedIn false, authMethod none,
+    exit 1), and the refusal names the flag it ran under."""
+    log = _fake_claude(monkeypatch, tmp_path)
+    template = providers.CLAUDE_CODE_COMMAND
+    bare = [*template[:-1], "--bare", template[-1]]
+    with pytest.raises(providers.BackendUnavailable, match="not signed in"):
+        providers.build_primary_backend(_cfg(model={"backend": "claude-code", "command": bare}))
+    assert _status_checks(log) == [["--restricted", "--bare", "auth", "status", "--json"]]
+
+
+def test_the_status_check_argv_is_derived_from_the_template():
+    """C1, the one source: the status check's global flags are read off the
+    template that will run, so the built-in's check carries its
+    --restricted and nothing else, a template with none of the flags is
+    checked with none, and the flags keep their values and order."""
+    assert providers.claude_code_status(providers.CLAUDE_CODE_COMMAND) == [
+        "--restricted", "auth", "status", "--json"]
+    assert providers.claude_code_status([CLAUDE, "-p", "--output-format", "json", "{image} {prompt}"]) == [
+        "auth", "status", "--json"]
+    own = [CLAUDE, "-p", "--settings", '{"apiKeyHelper": "x"}', "--add-dir", "/tmp", "--setting-sources",
+           "user,project", "--bare", "--restricted", "{image} {prompt}"]
+    assert providers.claude_code_status(own) == [
+        "--settings", '{"apiKeyHelper": "x"}', "--setting-sources", "user,project", "--bare", "--restricted",
+        "auth", "status", "--json"]
+    assert providers.claude_code_status([CLAUDE, "-p", "--settings", "{image} {prompt}"]) == [
+        "--settings", "{image} {prompt}", "auth", "status", "--json"]
+
+
+@posix_only
+def test_cli_detect_engines_probes_the_users_own_template_under_its_flags(
+    monkeypatch, tmp_path, capsys, no_ambient_keys
+):
+    """C1 at the dialog (Done-when 2, "the same verdict"): --detect-engines
+    probes the configured template under that template's flags, so a
+    `[model] command` whose `--settings` names an apiKeyHelper is shown
+    as signed in but not to the subscription, the verdict its run gets."""
+    from melampus.cli import main
+
+    log = _fake_claude(monkeypatch, tmp_path)
+    helper = tmp_path / "helper.json"
+    helper.write_text(json.dumps({"apiKeyHelper": "/usr/bin/true"}), encoding="utf-8")
+    template = providers.CLAUDE_CODE_COMMAND
+    own = [*template[:-1], "--settings", str(helper), template[-1]]
+    settings = tmp_path / "settings.toml"
+    settings.write_text(
+        f'[model]\nbackend = "claude-code"\ncommand = {json.dumps(own)}\n', encoding="utf-8")
+
+    assert main(["--detect-engines", "--config", str(settings)]) == 0
+
+    verdicts = json.loads(capsys.readouterr().out)
+    assert verdicts[-1]["engine"] == "claude-code"
+    assert verdicts[-1]["available"] is False, verdicts[-1]["reason"]
+    assert "not to a Claude subscription" in verdicts[-1]["reason"]
+    assert "remove apiKeyHelper from the settings" in verdicts[-1]["reason"]
+    assert _status_checks(log) == [["--restricted", "--settings", str(helper), "auth", "status", "--json"]]
 
 
 @posix_only
@@ -4007,7 +4188,7 @@ def test_cli_detect_engines_probes_the_program_the_claude_code_run_would(
     verdicts = json.loads(capsys.readouterr().out)
     assert verdicts[-1]["engine"] == "claude-code"
     assert verdicts[-1]["available"] is True, verdicts[-1]["reason"]
-    assert _status_checks(log) == [list(providers.CLAUDE_CODE_STATUS)]
+    assert _status_checks(log) == [providers.claude_code_status(own)]
 
 
 @posix_only

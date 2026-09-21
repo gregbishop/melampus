@@ -136,16 +136,22 @@ per call, so the cloud guards (the estimate, `max_images`, the cloud cache
 file) do not apply. Claude Code itself would use an API key over the login
 when one is in the environment melampus runs from (its documented precedence:
 "In non-interactive mode (`-p`), the key is always used when present"), which
-is why detection refuses that case rather than let a batch bill it, below. Detection (`--detect-engines`) probes the program a `claude-code` run
-would run, read from the same config: the built-in `claude`, or the first
-element of `[model] command` when one is set under `backend = "claude-code"`,
-so the verdict the dialog shows is the verdict the run gets. It reports
-`claude-code` as not installed when that program is not found (for the
-built-in, nothing on PATH is called `claude`), as not signed in when
+is why detection refuses that case rather than let a batch bill it, below. Detection (`--detect-engines`) probes the template a `claude-code` run
+would run, read from the same config: the built-in one above, or
+`[model] command` when one is set under `backend = "claude-code"`, so the
+verdict the dialog shows is the verdict the run gets. It reports
+`claude-code` as not installed when that template's program is not found (for
+the built-in, nothing on PATH is called `claude`), as not signed in when
 `claude --restricted auth status --json` says so (`loggedIn` false, or its
 documented exit 1 with nothing on stderr: a cheap check, no model call, under
-the same `--restricted` as the run so it reads the same settings and the same
-environment), as signed in but not to the subscription when that check passes
+the template's own settings flags, `--restricted` for the built-in, so it
+reads the same settings and the same environment as the run; a command of
+your own is checked under whatever it carries of `--restricted`, `--bare`,
+`--settings` and `--setting-sources`, values included, so one that leaves
+`--restricted` out or names a settings file with an `apiKeyHelper` is
+refused as the run would bill it, below, and one with `--bare` is never
+signed in, since bare mode never reads the login), as signed in but not to
+the subscription when that check passes
 on another credential (`authMethod` other than `claude.ai`: an API key, an
 OAuth or bearer token from the environment, a cloud provider; or the login
 set aside for a key, which the check reports as `apiKeySource` with

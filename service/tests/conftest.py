@@ -157,7 +157,7 @@ def no_ambient_claude_code(monkeypatch):
     `claude` on PATH and restores REAL_CLAUDE_CODE_VERDICT."""
     monkeypatch.setattr(
         providers, "claude_code_verdict",
-        lambda program=None: providers.EngineVerdict(
+        lambda command=None: providers.EngineVerdict(
             providers.CLAUDE_CODE, False, "Claude Code is not installed (kept out of the tests)"),
     )
 

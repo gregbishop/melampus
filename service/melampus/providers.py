@@ -106,12 +106,10 @@ CLAUDE_CODE_PROGRAM = "claude"
 #: this replaces, loaded it. The keychain login is not a settings file
 #: and stays: measured on 2.1.278, `claude --restricted auth status
 #: --json` reports the claude.ai login and its subscription; `--bare` is
-#: the mode that skips keychain reads. One constant: the run's template
-#: and the status check carry the same flag (the CLI takes it before a
-#: subcommand: measured, `claude --setting-sources bogus auth status
-#: --json` is refused as an invalid setting source), so the credential
-#: the check reports is read under the settings the run loads, in the
-#: same inherited environment (Codex round 1, S2).
+#: the mode that skips keychain reads. The status check carries this
+#: flag too, read off the template (CLAUDE_CODE_SETTINGS_FLAGS says how),
+#: so the credential it reports is read under the settings the run
+#: loads, in the same inherited environment (Codex round 1, S2).
 CLAUDE_CODE_ISOLATION = "--restricted"
 
 #: The one copy of the template. Every flag is from `claude --help` (2.1.277)
@@ -164,9 +162,34 @@ CLAUDE_CODE_SIGN_IN = "claude auth login"
 
 #: The documented, cheap sign-in check (cli-reference: "Show authentication
 #: status as JSON ... Exits with code 0 if logged in, 1 if not"): no model
-#: call, so detection and the up-front refusal spend nothing. Under the
-#: template's isolation flag, for the reason given at CLAUDE_CODE_ISOLATION.
-CLAUDE_CODE_STATUS = (CLAUDE_CODE_ISOLATION, "auth", "status", "--json")
+#: call, so detection and the up-front refusal spend nothing. Run under
+#: the settings flags of the template that will run (claude_code_status).
+CLAUDE_CODE_STATUS = ("auth", "status", "--json")
+
+#: The global flags that decide which settings files a run loads, and so
+#: which credential it uses, with how many values each takes: the status
+#: check carries them off the template that will run, values and order
+#: kept, before the subcommand (the CLI takes its global flags there:
+#: measured on 2.1.278, `claude --setting-sources bogus auth status
+#: --json` is refused as an invalid setting source, and `claude
+#: --restricted --settings '{"apiKeyHelper": ...}' auth status --json`
+#: reports authMethod api_key_helper, apiKeySource apiKeyHelper). A
+#: `[model] command` of the user's own can leave CLAUDE_CODE_ISOLATION
+#: out, name a settings file or a source, or run bare, and the credential
+#: differs each way: without `--restricted` the user's settings file is
+#: loaded (measured: an apiKeyHelper there is reported with no flag and
+#: not under `--restricted`); `--settings` "still appl[ies]" under
+#: `--restricted` (`claude --help`); `--setting-sources` picks the files;
+#: `--bare` never reads "OAuth and keychain" (`claude --help`), so the
+#: check under it says not signed in (measured: loggedIn false, exit 1,
+#: on the signed-in Mac). A check under fixed flags would approve the
+#: subscription while the run billed an apiKeyHelper's key (Codex round
+#: 2, C1); one read off the template is the run's own configuration,
+#: whatever the template. Flags that decide nothing about credentials
+#: (`--add-dir`, the tools, the prompt) are not carried.
+CLAUDE_CODE_SETTINGS_FLAGS = {
+    CLAUDE_CODE_ISOLATION: 0, "--bare": 0, "--settings": 1, "--setting-sources": 1,
+}
 
 #: What the status object calls the subscription sign-in: `authMethod`
 #: "claude.ai" (measured on 2.1.278, with `subscriptionType` "max"). The
@@ -314,17 +337,37 @@ def _key_required(engine: str) -> str:
     return f"API key required: set {specific} (or {generic})"
 
 
-def claude_code_verdict(program: str | None = None) -> EngineVerdict:
-    """Whether Claude Code can be the engine here (card #421): `program`
-    (CLAUDE_CODE_PROGRAM unless a template names another) must be on PATH,
-    and its status check must say signed in to the subscription. Never
-    raises; a verdict reports. The reasons are the words the user sees:
-    not installed with where to get it, not signed in with the command
-    that signs in, signed in but not to the subscription with what to
-    remove and the sign-in (CLAUDE_CODE_SUBSCRIPTION says why), a check
-    that did not answer or failed some other way (in the CLI's own words),
-    or available and billing to the subscription."""
-    program = program or CLAUDE_CODE_PROGRAM
+def claude_code_status(command: list[str]) -> list[str]:
+    """The status check for `command`, the template that will run: its
+    settings-deciding global flags (CLAUDE_CODE_SETTINGS_FLAGS, values
+    included, in the template's order) before CLAUDE_CODE_STATUS, so the
+    credential the check reports is the one that template's run would
+    bill (Codex round 2, C1). The argv after the executable."""
+    carried: list[str] = []
+    arguments = iter(command[1:])
+    for argument in arguments:
+        values = CLAUDE_CODE_SETTINGS_FLAGS.get(argument)
+        if values is None:
+            continue
+        carried.append(argument)
+        carried.extend(next(arguments, "") for _ in range(values))
+    return [*carried, *CLAUDE_CODE_STATUS]
+
+
+def claude_code_verdict(command: list[str] | None = None) -> EngineVerdict:
+    """Whether Claude Code can be the engine here (card #421): the program
+    `command` (CLAUDE_CODE_COMMAND unless the user set a template) names
+    must be on PATH, and its status check, under that template's own
+    settings flags (claude_code_status), must say signed in to the
+    subscription. Never raises; a verdict reports. The reasons are the
+    words the user sees: not installed with where to get it, not signed in
+    with the command that signs in, signed in but not to the subscription
+    with what to remove and the sign-in (CLAUDE_CODE_SUBSCRIPTION says
+    why), a check that did not answer or failed some other way (in the
+    CLI's own words), or available and billing to the subscription."""
+    command = command or CLAUDE_CODE_COMMAND
+    program = command[0]
+    check = claude_code_status(command)
     executable = shutil.which(program)
     if executable is None:
         return EngineVerdict(
@@ -334,14 +377,14 @@ def claude_code_verdict(program: str | None = None) -> EngineVerdict:
         )
     try:
         status = subprocess.run(
-            [executable, *CLAUDE_CODE_STATUS],
+            [executable, *check],
             capture_output=True, text=True, encoding="utf-8", errors="replace",
             stdin=subprocess.DEVNULL, timeout=CLAUDE_CODE_PROBE_SECONDS,
         )
     except subprocess.TimeoutExpired:
         return EngineVerdict(
             CLAUDE_CODE, False,
-            f"`{program} {' '.join(CLAUDE_CODE_STATUS)}` did not answer within "
+            f"`{program} {' '.join(check)}` did not answer within "
             f"{CLAUDE_CODE_PROBE_SECONDS:g}s",
         )
     except OSError as exc:
@@ -367,7 +410,7 @@ def claude_code_verdict(program: str | None = None) -> EngineVerdict:
             )
         return EngineVerdict(
             CLAUDE_CODE, False,
-            f"`{program} {' '.join(CLAUDE_CODE_STATUS)}` exited {status.returncode}"
+            f"`{program} {' '.join(check)}` exited {status.returncode}"
             + (f": {said}" if said else " with nothing on stderr"),
         )
     method = str(account.get("authMethod") or "")
@@ -383,7 +426,7 @@ def claude_code_verdict(program: str | None = None) -> EngineVerdict:
         return EngineVerdict(
             CLAUDE_CODE, False,
             f"Claude Code is signed in, but not to a Claude subscription: `{program} "
-            f"{' '.join(CLAUDE_CODE_STATUS)}` says {said}, and every frame would bill that "
+            f"{' '.join(check)}` says {said}, and every frame would bill that "
             f"credential instead ({CLAUDE_CODE_AUTH_DOCS}); {fix}, then sign in with "
             f"`{CLAUDE_CODE_SIGN_IN}`",
         )
@@ -398,19 +441,21 @@ def claude_code_verdict(program: str | None = None) -> EngineVerdict:
     )
 
 
-def claude_code_program(settings: ModelConfig) -> str | None:
-    """The program a claude-code run would ask and run: the one `[model]
-    command` names when the engine is claude-code and a command is set, else
-    None for the built-in `claude`. Read here, once, by the factory and by
+def claude_code_command(settings: ModelConfig) -> list[str] | None:
+    """The template a claude-code run would ask and run: `[model] command`
+    when the engine is claude-code and a command is set, else None for the
+    built-in CLAUDE_CODE_COMMAND. Read here, once, by the factory and by
     --detect-engines, so the verdict the dialog shows is the verdict the run
-    gets (Done-when 2), as the ollama address is."""
+    gets (Done-when 2), as the ollama address is: the program it names is
+    the one asked, under the settings flags it carries (Codex round 2, C1).
+    """
     if (settings.backend or "").strip().lower() == CLAUDE_CODE and settings.command:
-        return settings.command[0]
+        return list(settings.command)
     return None
 
 
 def detect_engines(
-    ollama_at: str | None = None, claude_code_program: str | None = None
+    ollama_at: str | None = None, claude_code_command: list[str] | None = None
 ) -> list[EngineVerdict]:
     """One verdict per engine, in the owner's order (BACKEND_CHOICES without the
     test fake), then claude-code (card #421; the picker learns it in #423).
@@ -418,9 +463,9 @@ def detect_engines(
     refusals' "what works" list and the CLI's default both come from it, so
     they cannot disagree with what the dialog (card #405) shows. `ollama_at`
     is the configured address, if any (`[model] ollama_url`);
-    `claude_code_program` the configured program, if any (a `[model] command`
-    under claude-code naming its own, read by `claude_code_program(settings)`),
-    else the built-in `claude`."""
+    `claude_code_command` the configured template, if any (a `[model]
+    command` under claude-code, read by `claude_code_command(settings)`),
+    else the built-in CLAUDE_CODE_COMMAND."""
     apple_silicon = on_apple_silicon()
     url = ollama_url(ollama_at)
     ollama = ollama_answers(url)
@@ -436,7 +481,7 @@ def detect_engines(
         ),
         EngineVerdict("openai", True, _key_required("openai")),
         EngineVerdict("claude", True, _key_required("claude")),
-        claude_code_verdict(claude_code_program),
+        claude_code_verdict(claude_code_command),
     ]
 
 
@@ -627,10 +672,10 @@ def build_primary_backend(config: MelampusConfig) -> VLMBackend:
         # and as `ollama` does it: one detection, on the template's program,
         # whose claude-code verdict is the refusal's sentence and whose list
         # is its "what works", so Claude Code is asked its status once,
-        # refused or built, and what runs is the executable that verdict
-        # resolved.
+        # under the template's own settings flags, refused or built, and
+        # what runs is the executable that verdict resolved.
         command = list(settings.command or CLAUDE_CODE_COMMAND)
-        verdicts = detect_engines(settings.ollama_url, claude_code_program(settings))
+        verdicts = detect_engines(settings.ollama_url, claude_code_command(settings))
         verdict = next(v for v in verdicts if v.engine == CLAUDE_CODE)
         if not verdict.available:
             raise _refusal(f"{verdict.reason}.", works_here=_works_here(verdicts))
