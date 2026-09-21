@@ -9,18 +9,14 @@ live here and both callers import them.
 
 from __future__ import annotations
 
-import contextlib
-import http.client
 import platform
-import socket
 import sys
-import threading
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
 from pydantic import SecretStr
 
-from .backend import VLMBackend
+from .backend import VLMBackend, _Deadline, _NotedHTTP, _NotedHTTPS
 from .config import MelampusConfig
 
 #: Where each provider's key is looked for, in order, when the config has none.
@@ -46,10 +42,9 @@ DEFAULT_MODELS = {
 #: answers nothing useful; it is here to prove the pipeline around it runs.
 SCRIPTED = "scripted"
 
-#: Named so the CLI accepts it (card #403: the user's choice of engine needs a
-#: home before it needs a dialog); its backend is card #406's. Until that
-#: lands, asking for it is refused below, the way mlx is refused off Apple
-#: Silicon.
+#: The local Ollama server (card #403 named it, card #406 built it): the local
+#: engine on Windows and Linux, and on Macs that prefer it. Refused below, the
+#: way mlx is refused off Apple Silicon, when no server answers.
 OLLAMA = "ollama"
 
 #: The engines the user chooses between, in the owner's order, then the fake.
@@ -58,8 +53,9 @@ OLLAMA = "ollama"
 BACKEND_CHOICES = ("mlx", OLLAMA, "openai", "claude", SCRIPTED)
 
 #: Where the local Ollama server listens. Ollama's docs/faq.mdx: "Ollama binds
-#: 127.0.0.1 port 11434 by default." One constant, so card #406 can make it a
-#: config value.
+#: 127.0.0.1 port 11434 by default." One constant: the default of the
+#: `[model] ollama_url` setting (card #406), which is unset until a user
+#: names another address, so the probe and the backend share it.
 OLLAMA_URL = "http://127.0.0.1:11434"
 
 #: How long the probe waits for the local server. Loopback answers in
@@ -95,63 +91,61 @@ def _refusal(reason: str, *, works_here: tuple[str, ...]) -> BackendUnavailable:
     )
 
 
-def _hang_up(connection: http.client.HTTPConnection, expired: threading.Event) -> None:
-    """The deadline, from its timer. Not connection.close(): the response
-    being read holds the socket's file object, and socket.close() waits for
-    that to go before it really closes, so the blocked read would read on.
-    shutdown(SHUT_RDWR) ends the stream now. And `expired`, because
-    http.client takes end-of-stream as the end of the headers: a status line
-    that arrived before the trickle would still parse as a 200, and the
-    probe must know the deadline finished the response, not the server. No
-    socket yet means the probe is still connecting: the socket timeout bounds
-    that, and the probe checks `expired` once connected, since a timer that
-    fired before the socket existed had nothing to hang up and the reads
-    after a late handshake would otherwise be bounded per byte only. The
-    socket is read once: the main thread's close() sets it to None at any
-    moment, and a socket it already closed raises OSError, which is
-    suppressed; None between two reads would not be."""
-    expired.set()
-    sock = connection.sock
-    if sock is not None:
-        with contextlib.suppress(OSError):
-            sock.shutdown(socket.SHUT_RDWR)
+def ollama_url(configured: str | None = None) -> str:
+    """The address Ollama is looked for at: `[model] ollama_url` when set,
+    else OLLAMA_URL. Trailing slash dropped so the endpoints append cleanly."""
+    return (configured or OLLAMA_URL).rstrip("/")
 
 
-def ollama_answers() -> bool:
-    """Whether an Ollama server answers at OLLAMA_URL: GET /api/version
-    (Ollama's docs/api.md § Version) within OLLAMA_PROBE_SECONDS, status 200.
-    Connection refused, a timeout, a non-200: unavailable. Never raises; a
-    probe reports. Straight to the address, never through a proxy: urlopen
-    honours http_proxy and the system proxy settings, which would send a
-    loopback probe off the machine and let the proxy's answer stand in for
-    Ollama's; http.client consults neither. And never past the address:
+def ollama_answers(url: str | None = None) -> bool:
+    """Whether an Ollama server answers at `url` (default OLLAMA_URL):
+    GET /api/version (Ollama's docs/api.md § Version) within
+    OLLAMA_PROBE_SECONDS, status 200. Connection refused, a timeout, a
+    non-200: unavailable. Never raises; a probe reports. The address is
+    read the way the backend reads it for every frame (OllamaBackend
+    builds `{url}/api/chat` and hands it to urllib): the endpoint goes on
+    the end of the address as typed, so a path in front of it (a reverse
+    proxy's `/ollama`) stays; the scheme picks the connection, the
+    backend's own _Noted ones, https spoken as TLS with the certificate
+    verified (http.client's default context, as urllib's), so an https
+    address is never asked in the clear and never on port 80; the host and
+    port are the address's own. Read
+    any other way, the probe would refuse a server every frame would reach,
+    or find one no frame would. Straight to the
+    address, never through a proxy: urlopen honours http_proxy and the
+    system proxy settings, which would send a loopback probe off the machine
+    and let the proxy's answer stand in for Ollama's; http.client consults
+    neither. And never past the address:
     http.client follows no redirect, and a 3xx is a non-200, so whatever
     listens on the port when Ollama does not cannot point the probe at another
     host and have that host's 200 stand in for Ollama's. And never past the
-    deadline: the socket timeout bounds each read, not the probe, so a
-    listener trickling headers a byte at a time could hold detection for as
-    long as it liked; a timer hangs up at OLLAMA_PROBE_SECONDS, and whatever
+    deadline: the socket timeout bounds each operation, not the probe, so
+    a listener trickling headers a byte at a time, or a slow connection
+    and then a handshake that stalls, could hold detection for as long as
+    it liked; a _Deadline, holding the socket from the moment the
+    connection makes it, hangs up at OLLAMA_PROBE_SECONDS, and whatever
     was read by then, the probe reports unavailable."""
-    address = urlsplit(OLLAMA_URL)
-    connection = http.client.HTTPConnection(
-        address.hostname, address.port, timeout=OLLAMA_PROBE_SECONDS
-    )
-    expired = threading.Event()
-    deadline = threading.Timer(OLLAMA_PROBE_SECONDS, _hang_up, [connection, expired])
-    deadline.start()
-    try:
-        connection.request("GET", "/api/version")
-        # A timer that fired during connect() found no socket to hang up;
-        # a late handshake must not start a read the deadline cannot end.
-        if expired.is_set():
+    with _Deadline(OLLAMA_PROBE_SECONDS) as deadline:
+        try:
+            address = urlsplit(f"{ollama_url(url)}/api/version")
+            connect = {"http": _NotedHTTP, "https": _NotedHTTPS}
+            connection = connect[address.scheme](
+                address.hostname, address.port, timeout=OLLAMA_PROBE_SECONDS, deadline=deadline
+            )
+        except Exception:  # noqa: BLE001 - an address that cannot be asked (no scheme, no host, a port out of range) is one nobody answers at
             return False
-        answered = connection.getresponse().status == 200
-    except Exception:  # noqa: BLE001 - every failure means the same thing: not here
-        return False
-    finally:
-        deadline.cancel()
-        connection.close()
-    return answered and not expired.is_set()
+        try:
+            connection.request("GET", address.path)
+            # A deadline that fired before the socket existed hung it up as
+            # soon as it did; asked anyway, the answer is not the server's.
+            if deadline.expired.is_set():
+                return False
+            answered = connection.getresponse().status == 200
+        except Exception:  # noqa: BLE001 - every failure means the same thing: not here
+            return False
+        finally:
+            connection.close()
+    return answered and not deadline.expired.is_set()
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,13 +164,15 @@ def _key_required(engine: str) -> str:
     return f"API key required: set {specific} (or {generic})"
 
 
-def detect_engines() -> list[EngineVerdict]:
+def detect_engines(ollama_at: str | None = None) -> list[EngineVerdict]:
     """One verdict per engine, in the owner's order (BACKEND_CHOICES without the
     test fake). This is the one place that knows whether an engine can run
     here: the refusals' "what works" list and the CLI's default both come from
-    it, so they cannot disagree with what the dialog (card #405) shows."""
+    it, so they cannot disagree with what the dialog (card #405) shows.
+    `ollama_at` is the configured address, if any (`[model] ollama_url`)."""
     apple_silicon = on_apple_silicon()
-    ollama = ollama_answers()
+    url = ollama_url(ollama_at)
+    ollama = ollama_answers(url)
     return [
         EngineVerdict(
             "mlx", apple_silicon,
@@ -184,25 +180,25 @@ def detect_engines() -> list[EngineVerdict]:
         ),
         EngineVerdict(
             OLLAMA, ollama,
-            f"Ollama is answering at {OLLAMA_URL}" if ollama
-            else f"no Ollama server at {OLLAMA_URL}; install it from {OLLAMA_INSTALL}",
+            f"Ollama is answering at {url}" if ollama
+            else f"no Ollama server at {url}; install it from {OLLAMA_INSTALL}",
         ),
         EngineVerdict("openai", True, _key_required("openai")),
         EngineVerdict("claude", True, _key_required("claude")),
     ]
 
 
-def _works_here() -> tuple[str, ...]:
-    """The backends this machine can run, as detection says, plus the fake."""
-    return (*(v.engine for v in detect_engines() if v.available), SCRIPTED)
+def _works_here(verdicts: list[EngineVerdict]) -> tuple[str, ...]:
+    """The backends this machine can run, as the verdicts say, plus the fake."""
+    return (*(v.engine for v in verdicts if v.available), SCRIPTED)
 
 
-def default_engine() -> str:
+def default_engine(ollama_at: str | None = None) -> str:
     """What runs when nothing names an engine: the first detection says is
     available, in the owner's order. There is always one, because the cloud
     engines are available everywhere; no fallback, so if the list ever
     changes that invariant breaks loudly here rather than naming mlx."""
-    return next(v.engine for v in detect_engines() if v.available)
+    return next(v.engine for v in detect_engines(ollama_at) if v.available)
 
 
 def normalise_provider(provider: str | None) -> str:
@@ -248,20 +244,36 @@ def build_primary_backend(config: MelampusConfig) -> VLMBackend:
     are identical wherever the answer comes from.
     """
     kind = (config.model.backend or "mlx").strip().lower()
+    settings = config.model
 
     if kind == "mlx":
         if not on_apple_silicon():
             raise _refusal(
                 "The local MLX backend only runs on Apple Silicon Macs.",
-                works_here=_works_here(),
+                works_here=_works_here(detect_engines(settings.ollama_url)),
             )
         from .backend import MLXBackend
 
-        return MLXBackend(config.model.repo, config.model.temperature)
+        return MLXBackend(settings.repo, settings.temperature)
 
     if kind == OLLAMA:
-        raise _refusal(
-            "The Ollama engine is not built yet (card #406).", works_here=_works_here()
+        # Detection, run once here, before any image is read: a server that is
+        # not there fails up front, with the fix, rather than once per frame
+        # mid-run. The refusal's sentence is the ollama verdict's own words
+        # (what --detect-engines and the dialog say), and its "what works"
+        # list comes from the same verdicts: one probe, one sentence.
+        verdicts = detect_engines(settings.ollama_url)
+        ollama = next(v for v in verdicts if v.engine == OLLAMA)
+        if not ollama.available:
+            raise _refusal(
+                f"{ollama.reason[0].upper()}{ollama.reason[1:]}.",
+                works_here=_works_here(verdicts),
+            )
+        from .backend import OllamaBackend
+
+        return OllamaBackend(
+            settings.ollama_model, ollama_url(settings.ollama_url),
+            temperature=settings.temperature, timeout=settings.timeout_seconds,
         )
 
     if kind == SCRIPTED:
@@ -278,7 +290,6 @@ def build_primary_backend(config: MelampusConfig) -> VLMBackend:
     else:
         import openai  # noqa: F401
 
-    settings = config.model
     key = resolve_provider_key(provider, settings.api_key)
     model = settings.name or DEFAULT_MODELS[provider]
 

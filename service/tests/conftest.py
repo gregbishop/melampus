@@ -32,6 +32,7 @@ import contextlib
 import importlib.util
 import platform
 import shutil
+import socket
 import subprocess
 import sys
 import threading
@@ -124,9 +125,9 @@ class QuietHandler(BaseHTTPRequestHandler):
 
 
 def recording_handler(seen: list[str]) -> type[QuietHandler]:
-    """A handler that answers 200 `{}` to any GET and appends the path it was
-    asked to `seen`: the server a test stands up to prove the client under
-    test never reached it (a proxy, a redirect's destination)."""
+    """A handler that answers 200 `{}` to any GET or POST and appends the path
+    it was asked to `seen`: the server a test stands up to prove the client
+    under test never reached it (a proxy, a redirect's destination)."""
 
     class Recording(QuietHandler):
         def do_GET(self) -> None:  # noqa: N802 - http.server's name
@@ -135,7 +136,19 @@ def recording_handler(seen: list[str]) -> type[QuietHandler]:
             self.end_headers()
             self.wfile.write(b"{}")
 
+        def do_POST(self) -> None:  # noqa: N802 - http.server's name
+            self.rfile.read(int(self.headers.get("Content-Length") or 0))
+            self.do_GET()
+
     return Recording
+
+
+def closed_port() -> int:
+    """A loopback port nothing listens on: where a test puts the Ollama address
+    so a developer's running server cannot answer for it."""
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
 
 
 @contextlib.contextmanager

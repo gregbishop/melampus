@@ -22,8 +22,9 @@ every session.
 - stack: python
 - build: `.venv/bin/python tools/build_binary.py` — from the repo root; writes
   `dist/melampus`, the one-file executable, with MLX on Apple Silicon and
-  without it elsewhere (`dist/melampus.exe` on Windows, cloud engines only;
-  needs the `build` extra, see readme.md § Building the executable)
+  without it elsewhere (`dist/melampus.exe` on Windows, where the local option
+  is Ollama, the cloud engines the other; needs the `build` extra, see
+  readme.md § Building the executable)
 - test: `.venv/bin/python -m pytest` — from the repo root, locally; add
   `--build-binary` to build the executable first and smoke-test it
 - test in CI: `uv sync --locked --extra dev --extra build --extra cloud --extra openai && uv run pytest -q --build-binary`

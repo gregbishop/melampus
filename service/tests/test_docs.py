@@ -609,6 +609,20 @@ def test_docs_name_engine_detection_where_the_default_and_the_refusal_are_descri
     assert "`--detect-engines`" in readme, "readme.md does not name --detect-engines"
 
 
+def test_brief_names_ollama_as_the_windows_executables_local_option():
+    """Card #406: Ollama is the local engine on Windows, as readme.md § Windows,
+    docs/architecture.md and docs/config.md say. The stack contract's build
+    line describes the same executable, so it must say the same and may no
+    longer call `dist/melampus.exe` cloud-only."""
+    brief = BRIEF.read_text(encoding="utf-8")
+    build = re.search(r"^- build: (.*?)(?=^- )", brief, re.MULTILINE | re.DOTALL)
+    assert build, "docs/brief.md's stack contract has no build line"
+    line = " ".join(build.group(1).split())
+    assert "`dist/melampus.exe`" in line, "the build line does not name the Windows executable"
+    assert "cloud engines only" not in line, "docs/brief.md still calls the Windows executable cloud-only"
+    assert "Ollama" in line, "docs/brief.md's build line does not name Ollama as the Windows local option"
+
+
 def test_docs_describe_the_engine_picker_and_where_the_key_lives():
     """Card #405: the engine has a control in Settings now. docs/plugin.md's
     engine section must describe the picker (what greys an engine, where the

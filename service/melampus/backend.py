@@ -7,10 +7,20 @@ one class here and changing nothing else.
 
 from __future__ import annotations
 
+import base64
+import contextlib
+import functools
+import http.client
+import json
+import socket
+import threading
 import time
+import urllib.error
+import urllib.request
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 
 @dataclass(slots=True)
@@ -23,6 +33,12 @@ class Completion:
     # Distinguishing the two matters: a refusal is permanent for that image and
     # prompt, so retrying it is only spending money to be told no again.
     refused: bool = False
+
+
+def _image_as_base64(image_path: Path) -> str:
+    """The staged image's bytes, base64 for a JSON body: the one thing every
+    HTTP backend sends of an image (no path, no filename)."""
+    return base64.standard_b64encode(Path(image_path).read_bytes()).decode("ascii")
 
 
 class VLMBackend(ABC):
@@ -177,9 +193,7 @@ class AnthropicBackend(VLMBackend):
         return client.messages.create(**params)
 
     def complete(self, image_path: Path, prompt: str, max_tokens: int) -> Completion:
-        import base64
-
-        data = base64.standard_b64encode(Path(image_path).read_bytes()).decode("ascii")
+        data = _image_as_base64(image_path)
         blocks = [
             {
                 "type": "image",
@@ -291,9 +305,7 @@ class OpenAIBackend(VLMBackend):
             return client.chat.completions.create(**params, max_tokens=max_tokens)
 
     def complete(self, image_path: Path, prompt: str, max_tokens: int) -> Completion:
-        import base64
-
-        data = base64.standard_b64encode(Path(image_path).read_bytes()).decode("ascii")
+        data = _image_as_base64(image_path)
         blocks = [
             {"type": "text", "text": prompt},
             {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{data}"}},
@@ -314,6 +326,333 @@ class OpenAIBackend(VLMBackend):
             prompt_tokens=getattr(usage, "prompt_tokens", None),
             generated_tokens=getattr(usage, "completion_tokens", None),
             refused=finish == "content_filter",
+        )
+
+
+def _hang_up(line, expired: threading.Event) -> None:
+    """The deadline, from its timer. `line` is the _Deadline holding the
+    exchange's socket as `sock`, handed over the moment `_Noted` makes it
+    and again, for https, as the wrapped socket before the handshake. Not
+    close(): the response being read holds the socket's file object, and
+    socket.close() waits for that to go before it really closes, so the
+    blocked read would read on. shutdown(SHUT_RDWR) ends the stream now.
+    And `expired`, because http.client takes end-of-stream as the end of
+    the headers: a status line that arrived before the trickle would still
+    parse as a 200, and the caller must know the deadline finished the
+    response, not the server. No socket yet means the caller is still
+    connecting: the socket timeout bounds that, and `_Deadline.on` hangs
+    the socket up as soon as it is given, since a timer that fired before
+    the socket existed had nothing to hang up. A socket the main thread
+    already closed (the probe's `finally`, or urllib once the headers are
+    in) raises OSError, which is suppressed."""
+    expired.set()
+    sock = line.sock
+    if sock is not None:
+        with contextlib.suppress(OSError):
+            sock.shutdown(socket.SHUT_RDWR)
+
+
+class _Deadline:
+    """A wall-clock bound on one HTTP exchange, as a context manager. A
+    socket timeout bounds each operation, not the exchange, so a server
+    trickling a byte at a time, each within the timeout, could hold the
+    caller for as long as it liked. Inside the block a timer counts
+    `seconds`; when it fires, `_hang_up` ends the stream on `sock` and sets
+    `expired`, which the caller reads after the exchange, since whatever
+    arrived by then is not the server's answer. `sock` is the socket the
+    exchange is on, given by `on()` once there is one: a deadline that
+    fired while the caller was still connecting found nothing to hang up,
+    so `on()` hangs up then, and the reads after a late handshake are not
+    left bounded per byte only. Leaving the block cancels the timer."""
+
+    def __init__(self, seconds: float) -> None:
+        self.sock: socket.socket | None = None
+        self.expired = threading.Event()
+        self._timer = threading.Timer(seconds, _hang_up, [self, self.expired])
+
+    def __enter__(self) -> _Deadline:
+        self._timer.start()
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        self._timer.cancel()
+
+    def on(self, sock: socket.socket | None) -> None:
+        self.sock = sock
+        if self.expired.is_set():
+            _hang_up(self, self.expired)
+
+
+class _StayPut(urllib.request.HTTPRedirectHandler):
+    """Follows no redirect: a 3xx from the configured address is an answer
+    from the wrong place, surfaced as the status it is."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D102
+        return None
+
+
+class _Noted:
+    """Mixed into http.client's connection classes, for the backend (urllib
+    opens them) and the probe alike: the socket goes to a _Deadline the
+    moment it exists. The moment it exists, because connect() is the TCP
+    connection and, for https, then the TLS handshake, each bounded by the
+    socket timeout on its own, so a connection that took most of the
+    budget and then a handshake that stalls would hold the caller a second
+    whole timeout before a deadline given the socket afterwards could
+    touch it; http.client makes the socket through the `_create_connection`
+    attribute it sets on itself (the seam its own tests use), so that is
+    where the socket is caught. And it is the deadline that holds the
+    socket, not the connection: urllib's do_open forgets the socket on
+    the connection once the headers are in (the response's file holds it
+    from then on), while the deadline outlives both. What comes before the
+    socket, resolving a hostname, has no timeout to give it: the resolver's
+    own applies, and `ollama_url` is an IP literal unless a user names a
+    host."""
+
+    def __init__(self, *args, deadline: _Deadline, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.deadline = deadline
+        self._create_connection = self._connect
+
+    def _connect(self, address, timeout, source_address) -> socket.socket:
+        sock = socket.create_connection(address, timeout, source_address)
+        self.deadline.on(sock)
+        return sock
+
+
+class _NotedHTTP(_Noted, http.client.HTTPConnection):
+    pass
+
+
+class _NotedHTTPS(_Noted, http.client.HTTPSConnection):
+    """HTTPSConnection.connect wraps the socket and runs the handshake in
+    one call, and the wrap detaches the socket the deadline holds (its
+    descriptor moves to the new SSLSocket), so a hang-up during the
+    handshake would touch nothing: a connection landing just before the
+    deadline bought a stalled handshake a whole socket timeout more. So
+    connect() here wraps without the handshake, gives the deadline the
+    wrapped socket, then shakes hands, with the verifying context the
+    connection has: the one `_Bounded` passed in for the backend, or the
+    one HTTPSConnection makes for itself when given none, for the probe.
+    The server name is the host: nothing here tunnels through a proxy, so
+    there is no other."""
+
+    def connect(self) -> None:  # noqa: D102 - http.client's
+        http.client.HTTPConnection.connect(self)
+        self.sock = self._context.wrap_socket(
+            self.sock, server_hostname=self.host, do_handshake_on_connect=False
+        )
+        self.deadline.on(self.sock)
+        self.sock.do_handshake()
+
+
+class _Bounded(urllib.request.HTTPHandler, urllib.request.HTTPSHandler):
+    """urllib's HTTP and HTTPS handlers, opening _Noted connections for the
+    request's deadline (OllamaBackend._send puts it on the request). The
+    https side keeps HTTPSHandler's default context, the verifying one it
+    builds when given none, and passes it to _NotedHTTPS as HTTPSHandler
+    would to HTTPSConnection."""
+
+    def http_open(self, req):  # noqa: D102 - urllib's
+        return self.do_open(functools.partial(_NotedHTTP, deadline=req.deadline), req)
+
+    def https_open(self, req):  # noqa: D102 - urllib's
+        return self.do_open(
+            functools.partial(_NotedHTTPS, deadline=req.deadline), req, context=self._context
+        )
+
+
+class OllamaBackend(VLMBackend):
+    """A local Ollama server behind the same interface (card #406): local
+    inference on Windows and Linux, and on Macs that prefer it, through the
+    engine most users already have.
+
+    One request per completion, from Ollama's docs/api.md § Generate a chat
+    completion: POST {url}/api/chat with a JSON body of `model`, one user
+    message carrying the prompt as `content` and the image as one base64
+    string in `images`, `stream` false so a single response object comes
+    back, and `options` of `num_predict` (docs/modelfile.mdx: the maximum
+    number of tokens to predict) and `temperature`. The reply's text is
+    `message.content`; the counts are `prompt_eval_count` and `eval_count`.
+    The text goes through the same JSON extraction and schema validation as
+    every other backend's (identify.py): nothing here parses candidates.
+
+    The standard library speaks it: the cloud backends each use their vendor's
+    SDK, so there is no shared HTTP client to reuse, and a dependency for four
+    JSON fields would be a new path for nothing. As with every backend, only
+    the bytes of the staged, metadata-free image travel: no path, no filename.
+
+    Whether a server is there at all is the factory's question
+    (providers.build_primary_backend probes before building this), so the
+    not-running message can name the install and exit 3 before any image is
+    read. Here a failure mid-run maps to a plain error naming the address or
+    the status, which identify() records on that frame while the batch goes on.
+    """
+
+    ENDPOINT = "/api/chat"
+    #: The most of a reply that is read: one object, the text of at most
+    #: `num_predict` tokens and a dozen counters, so a megabyte is not an
+    #: answer, and a server that keeps sending does not fill memory.
+    MAX_REPLY_BYTES = 1 << 20
+    #: The most of a non-200's body that is read: it lands in the frame's
+    #: error record (identify.py), so in the cache and --json-out. Ollama's
+    #: own errors are one line; a proxy's error page is cut here.
+    MAX_ERROR_BYTES = 1 << 10
+
+    def __init__(
+        self,
+        model: str,
+        url: str,
+        *,
+        temperature: float = 0.0,
+        timeout: float = 180.0,
+        client: Callable | None = None,
+    ) -> None:
+        self.name = model
+        self.model = model
+        # The address as the factory hands it: providers.ollama_url has
+        # already dropped the trailing slash, so ENDPOINT appends cleanly.
+        self.url = url
+        self.temperature = temperature
+        self.timeout = timeout
+        # Shaped like urllib.request.urlopen(request, timeout=...): the tests hand
+        # in a fake at this edge, the way the cloud backends take a client. Not
+        # urlopen itself: its opener honours http_proxy and the system proxy
+        # settings, which would send every frame's bytes off the machine and
+        # let the proxy's answer stand in for the model's (the probe in
+        # providers.ollama_answers keeps off the proxy for the same reason);
+        # ProxyHandler({}) consults neither. And it follows a 3xx, so
+        # whatever listens on the port when Ollama does not could point a
+        # frame at another host and have that host's reply stand in for the
+        # model's; _StayPut follows nothing, as the probe follows nothing.
+        # And its `timeout` is the socket's, per operation, so a server
+        # trickling bytes could hold a frame past `timeout_seconds`; _Bounded
+        # opens connections that hand their socket to the request's deadline.
+        self._urlopen = client or urllib.request.build_opener(
+            urllib.request.ProxyHandler({}), _StayPut(), _Bounded()
+        ).open
+
+    def _request(self, image_path: Path, prompt: str, max_tokens: int) -> urllib.request.Request:
+        image = _image_as_base64(image_path)
+        body = {
+            "model": self.model,
+            "messages": [{"role": "user", "content": prompt, "images": [image]}],
+            "stream": False,
+            "options": {"num_predict": max_tokens, "temperature": self.temperature},
+        }
+        return urllib.request.Request(
+            f"{self.url}{self.ENDPOINT}",
+            data=json.dumps(body).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+
+    def _send(self, request: urllib.request.Request) -> bytes:
+        """The reply's bytes, within `timeout` of wall-clock time from
+        connecting to the last byte read, error bodies included: a
+        _Deadline hangs up the socket when the time is up, and whatever the
+        exchange then looks like (a body cut short, a status line that
+        never finished, a reset) is the timeout, not that shape's error."""
+        with _Deadline(self.timeout) as deadline:
+            request.deadline = deadline
+            try:
+                raw = self._exchange(request)
+            except Exception as exc:
+                if deadline.expired.is_set():
+                    raise self._timed_out() from exc
+                raise
+        if deadline.expired.is_set():
+            raise self._timed_out()
+        if len(raw) > self.MAX_REPLY_BYTES:
+            raise RuntimeError(
+                f"Ollama's reply from {self.url} ran past {self.MAX_REPLY_BYTES} bytes"
+            )
+        return raw
+
+    def _exchange(self, request: urllib.request.Request) -> bytes:
+        """One request and what came back, every failure a plain error naming
+        the address or the status."""
+        try:
+            with self._urlopen(request, timeout=self.timeout) as response:
+                return response.read(self.MAX_REPLY_BYTES + 1)
+        except urllib.error.HTTPError as exc:
+            raise RuntimeError(
+                f"Ollama answered {exc.code}: {self._error_text(exc)}"
+            ) from exc
+        except urllib.error.URLError as exc:
+            if isinstance(exc.reason, TimeoutError):
+                raise self._timed_out() from exc
+            raise ConnectionError(
+                f"no Ollama server answering at {self.url} ({exc.reason}); "
+                "start Ollama, or set [model] ollama_url to where it listens"
+            ) from exc
+        except TimeoutError as exc:
+            raise self._timed_out() from exc
+        except http.client.HTTPException as exc:
+            # What urllib lets through unwrapped: a status line that is not
+            # HTTP (BadStatusLine carries it as sent), a server hanging up
+            # before one, a body cut short, a line past http.client's limit.
+            raise RuntimeError(
+                f"Ollama's reply from {self.url} was not HTTP: {self._plain(str(exc))}"
+            ) from exc
+
+    def _timed_out(self) -> TimeoutError:
+        return TimeoutError(
+            f"Ollama at {self.url} did not answer within {self.timeout:g}s; "
+            f"{self.model} may still be loading, or raise [model] timeout_seconds"
+        )
+
+    @classmethod
+    def _plain(cls, text: str) -> str:
+        """Text the server wrote, as it may reach the frame's error record,
+        the log and the terminal: one line of at most MAX_ERROR_BYTES
+        printable characters. An escape sequence in it would move the
+        cursor, recolour the terminal or erase a line, and a line break
+        would fake a line of the log. Whatever is not printable
+        (str.isprintable: the C0 and C1 controls, line and paragraph
+        breaks, the unassigned) becomes a space, and runs of whitespace
+        collapse to one, so what is left is words. The one rule for every
+        message that carries the server's words: an error body, and a
+        status line http.client could not parse."""
+        words = " ".join("".join(c if c.isprintable() else " " for c in text).split())
+        return words[: cls.MAX_ERROR_BYTES]
+
+    @classmethod
+    def _error_text(cls, exc: urllib.error.HTTPError) -> str:
+        """Ollama's own words when the body is its {"error": ...} object,
+        else the body as it came (a proxy's HTML, say), else the status
+        line's reason; at most MAX_ERROR_BYTES of it read, and only its
+        printable characters (`_plain`), since all three are the server's
+        to write."""
+        body = exc.read(cls.MAX_ERROR_BYTES).decode("utf-8", "replace").strip()
+        try:
+            error = json.loads(body).get("error")
+        except (json.JSONDecodeError, AttributeError):
+            error = None
+        return cls._plain(f"{error}" if error else body or exc.reason)
+
+    def complete(self, image_path: Path, prompt: str, max_tokens: int) -> Completion:
+        request = self._request(image_path, prompt, max_tokens)
+        started = time.perf_counter()
+        raw = self._send(request)
+        elapsed = time.perf_counter() - started
+        try:
+            reply = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                f"Ollama's reply from {self.url} was not JSON: {raw[:120]!r}"
+            ) from exc
+        message = (reply.get("message") or {}) if isinstance(reply, dict) else None
+        if not isinstance(message, dict):
+            raise RuntimeError(
+                f"Ollama's reply from {self.url} was not a JSON object with a "
+                f"message object: {raw[:120]!r}"
+            )
+        return Completion(
+            text=message.get("content") or "",
+            seconds=elapsed,
+            prompt_tokens=reply.get("prompt_eval_count"),
+            generated_tokens=reply.get("eval_count"),
         )
 
 
