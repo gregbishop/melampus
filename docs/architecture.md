@@ -105,9 +105,10 @@ inherited across exec), since the kernel would then reap the program the moment
 it exits and the pid its tree is stopped by could be someone else's: start
 melampus from a shell, or restore the signal's default in the launcher; and
 Claude Code is refused as not installed or, by its own `claude auth status`, as
-not signed in. The one failure that stops a batch rather than being recorded on
-the frame is a command exiting non-zero (`CommandFailed`): that is a broken
-engine, not a bad file, and every frame would fail the same way.
+not signed in, or as signed in but not to the subscription. The one failure that
+stops a batch rather than being recorded on the frame is a command exiting
+non-zero (`CommandFailed`): that is a broken engine, not a bad file, and every
+frame would fail the same way.
 
 ---
 

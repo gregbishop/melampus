@@ -131,19 +131,28 @@ What to install: Claude Code, from [code.claude.com/docs/en/setup](https://code.
 so that `claude` is on the PATH melampus runs from. How to sign in:
 `claude auth login` (the default, `--claudeai`, is the subscription). What it
 costs: **every frame bills to that Claude subscription**, its rate limits
-included, and no API key is read or needed here; nothing is charged per call,
-so the cloud guards (the estimate, `max_images`, the cloud cache file) do not
-apply. Detection (`--detect-engines`) probes the program a `claude-code` run
+included; melampus reads no API key for it and needs none; nothing is charged
+per call, so the cloud guards (the estimate, `max_images`, the cloud cache
+file) do not apply. Claude Code itself would use an API key over the login
+when one is in the environment melampus runs from (its documented precedence:
+"In non-interactive mode (`-p`), the key is always used when present"), which
+is why detection refuses that case rather than let a batch bill it, below. Detection (`--detect-engines`) probes the program a `claude-code` run
 would run, read from the same config: the built-in `claude`, or the first
 element of `[model] command` when one is set under `backend = "claude-code"`,
 so the verdict the dialog shows is the verdict the run gets. It reports
 `claude-code` as not installed when that program is not found (for the
 built-in, nothing on PATH is called `claude`), as not signed in when
-`claude auth status --json` says so (`loggedIn` false, or its documented exit
-1 with nothing on stderr: a cheap check, no model call), as failed in the
-CLI's own words when that check exits some other way (an older `claude`
-with no `auth` subcommand), and otherwise as available, naming the account
-kind; a run asked for
+`claude --restricted auth status --json` says so (`loggedIn` false, or its
+documented exit 1 with nothing on stderr: a cheap check, no model call, under
+the same `--restricted` as the run so it reads the same settings and the same
+environment), as signed in but not to the subscription when that check passes
+on another credential (`authMethod` other than `claude.ai`: an API key, an
+OAuth or bearer token from the environment, a cloud provider; or the login
+set aside for a key, which the check reports as `apiKeySource` with
+`subscriptionType` null), naming what to unset or remove and the sign-in, as
+failed in the CLI's own words when that check exits some other way (an older
+`claude` with no `auth` subcommand), and otherwise as available, naming the
+account kind (`claude.ai`, and the subscription); a run asked for
 `claude-code` is refused the same way before any image is read, exit 3. A
 session that lapses mid-batch is caught at the first reply (Claude Code prints
 `Not logged in` as its result, exit 1) and stops the batch at exit 3 with the

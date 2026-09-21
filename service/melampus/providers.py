@@ -106,7 +106,12 @@ CLAUDE_CODE_PROGRAM = "claude"
 #: this replaces, loaded it. The keychain login is not a settings file
 #: and stays: measured on 2.1.278, `claude --restricted auth status
 #: --json` reports the claude.ai login and its subscription; `--bare` is
-#: the mode that skips keychain reads.
+#: the mode that skips keychain reads. One constant: the run's template
+#: and the status check carry the same flag (the CLI takes it before a
+#: subcommand: measured, `claude --setting-sources bogus auth status
+#: --json` is refused as an invalid setting source), so the credential
+#: the check reports is read under the settings the run loads, in the
+#: same inherited environment (Codex round 1, S2).
 CLAUDE_CODE_ISOLATION = "--restricted"
 
 #: The one copy of the template. Every flag is from `claude --help` (2.1.277)
@@ -159,8 +164,46 @@ CLAUDE_CODE_SIGN_IN = "claude auth login"
 
 #: The documented, cheap sign-in check (cli-reference: "Show authentication
 #: status as JSON ... Exits with code 0 if logged in, 1 if not"): no model
-#: call, so detection and the up-front refusal spend nothing.
-CLAUDE_CODE_STATUS = ("auth", "status", "--json")
+#: call, so detection and the up-front refusal spend nothing. Under the
+#: template's isolation flag, for the reason given at CLAUDE_CODE_ISOLATION.
+CLAUDE_CODE_STATUS = (CLAUDE_CODE_ISOLATION, "auth", "status", "--json")
+
+#: What the status object calls the subscription sign-in: `authMethod`
+#: "claude.ai" (measured on 2.1.278, with `subscriptionType` "max"). The
+#: program's other words for it, read from its own source since the docs
+#: list none: none, api_key, api_key_helper, oauth_token, third_party.
+#: Only claude.ai is the subscription, and even then the login can be set
+#: aside for a key: a print-mode run uses whatever credential Claude
+#: Code's precedence puts first, the environment melampus runs from
+#: included (authentication § Authentication precedence: "In
+#: non-interactive mode (-p), the key is always used when present"), and
+#: the status object then names it in `apiKeySource` (measured: the login
+#: plus ANTHROPIC_API_KEY reports authMethod claude.ai, apiKeySource
+#: ANTHROPIC_API_KEY, subscriptionType null, and `--text` says "Auth
+#: token: claude.ai · not in use"). So the engine is available on
+#: authMethod claude.ai with no apiKeySource, and on nothing else (Codex
+#: round 1, C1 and S2): "signed in" alone would let a whole batch bill a
+#: key while the cloud guards, off for a local engine, ask nothing.
+CLAUDE_CODE_SUBSCRIPTION = "claude.ai"
+
+#: What to remove for each credential that is not the subscription, by
+#: the status object's name for it (apiKeySource first, then authMethod),
+#: in the docs' own variable names (authentication § Authentication
+#: precedence; `claude auth login --help`: "--console  Use Anthropic
+#: Console (API usage billing) instead of Claude subscription", the
+#: sign-in the program reports as apiKeySource "/login managed key").
+CLAUDE_CODE_CREDENTIAL_FIX = {
+    "ANTHROPIC_API_KEY": "unset ANTHROPIC_API_KEY",
+    "api_key": "unset ANTHROPIC_API_KEY",
+    "apiKeyHelper": "remove apiKeyHelper from the settings",
+    "api_key_helper": "remove apiKeyHelper from the settings",
+    "oauth_token": "unset CLAUDE_CODE_OAUTH_TOKEN and ANTHROPIC_AUTH_TOKEN",
+    "third_party": "unset CLAUDE_CODE_USE_BEDROCK, CLAUDE_CODE_USE_VERTEX and CLAUDE_CODE_USE_FOUNDRY",
+    "/login managed key": "that is the Console sign-in (API usage billing), so run `claude auth logout`",
+}
+
+#: Where the precedence is documented, for the refusal.
+CLAUDE_CODE_AUTH_DOCS = "https://code.claude.com/docs/en/authentication#authentication-precedence"
 
 #: How long the status check may take. A Node CLI answers it in a fraction
 #: of a second (measured: 0.1 s); ten seconds is a broken install, and
@@ -274,9 +317,11 @@ def _key_required(engine: str) -> str:
 def claude_code_verdict(program: str | None = None) -> EngineVerdict:
     """Whether Claude Code can be the engine here (card #421): `program`
     (CLAUDE_CODE_PROGRAM unless a template names another) must be on PATH,
-    and its status check must say signed in. Never raises; a verdict
-    reports. The reasons are the words the user sees: not installed with
-    where to get it, not signed in with the command that signs in, a check
+    and its status check must say signed in to the subscription. Never
+    raises; a verdict reports. The reasons are the words the user sees:
+    not installed with where to get it, not signed in with the command
+    that signs in, signed in but not to the subscription with what to
+    remove and the sign-in (CLAUDE_CODE_SUBSCRIPTION says why), a check
     that did not answer or failed some other way (in the CLI's own words),
     or available and billing to the subscription."""
     program = program or CLAUDE_CODE_PROGRAM
@@ -324,6 +369,23 @@ def claude_code_verdict(program: str | None = None) -> EngineVerdict:
             CLAUDE_CODE, False,
             f"`{program} {' '.join(CLAUDE_CODE_STATUS)}` exited {status.returncode}"
             + (f": {said}" if said else " with nothing on stderr"),
+        )
+    method = str(account.get("authMethod") or "")
+    key_source = str(account.get("apiKeySource") or "")
+    if method != CLAUDE_CODE_SUBSCRIPTION or key_source:
+        said = ", ".join(
+            f"{key} {account[key]}" for key in ("authMethod", "apiKeySource") if account.get(key)
+        ) or "nothing about the account"
+        fix = (
+            CLAUDE_CODE_CREDENTIAL_FIX.get(key_source) or CLAUDE_CODE_CREDENTIAL_FIX.get(method)
+            or "remove that credential from the environment melampus runs from"
+        )
+        return EngineVerdict(
+            CLAUDE_CODE, False,
+            f"Claude Code is signed in, but not to a Claude subscription: `{program} "
+            f"{' '.join(CLAUDE_CODE_STATUS)}` says {said}, and every frame would bill that "
+            f"credential instead ({CLAUDE_CODE_AUTH_DOCS}); {fix}, then sign in with "
+            f"`{CLAUDE_CODE_SIGN_IN}`",
         )
     signed_in_as = ", ".join(
         str(account[key]) for key in ("authMethod", "subscriptionType") if account.get(key)

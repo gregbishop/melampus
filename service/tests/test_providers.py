@@ -3314,7 +3314,14 @@ exits; `--output-format json` wraps it as a JSON object whose `result` is
 the text and whose `is_error` says whether the run failed; a failure inside
 the run, such as missing authentication, is printed as the result on stdout
 with a non-zero exit and nothing on stderr; `claude auth status` exits 0
-when signed in and 1 when not, `--json` carrying `loggedIn`. The image is
+when signed in and 1 when not, `--json` carrying `loggedIn` and
+`authMethod` (the shapes in STATUS, each measured on 2.1.278 or read from
+the program's own source: `claude.ai` is the subscription sign-in and
+carries `subscriptionType`; `api_key`, `oauth_token` and `third_party` are
+other credentials; `apiKeySource` names a key the login is set aside for,
+and then `subscriptionType` is null and `--text` says "not in use"), and
+takes the global flags (`--restricted`) before the subcommand, as the real
+one does. The image is
 a file the prompt names, read by the Read tool, which needs no prompt only
 when an `--allowedTools` rule pre-approves it (permissions § Read and
 Edit: a bare `Read` matches everywhere; `Read(//path)` is one absolute
@@ -3331,7 +3338,10 @@ confines the file tools to the working directory. MODE: "signed-in" answers;
 that lapses mid-batch would; "hung" never answers the status check;
 "no-auth-command" is an older CLI with no `auth` subcommand, a usage
 error on stderr at exit 2; "silent-not-signed-in" is the documented
-exit 1 alone, nothing printed."""
+exit 1 alone, nothing printed; "api-key", "login-and-api-key",
+"oauth-token", "third-party" and "console" pass the status check on
+another credential than the subscription (Codex round 1, C1 and S2) and
+answer runs, which would bill it."""
 import json
 import os
 import re
@@ -3342,12 +3352,27 @@ ROUTING = {routing!r}
 IDENTIFICATION = {identification!r}
 LOG = {log!r}
 NOT_LOGGED_IN = "Not logged in \\u00b7 Please run /login"
+STATUS = {{
+    "signed-in": {{"loggedIn": True, "authMethod": "claude.ai", "apiProvider": "firstParty",
+                  "subscriptionType": "max"}},
+    "api-key": {{"loggedIn": True, "authMethod": "api_key", "apiProvider": "firstParty",
+                "apiKeySource": "ANTHROPIC_API_KEY"}},
+    "login-and-api-key": {{"loggedIn": True, "authMethod": "claude.ai", "apiProvider": "firstParty",
+                          "apiKeySource": "ANTHROPIC_API_KEY", "subscriptionType": None}},
+    "oauth-token": {{"loggedIn": True, "authMethod": "oauth_token", "apiProvider": "firstParty"}},
+    "third-party": {{"loggedIn": True, "authMethod": "third_party", "apiProvider": "bedrock"}},
+    "console": {{"loggedIn": True, "authMethod": "claude.ai", "apiProvider": "firstParty",
+                "apiKeySource": "/login managed key", "subscriptionType": None}},
+    "not-signed-in": {{"loggedIn": False, "authMethod": "none", "apiProvider": "firstParty"}},
+}}
 
 argv = sys.argv[1:]
 with open(LOG, "a", encoding="utf-8") as log:
     log.write(json.dumps({{"argv": argv, "cwd": os.getcwd()}}) + "\\n")
 
-if argv[:2] == ["auth", "status"]:
+# The global flags the real CLI takes before a subcommand.
+command = [a for a in argv if a != "--restricted"]
+if command[:2] == ["auth", "status"]:
     if MODE == "hung":
         import time
         time.sleep(30)
@@ -3357,15 +3382,12 @@ if argv[:2] == ["auth", "status"]:
         sys.exit(2)
     if MODE == "silent-not-signed-in":
         sys.exit(1)
-    logged_in = MODE != "not-signed-in"
-    if "--text" in argv:
+    status = STATUS.get(MODE, STATUS["signed-in"])
+    logged_in = status["loggedIn"]
+    if "--text" in command:
         print("Login method: Claude Max account" if logged_in
               else "Not logged in. Run claude auth login to authenticate.")
     else:
-        status = {{"loggedIn": logged_in, "authMethod": "claude.ai" if logged_in else "none",
-                  "apiProvider": "firstParty"}}
-        if logged_in:
-            status["subscriptionType"] = "max"
         print(json.dumps(status, indent=2))
     sys.exit(0 if logged_in else 1)
 
@@ -3403,7 +3425,7 @@ def result(text, is_error=False):
         print(text)
 
 
-if MODE != "signed-in":
+if MODE == "expired" or not STATUS.get(MODE, {{}}).get("loggedIn"):
     result(NOT_LOGGED_IN, is_error=True)
     sys.exit(1)
 
@@ -3642,9 +3664,10 @@ def test_claude_code_primary_builds_the_command_backend_on_the_built_in_template
 
 
 def _status_checks(log: Path) -> list[list[str]]:
-    """The `auth status` invocations the fake `claude` logged."""
+    """The `auth status` invocations the fake `claude` logged, as received,
+    global flags before the subcommand included."""
     return [argv for argv in (json.loads(line)["argv"] for line in log.read_text(encoding="utf-8").splitlines())
-            if argv[:2] == ["auth", "status"]]
+            if "auth" in argv and argv[argv.index("auth"):argv.index("auth") + 2] == ["auth", "status"]]
 
 
 @posix_only
@@ -3660,18 +3683,18 @@ def test_claude_code_primary_asks_claude_code_once_refused_or_built(monkeypatch,
     log = _fake_claude(monkeypatch, tmp_path, mode="not-signed-in")
     with pytest.raises(providers.BackendUnavailable, match="not signed in"):
         providers.build_primary_backend(_cfg(model={"backend": "claude-code"}))
-    assert _status_checks(log) == [["auth", "status", "--json"]]
+    assert _status_checks(log) == [list(providers.CLAUDE_CODE_STATUS)]
 
     log.unlink()
     _fake_claude(monkeypatch, tmp_path)
     backend = providers.build_primary_backend(_cfg(model={"backend": "claude-code"}))
-    assert _status_checks(log) == [["auth", "status", "--json"]]
+    assert _status_checks(log) == [list(providers.CLAUDE_CODE_STATUS)]
     assert backend.executable == shutil.which(CLAUDE)
 
     log.unlink()
     own = [shutil.which(CLAUDE), "-p", "--output-format", "json", "{image} {prompt}"]
     backend = providers.build_primary_backend(_cfg(model={"backend": "claude-code", "command": own}))
-    assert _status_checks(log) == [["auth", "status", "--json"]], "the built-in's verdict was asked too"
+    assert _status_checks(log) == [list(providers.CLAUDE_CODE_STATUS)], "the built-in's verdict was asked too"
     assert backend.executable == shutil.which(CLAUDE)
 
 
@@ -3787,7 +3810,7 @@ def test_detection_claude_code_is_available_when_installed_and_signed_in(monkeyp
     assert verdict.available, verdict.reason
     assert "subscription" in verdict.reason
     calls = [json.loads(line)["argv"] for line in log.read_text(encoding="utf-8").splitlines()]
-    assert calls == [["auth", "status", "--json"]]
+    assert calls == [list(providers.CLAUDE_CODE_STATUS)]
 
 
 @posix_only
@@ -3823,7 +3846,7 @@ def test_detection_claude_code_reports_a_status_check_that_failed_some_other_way
     assert not verdict.available
     assert "not signed in" not in verdict.reason
     assert providers.CLAUDE_CODE_SIGN_IN not in verdict.reason
-    assert "claude auth status --json" in verdict.reason
+    assert "claude --restricted auth status --json" in verdict.reason
     assert "exited 2" in verdict.reason
     assert "error: unknown command 'auth'" in verdict.reason
 
@@ -3851,6 +3874,69 @@ def test_detection_claude_code_not_installed_points_to_the_install(monkeypatch, 
     verdict = _verdict("claude-code")
     assert not verdict.available
     assert "not installed" in verdict.reason and providers.CLAUDE_CODE_INSTALL in verdict.reason
+
+
+@posix_only
+@pytest.mark.parametrize(
+    ("mode", "names"),
+    [
+        ("api-key", ("authMethod api_key", "apiKeySource ANTHROPIC_API_KEY", "unset ANTHROPIC_API_KEY")),
+        ("login-and-api-key", ("authMethod claude.ai", "apiKeySource ANTHROPIC_API_KEY", "unset ANTHROPIC_API_KEY")),
+        ("oauth-token", ("authMethod oauth_token", "unset CLAUDE_CODE_OAUTH_TOKEN")),
+        ("third-party", ("authMethod third_party", "unset CLAUDE_CODE_USE_BEDROCK")),
+        ("console", ("apiKeySource /login managed key", "claude auth logout")),
+    ],
+)
+def test_detection_claude_code_signed_in_but_not_to_the_subscription_is_refused(
+    monkeypatch, tmp_path, mode, names
+):
+    """Codex round 1, C1 and S2 (one defect): the engine promises every frame
+    bills the subscription, and a print-mode run uses whatever credential
+    Claude Code's precedence puts first, the environment melampus runs
+    from included (authentication § Authentication precedence: "In
+    non-interactive mode (-p), the key is always used when present"). So a
+    status check that passes on another credential (an API key; the
+    subscription login set aside for one, which the real CLI reports as
+    authMethod claude.ai with apiKeySource named and subscriptionType
+    null; an OAuth or bearer token from the environment; a cloud provider;
+    the Console sign-in without a key) is not available: the verdict is a
+    sixth shape, signed in but not to the subscription, naming what the
+    status check said, what to remove, and the sign-in, and never "not
+    signed in", which is another fix."""
+    _fake_claude(monkeypatch, tmp_path, mode=mode)
+    verdict = _verdict("claude-code")
+    assert not verdict.available
+    assert "not to a Claude subscription" in verdict.reason, verdict.reason
+    assert "not signed in" not in verdict.reason
+    for name in names:
+        assert name in verdict.reason, verdict.reason
+    assert f"`{providers.CLAUDE_CODE_SIGN_IN}`" in verdict.reason
+
+
+@posix_only
+def test_detection_claude_code_available_only_on_a_verified_subscription(monkeypatch, tmp_path):
+    """The available verdict is positive evidence, not the absence of a
+    refusal: `authMethod` claude.ai with no `apiKeySource`, the shape
+    measured on a signed-in Mac, and the reason names the account kind."""
+    _fake_claude(monkeypatch, tmp_path)
+    verdict = _verdict("claude-code")
+    assert verdict.available, verdict.reason
+    assert "claude.ai, max" in verdict.reason and "subscription" in verdict.reason
+
+
+@posix_only
+def test_the_status_check_runs_under_the_templates_isolation(monkeypatch, tmp_path):
+    """S2, "under the same effective configuration used for inference": the
+    status check carries the template's --restricted before the
+    subcommand (the real CLI processes the global flag there: measured,
+    `claude --setting-sources bogus auth status --json` is refused as an
+    invalid setting source), so the credential it reports is read under
+    the settings the run loads, and the same inherited environment."""
+    log = _fake_claude(monkeypatch, tmp_path)
+    assert _verdict("claude-code").available
+    assert _status_checks(log) == [["--restricted", "auth", "status", "--json"]]
+    assert providers.CLAUDE_CODE_ISOLATION in providers.CLAUDE_CODE_COMMAND
+    assert providers.CLAUDE_CODE_STATUS[0] == providers.CLAUDE_CODE_ISOLATION
 
 
 @posix_only
@@ -3921,7 +4007,7 @@ def test_cli_detect_engines_probes_the_program_the_claude_code_run_would(
     verdicts = json.loads(capsys.readouterr().out)
     assert verdicts[-1]["engine"] == "claude-code"
     assert verdicts[-1]["available"] is True, verdicts[-1]["reason"]
-    assert _status_checks(log) == [["auth", "status", "--json"]]
+    assert _status_checks(log) == [list(providers.CLAUDE_CODE_STATUS)]
 
 
 @posix_only
@@ -3943,6 +4029,42 @@ def test_claude_code_not_signed_in_is_refused_before_any_image_is_read(
     assert code == 3, err
     assert "not signed in" in err and providers.CLAUDE_CODE_SIGN_IN in err
     assert_no_image_was_touched(err, "sign-in check")
+
+
+@posix_only
+def test_claude_code_on_an_api_key_is_refused_before_any_image_is_read(
+    monkeypatch, tmp_path, capsys, link_to_nowhere
+):
+    """C1 and S2 at analysis time: the subscription login set aside for an
+    API key in the environment (the shape a `claude` cloud engine's key
+    leaves behind), and the folder's one image a link to nowhere. Exit 3
+    on a refusal naming the key to unset and the sign-in, before any image
+    is read, and never mentioning the file."""
+    from melampus.cli import main
+
+    _fake_claude(monkeypatch, tmp_path, mode="login-and-api-key")
+
+    code = main([str(link_to_nowhere), "--backend", "claude-code", "--cache", str(tmp_path / "cache.jsonl")])
+
+    err = capsys.readouterr().err
+    assert code == 3, err
+    assert "not to a Claude subscription" in err and "unset ANTHROPIC_API_KEY" in err
+    assert providers.CLAUDE_CODE_SIGN_IN in err
+    assert_no_image_was_touched(err, "sign-in check")
+
+
+@posix_only
+def test_cli_detect_engines_prints_the_not_subscription_verdict(monkeypatch, tmp_path, capsys, no_ambient_keys):
+    """Done-when 2 gains the sixth shape: --detect-engines shows it."""
+    from melampus.cli import main
+
+    _fake_claude(monkeypatch, tmp_path, mode="api-key")
+    assert main(["--detect-engines"]) == 0
+    verdicts = json.loads(capsys.readouterr().out)
+    assert verdicts[-1]["engine"] == "claude-code"
+    assert verdicts[-1]["available"] is False
+    assert "not to a Claude subscription" in verdicts[-1]["reason"]
+    assert "unset ANTHROPIC_API_KEY" in verdicts[-1]["reason"]
 
 
 def test_claude_code_not_installed_is_refused_before_any_image_is_read(

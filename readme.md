@@ -108,7 +108,9 @@ and so is the engine when the process that started melampus ignores SIGCHLD,
 since the kernel would then reap the program the moment it exits and what it
 started could not be stopped safely (start melampus from a shell, or restore
 the signal's default in the launcher); Claude Code not signed in, likewise,
-naming the sign-in command.
+naming the sign-in command; Claude Code signed in but not to the subscription
+(an API key in the environment, which its print mode would bill instead),
+likewise, naming what to unset.
 
 **Cloud.** The same two backends the Mac uses for escalation, promoted to
 answering everything. Same prompts, same schema validation, same corrective
