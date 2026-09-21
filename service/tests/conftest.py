@@ -269,6 +269,16 @@ def read_request(connection: socket.socket) -> None:
         request.read(int(headers.get("Content-Length") or 0))
 
 
+def chunked_pull_answer(line: bytes) -> bytes:
+    """A pull's stream (a chunked 200 of application/x-ndjson, as Ollama
+    writes it) carrying `line`, one of its objects, as one chunk, and then
+    nothing: the answer a raw listener (`stalling_handler`,
+    `resetting_handler`) gives before it does what it is there to do."""
+    return (b"HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\n"
+            b"Transfer-Encoding: chunked\r\n\r\n"
+            + f"{len(line):x}".encode() + b"\r\n" + line + b"\r\n")
+
+
 def stalling_handler(answer: bytes, then: Callable[[], None] = lambda: None) -> type[socketserver.BaseRequestHandler]:
     """A listener that answers whatever it is asked with `answer`, calls
     `then`, and then writes nothing more, holding the connection open until

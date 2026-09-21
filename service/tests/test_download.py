@@ -2918,11 +2918,9 @@ def test_the_pull_whose_stream_is_reset_names_the_model_the_address_and_the_re_r
     earns. Given a listener answering the stream's first line and then
     resetting, the pull is a DownloadError naming the model, the address
     and the re-run hint."""
-    from conftest import resetting_handler
+    from conftest import chunked_pull_answer, resetting_handler
 
-    answer = (b"HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\n"
-              b"Transfer-Encoding: chunked\r\n\r\n"
-              b"1f\r\n" + b'{"status": "pulling manifest"}\n' + b"\r\n")
+    answer = chunked_pull_answer(b'{"status": "pulling manifest"}\n')
     with loopback_server(resetting_handler(answer)) as squatter:
         address = f"http://127.0.0.1:{squatter.server_port}"
         with pytest.raises(DownloadError) as failure:
@@ -3056,13 +3054,10 @@ def test_a_pull_resumed_after_a_cancel_in_its_second_layer_counts_the_first_laye
 def _stalling_pull(then: Callable[[], None] = lambda: None):
     """A listener answering the pull's stream with one layer line, chunked as
     Ollama writes it, and then nothing: the pull's next read blocks."""
-    from conftest import stalling_handler
+    from conftest import chunked_pull_answer, stalling_handler
 
-    chunk = b'{"status": "pulling aaa", "digest": "sha256:aaa", "total": 100}\n'
-    answer = (b"HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\n"
-              b"Transfer-Encoding: chunked\r\n\r\n"
-              + f"{len(chunk):x}".encode() + b"\r\n" + chunk + b"\r\n")
-    return stalling_handler(answer, then)
+    line = b'{"status": "pulling aaa", "digest": "sha256:aaa", "total": 100}\n'
+    return stalling_handler(chunked_pull_answer(line), then)
 
 
 def test_the_cancel_marker_ends_a_pull_whose_stream_has_stalled_within_a_second_not_at_the_timeout(tmp_path: Path):
