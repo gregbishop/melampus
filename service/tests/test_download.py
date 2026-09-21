@@ -46,6 +46,7 @@ from conftest import (
     loopback_server,
     snapshot_files,
 )
+from filelock import Timeout
 from huggingface_hub import constants
 from huggingface_hub.constants import DOWNLOAD_CHUNK_SIZE
 from huggingface_hub.file_download import repo_folder_name
@@ -1945,6 +1946,53 @@ def test_remove_goes_ahead_once_the_download_has_released_the_lock(fake_hub: Fak
         pass
 
     assert remove_model(FAKE_REPO, cache_dir=tmp_path / "hub").exists() is False, "the lock outlived its holder"
+
+
+def test_remove_holds_the_locks_a_download_takes_through_the_rename_and_the_deletion(
+    fake_hub: FakeHub, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Codex review 8, code finding 1 (download.py:765). The probe for a
+    running download took each of the repo's locks and released it at once,
+    so a download starting after the probe and before the rename took its
+    lock (the one `_fetch` takes on the blob it appends to) and appended
+    to a blob the removal then set aside and deleted: the model removed
+    under a running download, its partial file lost, where the contract
+    is the refusal. The removal holds every lock the download would take
+    from the probe through the rename and the deletion: a download
+    starting at either moment finds its lock held (as the probe finds a
+    download's: `_fetch`'s own timeout refuses it, or it waits), and the
+    lock is free once the removal has returned."""
+    from huggingface_hub.utils import WeakFileLock
+
+    path, _ = _fetch(fake_hub, tmp_path / "hub")
+    lock = _lock_dir(tmp_path / "hub") / "abc.lock"
+    lock.touch()
+    a_download_got_the_lock: dict[str, bool] = {}
+
+    def a_download_starts(at: str) -> None:
+        try:
+            with WeakFileLock(lock, timeout=0.2):
+                a_download_got_the_lock[at] = True
+        except Timeout:
+            a_download_got_the_lock[at] = False
+
+    rename, execute = Path.rename, download.DeleteCacheStrategy.execute
+
+    def rename_as_a_download_starts(self: Path, target: Path) -> Path:
+        a_download_starts("at the rename")
+        return rename(self, target)
+
+    def execute_as_a_download_starts(self) -> None:
+        a_download_starts("at the deletion")
+        execute(self)
+
+    monkeypatch.setattr(Path, "rename", rename_as_a_download_starts)
+    monkeypatch.setattr(download.DeleteCacheStrategy, "execute", execute_as_a_download_starts)
+    removed = remove_model(FAKE_REPO, cache_dir=tmp_path / "hub")
+    a_download_starts("after the removal")
+
+    assert removed == path.parents[1] and not removed.exists()
+    assert a_download_got_the_lock == {"at the rename": False, "at the deletion": False, "after the removal": True}
 
 
 def test_model_status_flag_needs_no_folder_and_prints_one_json_object_for_the_configured_repo(

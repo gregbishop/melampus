@@ -191,7 +191,9 @@ cache and the folder the OS named: check that folder's permissions.
   folder the model was in) and exits 0. It is refused with **exit 3** and
   the reason on stderr when nothing is installed, or while a download of
   the model is running (it holds the hub library's per-file lock the fetch
-  takes): cancel the download first. It also exits 3, the model untouched,
+  takes; the removal takes the model's locks itself and holds them until
+  the deletion is done, so no download starts on it in between): cancel
+  the download first. It also exits 3, the model untouched,
   when the repo's folder in the cache is a symbolic link (a model laid out
   on another disk and linked into the cache, which the status accepts as
   installed): nothing is deleted through a link, and the message names

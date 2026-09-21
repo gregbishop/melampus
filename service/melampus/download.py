@@ -43,7 +43,7 @@ import logging  # noqa: E402
 import re  # noqa: E402
 import shutil  # noqa: E402
 import signal  # noqa: E402
-from contextlib import contextmanager  # noqa: E402
+from contextlib import ExitStack, contextmanager  # noqa: E402
 from dataclasses import asdict, dataclass  # noqa: E402
 from pathlib import Path  # noqa: E402
 from typing import Callable, Iterator  # noqa: E402
@@ -757,13 +757,18 @@ def _holds(revision, listed: dict[str, int | None]) -> bool:
     return all(name in on_disk and (listed[name] is None or on_disk[name] == listed[name]) for name in needed)
 
 
-def _download_running(lock_dir: Path) -> bool:
+def _download_running(lock_dir: Path, held: ExitStack) -> bool:
     """Whether another process is appending to one of the repo's blobs: it
-    holds the per-file lock `_fetch` takes, under the cache's `.locks`."""
+    holds the per-file lock `_fetch` takes, under the cache's `.locks`. Each
+    lock this takes it keeps, on `held`, until the caller leaves that stack:
+    released at once, a download starting after the probe took its lock
+    and appended to a blob the removal then set aside and deleted. Held
+    through the rename and the deletion, a download starting in between
+    waits at its lock or refuses (`_fetch`'s own timeout), and one whose
+    lock is new writes into a folder the removal no longer names."""
     for lock in lock_dir.glob("*.lock") if lock_dir.is_dir() else ():
         try:
-            with WeakFileLock(lock, timeout=0.1):
-                pass
+            held.enter_context(WeakFileLock(lock, timeout=0.1))
         except Timeout:
             return True
     return False
@@ -817,20 +822,23 @@ def remove_model(repo: str, *, cache_dir: Path | None = None) -> Path:
         raise DownloadError(f"could not remove {repo} from {cache}: {aside} is still there, left by an earlier "
                             f"removal that was refused; delete that folder by hand, then remove again; "
                             "the model is untouched")
-    try:
-        if _download_running(locks):
-            raise DownloadError(f"a download of {repo} is running; cancel it first, then remove")
-        cached.repo_path.rename(aside)
-    except OSError as exc:
-        raise DownloadError(f"could not remove {repo} from {cache}: {exc}; the model is untouched") from exc
-    left = (f"could not remove {repo} from {cache} whole: the cache no longer lists it, and what could not be "
-            f"deleted is set aside at {aside}; check that folder's permissions (on Windows, that no other "
-            "program holds a file in it open) and delete it by hand")
-    try:
-        DeleteCacheStrategy(expected_freed_size=cached.size_on_disk, blobs=frozenset(), refs=frozenset(),
-                            repos=frozenset({aside}), snapshots=frozenset()).execute()
-    except OSError as exc:
-        raise DownloadError(f"{left} ({exc})") from exc
-    if aside.exists():
-        raise DownloadError(left)
+    # The locks the probe takes are held until the deletion is done: a
+    # download cannot start on this model between the probe and the end.
+    with ExitStack() as held:
+        try:
+            if _download_running(locks, held):
+                raise DownloadError(f"a download of {repo} is running; cancel it first, then remove")
+            cached.repo_path.rename(aside)
+        except OSError as exc:
+            raise DownloadError(f"could not remove {repo} from {cache}: {exc}; the model is untouched") from exc
+        left = (f"could not remove {repo} from {cache} whole: the cache no longer lists it, and what could not be "
+                f"deleted is set aside at {aside}; check that folder's permissions (on Windows, that no other "
+                "program holds a file in it open) and delete it by hand")
+        try:
+            DeleteCacheStrategy(expected_freed_size=cached.size_on_disk, blobs=frozenset(), refs=frozenset(),
+                                repos=frozenset({aside}), snapshots=frozenset()).execute()
+        except OSError as exc:
+            raise DownloadError(f"{left} ({exc})") from exc
+        if aside.exists():
+            raise DownloadError(left)
     return cached.repo_path
