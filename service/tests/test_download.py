@@ -1110,6 +1110,100 @@ def test_a_stale_cancel_marker_is_removed_when_a_download_starts(fake_hub: FakeH
     assert not marker.exists()
 
 
+def test_a_cancel_marker_that_cannot_be_removed_on_start_is_a_download_error_naming_it(
+    fake_hub: FakeHub, tmp_path: Path
+):
+    """Codex review 5, code finding 1 (Claude review 12, security finding 2;
+    download.py:583). A folder at the marker's path (or any marker the OS
+    refuses to remove) made the start's unlink raise its OSError straight
+    out of download_model: a traceback, exit 1, where docs/config.md names
+    exit 3 and a reason. Such a marker would stop the next download at its
+    first chunk, so the failure is a DownloadError naming the path and what
+    to do, raised before the hub is asked anything."""
+    marker = tmp_path / "data" / "download-cancel"
+    marker.mkdir(parents=True)
+
+    with pytest.raises(DownloadError) as failure:
+        download_model(FAKE_REPO, endpoint=fake_hub.endpoint, cache_dir=tmp_path / "hub",
+                       on_update=lambda update: None, cancel_marker=marker)
+
+    message = str(failure.value)
+    assert str(marker) in message and "by hand" in message, message
+    assert not fake_hub.requests, "the hub was asked with a marker that cannot be removed in place"
+    assert marker.is_dir()
+
+
+def test_a_cancel_marker_that_cannot_be_removed_on_exit_is_a_download_error_naming_it_with_the_model_complete(
+    fake_hub: FakeHub, tmp_path: Path
+):
+    """Codex review 5, code finding 1 (Claude review 12, security finding 2;
+    download.py:628). The exit's unlink in the `finally` raised the same
+    bare OSError: a folder that appeared at the marker's path as the last
+    chunk was counted (nothing looked for it after) left the model complete
+    and the command in a traceback. The failure names the marker and what
+    to do; the snapshot is laid out and the status reads installed."""
+    marker = tmp_path / "data" / "download-cancel"
+    marker.parent.mkdir(parents=True)
+
+    def a_folder_at_the_marker_once_complete(update: Update) -> None:
+        if update.bytes_done == update.bytes_total:
+            marker.mkdir(exist_ok=True)
+
+    with pytest.raises(DownloadError) as failure:
+        download_model(FAKE_REPO, endpoint=fake_hub.endpoint, cache_dir=tmp_path / "hub",
+                       on_update=a_folder_at_the_marker_once_complete, cancel_marker=marker)
+
+    message = str(failure.value)
+    assert str(marker) in message and "by hand" in message, message
+    assert marker.is_dir()
+    status = _status(fake_hub, tmp_path / "hub")
+    assert status.installed is True and status.bytes_done == FAKE_TOTAL
+
+
+def test_a_cancel_marker_that_cannot_be_removed_on_exit_does_not_mask_the_cancellation_in_flight(
+    fake_hub: FakeHub, tmp_path: Path
+):
+    """Codex review 5, code finding 1 (Claude review 12, security finding 2;
+    download.py:628). A folder appearing at the marker's path mid-download
+    is the marker appearing: the run is cancelled at the next chunk, and the
+    `finally`'s unlink, refused by the folder, must not replace that
+    DownloadCancelled (exit 4, `cancelled`, the partial kept) with its own
+    failure."""
+    marker = tmp_path / "data" / "download-cancel"
+    marker.parent.mkdir(parents=True)
+
+    def a_folder_at_the_marker_after_the_first_chunk(update: Update) -> None:
+        if update.bytes_done:
+            marker.mkdir(exist_ok=True)
+
+    with pytest.raises(DownloadCancelled) as cancelled:
+        download_model(FAKE_REPO, endpoint=fake_hub.endpoint, cache_dir=tmp_path / "hub",
+                       on_update=a_folder_at_the_marker_after_the_first_chunk, cancel_marker=marker)
+
+    assert CANCEL_MARKER in str(cancelled.value)
+    assert marker.is_dir()
+    assert _status(fake_hub, tmp_path / "hub").installed is False
+
+
+def test_download_model_flag_exits_3_naming_the_marker_it_cannot_remove_with_nothing_on_stdout(
+    monkeypatch: pytest.MonkeyPatch, capsys, tmp_path: Path
+):
+    """Codex review 5, code finding 1 (Claude review 12, security finding 2),
+    through the entry point, as the finding measured it: a folder at the
+    path `--model-status` reports as `cancel_path`, then `--download-model`.
+    Exit 3 with the reason on stderr naming the marker, no traceback, nothing
+    on stdout, the hub (a closed port here) never asked."""
+    marker = tmp_path / "data" / "download-cancel"
+    marker.mkdir(parents=True)
+    monkeypatch.setattr(download, "cancel_marker_path", lambda: marker)
+    monkeypatch.setattr(constants, "ENDPOINT", f"http://127.0.0.1:{closed_port()}")
+
+    assert main(["--download-model", "--no-local-config", "--model", FAKE_REPO]) == 3
+
+    out, err = capsys.readouterr()
+    assert out == "" and str(marker) in err and "Traceback" not in err, err
+
+
 def test_the_download_watches_the_documented_marker_by_default(monkeypatch, tmp_path: Path, fake_hub: FakeHub):
     """`--download-model` passes no marker: the download watches the path
     `--model-status` reports (the one docs/config.md documents), which is

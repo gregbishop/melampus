@@ -43,6 +43,7 @@ import logging  # noqa: E402
 import re  # noqa: E402
 import shutil  # noqa: E402
 import signal  # noqa: E402
+import sys  # noqa: E402
 from contextlib import contextmanager  # noqa: E402
 from dataclasses import asdict, dataclass  # noqa: E402
 from pathlib import Path  # noqa: E402
@@ -574,13 +575,17 @@ def download_model(
     the message; a DownloadCancelled raised from `cancel_on_signals`, or here
     when `cancel_marker` (the documented path by default) appears between
     chunks, passes through with the partial file kept. A stale marker is
-    removed on start, and the marker on exit, whatever the outcome. No URL's
+    removed on start, and the marker on exit, whatever the outcome; one that
+    cannot be removed (a folder at its path) is a DownloadError naming it,
+    on start before the hub is asked, on exit only when nothing else is in
+    flight: a cancellation or a failure already raised is the outcome, and
+    the next run names the marker. No URL's
     query string reaches the message or the hub library's warnings: an LFS
     file's is the CDN's signature for it.
     """
     endpoint = _hub_at(endpoint)
     marker = cancel_marker or cancel_marker_path()
-    marker.unlink(missing_ok=True)
+    _remove_marker(marker)
     with _hub_warnings_redacted():
         try:
             # The folders are the repo's in the cache and beside it, in `.locks`;
@@ -625,7 +630,26 @@ def download_model(
         except (OSError, httpx.HTTPError) as exc:
             raise DownloadError(f"download of {repo} from {endpoint} failed: {exc}; {RERUN}") from exc
         finally:
-            marker.unlink(missing_ok=True)
+            # A cancellation or failure already in flight is the outcome; a
+            # marker that then cannot be removed is the next run's to name.
+            in_flight = sys.exc_info()[1]
+            try:
+                _remove_marker(marker)
+            except DownloadError:
+                if in_flight is None:
+                    raise
+
+
+def _remove_marker(marker: Path) -> None:
+    """Remove the cancel marker, or raise DownloadError naming it: a marker
+    the OS refuses to remove (a folder at its path, say) would stop the next
+    download at its first chunk, so the owner is told where it is."""
+    try:
+        marker.unlink(missing_ok=True)
+    except OSError as exc:
+        raise DownloadError(
+            f"the cancel marker at {marker} could not be removed ({exc}): remove it by hand, then {RERUN}"
+        ) from exc
 
 
 def _cached(repo: str, cache: Path):

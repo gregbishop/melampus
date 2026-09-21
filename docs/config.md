@@ -105,7 +105,8 @@ message names the file and both sizes, never the hub library's own wording, whic
 after its own retry of a dropped connection names the file by the tail of its
 URL); a hub whose answers are not a hub's,
 an etag that is not a checksum or a commit that is not a hash, neither of which
-is let become a path in the cache, so check `HF_ENDPOINT`);
+is let become a path in the cache, so check `HF_ENDPOINT`; a cancel marker, below,
+the command cannot remove, so remove it by hand);
 **exit 4** when it was cancelled (`cancelled`), by a signal or by the cancel
 marker below. The signals are SIGINT (Ctrl+C), SIGTERM and, on Windows,
 Ctrl+Break: the download stops within the current chunk and leaves the partial
@@ -124,7 +125,12 @@ on macOS, `%LOCALAPPDATA%\Melampus\cache\download-cancel` on Windows; in a
 checkout `.melampus_cache/download-cancel`). It is looked for before each chunk
 is counted, and its appearance ends the run exactly as a signal does:
 `cancelled`, exit 4, the partial file kept. The command removes a stale marker
-when it starts and the marker when it exits, whatever the outcome. The name is
+when it starts and the marker when it exits, whatever the outcome; a marker it
+cannot remove (a folder at that path, say) is **exit 3** naming the path, on
+start before the hub is asked, and on exit when the download completed (the
+model is there; remove the marker by hand, or the next download stops at its
+first chunk). A cancellation or failure already under way is the outcome
+reported, and the next run names the marker. The name is
 `download.CANCEL_MARKER`, the path `download.cancel_marker_path()`, and
 `--model-status` reports it as `cancel_path`, so the plugin's Cancel button
 writes where the executable looks without deriving the directory itself.
