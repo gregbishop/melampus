@@ -647,8 +647,11 @@ def model_status(repo: str, *, endpoint: str | None = None, cache_dir: Path | No
     for the file listing (the repo's info with file metadata, the one listing
     call that takes a timeout: STATUS_TIMEOUT) and, when it cannot answer,
     does not within that time, or answers with something that is not a hub's
-    answer (a captive portal's page, a proxy's block page: the library's
-    ValueError or TypeError decoding it), `bytes_total` is None: the status
+    answer (a captive portal's page, a proxy's block page, a JSON error page
+    or a listing of another shape: the library's ValueError or TypeError
+    decoding it, its KeyError reading the repo id or a file's name, or the
+    TypeError of adding up sizes that are not numbers), `bytes_total` is
+    None and the listing is as if the hub had not answered: the status
     never fails for the network. It raises DownloadError for a `repo` that is
     not a repo id. The hub is asked through `_hub_client`, as the download
     asks it: the user's token goes only where that client lets it go.
@@ -671,10 +674,10 @@ def model_status(repo: str, *, endpoint: str | None = None, cache_dir: Path | No
     try:
         info = HfApi(endpoint=endpoint).model_info(repo, files_metadata=True, timeout=STATUS_TIMEOUT)
         listed: dict[str, int | None] | None = {f.rfilename: f.size for f in info.siblings or []}
-    except (RepositoryNotFoundError, httpx.HTTPError, OSError, ValueError, TypeError):
-        listed = None
+        total = sum(size or 0 for size in listed.values())
+    except (RepositoryNotFoundError, httpx.HTTPError, OSError, ValueError, TypeError, LookupError):
+        listed = total = None
     installed = main is not None and (listed is None or _holds(main, listed))
-    total = sum(size or 0 for size in listed.values()) if listed is not None else None
     path = str(main.snapshot_path) if installed else None
     return Status(repo, installed, total, _bytes_in_cache(storage), path, str(cancel_marker_path()))
 

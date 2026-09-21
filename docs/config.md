@@ -153,11 +153,14 @@ the hub is asked anything.
   every byte the cache holds for the repo, complete files and the partial one
   alike, which is what the next download starts from; `bytes_total` is the
   whole model from the hub's file listing, **null when the hub cannot be
-  reached** or does not answer within 10 seconds (`download.STATUS_TIMEOUT`,
+  reached**, does not answer within 10 seconds (`download.STATUS_TIMEOUT`,
   the hub library's own request timeout: the dialog waits for this command
   as it opens, so a stalled connection ends here rather than in Lightroom),
-  and the status never fails for the network being down (the button then
-  says "size unknown"). Example, absent:
+  or answers with something that is not a hub's answer (a captive portal's
+  page, a proxy's block page or JSON error, a listing whose files have no
+  name or whose sizes are not numbers), which counts as the hub not
+  reached; the status never fails for the network (the button then says
+  "size unknown"). Example, absent:
   `{"repo": "mlx-community/Qwen3-VL-30B-A3B-Instruct-4bit", "installed": false, "bytes_total": 18300000000, "bytes_done": 0, "path": null, "cancel_path": "~/Library/Application Support/Melampus/cache/download-cancel"}` (the path is absolute).
 - `--remove-model` deletes the repo from the cache, all or nothing from the
   cache's point of view: the repo's folder is first set aside within the

@@ -1273,17 +1273,30 @@ def test_status_gives_up_on_a_hub_that_accepts_the_connection_and_never_answers(
 @pytest.mark.parametrize(("content_type", "body"), [
     ("text/html", b"<html><body>Sign in to the network</body></html>"),
     ("application/json", b"[1, 2, 3]"),
-], ids=["not json", "json of another shape"])
+    ("application/json", b'{"error": "blocked"}'),
+    ("application/json", b'{"id": "fake-org/fake-model", "siblings": [{"size": 3}]}'),
+    ("application/json", b'{"id": "fake-org/fake-model", "siblings": [{"rfilename": "model.safetensors", "size": "big"}]}'),
+], ids=["not json", "json of another shape", "a json object without id", "a sibling without rfilename",
+        "a size that is not a number"])
 def test_status_treats_a_hub_answering_200_with_something_else_as_unreachable(
     tmp_path: Path, content_type: str, body: bytes
 ):
-    """Security (Claude review 9 of #16, download.py:648). A host at
-    HF_ENDPOINT that answers 200 with something that is not the hub's answer
-    (a captive portal's sign-in page, a proxy's block page, a JSON of another
-    shape) raised the library's decoding error out of the status uncaught:
-    a traceback in melampus-cli.log naming source paths, and the dialog
-    pointing at exit 1 instead of the row. The status never fails for the
-    network: such a hub is one that could not be reached, the size unknown."""
+    """Security (Claude review 9 of #16, download.py:648; Codex review 4,
+    security finding 1 and Claude review 11, security finding 1,
+    download.py:672-677). A host at HF_ENDPOINT that answers 200 with
+    something that is not the hub's answer (a captive portal's sign-in page,
+    a proxy's block page, a JSON of another shape) raised the library's
+    decoding error out of the status uncaught: a traceback in
+    melampus-cli.log naming source paths, and the dialog pointing at exit 1
+    instead of the row. Closed for a page and a JSON list, it stayed open
+    for a JSON object: one without `id` (a proxy's or a mirror's JSON error
+    page, the commonest non-hub JSON answer) and one whose sibling has no
+    `rfilename` raised the library's KeyError, not in the handler's tuple,
+    and a sibling whose `size` is a string passed the handler and broke the
+    sum of the sizes outside it. The status never fails for the network:
+    whatever the hub's answer does wrong, such a hub is one that could not
+    be reached, the size unknown; through the CLI that is exit 0, the JSON
+    on stdout with `bytes_total` null, and no traceback on stderr."""
     from conftest import QuietHandler, loopback_server
 
     class Elsewhere(QuietHandler):
@@ -1294,10 +1307,14 @@ def test_status_treats_a_hub_answering_200_with_something_else_as_unreachable(
             self.wfile.write(body)
 
     with loopback_server(Elsewhere) as server:
-        status = model_status(FAKE_REPO, endpoint=f"http://127.0.0.1:{server.server_port}", cache_dir=tmp_path / "hub")
+        endpoint = f"http://127.0.0.1:{server.server_port}"
+        status = model_status(FAKE_REPO, endpoint=endpoint, cache_dir=tmp_path / "hub")
+        proc = _cli(["--model-status", "--model", FAKE_REPO], {"HF_ENDPOINT": endpoint, "HF_HOME": str(tmp_path / "hf")})
 
     assert status == Status(FAKE_REPO, installed=False, bytes_total=None, bytes_done=0,
                             path=None, cancel_path=str(cancel_marker_path()))
+    assert proc.returncode == 0 and "Traceback" not in proc.stderr, proc.stderr[-3000:]
+    assert json.loads(proc.stdout)["bytes_total"] is None and json.loads(proc.stdout)["installed"] is False
 
 
 @pytest.mark.parametrize(("host", "carried"), [("127.0.0.1", True), ("hub.example", False)],
