@@ -364,15 +364,20 @@ class _Deadline:
     """A wall-clock bound on one HTTP exchange, as a context manager. A
     socket timeout bounds each operation, not the exchange, so a server
     trickling a byte at a time, each within the timeout, could hold the
-    caller for as long as it liked. Inside the block a timer counts
-    `seconds`; when it fires, `_hang_up` ends the stream on `sock` and sets
-    `expired`, which the caller reads after the exchange, since whatever
-    arrived by then is not the server's answer. `sock` is the socket the
-    exchange is on, given by `on()` once there is one: a deadline that
-    fired while the caller was still connecting found nothing to hang up,
-    so `on()` hangs up then, and the reads after a late handshake are not
-    left bounded per byte only. Leaving the block cancels the timer;
-    `again()` starts the count over, for a stream's next line.
+    caller for as long as it liked. Inside the block one thread, the timer,
+    waits for the deadline `seconds` away; when it passes, `_hang_up` ends
+    the stream on `sock` and sets `expired`, which the caller reads after
+    the exchange, since whatever arrived by then is not the server's
+    answer. `sock` is the socket the exchange is on, given by `on()` once
+    there is one: a deadline that fired while the caller was still
+    connecting found nothing to hang up, so `on()` hangs up then, and the
+    reads after a late handshake are not left bounded per byte only.
+    Leaving the block ends the timer; `again()` moves the deadline, for a
+    stream's next line, and starts nothing: the pull runs under a signal
+    handler that raises wherever the main thread is, and an exception
+    raised inside `Thread.start()` leaves the thread module's tables and
+    locks half-changed (review round 12, backend.py:419), so the block
+    starts its threads once, on entry, not once a line.
 
     `cancel`, when given, is a predicate looked at every WATCH seconds from
     a thread of the timer's kind, for a stream whose caller may need it
@@ -392,11 +397,15 @@ class _Deadline:
         self.expired = threading.Event()
         self.cancelled = threading.Event()
         self._over = threading.Event()
-        self._timer = self._counting()
+        self._until = time.monotonic() + seconds
+        self._timer = threading.Thread(target=self._counting, daemon=True)
         self._watcher = threading.Thread(target=self._watching, args=[cancel], daemon=True) if cancel else None
 
-    def _counting(self) -> threading.Timer:
-        return threading.Timer(self.seconds, _hang_up, [self, self.expired])
+    def _counting(self) -> None:
+        while not self._over.wait(max(0.0, self._until - time.monotonic())):
+            if time.monotonic() >= self._until:
+                _hang_up(self, self.expired)
+                return
 
     def _watching(self, cancel: Callable[[], bool]) -> None:
         while not self._over.wait(self.WATCH):
@@ -405,27 +414,27 @@ class _Deadline:
                 return
 
     def __enter__(self) -> _Deadline:
+        self._until = time.monotonic() + self.seconds
         self._timer.start()
         if self._watcher is not None:
             self._watcher.start()
         return self
 
     def __exit__(self, *_exc) -> None:
-        self._timer.cancel()
         self._over.set()
+        self._timer.join()
         if self._watcher is not None:
             self._watcher.join()
 
     def again(self) -> None:
         """The bound over again from now, for the next line of a stream
-        (OllamaBackend.stream): the timer counting is cancelled and a fresh
-        one counts `seconds`. A stream has no one exchange to bound, since
-        a model pull runs as long as the model is large, so each line gets
-        the bound an exchange gets. A deadline that already fired stays
-        fired: its socket is hung up, and the caller reads that."""
-        self._timer.cancel()
-        self._timer = self._counting()
-        self._timer.start()
+        (OllamaBackend.stream): the deadline the timer waits for moves to
+        `seconds` from now, an assignment the timer reads when the old one
+        comes round. A stream has no one exchange to bound, since a model
+        pull runs as long as the model is large, so each line gets the
+        bound an exchange gets. A deadline that already fired stays fired:
+        its socket is hung up, and the caller reads that."""
+        self._until = time.monotonic() + self.seconds
 
     def on(self, sock: socket.socket | None) -> None:
         self.sock = sock

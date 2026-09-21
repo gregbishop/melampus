@@ -16,6 +16,7 @@ import json
 import socket
 import socketserver
 import ssl
+import subprocess
 import sys
 import threading
 import time
@@ -925,6 +926,67 @@ def test_deadline_again_counts_the_bound_from_now():
         assert deadline.expired.wait(2.0), "the deadline never fired after again()"
 
 
+AGAIN_UNDER_A_SIGNAL = """\
+import json, signal, time
+from melampus.backend import _Deadline
+
+
+class Interrupted(Exception):
+    pass
+
+
+def raise_interrupted(signum, frame):
+    raise Interrupted()
+
+
+signal.signal(signal.SIGALRM, raise_interrupted)
+ended_with = []
+for _ in range({rounds}):
+    try:
+        with _Deadline(60.0) as deadline:
+            signal.setitimer(signal.ITIMER_REAL, 0.002)
+            until = time.monotonic() + 2.0
+            while time.monotonic() < until:
+                deadline.again()
+        ended_with.append("nothing: the signal never landed")
+    except BaseException as exc:
+        ended_with.append(type(exc).__name__)
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+print(json.dumps(ended_with))
+"""
+
+
+def test_deadline_again_under_a_signal_handlers_exception_leaves_that_exception_alone_and_nothing_on_stderr():
+    """Code review round 12 (backend.py:419), Done-when 1's signal path: the
+    pull runs under `cancel_on_signals`, whose handler raises wherever the
+    main thread is, and `again()`, called before every line of the stream,
+    started a `threading.Timer` thread for each: raised inside
+    `Thread.start()`, the handler's exception left the thread module's
+    limbo table to be deleted twice (the new thread dying with a KeyError
+    traceback on stderr, the log's tail the plugin shows) or the start
+    event's lock held (`RuntimeError: release unlocked lock` out of the
+    block, named as Ollama's failure, exit 3, the cancellation lost; or a
+    thread stuck on that lock, the process hanging at exit). Given a
+    SIGALRM handler that raises while the main thread loops `again()`
+    inside a block, `rounds` times in a fresh interpreter (a hang is then
+    the timeout, not the suite's), every block ends with the handler's
+    exception alone and the process writes nothing on stderr. Measured
+    at f398718, the timer per line: 20 of 20 runs failed, 19 with the
+    timer thread's KeyError traceback on stderr and 1 hung to the timeout;
+    on the one timer per block, 40 of 40 passed, and 40 of 40 under six
+    CPU-bound processes loading the machine."""
+    rounds = 40
+    proc = subprocess.run(
+        [sys.executable, "-c", AGAIN_UNDER_A_SIGNAL.format(rounds=rounds)],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert proc.stderr == "", f"the process wrote on stderr:\n{proc.stderr[-2000:]}"
+    assert proc.returncode == 0, f"exit {proc.returncode}"
+    ended_with = json.loads(proc.stdout)
+    assert ended_with == ["Interrupted"] * rounds, [e for e in ended_with if e != "Interrupted"]
+
+
 def test_deadline_watcher_runs_for_the_block_alone():
     """Code review round 10 (backend.py:386), rule 7: 36147fd gave the
     deadline a second thread with a lifecycle, the watcher of `cancel`,
@@ -938,7 +1000,9 @@ def test_deadline_watcher_runs_for_the_block_alone():
     cancels the timer, which exits on its own a moment later, and the
     count before the block can include a timer winding down from the
     deadline before, so the counts raced both; the timer is joined here,
-    with a bound, before it is read."""
+    with a bound, before it is read. Round 12 (backend.py:419): the timer
+    is one thread for the block, ended by `_over` and joined in __exit__
+    as the watcher is, so the join here is already done."""
     with _Deadline(5.0, cancel=lambda: False) as deadline:
         assert deadline._timer.is_alive(), "the timer"
         assert deadline._watcher.is_alive(), "the watcher"
