@@ -26,6 +26,7 @@ import threading
 import tomllib
 from http.server import ThreadingHTTPServer
 from pathlib import Path
+from typing import Callable
 
 import httpx
 import pytest
@@ -1958,6 +1959,31 @@ def test_remove_goes_ahead_once_the_download_has_released_the_lock(fake_hub: Fak
     assert remove_model(FAKE_REPO, cache_dir=tmp_path / "hub").exists() is False, "the lock outlived its holder"
 
 
+def _remove_as_another_run_starts(
+    monkeypatch: pytest.MonkeyPatch, cache: Path, another_run_starts: Callable[[str], None]
+) -> Path:
+    """`remove_model(FAKE_REPO)` from `cache` with another run of the model
+    starting at each moment a removal must hold its locks through: the
+    rename of the repo's folder (`another_run_starts("at the rename")`, from
+    under `Path.rename`) and the deletion (`"at the deletion"`, from under
+    the library's deletion strategy). What the run is, a download or a
+    lock it would take, and what it records, is the test's own. Returns
+    what the removal returns, the folder the model was in."""
+    rename, execute = Path.rename, download.DeleteCacheStrategy.execute
+
+    def rename_as_another_run_starts(self: Path, target: Path) -> Path:
+        another_run_starts("at the rename")
+        return rename(self, target)
+
+    def execute_as_another_run_starts(self) -> None:
+        another_run_starts("at the deletion")
+        execute(self)
+
+    monkeypatch.setattr(Path, "rename", rename_as_another_run_starts)
+    monkeypatch.setattr(download.DeleteCacheStrategy, "execute", execute_as_another_run_starts)
+    return remove_model(FAKE_REPO, cache_dir=cache)
+
+
 def test_remove_holds_the_locks_a_download_takes_through_the_rename_and_the_deletion(
     fake_hub: FakeHub, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -1984,19 +2010,7 @@ def test_remove_holds_the_locks_a_download_takes_through_the_rename_and_the_dele
         except Timeout:
             a_download_got_the_lock[at] = False
 
-    rename, execute = Path.rename, download.DeleteCacheStrategy.execute
-
-    def rename_as_a_download_starts(self: Path, target: Path) -> Path:
-        a_download_starts("at the rename")
-        return rename(self, target)
-
-    def execute_as_a_download_starts(self) -> None:
-        a_download_starts("at the deletion")
-        execute(self)
-
-    monkeypatch.setattr(Path, "rename", rename_as_a_download_starts)
-    monkeypatch.setattr(download.DeleteCacheStrategy, "execute", execute_as_a_download_starts)
-    removed = remove_model(FAKE_REPO, cache_dir=tmp_path / "hub")
+    removed = _remove_as_another_run_starts(monkeypatch, tmp_path / "hub", a_download_starts)
     a_download_starts("after the removal")
 
     assert removed == path.parents[1] and not removed.exists()
@@ -2048,19 +2062,7 @@ def test_remove_holds_the_repo_lock_so_a_download_of_a_blob_it_has_not_seen_refu
         except DownloadError as exc:
             downloads[at] = exc
 
-    rename, execute = Path.rename, download.DeleteCacheStrategy.execute
-
-    def rename_as_a_download_starts(self: Path, target: Path) -> Path:
-        a_download_starts("at the rename")
-        return rename(self, target)
-
-    def execute_as_a_download_starts(self) -> None:
-        a_download_starts("at the deletion")
-        execute(self)
-
-    monkeypatch.setattr(Path, "rename", rename_as_a_download_starts)
-    monkeypatch.setattr(download.DeleteCacheStrategy, "execute", execute_as_a_download_starts)
-    removed = remove_model(FAKE_REPO, cache_dir=cache)
+    removed = _remove_as_another_run_starts(monkeypatch, cache, a_download_starts)
 
     assert removed == path.parents[1] and not removed.exists()
     for at in ("at the rename", "at the deletion"):
