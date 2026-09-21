@@ -826,3 +826,18 @@ def test_config_doc_quotes_the_claude_code_template_from_its_one_source():
     assert "`claude-code`" in readme and "--backend claude-code" in readme
     architecture = (REPO / "docs" / "architecture.md").read_text(encoding="utf-8")
     assert "claude-code" in architecture
+
+
+def test_config_doc_command_row_says_where_the_program_runs():
+    """Security round 2 (S2) changed the command seam's contract for every
+    program, not only Claude Code: the program runs with the staged image's
+    temporary folder as its working directory, and one named by a relative
+    path is made absolute against melampus's cwd first. A user's own program
+    that reads a file beside itself through `.`, or writes a log there, now
+    does so in a folder that is deleted after the frame, so the `command`
+    row itself must say so (the Claude Code section is not where a
+    `command` user looks): where the program runs, and how to name it."""
+    config_doc = CONFIG_DOC.read_text(encoding="utf-8")
+    command_row = next(line for line in config_doc.splitlines() if line.startswith("| `command` |"))
+    for said in ("working directory", "PATH", "absolute path"):
+        assert said in command_row, f"docs/config.md's command row does not say {said!r}"
