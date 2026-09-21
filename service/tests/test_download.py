@@ -50,7 +50,7 @@ from conftest import (
     snapshot_files,
 )
 from filelock import Timeout
-from huggingface_hub import constants, file_download
+from huggingface_hub import constants, file_download, snapshot_download
 from huggingface_hub.constants import DOWNLOAD_CHUNK_SIZE
 from huggingface_hub.file_download import repo_folder_name
 from huggingface_hub.utils import WeakFileLock
@@ -1406,8 +1406,6 @@ def test_status_of_a_snapshot_laid_out_by_mlx_vlms_own_load_reports_installed(fa
     each at the hub's size. The snapshot is laid out with the patterns
     recorded from mlx-vlm itself where it imports, download.py's copy of
     them only where it does not."""
-    from huggingface_hub import snapshot_download
-
     patterns = _the_patterns_mlx_vlms_load_fetches() or list(MODEL_FILE_PATTERNS)
     laid_out = Path(snapshot_download(FAKE_REPO, endpoint=fake_hub.endpoint, cache_dir=tmp_path / "hub",
                                       allow_patterns=patterns))
@@ -2142,8 +2140,6 @@ def _mlx_vlm_loading_through_the_hub(monkeypatch: pytest.MonkeyPatch, hub: FakeH
     and returns a model and a processor that are no weights; its
     `load_config` reads nothing. Returns the event `load` sets as it
     begins."""
-    from huggingface_hub import snapshot_download
-
     loading = threading.Event()
     mlx_vlm, utils = types.ModuleType("mlx_vlm"), types.ModuleType("mlx_vlm.utils")
 
