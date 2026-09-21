@@ -15,14 +15,7 @@ failing to attach, and a counter reporting success for photos that got nothing.
 local t = require('harness')
 local mock = require('lrmock')
 
---- Locate the plugin relative to this file, so the suite runs from a clone at any
---- path and from any working directory. MELAMPUS_PLUGIN overrides it.
-local function pluginPath()
-	local here = debug.getinfo(1, 'S').source:match('^@(.*)[/\\]') or '.'
-	return here .. '/../Melampus.lrplugin'
-end
-
-local PLUGIN = os.getenv('MELAMPUS_PLUGIN') or pluginPath()
+local PLUGIN = mock.PLUGIN
 
 local function writeResults(path, records)
 	local parts = {}
@@ -51,28 +44,7 @@ end
 -- os.tmpname() creates the file; the suite writes it and removes it at the end.
 local RESULTS = os.tmpname()
 
---- Drop the plugin's modules so the next load runs them fresh under the mock.
-local function unloadPlugin()
-	for _, name in ipairs({ 'MelampusJson', 'MelampusRules', 'MelampusLog', 'MelampusAnalyze' }) do
-		package.loaded[name] = nil
-	end
-end
-
---- Load one plugin file fresh, dropping the modules first, and hand back what
---- it returns.
-local function loadPluginFile(name)
-	unloadPlugin()
-	return dofile(PLUGIN .. '/' .. name .. '.lua')
-end
-
---- Reset the mock, install it for a plugin folder (this one by default), and
---- load one plugin file fresh under it: the shape every load outside runImport
---- takes.
-local function loadUnderMock(name, resetOptions, folder, installOptions)
-	mock.reset(resetOptions)
-	mock.install(folder or PLUGIN, installOptions)
-	return loadPluginFile(name)
-end
+local loadPluginFile, loadUnderMock = mock.loadPluginFile, mock.loadUnderMock
 
 --- Run the real import file end to end and hand back the resulting state.
 -- `records` is what the results file holds, or nil for no results file
@@ -94,18 +66,16 @@ local function runImport(records, photos, prefs, options)
 		for k, v in pairs(spec[3] or {}) do photo._plugin[k] = v end
 	end
 	mock.install(PLUGIN)
-	unloadPlugin()
+	mock.unloadPlugin()
 	local ok, err = pcall(assert(loadfile(PLUGIN .. '/MelampusImport.lua')))
 	if not ok then error('import raised: ' .. tostring(err), 2) end
 	return true
 end
 
+--- The defaults with dry run off, so the writes this suite asserts on land,
+--- and `extra` over that.
 local function defaultPrefs(extra)
-	local Rules = loadPluginFile('MelampusRules')
-	local prefs = Rules.defaultSettings()
-	prefs.dryRun = false
-	for k, v in pairs(extra or {}) do prefs[k] = v end
-	return prefs
+	return mock.defaultPrefs({ dryRun = false }, extra)
 end
 
 -- ── the plugin actually runs ───────────────────────────────────────────────
@@ -391,7 +361,7 @@ end
 
 -- The executable beside this plugin, on the fake macOS Lightroom the suite
 -- runs the import under; the mock reports it present when a test says so.
-local MAC_EXECUTABLE = PLUGIN .. '/melampus'
+local MAC_EXECUTABLE = mock.EXECUTABLE
 
 -- A fake Windows Lightroom: the plugin in the per-user Modules folder, the
 -- previews in the temp folder the mock names for WIN_ENV.
@@ -423,11 +393,15 @@ end
 --- TMPDIR under a name like O'Brien) closed, escaped and reopened, as sh
 --- needs it. The whole line, so nothing of a Python checkout (python, .venv,
 --- tools/, cd) can be in it, wherever the clone is. `engine` is the engine
---- preference, on the line as --backend when set.
-local function macCommand(engine)
+--- preference, on the line as --backend when set. `variable` and `key` are
+--- the cloud engine's key variable and the key LrPasswords holds for it: set
+--- ahead of the executable in its environment (`VAR='key' command`, as sh
+--- sets one) when given, nothing when not.
+local function macCommand(engine, variable, key)
 	local temp = mock.state.tempDir
 	local previews = temp .. '/melampus-previews-1'
-	return table.concat({
+	local environment = variable and (variable .. '=' .. mock.sh(key) .. ' ') or ''
+	return environment .. table.concat({
 		mock.sh(MAC_EXECUTABLE), mock.sh(previews),
 		'--profile', mock.sh('wildlife') .. engineOption(engine, mock.sh),
 		'--plugin-out', mock.sh(previews .. '/results.json'),
@@ -437,14 +411,16 @@ local function macCommand(engine)
 end
 
 --- The same line for a fake Windows Lightroom, as cmd.exe needs it: every
---- path double-quoted (single quotes mean nothing to cmd.exe), and the whole
---- line wrapped in a pair of its own: cmd.exe /c strips the first and last
---- quote of a line that starts with one and holds more than two, so the ones
---- around each path survive.
-local function windowsCommand(engine)
+--- path double-quoted (single quotes mean nothing to cmd.exe), the key set
+--- with `set "VAR=key" &&` ahead of the executable when given, and the whole
+--- line wrapped in a pair of quotes of its own: cmd.exe /c strips the first
+--- and last quote of a line that starts with one and holds more than two, so
+--- the ones around each path survive.
+local function windowsCommand(engine, variable, key)
+	local environment = variable and ('set "' .. variable .. '=' .. key .. '" && ') or ''
 	return string.format(
-		'""%s" "%s" --profile "wildlife"%s --plugin-out "%s\\results.json" --yes >"%s\\melampus-cli.log" 2>&1"',
-		WIN_EXECUTABLE, WIN_PREVIEWS, engineOption(engine, function(w) return '"' .. w .. '"' end),
+		'"%s"%s" "%s" --profile "wildlife"%s --plugin-out "%s\\results.json" --yes >"%s\\melampus-cli.log" 2>&1"',
+		environment, WIN_EXECUTABLE, WIN_PREVIEWS, engineOption(engine, function(w) return '"' .. w .. '"' end),
 		WIN_PREVIEWS, WIN_TEMP)
 end
 
@@ -531,7 +507,7 @@ end)
 -- openai, claude, when the plugin builds the CLI command, then the CLI
 -- receives it. Done-when 2: given no preference, the plugin passes no
 -- --backend and the CLI's default applies.
-local ENGINES = { 'mlx', 'ollama', 'openai', 'claude' }
+local ENGINES = loadPluginFile('MelampusRules').ENGINES
 
 t.test('each engine preference reaches the command line as --backend', function()
 	for _, engine in ipairs(ENGINES) do
@@ -593,43 +569,23 @@ end)
 -- ── the Settings dialog describes the plugin as it is now ──────────────────
 -- The offer and Info.lua stopped saying "Mac" and stopped presenting a results
 -- file worked out elsewhere as the plugin; the Settings dialog is read by the
--- same Windows user and must say the same thing.
-
---- Every string the dialog shows, from the view tree the mock kept: titles
---- (static text, group boxes, checkboxes, buttons) and tooltips, in order.
-local function dialogStrings(view, out)
-	out = out or {}
-	if type(view) ~= 'table' then return out end
-	for _, key in ipairs({ 'title', 'tooltip' }) do
-		if type(view[key]) == 'string' then out[#out + 1] = view[key] end
-	end
-	for _, child in ipairs(view) do dialogStrings(child, out) end
-	return out
-end
-
---- The view bound to a preference, and the group box that holds it.
-local function viewBoundTo(view, key, group)
-	if type(view) ~= 'table' then return nil end
-	if view.kind == 'group_box' then group = view end
-	if view.value == key then return view, group end
-	for _, child in ipairs(view) do
-		local found, holder = viewBoundTo(child, key, group)
-		if found then return found, holder end
-	end
-	return nil
-end
+-- same Windows user and must say the same thing. The dialog's strings and
+-- bound fields are read through the mock's walk of the recorded view tree.
 
 t.test('the Settings dialog is worded for both platforms and the executable flow', function()
 	loadUnderMock('MelampusSettings', { prefs = defaultPrefs() })
 	local dialog = mock.state.dialogs[1]
 	t.isNotNil(dialog and dialog.modal and dialog.contents or nil,
 		'the Settings dialog was not presented with its contents')
-	local strings = dialogStrings(dialog.contents)
+	local strings = mock.dialogStrings(dialog.contents)
 	local text = table.concat(strings, '\n')
 	for _, platform in ipairs({ 'Mac', 'Finder', 'Explorer' }) do
 		t.isNil(string.find(text, '%f[%a]' .. platform .. '%f[%A]'),
 			'the Settings dialog says ' .. platform .. ':\n' .. text)
 	end
+	-- Windows has no keychain: the key's tooltip is read there too.
+	t.isNil(string.find(string.lower(text), 'keychain', 1, true),
+		'the Settings dialog says keychain, which Windows has not:\n' .. text)
 
 	-- The opening text says what the plugin does: it analyses, here.
 	local intro = strings[1]
@@ -638,7 +594,7 @@ t.test('the Settings dialog is worded for both platforms and the executable flow
 
 	-- The results file is the optional import of results produced elsewhere,
 	-- not a required first step, and it is --plugin-out output that is read.
-	local field, group = viewBoundTo(dialog.contents, 'resultsPath')
+	local field, group = mock.viewBoundTo(dialog.contents, 'resultsPath')
 	t.isNotNil(field, 'no field is bound to resultsPath')
 	t.isNotNil(group, 'the results-file field is not in a group box')
 	t.isNotNil(string.find(string.lower(group.title), 'optional', 1, true),
@@ -650,6 +606,218 @@ t.test('the Settings dialog is worded for both platforms and the executable flow
 	for _, s in ipairs(strings) do
 		t.isNil(string.match(s, '^Step %d'), 'numbered as a step when there is no first step: ' .. s)
 	end
+end)
+
+-- ── the picked cloud engine's key reaches the executable (card #405) ──────
+-- The key lives in LrPasswords. When the picked engine needs one, the
+-- command carries it in the executable's environment, in the variable the
+-- executable reads (MELAMPUS_OPENAI_KEY, MELAMPUS_ANTHROPIC_KEY), never as
+-- an argument, never in the log, and never for an engine that needs none.
+local KEY = 'stored-in-lrpasswords-not-a-real-key-4c1e'
+
+--- Run the import for `engine` with the given LrPasswords contents, on macOS,
+--- and hand back the one command the shell was given.
+local function commandWithKeys(engine, passwords)
+	runImport({}, { { 'fresh_01.CR3' }, { 'fresh_02.CR3' } }, defaultPrefs({ engine = engine }),
+		{ existing = { [MAC_EXECUTABLE] = true }, passwords = passwords })
+	local executed = mock.state.executed or {}
+	t.equals(#executed, 1, 'expected one command')
+	return executed[1]
+end
+
+t.test('the stored key for the picked cloud engine goes to the executable in its environment', function()
+	-- The whole line: the variable set once, ahead of the executable, never
+	-- as an argument, and not the other engine's variable.
+	local command = commandWithKeys('openai', { MELAMPUS_OPENAI_KEY = KEY })
+	t.equals(command, macCommand('openai', 'MELAMPUS_OPENAI_KEY', KEY),
+		'not the command with the OpenAI key set in the environment')
+
+	command = commandWithKeys('claude', { MELAMPUS_ANTHROPIC_KEY = KEY, MELAMPUS_OPENAI_KEY = 'other' })
+	t.equals(command, macCommand('claude', 'MELAMPUS_ANTHROPIC_KEY', KEY),
+		'not the command with the Claude key alone set in the environment')
+end)
+
+t.test('the key is never logged', function()
+	commandWithKeys('openai', { MELAMPUS_OPENAI_KEY = KEY })
+	t.isTrue(#mock.state.logLines > 0, 'the run was not logged at all')
+	for _, line in ipairs(mock.state.logLines) do
+		t.isNil(string.find(line, KEY, 1, true), 'the key was logged: ' .. line)
+	end
+end)
+
+t.test('a local engine, or no engine, carries no key even when keys are stored', function()
+	local stored = { MELAMPUS_OPENAI_KEY = KEY, MELAMPUS_ANTHROPIC_KEY = KEY }
+	for _, engine in ipairs({ 'mlx', 'ollama', '' }) do
+		local command = commandWithKeys(engine, stored)
+		t.equals(command, macCommand(engine), engine .. ': a key travels with a run that needs none')
+	end
+end)
+
+t.test('a cloud engine with no stored key runs without one, so the executable says what is missing', function()
+	local command = commandWithKeys('openai', {})
+	t.equals(command, macCommand('openai'), 'an empty key was set')
+end)
+
+t.test('on Windows the key is set for cmd.exe before the executable, once', function()
+	local Analyze = loadUnderMock('MelampusAnalyze',
+		{ existing = { [WIN_EXECUTABLE] = true }, passwords = { MELAMPUS_ANTHROPIC_KEY = KEY } },
+		WIN_PLUGIN, { windows = true })
+	local ok, message = Analyze.run(WIN_PREVIEWS, WIN_PREVIEWS .. '\\results.json', 'wildlife', 'claude')
+	t.isTrue(ok, 'run failed: ' .. tostring(message))
+	t.equals(mock.state.executed[1], windowsCommand('claude', 'MELAMPUS_ANTHROPIC_KEY', KEY),
+		'not the command with the Claude key set for cmd.exe ahead of the executable')
+	for _, line in ipairs(mock.state.logLines) do
+		t.isNil(string.find(line, KEY, 1, true), 'the key was logged: ' .. line)
+	end
+end)
+
+t.test('on Windows a stored key holding a character cmd.exe rewrites is refused before anything runs', function()
+	-- Inside `set "VAR=value"` a double quote ends the quoted text and what
+	-- follows is command text to cmd.exe, and %NAME% is expanded even inside
+	-- quotes: the same rewriting the paths are refused for. A line feed ends
+	-- the line itself, so what follows it is not the line the plugin built,
+	-- and a carriage return is dropped. There is no way to escape any of
+	-- them on a cmd.exe command line, so the key is refused, the way to fix
+	-- it named, and the key itself shown nowhere.
+	for _, key in ipairs({
+		'sk-not-a-real-key" & calc & "', 'sk-not-a-real-key-%TEMP%',
+		'sk-not-a-real-key\ncalc', 'sk-not-a-real-key\r',
+	}) do
+		local Analyze = loadUnderMock('MelampusAnalyze',
+			{ existing = { [WIN_EXECUTABLE] = true }, passwords = { MELAMPUS_OPENAI_KEY = key } },
+			WIN_PLUGIN, { windows = true })
+		local ok, message = Analyze.run(WIN_PREVIEWS, WIN_PREVIEWS .. '\\results.json', 'wildlife', 'openai')
+		t.isFalse(ok, 'ran with a key cmd.exe would rewrite: ' .. key)
+		t.isNil(mock.state.executed, 'a command carrying the key reached cmd.exe: ' .. key)
+		t.isNotNil(string.find(message, 'Settings', 1, true),
+			'the message does not say where to enter the key again:\n' .. tostring(message))
+		t.isNil(string.find(message, key, 1, true), 'the message shows the key:\n' .. message)
+		for _, line in ipairs(mock.state.logLines) do
+			t.isNil(string.find(line, key, 1, true), 'the key was logged: ' .. line)
+		end
+	end
+end)
+
+t.test('on macOS a key holding shell characters travels intact, single-quoted for sh', function()
+	-- sh gets the key through quote(): an apostrophe closed, escaped and
+	-- reopened; a double quote, a percent sign and a dollar mean nothing
+	-- inside single quotes. So nothing is refused there.
+	local key = "sk-not-a-real-key-o'brien\"%TEMP%$HOME"
+	local command = commandWithKeys('openai', { MELAMPUS_OPENAI_KEY = key })
+	t.equals(command, macCommand('openai', 'MELAMPUS_OPENAI_KEY', key),
+		'not the command with the key single-quoted for sh')
+end)
+
+-- ── asking the executable which engines can run here (card #405) ───────────
+-- The dialog's picker shows what `melampus --detect-engines` says. The plugin
+-- runs the executable beside it once, reads the JSON it printed, and hands the
+-- decoded list to Rules.engineItems; a missing executable is the same message
+-- the analysis gives, never a crash.
+--- Load MelampusAnalyze.lua under a fake macOS Lightroom with the executable
+--- beside the plugin, played by mock.answersDetection(text, code).
+local function loadAnalyzeAnswering(text, code)
+	return loadUnderMock('MelampusAnalyze',
+		{ existing = { [MAC_EXECUTABLE] = true }, onExecute = mock.answersDetection(text, code) })
+end
+
+--- The one line detection runs on macOS: the executable beside the plugin
+--- asked for its verdicts, its stdout to a file in the mock's temp directory
+--- and its stderr to the CLI log there, every path single-quoted for sh.
+local function macDetectionCommand()
+	local temp = mock.state.tempDir
+	return string.format("'%s' --detect-engines >'%s/melampus-engines.json' 2>'%s/melampus-cli.log'",
+		MAC_EXECUTABLE, temp, temp)
+end
+
+t.test('detection runs the executable once with --detect-engines and returns the decoded list', function()
+	local Analyze = loadAnalyzeAnswering(mock.detectionText())
+	local verdicts, problem = Analyze.detectEngines()
+	t.isNotNil(verdicts, 'no verdicts: ' .. tostring(problem))
+	t.equals(#mock.state.executed, 1, 'detection should run the executable exactly once')
+	t.equals(mock.state.executed[1], macDetectionCommand(), 'not the one command that asks for the verdicts')
+	t.equals(#verdicts, 4)
+	t.equals(verdicts[2].engine, 'ollama')
+	t.isFalse(verdicts[2].available)
+	t.isNotNil(string.find(verdicts[2].reason, 'https://ollama.com/download', 1, true))
+end)
+
+t.test('a missing executable makes detection say so, with the plugin folder and the file', function()
+	-- Absent by name, as the analysis's sibling above: the mock must not look
+	-- at the disk, where the readme's install step may have put the real one.
+	local Analyze = loadUnderMock('MelampusAnalyze', { existing = { [MAC_EXECUTABLE] = false } })
+	local verdicts, problem = Analyze.detectEngines()
+	t.isNil(verdicts)
+	t.isNil(mock.state.executed, 'ran a command with no executable to run')
+	t.equals(problem, missingExecutableMessage('melampus', PLUGIN),
+		'not the message for a missing executable')
+end)
+
+t.test('an executable that fails or prints no list makes detection say so, never raise', function()
+	local verdicts, problem = loadAnalyzeAnswering('Traceback (most recent call last)', 1).detectEngines()
+	t.isNil(verdicts, 'a failed run produced verdicts')
+	t.isNotNil(string.find(problem, 'exit 1', 1, true), 'the message does not give the exit code:\n' .. tostring(problem))
+
+	-- Exit 0 with something other than the list: what the executable printed
+	-- went to the engines file, its stderr to the CLI log. The message names
+	-- both, each as what it is; neither is "the log" on its own. The temp
+	-- directory is the one the mock made for this load.
+	local function namesBothFiles(message)
+		local temp = mock.state.tempDir
+		t.isNotNil(string.find(message, 'What it printed is in:\n' .. temp .. '/melampus-engines.json', 1, true),
+			'the message does not say what the engines file is and where:\n' .. tostring(message))
+		t.isNotNil(string.find(message, temp .. '/melampus-cli.log', 1, true),
+			'the message does not name the CLI log:\n' .. tostring(message))
+		t.isNil(string.find(message, 'See the log:', 1, true),
+			'the message calls the engines file the log:\n' .. tostring(message))
+	end
+
+	verdicts, problem = loadAnalyzeAnswering('{"not": "a list"}').detectEngines()
+	t.isNil(verdicts, 'an object is not the verdict list')
+	namesBothFiles(problem)
+
+	verdicts, problem = loadAnalyzeAnswering('').detectEngines()
+	t.isNil(verdicts, 'empty output is not the verdict list')
+	namesBothFiles(problem)
+end)
+
+t.test('on Windows detection names melampus.exe with cmd.exe quoting', function()
+	local Analyze = loadAnalyzeOnWindows(true)
+	Analyze.detectEngines()
+	-- Every path double-quoted and the whole line wrapped, as cmd.exe needs it.
+	t.equals(mock.state.executed[1], string.format(
+		'""%s" --detect-engines >"%s\\melampus-engines.json" 2>"%s\\melampus-cli.log""',
+		WIN_EXECUTABLE, WIN_TEMP, WIN_TEMP),
+		'not the one command that asks melampus.exe for the verdicts, as cmd.exe needs it')
+end)
+
+t.test('on Windows detection refuses a path with "%" the way the run does, naming the fix', function()
+	-- Detection redirects to the same temp-folder paths the run refuses when
+	-- they hold "%", and its executable is in the same plugin folder. Run
+	-- through cmd.exe unchecked, a rewritten path reports "could not ask"
+	-- or "did not understand" instead of the refusal that names the fix.
+	local folder = 'C:\\Users\\photo%grapher\\AppData\\Roaming\\Adobe\\Lightroom\\Modules\\Melampus.lrplugin'
+	local Analyze = loadUnderMock('MelampusAnalyze',
+		{ existing = { [folder .. '\\melampus.exe'] = true } }, folder, { windows = true })
+	local verdicts, problem = Analyze.detectEngines()
+	t.isNil(verdicts, 'detected through a plugin folder with "%"')
+	t.isNil(mock.state.executed, 'ran detection through a plugin folder with "%"')
+	t.isNotNil(string.find(problem, folder, 1, true),
+		'the message does not name the plugin folder:\n' .. tostring(problem))
+	t.isNotNil(string.find(problem, 'Move the plugin', 1, true),
+		'the message does not name the fix for the plugin folder:\n' .. problem)
+
+	local temp = 'C:\\Users\\photo%grapher\\AppData\\Local\\Temp'
+	Analyze = loadUnderMock('MelampusAnalyze',
+		{ existing = { [WIN_EXECUTABLE] = true }, windowsTemp = temp }, WIN_PLUGIN, { windows = true })
+	verdicts, problem = Analyze.detectEngines()
+	t.isNil(verdicts, 'detected through a temp folder with "%"')
+	t.isNil(mock.state.executed, 'ran detection through a temp folder with "%"')
+	t.isNotNil(string.find(problem, temp .. '\\melampus-engines.json', 1, true),
+		'the message does not name the file in the temp folder:\n' .. tostring(problem))
+	t.isNotNil(string.find(problem, 'Set TEMP', 1, true),
+		'the message does not name the fix for the temp folder:\n' .. problem)
+	t.isNil(string.find(problem, 'Move the plugin', 1, true),
+		'moving the plugin would not fix the temp folder:\n' .. problem)
 end)
 
 os.remove(RESULTS)

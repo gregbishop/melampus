@@ -108,6 +108,80 @@ function Rules.chosenEngine(settings)
 		.. '.\n\nSet one of those in Settings, or leave it unset to let Melampus choose.'
 end
 
+--- What the picker calls each engine. The reason detection gives says the
+-- rest; a title only has to be recognisable.
+Rules.ENGINE_TITLES = {
+	mlx = 'MLX — local, Apple Silicon',
+	ollama = 'Ollama — local',
+	openai = 'OpenAI — cloud, needs an API key',
+	claude = 'Claude — cloud, needs an API key',
+}
+
+--- The variable a cloud engine's API key travels in to the executable
+-- (providers.KEY_VARIABLES on the Python side), which is also the name the
+-- key is stored under. nil for an engine that needs no key.
+Rules.KEY_VARIABLES = {
+	openai = 'MELAMPUS_OPENAI_KEY',
+	claude = 'MELAMPUS_ANTHROPIC_KEY',
+}
+
+function Rules.keyVariable(engine)
+	return Rules.KEY_VARIABLES[engine]
+end
+
+--- The engine picker's items from what the executable said (card #405):
+-- `verdicts` is the decoded JSON of --detect-engines, a list of
+-- { engine, available, reason }. The first item leaves the choice to the
+-- executable (the unset preference); then Rules.ENGINES in order, each
+-- disabled when detection said it cannot run here. The ollama item alone,
+-- when disabled and its reason names a web address, carries the last one
+-- it names as `link`: where to install Ollama. Another engine's address
+-- stays text in the note. Without verdicts (no executable, or output that
+-- is not the list) nothing is greyed and `problem` is the note. Returns the
+-- items and the note to show under the picker: one line per unavailable
+-- engine with its reason, or the problem. An item carries only what the
+-- dialog reads: title, value, enabled, link.
+function Rules.engineItems(verdicts, problem)
+	local byEngine = {}
+	if type(verdicts) == 'table' then
+		for _, verdict in ipairs(verdicts) do
+			if type(verdict) == 'table' and type(verdict.engine) == 'string' then
+				byEngine[verdict.engine] = verdict
+			end
+		end
+	end
+	local items = {
+		{ title = 'Let Melampus choose — the first engine that can run here',
+			value = '', enabled = true },
+	}
+	local lines = {}
+	for _, engine in ipairs(Rules.ENGINES) do
+		local verdict = byEngine[engine]
+		local available = verdict == nil or verdict.available ~= false
+		local item = {
+			title = Rules.ENGINE_TITLES[engine] .. (available and '' or ' (not available)'),
+			value = engine, enabled = available,
+		}
+		if not available then
+			local reason = tostring(verdict.reason or '')
+			-- Only Ollama is something to go and install. The address to go
+			-- to is the last one the reason names (the first may be where a
+			-- local server was looked for), without a trailing full stop or
+			-- semicolon from the sentence around it.
+			if engine == 'ollama' then
+				for address in string.gmatch(reason, 'https?://[^%s]+') do
+					item.link = string.match(address, '^(.-)[.,;:)]*$')
+				end
+			end
+			lines[#lines + 1] = Rules.ENGINE_TITLES[engine] .. ': ' .. reason
+		end
+		items[#items + 1] = item
+	end
+	local note = table.concat(lines, '\n')
+	if note == '' and next(byEngine) == nil then note = problem or '' end
+	return items, note
+end
+
 -- Keyword hierarchy uses '>' as its separator, so a species name containing one
 -- would silently create extra levels. Strip anything structural.
 local function sanitise(text)

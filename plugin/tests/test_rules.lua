@@ -16,6 +16,7 @@ catalog; applying the plan is the thin Lightroom layer's job.
 --]]
 
 local t = require('harness')
+local mock = require('lrmock')
 local Rules = require('MelampusRules')
 
 local function result(overrides)
@@ -266,6 +267,115 @@ t.test('an unknown engine is refused with the four choices named', function()
 	local _, why = Rules.chosenEngine(settings({ engine = 'MLX' }))
 	t.isNotNil(why, 'a near miss is refused with a message, not silently unset')
 	t.isNil(Rules.chosenEngine(settings({ engine = 42 })), 'a junk pref is refused, not crashed on')
+end)
+
+-- ── detection to picker items (card #405) ─────────────────────────────────
+-- The CLI decides what can run here (--detect-engines, card #404); the dialog
+-- only shows it. Rules.engineItems turns the decoded verdict list into the
+-- picker's items, in the owner's order, with the unavailable ones disabled, and
+-- a note to show under the picker that carries their reasons.
+local verdicts = mock.detectionVerdicts
+
+--- The picker's items indexed by value, so a test can name one: byValue.ollama.
+local function itemsByValue(items)
+	local byValue = {}
+	for _, item in ipairs(items) do byValue[item.value] = item end
+	return byValue
+end
+
+t.test('the picker lists the four engines in the owner\'s order, after letting Melampus choose', function()
+	local items = Rules.engineItems(verdicts())
+	t.equals(items[1].value, '', 'the first item must be the unset preference: let the CLI choose')
+	t.isTrue(items[1].enabled, 'letting Melampus choose is always allowed')
+	t.equals(#items, 5, 'the automatic item and the four engines')
+	for i, engine in ipairs(ENGINES) do
+		t.equals(items[i + 1].value, engine, 'item ' .. (i + 1))
+		t.isNotNil(items[i + 1].title, engine .. ' has no title')
+	end
+end)
+
+t.test('unavailable engines are disabled, and the note carries the reason detection gave', function()
+	-- The dialog reads enabled and link from an item and shows the reasons
+	-- from the note under the picker; an item carries nothing the dialog
+	-- does not read.
+	local items, note = Rules.engineItems(verdicts({ mlx = { available = false, reason = 'needs Apple Silicon' } }))
+	local byValue = itemsByValue(items)
+	t.isFalse(byValue.mlx.enabled, 'mlx should be greyed')
+	t.isFalse(byValue.ollama.enabled, 'ollama should be greyed')
+	for _, item in ipairs(items) do
+		t.isNil(item.reason, item.value .. ' carries a reason nothing reads; the note has it')
+	end
+	t.isTrue(byValue.openai.enabled, 'openai is available')
+	t.isTrue(byValue.claude.enabled, 'claude is available')
+	-- The title says so too: per-item enabled is not visible outside
+	-- Lightroom, the title is.
+	for _, item in ipairs(items) do
+		local saysNotAvailable = string.find(item.title, ' (not available)', 1, true) ~= nil
+		local endsWithIt = string.sub(item.title, -#' (not available)') == ' (not available)'
+		if item.enabled then
+			t.isFalse(saysNotAvailable, item.value .. ' is available but its title says otherwise: ' .. item.title)
+		else
+			t.isTrue(endsWithIt, item.value .. ' is greyed but its title does not end with "(not available)": ' .. item.title)
+		end
+	end
+	t.isNotNil(string.find(note, 'needs Apple Silicon', 1, true), 'the note does not carry the mlx reason:\n' .. note)
+	t.isNotNil(string.find(note, 'no Ollama server', 1, true), 'the note does not carry the ollama reason:\n' .. note)
+	t.isNil(string.find(note, 'API key required', 1, true), 'the note explains available engines:\n' .. note)
+end)
+
+t.test('the link is the ollama item\'s alone, from the address its reason names', function()
+	-- Only Ollama is something to go and install (Done-when 3): another
+	-- engine's reason stays text in the note, address and all.
+	local items = Rules.engineItems(verdicts())
+	local byValue = itemsByValue(items)
+	t.equals(byValue.ollama.link, 'https://ollama.com/download')
+	t.isNil(byValue.mlx.link, 'mlx is not ollama, so it gets no link')
+	t.isNil(byValue.openai.link, 'openai is not ollama, so it gets no link')
+	local MLX_ADDRESS = 'https://example.com/apple-silicon'
+	local note
+	items, note = Rules.engineItems(verdicts({ mlx = { available = false, reason = 'needs Apple Silicon; see ' .. MLX_ADDRESS } }))
+	byValue = itemsByValue(items)
+	t.isNil(byValue.mlx.link, 'an address in the mlx reason must not become a link: only ollama\'s does')
+	t.isNotNil(string.find(note, MLX_ADDRESS, 1, true), 'the note does not carry the mlx address as text:\n' .. note)
+	local answering = verdicts({ ollama = { available = true, reason = 'Ollama is answering at http://127.0.0.1:11434' } })
+	items = Rules.engineItems(answering)
+	byValue = itemsByValue(items)
+	t.isTrue(byValue.ollama.enabled)
+	t.isNil(byValue.ollama.link, 'an available engine needs no link')
+end)
+
+t.test('without verdicts nothing is greyed and the note says why', function()
+	local problem = 'Melampus could not find its analysis program.'
+	local items, note = Rules.engineItems(nil, problem)
+	t.equals(#items, 5)
+	for _, item in ipairs(items) do
+		t.isTrue(item.enabled, item.value .. ' was greyed with no verdict to grey it')
+		t.isNil(item.link)
+	end
+	for i, engine in ipairs(ENGINES) do t.equals(items[i + 1].value, engine) end
+	t.equals(note, problem)
+	-- Junk from the executable is the same case, and never a crash.
+	items, note = Rules.engineItems({ 'not', 'verdicts' }, problem)
+	t.equals(#items, 5)
+	t.isTrue(items[3].enabled)
+	t.equals(note, problem)
+	items, note = Rules.engineItems({})
+	t.equals(#items, 5)
+	t.equals(note, '', 'nothing to say when there are no verdicts and no problem')
+end)
+
+t.test('when every engine is available the note is empty', function()
+	local _, note = Rules.engineItems(verdicts({ ollama = { available = true, reason = 'Ollama is answering' } }))
+	t.equals(note, '')
+end)
+
+t.test('each cloud engine names the variable its key travels in; local engines none', function()
+	t.equals(Rules.keyVariable('openai'), 'MELAMPUS_OPENAI_KEY')
+	t.equals(Rules.keyVariable('claude'), 'MELAMPUS_ANTHROPIC_KEY')
+	t.isNil(Rules.keyVariable('mlx'))
+	t.isNil(Rules.keyVariable('ollama'))
+	t.isNil(Rules.keyVariable(''))
+	t.isNil(Rules.keyVariable(nil))
 end)
 
 -- ── colour labels ──────────────────────────────────────────────────────────

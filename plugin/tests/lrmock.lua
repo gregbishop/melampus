@@ -35,6 +35,63 @@ end
 -- quoting the mock's own shell traffic uses, and still not from the plugin's.
 M.sh = sh
 
+--- Plays the executable for real, for state.onExecute: the line goes to the
+-- host's shell the way LrTasks.execute hands it to Lightroom's (sh -c, or
+-- cmd.exe /c on a Windows host), and the exit code comes back as a number,
+-- which is what Lightroom's Lua 5.1 os.execute returns; 5.2 and later
+-- return a boolean, the word 'exit' and then the code.
+function M.runThroughTheShell(command)
+	local first, _, code = os.execute(command)
+	if type(first) == 'number' then return first end
+	return code
+end
+
+--- What `melampus --detect-engines` says on a Mac with no Ollama running,
+-- decoded: one verdict per engine, in the order the executable prints them.
+-- `overrides[engine]` replaces fields of that engine's verdict. The one
+-- canned answer every suite starts from, so a reason is spelled once.
+function M.detectionVerdicts(overrides)
+	local list = {
+		{ engine = 'mlx', available = true, reason = 'runs locally on this Apple Silicon Mac' },
+		{ engine = 'ollama', available = false,
+			reason = 'no Ollama server at http://127.0.0.1:11434; install it from https://ollama.com/download' },
+		{ engine = 'openai', available = true, reason = 'API key required: set MELAMPUS_OPENAI_KEY (or OPENAI_API_KEY)' },
+		{ engine = 'claude', available = true, reason = 'API key required: set MELAMPUS_ANTHROPIC_KEY (or ANTHROPIC_API_KEY)' },
+	}
+	for _, v in ipairs(list) do
+		local o = overrides and overrides[v.engine]
+		if o then for k, value in pairs(o) do v[k] = value end end
+	end
+	return list
+end
+
+--- The same answer as the JSON text the executable prints.
+function M.detectionText(overrides)
+	local function quoted(text)
+		return '"' .. string.gsub(tostring(text), '[\\"]', '\\%0') .. '"'
+	end
+	local parts = {}
+	for _, v in ipairs(M.detectionVerdicts(overrides)) do
+		parts[#parts + 1] = string.format('{"engine": %s, "available": %s, "reason": %s}',
+			quoted(v.engine), tostring(v.available), quoted(v.reason))
+	end
+	return '[' .. table.concat(parts, ', ') .. ']'
+end
+
+--- A fake executable for state.onExecute: answers a --detect-engines command
+-- by writing `text` to the file the command's stdout is redirected to, and
+-- exits with `code`; any other command exits 0 and writes nothing.
+function M.answersDetection(text, code)
+	return function(command)
+		if not string.find(command, '--detect-engines', 1, true) then return 0 end
+		local target = string.match(command, ">'([^']+)'")
+		local handle = assert(io.open(target, 'w'))
+		handle:write(text)
+		handle:close()
+		return code or 0
+	end
+end
+
 --- Remove the temp directory this run made, if it made one.
 function M.cleanUp()
 	if M.state.tempDir then
@@ -68,6 +125,19 @@ function M.reset(options)
 		-- plugin, on either platform; false so a test that wants it missing
 		-- holds after the readme's install step has put the real one there.
 		existing = options.existing or {},
+		-- Plays the executable for LrTasks.execute: given the command, it
+		-- writes what the real one would and returns its exit code.
+		onExecute = options.onExecute,
+		-- Plays the user while a modal dialog is up: given the options, it
+		-- can set values the way typing would.
+		onModalDialog = options.onModalDialog,
+		-- What LrPasswords holds, by key string; the URLs the browser was
+		-- asked to open.
+		passwords = options.passwords or {},
+		openedUrls = {},
+		-- The Windows temp folder a fake Windows Lightroom reports, when a
+		-- test names one; otherwise windowsTemp() decides.
+		windowsTemp = options.windowsTemp,
 		-- How many previews the plugin asked for in this run.
 		previewsRequested = 0,
 	}
@@ -264,8 +334,75 @@ namespaces.LrDialogs = {
 	presentModalDialog = function(options)
 		M.state.dialogs[#M.state.dialogs + 1] = {
 			title = options.title, contents = options.contents, modal = true }
+		if M.state.onModalDialog then M.state.onModalDialog(options) end
 		return 'ok'
 	end,
+}
+
+-- ── reading a recorded dialog ──────────────────────────────────────────────
+-- One walk of the view tree a dialog was presented with, for every suite that
+-- reads one: children are the array part of each view, attributes the rest
+-- (see LrView below).
+
+--- Every view under `root`, the root first, in the order the plugin built
+--- them, each as { view, parent, group }: `parent` the view holding it,
+--- `group` the nearest group_box around it (itself, when it is one).
+function M.views(root)
+	local found = {}
+	local function walk(node, parent, group)
+		if type(node) ~= 'table' then return end
+		if node.kind == 'group_box' then group = node end
+		found[#found + 1] = { view = node, parent = parent, group = group }
+		for _, child in ipairs(node) do walk(child, node, group) end
+	end
+	walk(root, nil, nil)
+	return found
+end
+
+--- The first view whose value is bound to `key` (a `bind 'key'` is the key
+--- itself under this mock), and the group box that holds it.
+function M.viewBoundTo(root, key)
+	for _, entry in ipairs(M.views(root)) do
+		if entry.view.value == key then return entry.view, entry.group end
+	end
+	return nil
+end
+
+--- Every string a dialog shows: titles (static text, group boxes, checkboxes,
+--- buttons) and tooltips, in order.
+function M.dialogStrings(root)
+	local out = {}
+	for _, entry in ipairs(M.views(root)) do
+		for _, key in ipairs({ 'title', 'tooltip' }) do
+			if type(entry.view[key]) == 'string' then out[#out + 1] = entry.view[key] end
+		end
+	end
+	return out
+end
+
+--- Stored and retrieved by key string; the real one keeps them in the OS
+-- keychain on macOS, which is exactly why a test must see them land here and
+-- nowhere else.
+namespaces.LrPasswords = {
+	store = function(key, password)
+		assert(key ~= nil and password ~= nil, 'keystring or password is nil.')
+		M.state.passwords[key] = password
+	end,
+	retrieve = function(key)
+		assert(key ~= nil, 'keystring is nil.')
+		return M.state.passwords[key]
+	end,
+}
+
+namespaces.LrHttp = {
+	openUrlInBrowser = function(url)
+		M.state.openedUrls[#M.state.openedUrls + 1] = url
+	end,
+}
+
+--- An observable property table is, for these tests, a plain table.
+namespaces.LrBinding = {
+	makePropertyTable = function() return {} end,
 }
 
 namespaces.LrFileUtils = {
@@ -335,13 +472,15 @@ end
 -- spells the directory separator first in package.config.
 local HOST_IS_WINDOWS = package.config:sub(1, 1) == '\\'
 
---- The Windows temp folder of a fake Windows Lightroom. On a Windows host,
--- the real one, TEMP, which is what Lightroom reports there, so a command
+--- The Windows temp folder of a fake Windows Lightroom: the one the test
+-- named in reset's options, if it did. Otherwise, on a Windows host, the
+-- real one, TEMP, which is what Lightroom reports there, so a command
 -- built for cmd.exe can be run by cmd.exe and the CLI log it names has a
 -- folder to land in. Elsewhere a Windows path that exists nowhere: the
 -- host's shell could not run the command anyway, and the suites read the
 -- line, not the disk.
 local function windowsTemp()
+	if M.state.windowsTemp then return M.state.windowsTemp end
 	if HOST_IS_WINDOWS then return assert(os.getenv('TEMP'), 'TEMP is not set') end
 	return 'C:\\Users\\photographer\\AppData\\Local\\Temp'
 end
@@ -377,6 +516,9 @@ namespaces.LrTasks = {
 	execute = function(cmd)
 		M.state.executed = M.state.executed or {}
 		M.state.executed[#M.state.executed + 1] = cmd
+		-- state.onExecute plays the executable: given the command, it writes
+		-- what the real one would and returns its exit code.
+		if M.state.onExecute then return M.state.onExecute(cmd) or 0 end
 		return M.state.executeCode or 0
 	end,
 }
@@ -398,7 +540,9 @@ namespaces.LrColor = function() return {} end
 namespaces.LrShell = { revealInShell = function() end }
 --- The view factory hands back each spec as given, tagged with the kind of
 -- view asked for (static_text, group_box, ...), so a dialog's text can be
--- read from the tree the plugin built.
+-- read from the tree the plugin built: children are the array part,
+-- attributes the rest. `bind` returns what it was given (a key, or a table
+-- with key, bind_to_object and transform), so bindings are inspectable.
 namespaces.LrView = {
 	osFactory = function()
 		return setmetatable({}, { __index = function(_, kind)
@@ -409,7 +553,7 @@ namespaces.LrView = {
 			end
 		end })
 	end,
-	bind = function(key) return key end,
+	bind = function(spec) return spec end,
 }
 
 --- Install the SDK globals so plugin files can be dofile()'d directly.
@@ -426,6 +570,56 @@ function M.install(pluginPath, options)
 	_G.WIN_ENV = options.windows and true or nil
 	_G.MAC_ENV = (not options.windows) and true or nil
 	_G.LOC = function(text) return text end
+end
+
+-- ── loading the plugin under the mock ──────────────────────────────────────
+-- Shared by the suites that execute the real plugin files, so the plugin's
+-- location, its module list and its defaults are spelled once.
+
+--- The plugin folder, relative to this file, so a suite runs from a clone at
+--- any path and from any working directory. MELAMPUS_PLUGIN overrides it.
+local function pluginPath()
+	local here = debug.getinfo(1, 'S').source:match('^@(.*)[/\\]') or '.'
+	return here .. '/../Melampus.lrplugin'
+end
+
+M.PLUGIN = os.getenv('MELAMPUS_PLUGIN') or pluginPath()
+
+--- The executable beside that plugin on a macOS Lightroom, the path the
+--- plugin looks for; a suite tells the mock it is present or absent by name.
+M.EXECUTABLE = M.PLUGIN .. '/melampus'
+
+--- Drop the plugin's modules so the next load runs them fresh under the mock.
+function M.unloadPlugin()
+	for _, name in ipairs({ 'MelampusJson', 'MelampusRules', 'MelampusLog', 'MelampusAnalyze' }) do
+		package.loaded[name] = nil
+	end
+end
+
+--- Load one plugin file fresh, dropping the modules first, and hand back what
+--- it returns.
+function M.loadPluginFile(name)
+	M.unloadPlugin()
+	return dofile(M.PLUGIN .. '/' .. name .. '.lua')
+end
+
+--- Reset the mock, install it for a plugin folder (this one by default), and
+--- load one plugin file fresh under it: the shape every load outside a whole
+--- import takes.
+function M.loadUnderMock(name, resetOptions, folder, installOptions)
+	M.reset(resetOptions)
+	M.install(folder or M.PLUGIN, installOptions)
+	return M.loadPluginFile(name)
+end
+
+--- The plugin's default settings, from MelampusRules.lua loaded fresh, with
+--- each table of overrides applied in turn (a nil one is skipped).
+function M.defaultPrefs(...)
+	local prefs = M.loadPluginFile('MelampusRules').defaultSettings()
+	for i = 1, select('#', ...) do
+		for k, v in pairs(select(i, ...) or {}) do prefs[k] = v end
+	end
+	return prefs
 end
 
 M.catalog = catalog

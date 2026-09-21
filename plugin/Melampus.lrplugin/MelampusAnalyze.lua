@@ -19,9 +19,11 @@ Two ordering constraints, both from §5.3 and both load-bearing:
 
 local LrDialogs = import 'LrDialogs'
 local LrFileUtils = import 'LrFileUtils'
+local LrPasswords = import 'LrPasswords'
 local LrPathUtils = import 'LrPathUtils'
 local LrTasks = import 'LrTasks'
 
+local Json = require 'MelampusJson'
 local Log = require 'MelampusLog'
 local Rules = require 'MelampusRules'
 
@@ -157,26 +159,49 @@ end
 --- Why the command must not run on Windows, or nil when it may.
 -- cmd.exe expands %NAME% even inside double quotes, silently rewriting the
 -- path before execution. Refusing loudly beats running against a path the
--- user never named. The message names the path that has the "%" and the fix
--- for that path: the plugin folder is where the user put it; the other three
--- are in the Windows temp folder.
-local function windowsPathRefusal(folder, previewFolder, resultsPath, cliLog)
+-- user never named. `checked` lists { what, path, advice }: the message
+-- names the path that has the "%" and the fix for that path, the plugin
+-- folder being where the user put it (MOVE_PLUGIN) and the rest in the
+-- Windows temp folder (IN_TEMP).
+local MOVE_PLUGIN = 'Move the plugin to a folder whose path has no "%" and try again.'
+local IN_TEMP = 'Melampus keeps this in the Windows temp folder. Set TEMP to a '
+	.. 'folder whose path has no "%" and try again.'
+
+local function windowsPathRefusal(checked)
 	if not WIN_ENV then return nil end
-	local inTemp = 'Melampus keeps this in the Windows temp folder. Set TEMP to a '
-		.. 'folder whose path has no "%" and try again.'
-	local checked = {
-		{ 'plugin folder', folder,
-			'Move the plugin to a folder whose path has no "%" and try again.' },
-		{ 'previews folder', previewFolder, inTemp },
-		{ 'results file', resultsPath, inTemp },
-		{ 'log file', cliLog, inTemp },
-	}
 	for _, entry in ipairs(checked) do
 		local what, path, advice = entry[1], tostring(entry[2]), entry[3]
 		if path:find('%%') then
 			return 'The ' .. what .. ' path contains "%", which the Windows '
 				.. 'shell rewrites:\n' .. path .. '\n\n' .. advice
 		end
+	end
+	return nil
+end
+
+--- A variable set in the child's environment, ahead of the command. LrTasks
+-- .execute takes one string and nothing else, so the shell sets it: `VAR=
+-- 'value' command` for sh, `set "VAR=value" && command` for cmd.exe. That
+-- string is the child's command line for the run's duration, which is why
+-- the caller logs the line with the value replaced, never this one.
+local function environmentPrefix(name, value)
+	if WIN_ENV then return 'set "' .. name .. '=' .. value .. '" && ' end
+	return name .. '=' .. quote(value) .. ' '
+end
+
+--- Why the key must not go to cmd.exe, or nil when it may. Inside
+-- `set "VAR=value"` a double quote ends the quoted text and what follows is
+-- command text to cmd.exe, %NAME% is expanded even inside quotes (see
+-- windowsPathRefusal), a line feed ends the line so what follows it is not
+-- the line the plugin built, and a carriage return is dropped; none of them
+-- can be escaped on a cmd.exe command line. sh gets the key through
+-- quote(), where nothing needs refusing. The message never shows the key.
+local function windowsKeyRefusal(key)
+	if not WIN_ENV then return nil end
+	if string.find(key, '["%%\r\n]') then
+		return 'The API key kept for this engine contains a character the Windows '
+			.. 'shell rewrites (", % or a line break), so Melampus will not hand it '
+			.. 'to its analysis program.\n\nOpen Settings and enter the key again.'
 	end
 	return nil
 end
@@ -189,8 +214,62 @@ end
 -- location guaranteed to exist on both platforms (the plugin-log directory is
 -- not — Log.path() is a macOS layout). Outside previewFolder so cleanUp()
 -- does not take the evidence with it.
+local function tempPath(name)
+	return LrPathUtils.child(LrPathUtils.getStandardFilePath('temp'), name)
+end
+
 local function cliLogPath()
-	return LrPathUtils.child(LrPathUtils.getStandardFilePath('temp'), 'melampus-cli.log')
+	return tempPath('melampus-cli.log')
+end
+
+--- The one message for an executable that is not beside the plugin: which
+-- folder should hold it and what the file is called, and nothing about how
+-- it might be built.
+local function missingExecutable()
+	return 'Melampus could not find its analysis program.\n\n'
+		.. 'The plugin folder should contain a file named '
+		.. Analyze.executableName() .. ':\n' .. tostring(pluginDir())
+		.. '\n\nCopy it there from the Melampus download and try again.'
+end
+
+--- The suffix every failure message that has a run behind it ends with: the
+-- plugin's log and the CLI log of that run, so the two paths are said once.
+local function seeTheLogs(cliLog)
+	return '\n\nSee the logs:\n' .. Log.path() .. '\n' .. cliLog
+end
+
+--- Ask the executable which engines can run here: `--detect-engines` (card
+-- #404) prints a JSON list of { engine, available, reason }. Returns the
+-- decoded list, or nil plus a message: the executable is missing, exited
+-- non-zero, or printed something other than the list. Runs the executable
+-- once per call; the Settings dialog calls it once, when it opens.
+function Analyze.detectEngines()
+	local executable = Analyze.executablePath()
+	if not executable or not LrFileUtils.exists(executable) then
+		return nil, missingExecutable()
+	end
+	local output, cliLog = tempPath('melampus-engines.json'), cliLogPath()
+	local refusal = windowsPathRefusal({
+		{ 'plugin folder', pluginDir(), MOVE_PLUGIN },
+		{ 'engines file', output, IN_TEMP },
+		{ 'log file', cliLog, IN_TEMP },
+	})
+	if refusal then return nil, refusal end
+	local command = shellLine(quote(executable) .. ' --detect-engines >'
+		.. quote(output) .. ' 2>' .. quote(cliLog))
+	Log.info('running: ' .. command)
+	local code = LrTasks.execute(command)
+	if code ~= 0 then
+		return nil, 'Melampus could not ask its analysis program which engines can run here '
+			.. '(exit ' .. tostring(code) .. ').' .. seeTheLogs(cliLog)
+	end
+	local verdicts, err = Json.decode(LrFileUtils.readFile(output) or '')
+	if type(verdicts) ~= 'table' or verdicts[1] == nil then
+		return nil, 'Melampus did not understand what its analysis program said about the engines'
+			.. (err and (': ' .. tostring(err)) or '') .. '.\n\nWhat it printed is in:\n' .. output
+			.. seeTheLogs(cliLog)
+	end
+	return verdicts
 end
 
 --- Run the identification pipeline over a folder of previews, writing the
@@ -202,17 +281,19 @@ function Analyze.run(previewFolder, resultsPath, profile, engine)
 	local folder = pluginDir()
 	local executable = Analyze.executablePath()
 	if not executable or not LrFileUtils.exists(executable) then
-		return false, 'Melampus could not find its analysis program.\n\n'
-			.. 'The plugin folder should contain a file named '
-			.. Analyze.executableName() .. ':\n' .. tostring(folder)
-			.. '\n\nCopy it there from the Melampus download and try again.'
+		return false, missingExecutable()
 	end
 
 	local chosen, engineError = Rules.chosenEngine({ engine = engine })
 	if engineError then return false, engineError end
 
 	local cliLog = cliLogPath()
-	local refusal = windowsPathRefusal(folder, previewFolder, resultsPath, cliLog)
+	local refusal = windowsPathRefusal({
+		{ 'plugin folder', folder, MOVE_PLUGIN },
+		{ 'previews folder', previewFolder, IN_TEMP },
+		{ 'results file', resultsPath, IN_TEMP },
+		{ 'log file', cliLog, IN_TEMP },
+	})
 	if refusal then return false, refusal end
 
 	-- Identification and enrichment, one process. Long-running, so it must not
@@ -234,12 +315,26 @@ function Analyze.run(previewFolder, resultsPath, profile, engine)
 	parts[#parts + 1] = quote(resultsPath)
 	parts[#parts + 1] = '--yes'
 	parts[#parts + 1] = '>' .. quote(cliLog) .. ' 2>&1'
-	local command = shellLine(table.concat(parts, ' '))
-	Log.info('running: ' .. command)
+	local line = table.concat(parts, ' ')
+
+	-- A cloud engine's key (card #405): stored by the Settings dialog through
+	-- LrPasswords, handed to the executable in the variable it reads, and
+	-- only for the engine the user picked. It is never an argument and never
+	-- logged; the log carries the line with the key blanked.
+	local logged = line
+	local variable = Rules.keyVariable(chosen)
+	local key = variable and LrPasswords.retrieve(variable)
+	if key and key ~= '' then
+		local keyRefusal = windowsKeyRefusal(key)
+		if keyRefusal then return false, keyRefusal end
+		line = environmentPrefix(variable, key) .. line
+		logged = environmentPrefix(variable, '') .. logged
+	end
+	local command = shellLine(line)
+	Log.info('running: ' .. shellLine(logged))
 	local code = LrTasks.execute(command)
 	if code ~= 0 then
-		return false, 'Identification failed (exit ' .. tostring(code)
-			.. ').\n\nSee the logs:\n' .. Log.path() .. '\n' .. cliLog
+		return false, 'Identification failed (exit ' .. tostring(code) .. ').' .. seeTheLogs(cliLog)
 	end
 
 	return true, resultsPath
