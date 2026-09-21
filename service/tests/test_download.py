@@ -40,6 +40,7 @@ from conftest import (
     FAKE_TOTAL,
     VENV_CLI,
     FakeHub,
+    QuietHandler,
     Silent,
     assert_download_completed,
     closed_port,
@@ -1461,11 +1462,7 @@ def test_status_gives_up_on_a_hub_that_accepts_the_connection_and_never_answers(
     network, a captive portal) must end the request, not hang the dialog: the
     listing is waited for at most STATUS_TIMEOUT, the hub library's own
     request timeout, and then the size is unknown as when nothing answers."""
-    import threading
     import time
-    from http.server import ThreadingHTTPServer
-
-    from conftest import QuietHandler, loopback_server
 
     released = threading.Event()
 
@@ -1571,7 +1568,6 @@ def test_status_treats_a_hub_answering_200_with_something_else_as_unreachable(
     is one that could not be reached, the size unknown and installed what
     the cache lays out; through the CLI that is exit 0, the JSON on stdout
     with `bytes_total` null, and no traceback on stderr."""
-    from conftest import QuietHandler, loopback_server
 
     class Elsewhere(QuietHandler):
         def do_GET(self):  # noqa: N802 - http.server's name
