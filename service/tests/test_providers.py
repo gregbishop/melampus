@@ -3319,7 +3319,13 @@ a file the prompt names, read by the Read tool, which needs no prompt only
 when an `--allowedTools` rule pre-approves it (permissions § Read and
 Edit: a bare `Read` matches everywhere; `Read(//path)` is one absolute
 path, and an allow rule applies only when both the path as given and
-the file it resolves to match). MODE: "signed-in" answers;
+the file it resolves to match). Allow rules and `additionalDirectories`
+from the user's settings file, `$CLAUDE_CONFIG_DIR/settings.json`
+(permissions § Settings precedence: rules from every loaded settings file
+merge, only a deny wins), count when `user` is among the setting sources;
+`--restricted` loads no user, project or local settings file
+(cli-reference: "loads only managed settings and --settings") and
+confines the file tools to the working directory. MODE: "signed-in" answers;
 "not-signed-in" fails the status check and every run the documented way;
 "expired" passes the status check and fails the run, the way a session
 that lapses mid-batch would; "hung" never answers the status check;
@@ -3374,14 +3380,18 @@ ap.add_argument("--permission-prompts", choices=["host", "none"], default="host"
 ap.add_argument("--no-session-persistence", action="store_true")
 ap.add_argument("--strict-mcp-config", action="store_true")
 ap.add_argument("--setting-sources", default="user,project,local")
+ap.add_argument("--restricted", action="store_true")
 ap.add_argument("prompt")
 args = ap.parse_args()
 if not args.print:
     sys.exit("an interactive session needs a terminal; use -p")
-for source in args.setting_sources.split(","):
+sources = args.setting_sources.split(",") if args.setting_sources else []
+for source in sources:
     if source not in ("user", "project", "local"):
         sys.exit(f"Error processing --setting-sources: Invalid setting source: {{source}}. "
                  "Valid options are: user, project, local")
+if args.restricted:
+    sources = []
 
 
 def result(text, is_error=False):
@@ -3416,7 +3426,23 @@ def allows(rule):
     return False
 
 
-if not any(allows(rule) for rule in args.allowedTools.replace(",", " ").split()):
+rules = args.allowedTools.replace(",", " ").split()
+folders = []
+if "user" in sources:
+    settings = os.path.join(os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude"),
+                            "settings.json")
+    try:
+        with open(settings, encoding="utf-8") as f:
+            permissions = json.load(f).get("permissions", {{}})
+    except (OSError, ValueError):
+        permissions = {{}}
+    rules += permissions.get("allow", [])
+    folders += permissions.get("additionalDirectories", [])
+if args.restricted and os.path.dirname(os.path.realpath(image)) != os.path.realpath(os.getcwd()):
+    result("Permission to read " + image + " was denied: outside the working directory.")
+    sys.exit(0)
+if not (any(allows(rule) for rule in rules)
+        or any(image.startswith(folder.rstrip("/") + "/") for folder in folders)):
     result("Permission to read " + image + " was denied.")
     sys.exit(0)
 if not os.path.isfile(image):
@@ -3429,12 +3455,17 @@ result("```json\\n" + answer + "\\n```")
 
 def _fake_claude(monkeypatch, tmp_path, *, mode: str = "signed-in") -> Path:
     """Put a `claude` that imitates the real CLI's documented interface on
-    PATH, ahead of any real Claude Code. Returns the log it appends each
-    invocation's argv and cwd to."""
+    PATH, ahead of any real Claude Code, with a settings folder of the
+    test's own (CLAUDE_CONFIG_DIR, empty until a test writes a
+    settings.json into it) so no test reads a developer's real one. Returns
+    the log it appends each invocation's argv and cwd to."""
     log = tmp_path / "claude-calls.jsonl"
     _script_on_path(monkeypatch, tmp_path, CLAUDE, _FAKE_CLAUDE_SCRIPT.format(
         python=sys.executable, mode=mode, routing=ROUTING_OK, identification=ID_OK, log=str(log),
     ))
+    config_dir = tmp_path / "claude-config"
+    config_dir.mkdir(exist_ok=True)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_dir))
     _real_detection(monkeypatch)
     return log
 
@@ -3486,8 +3517,13 @@ def test_claude_code_template_is_the_documented_print_mode_invocation():
     `--permission-prompts none` denies anything else that would wait for a
     person; `--no-session-persistence` keeps a thousand frames from writing
     a thousand transcripts; `--strict-mcp-config` connects no MCP server;
-    `--setting-sources user` loads no project or local settings from
-    wherever melampus was launched. The prompt is the last argument, the
+    `--restricted` loads no user, project or local settings file (Codex
+    round 1, S1: cli-reference, "loads only managed settings and
+    --settings", and "confines the built-in file tools to the working
+    directories", the staged image's own folder) while the keychain login
+    is not a settings file and stays (measured: `claude --restricted auth
+    status --json` reports the claude.ai login; `--bare` is the mode that
+    skips keychain reads). The prompt is the last argument, the
     positional, and carries both placeholders: the image's path for the
     Read tool to read, then the pipeline's prompt in full. It is a valid
     `[model] command` by the config's own rule."""
@@ -3497,8 +3533,9 @@ def test_claude_code_template_is_the_documented_print_mode_invocation():
     assert flags == [
         "-p", "--output-format", "json", "--tools", "Read", "--allowedTools", "Read(/{image})",
         "--permission-prompts", "none", "--no-session-persistence", "--strict-mcp-config",
-        "--setting-sources", "user",
+        "--restricted",
     ]
+    assert "--setting-sources" not in template, "a settings file would be loaded"
     assert "{image}" in template[-1] and "{prompt}" in template[-1]
     assert template[-1].index("{image}") < template[-1].index("{prompt}")
     assert "Read" in template[-1], "the prompt must say to read the file with the Read tool"
@@ -3702,6 +3739,40 @@ def test_the_fake_claude_denies_a_read_the_allow_rule_does_not_name(monkeypatch,
     assert reply(f"Read(/{elsewhere})") == f"Permission to read {image} was denied."
     assert ROUTING_OK in reply(f"Read(/{image})")
     assert ROUTING_OK in reply("Read")
+
+
+@posix_only
+def test_claude_code_runs_without_the_users_own_permission_grants(monkeypatch, tmp_path):
+    """Codex round 1, S1: a user's own settings file can allow Read
+    everywhere (`permissions.allow`) and open more folders
+    (`additionalDirectories`), and rules from every loaded settings file
+    merge with --allowedTools (permissions § Settings precedence: only a
+    deny wins), so loaded, such a grant lets text rendered in a photograph
+    reach files outside the staged folder. The template loads no settings
+    file: given a broad grant in the user's settings, a read the template's
+    rule does not name is still denied. With `--setting-sources user` in
+    the flag's place, the same read goes through: the fake models the
+    grant, so the denial above is the flag's doing."""
+    _fake_claude(monkeypatch, tmp_path)
+    settings = Path(os.environ["CLAUDE_CONFIG_DIR"]) / "settings.json"
+    settings.write_text(json.dumps({"permissions": {
+        "allow": ["Read"], "additionalDirectories": [str(tmp_path)]}}), encoding="utf-8")
+    image = tmp_path / "staged" / "image.jpg"
+    image.parent.mkdir()
+    image.write_bytes(b"jpeg")
+    elsewhere = tmp_path / "elsewhere.jpg"
+
+    def reply(command: list[str]) -> str:
+        backend = providers.build_primary_backend(_cfg(model={"backend": "claude-code", "command": command}))
+        return backend.complete(image, "router", 10).text
+
+    own = [a.replace("Read(/{image})", f"Read(/{elsewhere})") for a in providers.CLAUDE_CODE_COMMAND]
+    assert reply(own) == f"Permission to read {image} was denied.", "the user's grant was loaded"
+
+    loaded = [a for a in own if a != "--restricted"]
+    loaded[1:1] = ["--setting-sources", "user"]
+    assert loaded != own, "the template has no --restricted to take out"
+    assert ROUTING_OK in reply(loaded), "the fake does not model the user's grant"
 
 
 @posix_only

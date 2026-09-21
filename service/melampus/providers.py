@@ -92,6 +92,23 @@ CLAUDE_CODE = "claude-code"
 #: The program, as shutil.which looks for it: `claude` on PATH.
 CLAUDE_CODE_PROGRAM = "claude"
 
+#: The flag that loads no settings file: `--restricted` (cli-reference,
+#: 2.1.248 and later: "loads only managed settings and `--settings`", for
+#: "an evaluation harness [that] drives `claude` on a shared machine and
+#: Claude Code must not run commands or read that machine's user and
+#: project settings"; it "also confines the built-in file tools to the
+#: working directories", the staged image's own folder). A user's own
+#: settings file can allow Read everywhere and open more folders, and
+#: rules from every loaded settings file merge with --allowedTools
+#: (permissions § Settings precedence: only a deny wins), so loaded, that
+#: grant would let text rendered in a photograph reach files outside the
+#: staged folder (Codex round 1, S1); `--setting-sources user`, the flag
+#: this replaces, loaded it. The keychain login is not a settings file
+#: and stays: measured on 2.1.278, `claude --restricted auth status
+#: --json` reports the claude.ai login and its subscription; `--bare` is
+#: the mode that skips keychain reads.
+CLAUDE_CODE_ISOLATION = "--restricted"
+
 #: The one copy of the template. Every flag is from `claude --help` (2.1.277)
 #: and code.claude.com/docs/en/headless: `-p` prints one reply and exits;
 #: `--output-format json` puts the reply in the result object's `result`
@@ -113,20 +130,20 @@ CLAUDE_CODE_PROGRAM = "claude"
 #: target match"; `//c/...` is the documented form on Windows, card #424's
 #: run. `--permission-prompts none` denies anything else that would wait
 #: for a person; `--no-session-persistence` writes no transcript per frame;
-#: `--strict-mcp-config` connects no MCP server;
-#: `--setting-sources user` loads no project or local settings from wherever
-#: melampus was launched. The prompt is the positional argument, last: the
-#: staged image's path for the Read tool, then the pipeline's prompt in full,
-#: on one line up to the placeholder: the template is printed in the
-#: `loading` line and in every message that names the program, so the
-#: config refuses an element with a line break in it (card #420), and the
-#: prompt's own line breaks arrive through the placeholder, not the template.
+#: `--strict-mcp-config` connects no MCP server; CLAUDE_CODE_ISOLATION
+#: (`--restricted`) loads no settings file at all (Codex round 1, S1). The
+#: prompt is the positional argument, last: the staged image's path for
+#: the Read tool, then the pipeline's prompt in full, on one line up to the
+#: placeholder: the template is printed in the `loading` line and in every
+#: message that names the program, so the config refuses an element with a
+#: line break in it (card #420), and the prompt's own line breaks arrive
+#: through the placeholder, not the template.
 #: Not `--bare`: bare mode never reads the subscription login (headless docs:
 #: "bare mode doesn't use your subscription login").
 CLAUDE_CODE_COMMAND = [
     CLAUDE_CODE_PROGRAM, "-p", "--output-format", "json", "--tools", "Read",
     "--allowedTools", "Read(/{image})", "--permission-prompts", "none", "--no-session-persistence",
-    "--strict-mcp-config", "--setting-sources", "user",
+    "--strict-mcp-config", CLAUDE_CODE_ISOLATION,
     "The photograph is the file {image}. Read it with the Read tool, then answer this "
     "about it: {prompt}",
 ]

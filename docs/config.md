@@ -85,8 +85,7 @@ command = [
   "none",
   "--no-session-persistence",
   "--strict-mcp-config",
-  "--setting-sources",
-  "user",
+  "--restricted",
   "The photograph is the file {image}. Read it with the Read tool, then answer this about it: {prompt}"
 ]
 ```
@@ -113,8 +112,16 @@ given and the file it resolves to both match; on Windows the documented
 form is `//c/...`, which card #424's run settles.
 `--permission-prompts none` denies anything else that would wait for a person;
 `--no-session-persistence` writes no transcript per frame; `--strict-mcp-config`
-connects no MCP server; `--setting-sources user` loads no project or local
-settings from wherever melampus was launched. The prompt is the last argument:
+connects no MCP server; `--restricted` loads no settings file at all, neither
+yours nor a project's from wherever melampus was launched (the CLI reference:
+it "loads only managed settings and `--settings`", and "confines the built-in
+file tools to the working directories", the staged file's own folder; Claude
+Code 2.1.248 or later). That matters because your own settings file can allow
+`Read` everywhere or open more folders, and rules from every loaded settings
+file merge with the run's, so loaded, such a grant would let text rendered in
+a photograph reach files outside the staged folder. Your sign-in is not a
+settings file and stays: `claude --restricted auth status --json` still
+reports it. The prompt is the last argument:
 the staged image's path for the Read tool, then the pipeline's prompt in full.
 Not `--bare`, which never reads the subscription login. On the committed
 fixture the routing prompt came back in 5.6 s and two turns (one Read, one
