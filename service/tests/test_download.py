@@ -2814,9 +2814,8 @@ def test_the_pull_gives_up_on_an_ollama_that_trickles_a_line_naming_the_setting_
     TimeoutError a second time, `the pull of m from <url> failed: Ollama
     at <url> did not answer ...`, the address twice and the model twice
     on stderr, in the log and in the dialog."""
-    url = f"http://127.0.0.1:{{port}}"
     with loopback_server(TricklingPull, ThreadingHTTPServer) as trickler:
-        url = url.format(port=trickler.server_port)
+        url = f"http://127.0.0.1:{trickler.server_port}"
         started = time.monotonic()
         with pytest.raises(DownloadError) as failure:
             pull_model(FAKE_MODEL, url, on_update=lambda update: None,
