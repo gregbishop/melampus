@@ -2460,6 +2460,29 @@ def test_pull_stream_that_is_not_json_is_a_failure_not_a_traceback():
     assert "not JSON" in str(failure.value)
 
 
+@pytest.mark.parametrize(
+    "error",
+    ["pull model manifest: file does not exist\x1b[2K\rfake log line", "boom\x1b[31m\r\nfake log line\x07"],
+    ids=["unknown-model", "other"],
+)
+def test_pull_stream_error_words_keep_none_of_the_servers_control_characters(error: str):
+    """Security: an error line's words are the server's, and the message
+    carrying them lands on stderr, so in the CLI log the dialog shows its
+    tail of, and the terminal. Escape sequences and control characters in
+    it would move the cursor, recolour the terminal, erase a line, or fake a
+    line of the log. The backend neutralises them in every message that
+    carries the server's words (OllamaBackend._plain); the stream's error
+    line, one more such message, keeps the words and none of the controls,
+    on both of its paths."""
+    from melampus.download import pull_updates
+
+    with pytest.raises(DownloadError) as failure:
+        list(pull_updates(FAKE_MODEL, _stream({"error": error})))
+    message = str(failure.value)
+    assert "fake log line" in message
+    assert all(c.isprintable() for c in message), repr(message)
+
+
 def test_pull_stream_ending_without_success_is_a_failure():
     """The connection dropped before `success`: not done, and said so."""
     from melampus.download import pull_updates

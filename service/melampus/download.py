@@ -971,13 +971,17 @@ def _pull_error(model: str, error: object) -> DownloadError:
     `[model] ollama_model` when the library has no such model (`pull model
     manifest: file does not exist`, its 404 as os.ErrNotExist in
     server/images.go), else the re-run hint, since Ollama keeps the layers it
-    has and resumes them."""
-    if "file does not exist" in str(error):
+    has and resumes them. The words are the server's and land on stderr,
+    so in the CLI log and the terminal: only their printable characters,
+    by the backend's one rule for every message carrying them
+    (OllamaBackend._plain)."""
+    words = OllamaBackend._plain(str(error))
+    if "file does not exist" in words:
         return DownloadError(
-            f"Ollama has no model named {model} ({error}): check [model] ollama_model "
+            f"Ollama has no model named {model} ({words}): check [model] ollama_model "
             "is a tag from ollama.com/library"
         )
-    return DownloadError(f"Ollama could not pull {model}: {error}; {RERUN}")
+    return DownloadError(f"Ollama could not pull {model}: {words}; {RERUN}")
 
 
 def pull_updates(model: str, lines: Iterable[bytes | str]) -> Iterator[Update]:
