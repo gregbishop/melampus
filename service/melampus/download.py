@@ -84,7 +84,7 @@ from huggingface_hub.utils import WeakFileLock, build_hf_headers, filter_repo_ob
 from huggingface_hub.utils import logging as hub_logging  # noqa: E402 - the library's own logger, where its warnings go
 from huggingface_hub.utils._http import default_client_factory  # noqa: E402 - the library's own client, not a copy of it
 
-from .backend import OllamaBackend, ollama_not_running, ollama_request  # noqa: E402
+from .backend import OllamaBackend, ollama_request  # noqa: E402
 from .config import cache_file  # noqa: E402
 
 PROGRESS = "progress"
@@ -1136,18 +1136,19 @@ def _ollama_request(model: str, url: str, path: str, body: dict | None = None, *
     `model`, through `OllamaBackend.send`: straight to the address (no
     proxy, no redirect), the whole exchange within `timeout` of wall-clock
     time, at most `MAX_REPLY_BYTES` of the reply read. Raises DownloadError
-    with the backend's words: not-running when nothing answers, the
+    with the backend's words, the three kinds `send` raises and nothing
+    else: not-running when nothing answers (its one ConnectionError), the
     timeout (its message names `[model] timeout_seconds`, so `timeout` is
-    that setting for a call whose failure is shown: the delete's), `Ollama
-    answered <status>: <its words>` for an HTTP error, a reply that ran
-    past the bound or was not HTTP."""
+    that setting for a call whose failure is shown: the delete's), and a
+    RuntimeError for `Ollama answered <status>: <its words>` on an HTTP
+    error, a reply that ran past the bound or was not HTTP, or a
+    connection that ended mid-reply (a reset, a broken pipe: the raw
+    socket error, named `the connection to Ollama at <url> ended`)."""
     request = ollama_request(url, path, body, method=method)
     try:
         raw = OllamaBackend(model, url, timeout=timeout).send(request)
     except (RuntimeError, ConnectionError, TimeoutError) as exc:
         raise DownloadError(str(exc)) from exc
-    except OSError as exc:
-        raise DownloadError(ollama_not_running(url, exc)) from exc
     try:
         reply = json.loads(raw or b"{}")
     except json.JSONDecodeError as exc:
