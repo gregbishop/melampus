@@ -207,6 +207,14 @@ def _works_here(verdicts: list[EngineVerdict]) -> tuple[str, ...]:
     return (*(v.engine for v in verdicts if v.available), SCRIPTED)
 
 
+def _refuse_here(reason: str, ollama_url: str | None) -> BackendUnavailable:
+    """A refusal whose "what works" list comes from a fresh detection: for the
+    branches that refuse on their own grounds (no Apple Silicon, no program)
+    and have not probed the engines yet. Each refusal is terminal, so the
+    probe runs once."""
+    return _refusal(reason, works_here=_works_here(detect_engines(ollama_url)))
+
+
 def default_engine(ollama_at: str | None = None) -> str:
     """What runs when nothing names an engine: the first detection says is
     available, in the owner's order. There is always one, because the cloud
@@ -262,9 +270,8 @@ def build_primary_backend(config: MelampusConfig) -> VLMBackend:
 
     if kind == "mlx":
         if not on_apple_silicon():
-            raise _refusal(
-                "The local MLX backend only runs on Apple Silicon Macs.",
-                works_here=_works_here(detect_engines(settings.ollama_url)),
+            raise _refuse_here(
+                "The local MLX backend only runs on Apple Silicon Macs.", settings.ollama_url
             )
         from .backend import MLXBackend
 
@@ -296,29 +303,29 @@ def build_primary_backend(config: MelampusConfig) -> VLMBackend:
         # frame mid-run. The resolved path is what runs, so the check and
         # the run agree on the program.
         if not settings.command:
-            raise _refusal(
+            raise _refuse_here(
                 "The command backend needs [model] command: the program to run, as "
                 "a list of arguments with {image} and {prompt} placeholders "
                 "(docs/config.md § [model]).",
-                works_here=_works_here(detect_engines(settings.ollama_url)),
+                settings.ollama_url,
             )
         program = settings.command[0]
         executable = shutil.which(program)
         if executable is None:
-            raise _refusal(
+            raise _refuse_here(
                 f"The command '{program}' is not installed or not on PATH. Install "
                 "it, make sure the shell melampus runs from can find it, or name "
                 "its full path in [model] command.",
-                works_here=_works_here(detect_engines(settings.ollama_url)),
+                settings.ollama_url,
             )
         if executable.lower().endswith(BATCH_SUFFIXES):
-            raise _refusal(
+            raise _refuse_here(
                 f"The command '{program}' resolves to {executable}, a batch file "
                 "that Windows runs through cmd.exe whatever it is told, so the "
                 "prompt would be parsed as shell text rather than passed as one "
                 "argument. Name the program's real entry in [model] command "
                 "instead: its .exe, or node and the script the shim wraps.",
-                works_here=_works_here(detect_engines(settings.ollama_url)),
+                settings.ollama_url,
             )
         from .backend import CommandBackend
 
