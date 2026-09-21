@@ -12,6 +12,7 @@ import contextlib
 import errno
 import functools
 import http.client
+import itertools
 import json
 import os
 import select
@@ -952,13 +953,15 @@ class CommandBackend(VLMBackend):
         return [self.executable, *expanded[1:]]
 
     def _stderr_lines(self, stderr: str) -> str:
-        """The first STDERR_LINES lines the program wrote, joined with
-        " / ", each read through `plain`: they land in the frame's error
-        record, the log and the terminal, so an escape sequence in them
-        would clear the screen or recolour it, and a control would fake a
-        line of the log."""
-        lines = [line for line in stderr.splitlines() if line.strip()]
-        return " / ".join(self.plain(line) for line in lines[: self.STDERR_LINES])
+        """The first STDERR_LINES lines the program wrote that are words
+        once read through `plain`, joined with " / ": they land in the
+        frame's error record, the log and the terminal, so an escape
+        sequence in them would clear the screen or recolour it, and a
+        control would fake a line of the log. A line that is only
+        controls is not a line, so it spends none of the STDERR_LINES;
+        `islice` stops the reading at the cap."""
+        words = (self.plain(line) for line in stderr.splitlines())
+        return " / ".join(itertools.islice(filter(None, words), self.STDERR_LINES))
 
     def _stop_tree(self, pid: int) -> None:
         """Stop the process tree the command with `pid` heads (OWN_GROUP):
