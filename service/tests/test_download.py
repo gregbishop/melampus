@@ -2876,6 +2876,44 @@ def test_status_with_no_ollama_answering_says_absent_and_never_fails():
                             path=None, cancel_path=str(cancel_marker_path()))
 
 
+@pytest.mark.parametrize("reply", [
+    [],
+    {"models": 5},
+    {"models": [{"name": [FAKE_MODEL]}]},
+    {"models": [{"name": "other:latest", "model": [FAKE_MODEL]}]},
+    {"models": [{"name": FAKE_MODEL, "size": "large"}]},
+    {"models": [{"name": FAKE_MODEL, "size": [1]}]},
+], ids=["not-an-object", "models-not-a-list", "name-not-a-string", "model-not-a-string", "size-words", "size-a-list"])
+def test_status_with_an_ollama_answering_the_list_in_the_wrong_shape_says_absent_and_never_fails(reply):
+    """Security: the list is whatever listens at the address writes it, and
+    `--model-status` is what the Settings dialog waits on when it opens, so
+    it never fails for the server (test_status_with_no_ollama_answering...).
+    Given a list that is JSON but not the documented shape (docs/api.md §
+    List Local Models: an object whose `models` is a list of objects with
+    a `name` and a `size`), the malformed reply is named at the boundary as
+    the pull's is, never a traceback out of the entry point, and the status
+    reads absent, size unknown."""
+    from conftest import QuietHandler
+
+    class WrongShape(QuietHandler):
+        def do_GET(self):  # noqa: N802 - http.server's name
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(reply).encode("utf-8"))
+
+    with loopback_server(WrongShape) as squatter:
+        address = f"http://127.0.0.1:{squatter.server_port}"
+        with pytest.raises(DownloadError) as failure:
+            download._held(FAKE_MODEL, address)
+        assert download.OLLAMA_TAGS in str(failure.value), str(failure.value)
+
+        status = ollama_status(FAKE_MODEL, address)
+
+    assert status == Status(FAKE_MODEL, installed=False, bytes_total=None, bytes_done=0,
+                            path=None, cancel_path=str(cancel_marker_path()))
+
+
 def test_remove_deletes_the_pulled_model_from_ollama(fake_ollama: FakeOllama):
     """Remove: the delete endpoint (docs/api.md § Delete a Model: DELETE
     /api/delete with the model's name, 200 when gone). The status reads

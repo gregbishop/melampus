@@ -1134,19 +1134,40 @@ def _ollama_request(model: str, url: str, path: str, body: dict | None = None, *
     except OSError as exc:
         raise DownloadError(ollama_not_running(address, exc)) from exc
     try:
-        return json.loads(raw or b"{}")
+        reply = json.loads(raw or b"{}")
     except json.JSONDecodeError as exc:
         raise DownloadError(f"Ollama's reply from {url}{path} was not JSON: {raw[:120]!r}") from exc
+    if not isinstance(reply, dict):
+        raise DownloadError(f"Ollama's reply from {url}{path} was not a JSON object: {raw[:120]!r}")
+    return reply
 
 
 def _held(model: str, url: str) -> dict | None:
     """The list entry for `model` in the Ollama at `url` (docs/api.md § List
     Local Models: GET /api/tags, `models` each with `name` and `size`), or
     None when it is not held. A name without a tag is `<name>:latest`
-    there (§ Model names: the tag defaults to `latest`)."""
+    there (§ Model names: the tag defaults to `latest`). The list is the
+    server's to write: one not in that shape (`models` not a list, an
+    entry's name not a string, its size not a count) is a DownloadError
+    naming it, as a malformed pull line is, never a traceback."""
     names = {model, model if ":" in model else f"{model}:latest"}
-    for entry in _ollama_request(model, url, OLLAMA_TAGS, method="GET").get("models") or []:
-        if isinstance(entry, dict) and (entry.get("name") in names or entry.get("model") in names):
+    models = _ollama_request(model, url, OLLAMA_TAGS, method="GET").get("models") or []
+    if not isinstance(models, list):
+        raise DownloadError(f"Ollama's list from {url}{OLLAMA_TAGS} was not a list of models: {str(models)[:120]!r}")
+    for entry in models:
+        listed = [entry.get(key) for key in ("name", "model")] if isinstance(entry, dict) else [None]
+        if not isinstance(listed[0], str) or not all(isinstance(name, (str, type(None))) for name in listed):
+            raise DownloadError(
+                f"Ollama's list from {url}{OLLAMA_TAGS} carried an entry with no name: {str(entry)[:120]!r}"
+            )
+        if names & set(listed):
+            try:
+                int(entry.get("size") or 0)
+            except (TypeError, ValueError) as exc:
+                raise DownloadError(
+                    f"Ollama's list from {url}{OLLAMA_TAGS} carried a size that is not a count: "
+                    f"{str(entry)[:120]!r}"
+                ) from exc
             return entry
     return None
 
