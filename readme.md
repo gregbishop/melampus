@@ -88,9 +88,11 @@ so, naming the address it tried and where to install Ollama.
 
 **A subscription CLI.** An installed command-line program can be the engine
 too: `backend = "command"` runs the program `[model] command` names once per
-frame with the image path and the prompt in its arguments and reads the reply
-from its stdout, so a CLI that bills to a subscription rather than per call,
-such as Claude Code or Codex CLI, is vision with no API key
+completion (a frame is two, the taxon routing prompt and then the group's
+identification prompt; a retry or a fallback size is another) with the image
+path and the prompt in its arguments and reads the reply from its stdout, so a
+CLI that bills to a subscription rather than per call, such as Claude Code or
+Codex CLI, is vision with no API key
 ([docs/config.md](docs/config.md) § `[model]`). The seam is generic; the
 configured templates for Claude Code (card #421) and Codex (card #422) ship
 separately, and the plugin's picker learns the name in card #423. A program

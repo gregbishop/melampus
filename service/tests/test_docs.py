@@ -715,3 +715,23 @@ def test_config_doc_names_the_command_output_ceiling():
     assert str(CommandBackend.MAX_OUTPUT_BYTES) in command_row, (
         "docs/config.md's command row does not name the output ceiling in bytes")
     assert "4 MiB" in command_row, "docs/config.md's command row does not name the output ceiling"
+
+
+def test_docs_say_the_command_runs_once_per_completion():
+    """Card #420: the `command` backend runs its program once per
+    completion, not once per frame: a frame is at least two completions
+    (the routing prompt, then the group's identification prompt), and a
+    corrective retry or a step down the fallback ladder is another. Each
+    of docs/architecture.md, docs/config.md's `backend` row and readme.md
+    must say so where it describes the engine, and name the two stages."""
+    for doc, prose in (
+        ("docs/architecture.md", (REPO / "docs" / "architecture.md").read_text(encoding="utf-8")),
+        ("docs/config.md", next(line for line in CONFIG_DOC.read_text(encoding="utf-8").splitlines()
+                                if line.startswith("| `backend` |"))),
+        ("readme.md", README.read_text(encoding="utf-8")),
+    ):
+        prose = " ".join(prose.split())  # the prose wraps; the phrase must not hide across a line break
+        assert "once per frame" not in prose, f"{doc} still says the command runs once per frame"
+        assert "once per completion" in prose, f"{doc} does not say the command runs once per completion"
+        assert "routing" in prose and "identification" in prose, (
+            f"{doc} does not name the two completions a frame is made of")
