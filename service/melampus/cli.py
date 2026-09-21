@@ -188,10 +188,11 @@ def _run_escalation(paths, local_cache: ResultCache, config, *,
     return 0
 
 
-def _download_model(fetch: Callable[[Callable[[Update], None]], object]) -> int:
+def _download_model(fetch: Callable[..., object]) -> int:
     """--download-model (card #407): fetch the model with progress on stdout
     in the protocol the plugin parses (docs/config.md § Downloading the
-    model). `fetch` takes the update callback and returns what `done`
+    model). `fetch` takes the update callback as `on_update` (the download
+    functions' keyword, with the model already bound) and returns what `done`
     prints: the snapshot folder for mlx, the model's name for ollama (card
     #409). Exit 0 once complete, 3 on a failure with the fix on stderr, and
     EXIT_CANCELLED when a signal or the cancel marker (card #408) stopped it
@@ -203,7 +204,7 @@ def _download_model(fetch: Callable[[Callable[[Update], None]], object]) -> int:
 
     try:
         with cancel_on_signals():
-            path = fetch(emit)
+            path = fetch(on_update=emit)
     except DownloadCancelled:
         emit(Update.cancelled())
         return EXIT_CANCELLED
@@ -260,15 +261,14 @@ def _model_command(args: argparse.Namespace, config) -> int:
     engine = _pick_model_engine(args, config)
     if engine == "mlx":
         repo = config.model.repo
-        fetch = lambda on_update: download.download_model(repo, on_update=on_update)  # noqa: E731
-        status = lambda: download.model_status(repo)  # noqa: E731
-        remove = lambda: download.remove_model(repo)  # noqa: E731
+        fetch = functools.partial(download.download_model, repo)
+        status = functools.partial(download.model_status, repo)
+        remove = functools.partial(download.remove_model, repo)
     elif engine == OLLAMA:
         model, url = config.model.ollama_model, ollama_url(config.model.ollama_url)
-        fetch = lambda on_update: download.pull_model(  # noqa: E731
-            model, url, on_update=on_update, timeout=config.model.timeout_seconds)
-        status = lambda: download.ollama_status(model, url)  # noqa: E731
-        remove = lambda: download.remove_ollama_model(model, url)  # noqa: E731
+        fetch = functools.partial(download.pull_model, model, url, timeout=config.model.timeout_seconds)
+        status = functools.partial(download.ollama_status, model, url)
+        remove = functools.partial(download.remove_ollama_model, model, url)
     else:
         return _fail(
             f"the {engine} engine has no model to fetch here: the engines with one are "
