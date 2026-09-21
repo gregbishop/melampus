@@ -3013,6 +3013,46 @@ def test_pull_stops_when_the_cancel_marker_appears_and_the_next_pull_resumes(tmp
         assert ollama.models == {FAKE_MODEL: size}
 
 
+def test_a_pull_resumed_after_a_cancel_in_its_second_layer_counts_the_first_layer_held_and_both_in_its_total(
+    tmp_path: Path
+):
+    """Codex review (opposing vendor) round 2, code finding 2
+    (conftest.py:792). The fake reported a layer already complete only when
+    the whole model was installed, so a pull resumed after a cancel during
+    the second layer never saw the first: its lines were the second layer's
+    alone, `progress 1000 1000` for a model of 4,000 bytes, where Ollama
+    reports a layer it already holds once, complete (server/download.go;
+    docs/api.md § Pull a Model), so the protocol's sums cover both. Given a
+    cancel during the second layer, the resumed pull's first line is the
+    first layer held whole, its last progress line the whole model, and
+    the fake then holds the model at its whole size."""
+    marker = tmp_path / "data" / "download-cancel"
+    seen: list[Update] = []
+
+    def cancel_in_the_second_layer(update: Update) -> None:
+        seen.append(update)
+        if update.bytes_total == 4000 and update.bytes_done > 3000 and not marker.exists():
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.touch()
+
+    ollama = FakeOllama(library={FAKE_MODEL: [3000, 1000]})
+    ollama.throttle = (100, 0.01)
+    with ollama.serve():
+        with pytest.raises(DownloadCancelled):
+            pull_model(FAKE_MODEL, ollama.endpoint, on_update=cancel_in_the_second_layer, cancel_marker=marker)
+        assert 3000 < seen[-1].bytes_done < 4000, "the cancel did not land in the second layer"
+        assert FAKE_MODEL not in ollama.models, "the fake finished the pull after the stream closed"
+
+        ollama.throttle = None
+        updates = _pull(ollama, cancel_marker=marker)
+
+    assert [p["model"] for p in ollama.pulls] == [FAKE_MODEL, FAKE_MODEL], "the second pull was not asked for"
+    assert updates[0] == Update.progress(3000, 3000), f"the first layer was not reported held: {updates}"
+    assert updates[-2] == Update.progress(4000, 4000), f"the total did not cover both layers: {updates}"
+    assert updates[-1] == Update.done(FAKE_MODEL)
+    assert ollama.models == {FAKE_MODEL: 4000}
+
+
 def test_a_stale_cancel_marker_is_removed_when_a_pull_starts(fake_ollama: FakeOllama, tmp_path: Path):
     marker = tmp_path / "data" / "download-cancel"
     marker.parent.mkdir(parents=True)

@@ -781,7 +781,13 @@ class FakeOllama:
                         digest = "sha256:" + hashlib.sha256(f"{name}:{index}".encode()).hexdigest()
                         line = {"status": f"pulling {digest[7:19]}", "digest": digest, "total": size}
                         done = ollama.partial.get((name, digest), 0)
-                        if done == 0 and name not in ollama.models:
+                        if done == size:
+                            # A layer already held is reported once, complete
+                            # (server/download.go), whether the whole model is
+                            # installed or a cut-off pull kept this layer alone.
+                            self._line({**line, "completed": done})
+                            continue
+                        if done == 0:
                             self._line(line)
                         step, pause = ollama.throttle or (size, 0.0)
                         while done < size:
@@ -789,8 +795,6 @@ class FakeOllama:
                             ollama.partial[(name, digest)] = done
                             self._line({**line, "completed": done})
                             time.sleep(pause)
-                        if done == size and name in ollama.models:
-                            self._line({**line, "completed": done})
                     for status_ in ("verifying sha256 digest", "writing manifest", "removing any unused layers"):
                         self._line({"status": status_})
                     ollama.models[name] = sum(ollama.library[name])
