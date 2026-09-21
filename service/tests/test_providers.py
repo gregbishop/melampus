@@ -2556,46 +2556,66 @@ def test_command_backend_returns_candidates_in_the_same_shape_as_mlx_on_the_fixt
 
 def _gone(pid: int, within: float) -> bool:
     """Whether process `pid` is gone (or a zombie no longer running) within
-    `within` seconds."""
+    `within` seconds; looked for at least once."""
     deadline = time.monotonic() + within
-    while time.monotonic() < deadline:
+    while True:
         try:
             os.kill(pid, 0)
         except ProcessLookupError:
             return True
+        if time.monotonic() >= deadline:
+            return False
         time.sleep(0.05)
-    return False
+
+
+@pytest.fixture
+def pid_file(tmp_path):
+    """The file a fake CLI's script writes a pid into (its worker's, or its
+    own) so the test can look for that process afterwards. On teardown,
+    the process it names is killed if it is still there, which is the
+    failing case: a passing test has proven it gone, and a pid proven
+    free is never signalled, since it may be another process's by then."""
+    path = tmp_path / "worker.pid"
+    yield path
+    if path.exists():
+        pid = int(path.read_text(encoding="utf-8"))
+        if not _gone(pid, within=0.0):
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(pid, 9)
+
+
+def _real_command_backend(monkeypatch, tmp_path, script: str, timeout: float, **fields) -> CommandBackend:
+    """The backend the factory builds for the fake CLI `script` (a body for
+    _fake_cli, `fields` filled in) under a `timeout` of that many seconds:
+    the real shutil.which, the real subprocess, no shell."""
+    command = _fake_cli(monkeypatch, tmp_path, script=script, **fields)
+    return providers.build_primary_backend(
+        _cfg(model={"backend": "command", "command": command, "timeout_seconds": timeout}))
 
 
 @posix_only
-def test_command_backend_timeout_stops_the_worker_the_command_started(monkeypatch, tmp_path):
+def test_command_backend_timeout_stops_the_worker_the_command_started(monkeypatch, tmp_path, pid_file):
     """At the real boundary: the command starts a worker and waits for it,
     the way a CLI wrapping a daemon does, and neither answers within the
     timeout. Then the run is a TimeoutError as before, and the worker is
     gone too: stopping only the command would leave a worker per timed-out
     frame running while the batch goes on."""
-    pid_file = tmp_path / "worker.pid"
-    command = _fake_cli(monkeypatch, tmp_path, script=_LAUNCHER_SCRIPT,
-                        pid_file=str(pid_file), waits=True)
-    backend = providers.build_primary_backend(
-        _cfg(model={"backend": "command", "command": command, "timeout_seconds": 1}))
+    backend = _real_command_backend(monkeypatch, tmp_path, _LAUNCHER_SCRIPT, timeout=1,
+                                    pid_file=str(pid_file), waits=True)
     image = tmp_path / "image.jpg"
     image.write_bytes(b"jpeg")
 
-    try:
-        with pytest.raises(TimeoutError) as err:
-            backend.complete(image, "prompt", 10)
-        assert "fake-vlm did not answer within 1s" in str(err.value)
-        worker = int(pid_file.read_text(encoding="utf-8"))
-        assert _gone(worker, within=10.0), f"worker {worker} is still running after the timeout"
-    finally:
-        if pid_file.exists():
-            with contextlib.suppress(ProcessLookupError):
-                os.kill(int(pid_file.read_text(encoding="utf-8")), 9)
+    with pytest.raises(TimeoutError) as err:
+        backend.complete(image, "prompt", 10)
+
+    assert "fake-vlm did not answer within 1s" in str(err.value)
+    worker = int(pid_file.read_text(encoding="utf-8"))
+    assert _gone(worker, within=10.0), f"worker {worker} is still running after the timeout"
 
 
 @posix_only
-def test_command_backend_uses_the_reply_of_a_command_that_exits_leaving_a_worker(monkeypatch, tmp_path):
+def test_command_backend_uses_the_reply_of_a_command_that_exits_leaving_a_worker(
+        monkeypatch, tmp_path, pid_file):
     """At the real boundary: the command prints its reply, starts a worker
     that inherits its stdout and stderr, and exits 0 at once, the way a
     CLI that leaves a helper behind does. Its exit ends its answer: the
@@ -2604,11 +2624,8 @@ def test_command_backend_uses_the_reply_of_a_command_that_exits_leaving_a_worker
     that could not help, the reply discarded), the worker is gone, and
     the group was stopped by a pid that was still the command's own, its
     exited process unreaped (a signal 0 still reaches it)."""
-    pid_file = tmp_path / "worker.pid"
-    command = _fake_cli(monkeypatch, tmp_path, script=_LAUNCHER_SCRIPT,
-                        pid_file=str(pid_file), waits=False)
-    backend = providers.build_primary_backend(
-        _cfg(model={"backend": "command", "command": command, "timeout_seconds": 4}))
+    backend = _real_command_backend(monkeypatch, tmp_path, _LAUNCHER_SCRIPT, timeout=4,
+                                    pid_file=str(pid_file), waits=False)
     image = tmp_path / "image.jpg"
     image.write_bytes(b"jpeg")
     killpg, leader_unreaped = os.killpg, []
@@ -2622,18 +2639,14 @@ def test_command_backend_uses_the_reply_of_a_command_that_exits_leaving_a_worker
         return killpg(pgid, sig)
     monkeypatch.setattr(os, "killpg", spy)
 
-    try:
-        started = time.monotonic()
-        completion = backend.complete(image, "prompt", 10)
-        assert time.monotonic() - started < 2, "the reply was held to the timeout"
-        assert completion.text.strip() == ID_OK
-        worker = int(pid_file.read_text(encoding="utf-8"))
-        assert _gone(worker, within=10.0), f"worker {worker} outlived the command's exit"
-        assert leader_unreaped == [True], "the tree was stopped by a pid the command no longer held"
-    finally:
-        if pid_file.exists():
-            with contextlib.suppress(ProcessLookupError):
-                os.kill(int(pid_file.read_text(encoding="utf-8")), 9)
+    started = time.monotonic()
+    completion = backend.complete(image, "prompt", 10)
+
+    assert time.monotonic() - started < 2, "the reply was held to the timeout"
+    assert completion.text.strip() == ID_OK
+    worker = int(pid_file.read_text(encoding="utf-8"))
+    assert _gone(worker, within=10.0), f"worker {worker} outlived the command's exit"
+    assert leader_unreaped == [True], "the tree was stopped by a pid the command no longer held"
 
 
 def test_command_backend_sees_the_exit_without_reaping_the_command():
@@ -2662,33 +2675,27 @@ def test_command_backend_sees_the_exit_without_reaping_the_command():
 
 @posix_only
 @pytest.mark.parametrize("stream", ["stdout", "stderr"])
-def test_command_backend_stops_a_runaway_command_before_the_timeout(monkeypatch, tmp_path, stream):
+def test_command_backend_stops_a_runaway_command_before_the_timeout(
+        monkeypatch, tmp_path, pid_file, stream):
     """At the real boundary: the command writes without end to one stream,
     under a timeout of a minute. It is stopped as soon as it passes the
     ceiling, seconds in, not read into memory until the timeout: the frame's
     error names the program, the stream and the ceiling, and the process is
     gone."""
-    pid_file = tmp_path / "runaway.pid"
-    command = _fake_cli(monkeypatch, tmp_path, script=_RUNAWAY_SCRIPT,
-                        pid_file=str(pid_file), stream=stream)
-    backend = providers.build_primary_backend(
-        _cfg(model={"backend": "command", "command": command, "timeout_seconds": 60}))
+    backend = _real_command_backend(monkeypatch, tmp_path, _RUNAWAY_SCRIPT, timeout=60,
+                                    pid_file=str(pid_file), stream=stream)
     image = tmp_path / "image.jpg"
     image.write_bytes(b"jpeg")
 
-    try:
-        started = time.monotonic()
-        with pytest.raises(RuntimeError) as err:
-            backend.complete(image, "prompt", 10)
-        assert time.monotonic() - started < 20, "the runaway was read until the timeout"
-        for named in ("fake-vlm", stream, str(CommandBackend.MAX_OUTPUT_BYTES)):
-            assert named in str(err.value), str(err.value)
-        pid = int(pid_file.read_text(encoding="utf-8"))
-        assert _gone(pid, within=10.0), f"the runaway {pid} is still running"
-    finally:
-        if pid_file.exists():
-            with contextlib.suppress(ProcessLookupError):
-                os.kill(int(pid_file.read_text(encoding="utf-8")), 9)
+    started = time.monotonic()
+    with pytest.raises(RuntimeError) as err:
+        backend.complete(image, "prompt", 10)
+
+    assert time.monotonic() - started < 20, "the runaway was read until the timeout"
+    for named in ("fake-vlm", stream, str(CommandBackend.MAX_OUTPUT_BYTES)):
+        assert named in str(err.value), str(err.value)
+    pid = int(pid_file.read_text(encoding="utf-8"))
+    assert _gone(pid, within=10.0), f"the runaway {pid} is still running"
 
 
 def test_command_not_installed_fires_before_any_image_is_read(tmp_path, capsys, no_ambient_ollama):
