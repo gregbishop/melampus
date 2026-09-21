@@ -1806,6 +1806,76 @@ def test_remove_refuses_with_the_reason_when_a_lock_it_probes_cannot_be_opened(f
     assert path.exists() and snapshot_files(path) == FAKE_FILES, "the model was removed"
 
 
+@pytest.mark.skipif(sys.platform == "win32" or getattr(os, "geteuid", lambda: 1)() == 0,
+                    reason="an unsearchable folder does not stop a scan here")
+def test_status_and_remove_refuse_with_the_reason_when_another_repo_in_the_cache_cannot_be_scanned(
+    fake_hub: FakeHub, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+):
+    """Security (Claude review 13, security finding 1; download.py:655-665).
+    The hub library's scan of the cache walks every repo folder in it, other
+    tools' models included; one the process cannot search raised its
+    PermissionError through `--model-status` and `--remove-model` as a
+    traceback, exit 1, naming the build machine's source paths, where the
+    contract is exit 3 with a reason. It is a DownloadError naming the
+    cache and the folder the OS named, from both, and through the CLI exit
+    3 with the folder on stderr, nothing on stdout, no traceback; the model
+    stays."""
+    cache = tmp_path / "hub"
+    path, _ = _fetch(fake_hub, cache)
+    other = cache / "models--other--repo"
+    other.mkdir()
+    os.chmod(other, 0)
+    try:
+        for ask in (lambda: _status(fake_hub, cache), lambda: remove_model(FAKE_REPO, cache_dir=cache)):
+            with pytest.raises(DownloadError) as failure:
+                ask()
+            message = str(failure.value)
+            assert str(cache) in message and str(other) in message and "permissions" in message, message
+        monkeypatch.setattr(download.constants, "HF_HUB_CACHE", str(cache))
+        for flag in ("--model-status", "--remove-model"):
+            assert main([flag, "--no-local-config", "--model", FAKE_REPO]) == 3, flag
+            out, err = capsys.readouterr()
+            assert out == "" and str(other) in err and "Traceback" not in err, (flag, err)
+    finally:
+        os.chmod(other, 0o700)
+    assert snapshot_files(path) == FAKE_FILES, "the model was removed"
+
+
+@pytest.mark.skipif(sys.platform == "win32" or getattr(os, "geteuid", lambda: 1)() == 0,
+                    reason="an unsearchable folder does not stop a count here")
+def test_status_refuses_with_the_reason_when_the_repo_blobs_cannot_be_counted(
+    fake_hub: FakeHub, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+):
+    """Security (Claude review 13, security finding 1; download.py:668-671).
+    The status counts the repo's bytes by listing and stat-ing its `blobs`
+    folder; one the process cannot search raised the PermissionError as a
+    traceback, exit 1. It is a DownloadError naming the cache and the
+    folder, exit 3 through the CLI with the folder on stderr, nothing on
+    stdout, no traceback. The snapshot's files are copies of the blobs
+    here, the layout the hub library makes where it cannot link, so the
+    scan (which stats the snapshot's files) reads them and the count is
+    what meets the folder."""
+    cache = tmp_path / "hub"
+    path, _ = _fetch(fake_hub, cache)
+    for file in path.iterdir():
+        blob = file.resolve()
+        file.unlink()
+        shutil.copyfile(blob, file)
+    blobs = cache / FAKE_FOLDER / "blobs"
+    os.chmod(blobs, 0)
+    try:
+        with pytest.raises(DownloadError) as failure:
+            _status(fake_hub, cache)
+        message = str(failure.value)
+        assert str(cache) in message and str(blobs) in message and "permissions" in message, message
+        monkeypatch.setattr(download.constants, "HF_HUB_CACHE", str(cache))
+        assert main(["--model-status", "--no-local-config", "--model", FAKE_REPO]) == 3
+        out, err = capsys.readouterr()
+        assert out == "" and str(blobs) in err and "Traceback" not in err, err
+    finally:
+        os.chmod(blobs, 0o700)
+
+
 def _lock_dir(cache: Path) -> Path:
     """The cache's locks folder for the fake repo, where a running download
     holds the hub library's per-file lock on the blob it is appending to (the

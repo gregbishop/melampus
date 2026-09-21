@@ -208,7 +208,8 @@ def _model_status(repo: str) -> int:
     """--model-status (card #408): one JSON object on stdout saying whether the
     MLX model is in the cache, its size, and where the plugin writes to
     cancel a download. Never fails for the network: the size is null then.
-    Exit 3 with the reason on stderr for a repo that is not a repo id."""
+    Exit 3 with the reason on stderr for a repo that is not a repo id, or a
+    cache it cannot read."""
     from .download import DownloadError, model_status
 
     try:

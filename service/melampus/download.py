@@ -663,7 +663,11 @@ def _cached(repo: str, cache: Path):
     warning, not a repo."""
     if not cache.is_dir():
         return None
-    for cached in scan_cache_dir(cache).repos:
+    try:
+        repos = scan_cache_dir(cache).repos
+    except OSError as exc:
+        raise _cache_unreadable(cache, exc) from exc
+    for cached in repos:
         if cached.repo_id == repo and cached.repo_type == "model":
             return cached
     return None
@@ -673,7 +677,18 @@ def _bytes_in_cache(storage: Path) -> int:
     """Every byte of the repo the cache holds: complete blobs and the
     `.incomplete` partial alike, which is what the next run starts from."""
     blobs = storage / "blobs"
-    return sum(p.stat().st_size for p in blobs.iterdir() if p.is_file()) if blobs.is_dir() else 0
+    try:
+        return sum(p.stat().st_size for p in blobs.iterdir() if p.is_file()) if blobs.is_dir() else 0
+    except OSError as exc:
+        raise _cache_unreadable(storage.parent, exc) from exc
+
+
+def _cache_unreadable(cache: Path, exc: OSError) -> DownloadError:
+    """The DownloadError for a cache the process cannot read (a folder in it,
+    another tool's model included, that it cannot search or list): the scan
+    the status and the removal share, and the status's byte count, name the
+    cache and the path the OS named, and the CLI maps it to exit 3."""
+    return DownloadError(f"could not read the model cache at {cache} ({exc}): check that folder's permissions")
 
 
 def model_status(repo: str, *, endpoint: str | None = None, cache_dir: Path | None = None) -> Status:
@@ -782,9 +797,11 @@ def remove_model(repo: str, *, cache_dir: Path | None = None) -> Path:
     and loadable by nothing; set aside, the model is gone from the cache
     (the status reads absent, a second removal has nothing to remove), and
     the message names the folder for the owner to delete by hand. Any other
-    OSError of the lock probe or the deletion (a lock file that cannot be
-    opened) is a DownloadError naming it too, as `download_model` bounds its
-    own: the CLI maps DownloadError to exit 3 and lets nothing else out."""
+    OSError of the scan (a folder in the shared cache the process cannot
+    search, another tool's model included), the lock probe or the deletion
+    (a lock file that cannot be opened) is a DownloadError naming it too, as
+    `download_model` bounds its own: the CLI maps DownloadError to exit 3
+    and lets nothing else out."""
     cache, _, locks = _cache_paths(repo, cache_dir)
     cached = _cached(repo, cache)
     if cached is None:
