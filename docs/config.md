@@ -132,7 +132,10 @@ writes where the executable looks without deriving the directory itself.
 ### `--model-status` and `--remove-model`
 
 Two more flags that need no folder and take `[model] repo` or `--model`, for
-the Settings dialog's Download button (card #408):
+the Settings dialog's Download button (card #408). Both refuse an id that is
+not a repo id (a pasted hub URL, a path) the way `--download-model` does:
+**exit 3**, the message on stderr naming `[model] repo` or `--model`, before
+the hub is asked anything.
 
 - `--model-status` prints one JSON object and exits 0:
   `{"repo", "installed", "bytes_total", "bytes_done", "path", "cancel_path"}`.

@@ -1228,6 +1228,36 @@ def test_status_gives_up_on_a_hub_that_accepts_the_connection_and_never_answers(
                             path=None, cancel_path=str(cancel_marker_path()))
 
 
+@pytest.mark.parametrize(("content_type", "body"), [
+    ("text/html", b"<html><body>Sign in to the network</body></html>"),
+    ("application/json", b"[1, 2, 3]"),
+], ids=["not json", "json of another shape"])
+def test_status_treats_a_hub_answering_200_with_something_else_as_unreachable(
+    tmp_path: Path, content_type: str, body: bytes
+):
+    """Security (Claude review 9 of #16, download.py:648). A host at
+    HF_ENDPOINT that answers 200 with something that is not the hub's answer
+    (a captive portal's sign-in page, a proxy's block page, a JSON of another
+    shape) raised the library's decoding error out of the status uncaught:
+    a traceback in melampus-cli.log naming source paths, and the dialog
+    pointing at exit 1 instead of the row. The status never fails for the
+    network: such a hub is one that could not be reached, the size unknown."""
+    from conftest import QuietHandler, loopback_server
+
+    class Elsewhere(QuietHandler):
+        def do_GET(self):  # noqa: N802 - http.server's name
+            self.send_response(200)
+            self.send_header("Content-Type", content_type)
+            self.end_headers()
+            self.wfile.write(body)
+
+    with loopback_server(Elsewhere) as server:
+        status = model_status(FAKE_REPO, endpoint=f"http://127.0.0.1:{server.server_port}", cache_dir=tmp_path / "hub")
+
+    assert status == Status(FAKE_REPO, installed=False, bytes_total=None, bytes_done=0,
+                            path=None, cancel_path=str(cancel_marker_path()))
+
+
 @pytest.mark.parametrize(("host", "carried"), [("127.0.0.1", True), ("hub.example", False)],
                          ids=["loopback http", "remote http"])
 def test_status_sends_the_user_token_to_a_loopback_hub_and_never_to_a_remote_http_hub(
@@ -1431,6 +1461,21 @@ def test_remove_model_flag_exits_3_with_the_refusal_on_stderr_and_nothing_on_std
 
     out, err = capsys.readouterr()
     assert out == "" and "cancel it first" in err
+
+
+@pytest.mark.parametrize("flag", ["--download-model", "--model-status", "--remove-model"])
+def test_model_flags_exit_3_with_the_config_key_on_stderr_when_the_repo_is_not_a_repo_id(capsys, flag: str):
+    """Security (Claude review 9 of #16, download.py:643 and :675). A `[model]
+    repo` (or `--model`) that is not a repo id (a URL, a path) is refused by
+    the hub library's own check before the hub is asked anything; the
+    download mapped that to exit 3 naming the config key, the status and the
+    removal let it out as a 19-line traceback, exit 1. All three refuse the
+    same way: exit 3, the key on stderr, nothing on stdout."""
+    assert main([flag, "--no-local-config", "--model", "not a repo id/x/y"]) == 3
+
+    out, err = capsys.readouterr()
+    assert out == ""
+    assert "not a repo id/x/y" in err and "[model] repo" in err and "Traceback" not in err
 
 
 def test_cli_reports_absent_then_installed_then_removed_against_the_fake_hub(

@@ -535,9 +535,18 @@ def _cache_paths(repo: str, cache_dir: Path | None) -> tuple[Path, Path, Path]:
     `cache_dir`), said once for the download, the status and the removal:
     the cache, the repo's storage folder in it (the hub library's own
     layout, `models--org--name`), and the `.locks` folder holding the
-    per-file locks `_fetch` takes and `_download_running` tries."""
+    per-file locks `_fetch` takes and `_download_running` tries. The hub
+    library's own check of the id (`namespace/name`, no URL, no path under
+    it) runs here, before the hub is asked anything, so the three refuse an
+    id that is not one the same way: a DownloadError naming the config key."""
     cache = Path(cache_dir or constants.HF_HUB_CACHE)
-    folder = repo_folder_name(repo_id=repo, repo_type="model")
+    try:
+        folder = repo_folder_name(repo_id=repo, repo_type="model")
+    except HFValidationError as exc:
+        raise DownloadError(
+            f"{repo} is not a model repo id (the hub's form is namespace/name, not a URL or a path): "
+            f"check [model] repo in config, or --model ({exc})"
+        ) from exc
     return cache, cache / folder, cache / ".locks" / folder
 
 
@@ -567,9 +576,8 @@ def download_model(
     marker.unlink(missing_ok=True)
     with _hub_warnings_redacted():
         try:
-            # The hub library's own check of the id (`namespace/name`, no URL,
-            # no path under it), before the hub is asked anything; the folders
-            # it names are the repo's in the cache and beside it, in `.locks`.
+            # The folders are the repo's in the cache and beside it, in `.locks`;
+            # an id that is not a repo id is refused here, before the hub is asked.
             cache, storage, locks = _cache_paths(repo, cache_dir)
             commit, blobs = _plan(repo, endpoint, cache, storage)
             # Files with the same bytes share one etag, so one blob in the cache:
@@ -594,11 +602,6 @@ def download_model(
             raise DownloadError(
                 f"the model repo {repo} on the hub at {endpoint} is gated: request access to it "
                 f"on the hub, sign in with `hf auth login` (or set HF_TOKEN), then {RERUN} ({exc})"
-            ) from exc
-        except HFValidationError as exc:
-            raise DownloadError(
-                f"{repo} is not a model repo id (the hub's form is namespace/name, not a URL or a path): "
-                f"check [model] repo in config, or --model ({exc})"
             ) from exc
         except RepositoryNotFoundError as exc:
             raise DownloadError(
@@ -642,11 +645,13 @@ def model_status(repo: str, *, endpoint: str | None = None, cache_dir: Path | No
     """Whether `repo` is in the cache, its size on disk, and its whole size from
     the hub. The cache is read without the network; the hub is asked once
     for the file listing (the repo's info with file metadata, the one listing
-    call that takes a timeout: STATUS_TIMEOUT) and, when it cannot answer or
-    does not within that time, `bytes_total` is None: the status never fails
-    for the network being down. The hub is asked through `_hub_client`, as
-    the download asks it: the user's token goes only where that client lets
-    it go."""
+    call that takes a timeout: STATUS_TIMEOUT) and, when it cannot answer,
+    does not within that time, or answers with something that is not a hub's
+    answer (a captive portal's page, a proxy's block page: the library's
+    ValueError or TypeError decoding it), `bytes_total` is None: the status
+    never fails for the network. It raises DownloadError for a `repo` that is
+    not a repo id. The hub is asked through `_hub_client`, as the download
+    asks it: the user's token goes only where that client lets it go."""
     endpoint = _hub_at(endpoint)
     cache, storage, _ = _cache_paths(repo, cache_dir)
     cached = _cached(repo, cache)
@@ -655,7 +660,7 @@ def model_status(repo: str, *, endpoint: str | None = None, cache_dir: Path | No
     try:
         info = HfApi(endpoint=endpoint).model_info(repo, files_metadata=True, timeout=STATUS_TIMEOUT)
         total: int | None = sum(f.size or 0 for f in info.siblings or [])
-    except (RepositoryNotFoundError, httpx.HTTPError, OSError):
+    except (RepositoryNotFoundError, httpx.HTTPError, OSError, ValueError, TypeError):
         total = None
     return Status(repo, installed, total, _bytes_in_cache(storage), path, str(cancel_marker_path()))
 
