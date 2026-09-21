@@ -1910,19 +1910,23 @@ def test_command_template_without_a_placeholder_is_refused_at_config_load(comman
 class _FakeRun:
     """Stands in for subprocess.Popen at the backend's process edge: records
     every call, then returns a started process whose stdout and stderr
-    pipes carry `stdout` and `stderr` (text, or bytes as they came) and that
-    exits `returncode`, or raises `error` on starting. `hangs` is a process
-    that never finishes on its own: `wait(timeout=...)` raises
-    TimeoutExpired until it is killed. `stopped` records the pid of every
-    process tree the backend stopped (the OS edge, faked)."""
+    pipes carry `stdout` and `stderr` (text, or bytes as they came, or an
+    open binary pipe the test holds the other end of) and that exits
+    `returncode`, or raises `error` on starting. `hangs` is a process that
+    never finishes on its own: it has not exited, and `wait(timeout=...)`
+    raises TimeoutExpired, until it is killed. `stopped` records, for every
+    process tree the backend stopped (the OS edge, faked), the command's
+    pid and its returncode at that moment: None means it had not been
+    reaped, so the pid was still its own and its group's."""
 
-    def __init__(self, stdout: str | bytes = "", stderr: str | bytes = "", returncode: int = 0,
+    def __init__(self, stdout: str | bytes | io.BufferedReader = "",
+                 stderr: str | bytes | io.BufferedReader = "", returncode: int = 0,
                  error: Exception | None = None, hangs: bool = False):
         self.stdout, self.stderr, self.returncode, self.error = stdout, stderr, returncode, error
         self.hangs = hangs
         self.calls: list[tuple[list[str], dict]] = []
         self.processes: list[_FakeProcess] = []
-        self.stopped: list[int] = []
+        self.stopped: list[tuple[int, int | None]] = []
 
     def __call__(self, argv, **kwargs):
         self.calls.append((argv, kwargs))
@@ -1930,6 +1934,20 @@ class _FakeRun:
             raise self.error
         self.processes.append(_FakeProcess(argv, self))
         return self.processes[-1]
+
+    def stop_tree(self, pid: int) -> None:
+        """The OS edge faked: os.killpg or taskkill on the command's pid."""
+        (process,) = [process for process in self.processes if process.pid == pid]
+        self.stopped.append((pid, process.returncode))
+
+    def exited(self, process: _FakeProcess, within: float) -> bool:
+        """The OS edge faked: whether `process` has exited, seen without
+        reaping it (kqueue, waitid); a process that has not is given
+        `within` seconds to, the way the OS call waits."""
+        if process.exited:
+            return True
+        time.sleep(within)
+        return False
 
 
 class _FakeProcess:
@@ -1941,16 +1959,24 @@ class _FakeProcess:
         self.returncode: int | None = None
         self.killed = False
         self.waited: list[float | None] = []
-        self.stdout = io.BytesIO(self._bytes(run.stdout))
-        self.stderr = io.BytesIO(self._bytes(run.stderr))
+        self.stdout = self._pipe(run.stdout)
+        self.stderr = self._pipe(run.stderr)
 
     @staticmethod
-    def _bytes(said: str | bytes) -> bytes:
-        return said if isinstance(said, bytes) else said.encode("utf-8")
+    def _pipe(said: str | bytes | io.BufferedReader) -> io.BufferedIOBase:
+        if isinstance(said, io.BufferedReader):
+            return said
+        return io.BytesIO(said if isinstance(said, bytes) else said.encode("utf-8"))
+
+    @property
+    def exited(self) -> bool:
+        """Whether the process has ended, reaped or not: a process that hangs
+        has not until it is killed."""
+        return not self._run.hangs or self.killed
 
     def wait(self, timeout: float | None = None):
         self.waited.append(timeout)
-        if self._run.hangs and not self.killed:
+        if not self.exited:
             raise subprocess.TimeoutExpired(self.args, timeout)
         self.returncode = -9 if self.killed else self._run.returncode
         return self.returncode
@@ -1964,9 +1990,11 @@ class _FakeProcess:
 
 def _command_backend(run: _FakeRun, command: list[str] = COMMAND, **kwargs) -> CommandBackend:
     backend = CommandBackend(command, executable="/opt/fake/bin/fake-vlm", run=run, **kwargs)
-    # The process-tree stop is the OS edge (os.killpg, taskkill): the fake
-    # records the pid it would have stopped instead.
-    backend._stop_tree = run.stopped.append
+    # The process-tree stop (os.killpg, taskkill) and the sight of the exit
+    # without reaping (kqueue, waitid) are the OS edge: the fake records the
+    # pid it would have stopped, and answers for its own process, instead.
+    backend._stop_tree = run.stop_tree
+    backend._exited = run.exited
     return backend
 
 
@@ -2003,8 +2031,9 @@ def test_command_backend_expands_the_template_into_one_argv(tmp_path):
     else:
         assert kwargs["start_new_session"] is True
     (process,) = run.processes
-    assert process.waited[0] == 42.0
-    assert run.stopped == [], "a process that answered in time is not stopped"
+    assert backend.timeout == 42.0
+    assert run.stopped == [(process.pid, None)], (
+        "what the command started is stopped at its exit, by its pid while it is still the command's own")
 
 
 def test_command_backend_expands_a_placeholder_inside_a_longer_argument(tmp_path):
@@ -2050,7 +2079,7 @@ def test_command_backend_reads_stdout_into_a_completion(tmp_path):
         (_FakeRun(returncode=2, stderr="not logged in\nrun `fake-vlm login` first\nmore\nand more"),
          CommandFailed, "fake-vlm exited 2: not logged in / run `fake-vlm login` first / more"),
         (_FakeRun(returncode=1), CommandFailed, "fake-vlm exited 1 with nothing on stderr"),
-        (_FakeRun(hangs=True), TimeoutError, "fake-vlm did not answer within 42s"),
+        (_FakeRun(hangs=True), TimeoutError, "fake-vlm did not answer within 0.2s"),
         (_FakeRun(stdout="  \n", stderr="usage: fake-vlm ..."),
          RuntimeError, "fake-vlm printed nothing on stdout: usage: fake-vlm ..."),
         (_FakeRun(error=PermissionError(13, "Permission denied")),
@@ -2068,7 +2097,7 @@ def test_command_backend_maps_each_failure_to_a_plain_error(tmp_path, run, expec
     subprocess."""
     image = tmp_path / "image.jpg"
     image.write_bytes(b"jpeg")
-    backend = _command_backend(run, timeout=42.0)
+    backend = _command_backend(run, timeout=0.2)
     with pytest.raises(expected) as err:
         backend.complete(image, "prompt", 10)
     assert said in str(err.value), str(err.value)
@@ -2125,13 +2154,14 @@ def test_command_backend_stops_a_command_that_writes_past_the_ceiling(tmp_path, 
     for named in ("fake-vlm", stream, str(ceiling)):
         assert named in str(err.value), str(err.value)
     (process,) = run.processes
-    assert run.stopped == [process.pid]
+    assert run.stopped == [(process.pid, None)], (
+        "the tree is stopped by the command's pid while it is still the command's own, before the reap")
     assert process.returncode is not None, "the stopped command was not reaped"
 
     within = (_FakeRun(stdout=ID_OK.ljust(ceiling)) if stream == "stdout"
               else _FakeRun(stdout=ID_OK, stderr="x" * ceiling))
     assert _command_backend(within).complete(image, "prompt", 10).text.strip() == ID_OK
-    assert within.stopped == []
+    assert within.stopped == [(within.processes[0].pid, None)], "stopped at its exit, not at the ceiling"
 
 
 def test_command_backend_stops_the_whole_process_tree_on_timeout(tmp_path):
@@ -2145,13 +2175,50 @@ def test_command_backend_stops_the_whole_process_tree_on_timeout(tmp_path):
     run = _FakeRun(hangs=True)
     backend = _command_backend(run, timeout=0.5)
 
+    started = time.monotonic()
     with pytest.raises(TimeoutError):
         backend.complete(image, "prompt", 10)
 
+    assert 0.5 <= time.monotonic() - started < 5, "the config's timeout is the ceiling"
     (process,) = run.processes
-    assert run.stopped == [process.pid]
+    assert run.stopped == [(process.pid, None)], (
+        "the tree is stopped by the command's pid while it is still the command's own, before the reap")
     assert process.killed
     assert process.returncode is not None, "the killed command was not reaped"
+
+
+def test_command_backend_uses_the_reply_of_a_command_that_exited_leaving_its_pipe_held(tmp_path):
+    """The command's exit ends its answer. A command that printed its reply,
+    exited 0 and left a process it started holding its stdout is not a
+    timeout (the old outcome, after the whole timeout, advising a longer
+    one that could not help, the reply discarded): the tree it heads is
+    stopped the moment its exit is seen, which frees the pipe, and what
+    was read is the reply. The stop happens before the command is reaped
+    (its returncode still None at that moment), so the pid the tree is
+    stopped by is still the command's own and cannot have been given to
+    another process. The fake's stdout is a real pipe whose write end the
+    test holds, as the worker would, until the tree is stopped."""
+    image = tmp_path / "image.jpg"
+    image.write_bytes(b"jpeg")
+    read_end, write_end = os.pipe()
+    os.write(write_end, ID_OK.encode("utf-8"))
+    run = _FakeRun(stdout=os.fdopen(read_end, "rb"))
+    backend = _command_backend(run, timeout=5.0)
+
+    def stop_tree(pid: int) -> None:
+        run.stop_tree(pid)
+        os.close(write_end)  # the worker dies with the tree and the pipe ends
+    backend._stop_tree = stop_tree
+
+    started = time.monotonic()
+    completion = backend.complete(image, "prompt", 10)
+
+    assert completion.text == ID_OK
+    assert time.monotonic() - started < 2, "the reply was held to the timeout"
+    (process,) = run.processes
+    assert run.stopped == [(process.pid, None)], (
+        "the tree is stopped by the command's pid while it is still the command's own, before the reap")
+    assert process.returncode == 0, "the command was reaped last"
 
 
 def test_command_is_selectable_by_config_and_flag_but_not_a_picker_choice():
@@ -2289,16 +2356,21 @@ while True:
 '''
 
 _LAUNCHER_SCRIPT = '''#!{python}
-"""A CLI that hands the work to a worker and waits for it, the way one
-wrapping a language server or a daemon does. The worker's pid goes to a
-file so the test can look for the worker after the CLI is stopped."""
+"""A CLI that hands the work to a worker, the way one wrapping a language
+server or a daemon does: it waits for the worker (`waits`), or prints its
+reply and exits at once, leaving the worker running with the CLI's own
+stdout and stderr. The worker's pid goes to a file so the test can look
+for the worker after the CLI is stopped or has exited."""
 import subprocess
 import sys
 
 worker = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
 with open({pid_file!r}, "w") as handle:
     handle.write(str(worker.pid))
-worker.wait()
+if {waits}:
+    worker.wait()
+else:
+    print({identification!r})
 '''
 
 
@@ -2386,7 +2458,8 @@ def test_command_backend_timeout_stops_the_worker_the_command_started(monkeypatc
     gone too: stopping only the command would leave a worker per timed-out
     frame running while the batch goes on."""
     pid_file = tmp_path / "worker.pid"
-    command = _fake_cli(monkeypatch, tmp_path, script=_LAUNCHER_SCRIPT, pid_file=str(pid_file))
+    command = _fake_cli(monkeypatch, tmp_path, script=_LAUNCHER_SCRIPT,
+                        pid_file=str(pid_file), waits=True)
     backend = providers.build_primary_backend(
         _cfg(model={"backend": "command", "command": command, "timeout_seconds": 1}))
     image = tmp_path / "image.jpg"
@@ -2402,6 +2475,72 @@ def test_command_backend_timeout_stops_the_worker_the_command_started(monkeypatc
         if pid_file.exists():
             with contextlib.suppress(ProcessLookupError):
                 os.kill(int(pid_file.read_text(encoding="utf-8")), 9)
+
+
+@posix_only
+def test_command_backend_uses_the_reply_of_a_command_that_exits_leaving_a_worker(monkeypatch, tmp_path):
+    """At the real boundary: the command prints its reply, starts a worker
+    that inherits its stdout and stderr, and exits 0 at once, the way a
+    CLI that leaves a helper behind does. Its exit ends its answer: the
+    reply is used and the call returns well inside the timeout (the old
+    outcome was a TimeoutError at the whole timeout, advising a longer one
+    that could not help, the reply discarded), the worker is gone, and
+    the group was stopped by a pid that was still the command's own, its
+    exited process unreaped (a signal 0 still reaches it)."""
+    pid_file = tmp_path / "worker.pid"
+    command = _fake_cli(monkeypatch, tmp_path, script=_LAUNCHER_SCRIPT,
+                        pid_file=str(pid_file), waits=False)
+    backend = providers.build_primary_backend(
+        _cfg(model={"backend": "command", "command": command, "timeout_seconds": 4}))
+    image = tmp_path / "image.jpg"
+    image.write_bytes(b"jpeg")
+    killpg, leader_unreaped = os.killpg, []
+
+    def spy(pgid, sig):
+        try:
+            os.kill(pgid, 0)
+            leader_unreaped.append(True)
+        except ProcessLookupError:
+            leader_unreaped.append(False)
+        return killpg(pgid, sig)
+    monkeypatch.setattr(os, "killpg", spy)
+
+    try:
+        started = time.monotonic()
+        completion = backend.complete(image, "prompt", 10)
+        assert time.monotonic() - started < 2, "the reply was held to the timeout"
+        assert completion.text.strip() == ID_OK
+        worker = int(pid_file.read_text(encoding="utf-8"))
+        assert _gone(worker, within=10.0), f"worker {worker} outlived the command's exit"
+        assert leader_unreaped == [True], "the tree was stopped by a pid the command no longer held"
+    finally:
+        if pid_file.exists():
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(int(pid_file.read_text(encoding="utf-8")), 9)
+
+
+def test_command_backend_sees_the_exit_without_reaping_the_command():
+    """At the real boundary, the sight of the exit: a real child that has
+    ended is seen as exited at once, and one still running is not, within
+    the time given; on POSIX the child is not reaped by the look (its
+    returncode is still None afterwards, so its pid is still its own and
+    its group's until the backend reaps it last); on Windows the Popen
+    handle keeps the pid reserved and the look may reap."""
+    backend = CommandBackend(["fake-vlm", "{image}", "{prompt}"])
+    ended = subprocess.Popen([sys.executable, "-c", "pass"], **CommandBackend.OWN_GROUP)
+    running = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"],
+                               **CommandBackend.OWN_GROUP)
+    try:
+        assert backend._exited(ended, 10.0) is True
+        if sys.platform != "win32":
+            assert ended.returncode is None, "the look reaped the command"
+        started = time.monotonic()
+        assert backend._exited(running, 0.2) is False
+        assert 0.2 <= time.monotonic() - started < 2
+    finally:
+        running.kill()
+        running.wait()
+        ended.wait()
 
 
 @posix_only

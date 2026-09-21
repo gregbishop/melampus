@@ -13,6 +13,7 @@ import functools
 import http.client
 import json
 import os
+import select
 import shlex
 import signal
 import socket
@@ -877,7 +878,9 @@ class CommandBackend(VLMBackend):
     past that is stopped and the frame refused by name. `timeout` is the
     one ceiling on a run's time; past it the command and every process it
     started are stopped (OWN_GROUP) before the frame's TimeoutError is
-    raised.
+    raised. The command's exit ends its answer: whatever it started is
+    stopped then too, so a helper it leaves holding stdout or stderr is
+    stopped rather than waited on, and what was read is the reply.
     """
 
     #: How much of stderr an error message carries: enough to say what went
@@ -943,14 +946,18 @@ class CommandBackend(VLMBackend):
     def _stop_tree(self, pid: int) -> None:
         """Stop the process tree the command with `pid` heads (OWN_GROUP):
         every process in its group on POSIX, the tree under it on Windows.
-        A tree already gone is nothing to do."""
+        Called only while the command is unreaped (_wait reaps it last), so
+        the pid is still the command's own and its group's, never a
+        number given since to a process of someone else's. A tree already
+        gone is nothing to do; so is one holding nothing but the command's
+        own exited process, which macOS answers with EPERM."""
         if sys.platform == "win32":
             subprocess.run(
                 ["taskkill", "/T", "/F", "/PID", str(pid)],
                 stdin=subprocess.DEVNULL, capture_output=True, check=False,
             )
         else:
-            with contextlib.suppress(ProcessLookupError):
+            with contextlib.suppress(ProcessLookupError, PermissionError):
                 os.killpg(pid, signal.SIGKILL)
 
     def _stop(self, process) -> None:
@@ -961,44 +968,81 @@ class CommandBackend(VLMBackend):
     def _drain(self, process, name: str, sink: bytearray, overflowed: list[str]) -> None:
         """Read the pipe `name` of `process` to its end into `sink`, keeping
         at most MAX_OUTPUT_BYTES. Past that the program is a runaway: its
-        name goes on `overflowed`, its tree is stopped, and the rest is read
-        and dropped so the pipe still ends."""
+        name goes on `overflowed`, which _wait watches for and stops the
+        tree on (every stop is made by the thread that reaps, before it
+        reaps), and the rest is read and dropped so the pipe still ends."""
         stream = getattr(process, name)
         while chunk := stream.read1(self.CHUNK_BYTES):
             if overflowed:
                 continue
             if len(sink) + len(chunk) > self.MAX_OUTPUT_BYTES:
                 overflowed.append(name)
-                self._stop_tree(process.pid)
                 continue
             sink += chunk
 
-    def _wait(self, process, readers: list[threading.Thread]) -> bool:
-        """Whether the command exited and both pipes ended within `timeout`.
-        Past it, or on any other interruption (Ctrl+C), the command and
-        everything it started are stopped, as subprocess.run kills its
-        child: the command does not outlive the run that started it. The
-        command is reaped either way."""
+    def _exited(self, process, within: float) -> bool:
+        """Whether the command has exited, seen within `within` seconds and
+        without reaping it: an exited process that is not reaped keeps its
+        pid, and so its group's id, until _wait reaps it last, so a tree
+        stopped by that pid is the command's and never a process given the
+        number since. macOS's Python has no waitid, and kqueue's NOTE_EXIT
+        is how it sees an exit; waitid with WNOWAIT elsewhere on POSIX; on
+        Windows the Popen handle keeps the pid reserved, so wait itself is
+        safe there and the order does not matter."""
+        if sys.platform == "win32":
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                process.wait(timeout=within)
+                return True
+            return False
+        if hasattr(select, "kqueue"):
+            exit_event = select.kevent(
+                process.pid, select.KQ_FILTER_PROC,
+                select.KQ_EV_ADD | select.KQ_EV_ONESHOT, select.KQ_NOTE_EXIT,
+            )
+            queue = select.kqueue()
+            try:
+                return bool(queue.control([exit_event], 1, within))
+            finally:
+                queue.close()
+        time.sleep(within)
+        return os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOWAIT | os.WNOHANG) is not None
+
+    def _wait(self, process, readers: list[threading.Thread], overflowed: list[str]) -> bool:
+        """Whether the command exited within `timeout`. Its exit ends its
+        answer: the moment it is seen (_exited, without reaping) the tree
+        it heads is stopped, so a worker it left holding stdout or stderr
+        dies and the pipe ends, the readers are given a short bound to
+        reach those ends, and what they read is the reply. Past the
+        timeout, at the ceiling (`overflowed`, which the readers raise and
+        this loop sees within a step), or on any other interruption
+        (Ctrl+C), the tree and the command are stopped the same way, as
+        subprocess.run kills its child: the command does not outlive the
+        run that started it, and neither does anything it started. Every
+        stop is made before the command is reaped, which is the last thing
+        done here, so the pid the tree is stopped by is still the
+        command's own; on the interruption path it is stopped, not reaped,
+        and the interrupt propagates."""
         deadline = time.monotonic() + self.timeout
+        step = 0.0005
         try:
-            process.wait(timeout=self.timeout)
-            for reader in readers:
-                reader.join(timeout=max(0.0, deadline - time.monotonic()))
-            # A pipe still open after the exit is held by a worker that
-            # outlived the command: it is not an answer either.
-            in_time = not any(reader.is_alive() for reader in readers)
-        except subprocess.TimeoutExpired:
-            in_time = False
+            while not (in_time := self._exited(process, step)) and not overflowed:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                step = min(step * 2, remaining, 0.05)
         except BaseException:
             self._stop(process)
             raise
-        if not in_time:
+        if in_time:
+            self._stop_tree(process.pid)
+        else:
             self._stop(process)
+        ends = time.monotonic() + 5.0
         for reader in readers:
             # The pipes end when the tree is gone; one still open is held by
             # something that left the group (a double-forked daemon) and is
             # left to it rather than waited on.
-            reader.join(timeout=5.0)
+            reader.join(timeout=max(0.0, ends - time.monotonic()))
         process.wait()
         return in_time
 
@@ -1023,7 +1067,7 @@ class CommandBackend(VLMBackend):
         ]
         for reader in readers:
             reader.start()
-        in_time = self._wait(process, readers)
+        in_time = self._wait(process, readers, overflowed)
         elapsed = time.perf_counter() - started
         stdout, stderr = (sinks[name].decode("utf-8", "replace") for name in ("stdout", "stderr"))
 
