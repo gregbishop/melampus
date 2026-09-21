@@ -726,8 +726,7 @@ def test_config_doc_says_the_commands_exit_ends_its_answer_and_stops_what_it_sta
     finds it stopped after every completion, so docs/config.md's `command`
     row must say so, and its `timeout_seconds` row must say the stop
     reaches everything the program started, not the program alone."""
-    model = re.search(r"^## `\[model\]`\n(.*?)^## ", CONFIG_DOC.read_text(encoding="utf-8"),
-                      re.MULTILINE | re.DOTALL).group(1)  # [escalation] has a timeout_seconds row of its own
+    model = _section(CONFIG_DOC.read_text(encoding="utf-8"), "`[model]`")  # [escalation] has a timeout_seconds row of its own
     rows = {line.split(" | ")[0]: line for line in model.splitlines() if line.startswith("| `")}
     command_row, timeout_row = rows["| `command`"], rows["| `timeout_seconds`"]
     assert "exit ends its answer" in command_row, (
