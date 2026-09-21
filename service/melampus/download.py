@@ -1139,15 +1139,20 @@ def _held(model: str, url: str, *, timeout: float = STATUS_TIMEOUT) -> tuple[str
     exchange within `timeout`. A name without a tag is `<name>:latest`
     there (§ Model names: the tag defaults to `latest`). The list is the
     server's to write: one not in that shape (`models` not a list, an
-    entry's name not a string, its size not a count) is a DownloadError
+    entry not an object, its name not a string, its size not a count) is a DownloadError
     naming it, as a malformed pull line is, never a traceback."""
     names = {model, model if ":" in model else f"{model}:latest"}
     models = _ollama_request(model, url, OLLAMA_TAGS, method="GET", timeout=timeout).get("models") or []
     if not isinstance(models, list):
         raise DownloadError(f"Ollama's list from {url}{OLLAMA_TAGS} was not a list of models: {str(models)[:120]!r}")
     for entry in models:
-        name = entry.get("name") if isinstance(entry, dict) else None
-        alias = entry.get("model") if isinstance(entry, dict) else None
+        if not isinstance(entry, dict):
+            raise DownloadError(
+                f"Ollama's list from {url}{OLLAMA_TAGS} carried an entry that is not an object: "
+                f"{str(entry)[:120]!r}"
+            )
+        name = entry.get("name")
+        alias = entry.get("model")
         if not isinstance(name, str):
             raise DownloadError(
                 f"Ollama's list from {url}{OLLAMA_TAGS} carried an entry whose name is not a string: "

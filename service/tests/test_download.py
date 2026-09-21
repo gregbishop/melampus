@@ -2937,11 +2937,13 @@ def test_status_with_no_ollama_answering_says_absent_and_never_fails():
 @pytest.mark.parametrize(("reply", "named"), [
     ([], "not a JSON object"),
     ({"models": 5}, "not a list of models"),
+    ({"models": [5]}, "carried an entry that is not an object"),
     ({"models": [{"name": [FAKE_MODEL]}]}, "whose name is not a string"),
     ({"models": [{"name": "other:latest", "model": [FAKE_MODEL]}]}, "whose model is not a string"),
     ({"models": [{"name": FAKE_MODEL, "size": "large"}]}, "a size that is not a count"),
     ({"models": [{"name": FAKE_MODEL, "size": [1]}]}, "a size that is not a count"),
-], ids=["not-an-object", "models-not-a-list", "name-not-a-string", "model-not-a-string", "size-words", "size-a-list"])
+], ids=["not-an-object", "models-not-a-list", "models-entry-not-an-object", "name-not-a-string",
+        "model-not-a-string", "size-words", "size-a-list"])
 def test_status_with_an_ollama_answering_the_list_in_the_wrong_shape_says_absent_and_never_fails(reply, named):
     """Security: the list is whatever listens at the address writes it, and
     `--model-status` is what the Settings dialog waits on when it opens, so
@@ -2952,7 +2954,9 @@ def test_status_with_an_ollama_answering_the_list_in_the_wrong_shape_says_absent
     the pull's is, never a traceback out of the entry point, and the status
     reads absent, size unknown. Review round 3 (download.py:894-898): the
     message says which field is wrong, the `name` or the `model`, not
-    "no name" for an entry that has one."""
+    "no name" for an entry that has one; round 4 (download.py:894-899): an
+    entry that is not an object is named as such, not for a name it has no
+    field to hold."""
     from conftest import QuietHandler
 
     class WrongShape(QuietHandler):
