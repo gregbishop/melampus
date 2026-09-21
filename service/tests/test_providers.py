@@ -1897,13 +1897,18 @@ def test_command_is_a_setting_in_the_model_section(tmp_path):
         (["fake-vlm", "--prompt", "{prompt}"], "{image}"),
         (["fake-vlm", "--image", "{image}"], "{prompt}"),
         (["fake-vlm"], "{image}"),
+        (["fake-vlm-{image}", "--prompt", "{prompt}"], "{image}"),
+        (["fake-vlm-{prompt}", "--image", "{image}"], "{prompt}"),
     ],
-    ids=["no-image", "no-prompt", "neither"],
+    ids=["no-image", "no-prompt", "neither", "image-only-in-program", "prompt-only-in-program"],
 )
 def test_command_template_without_a_placeholder_is_refused_at_config_load(command, missing):
     """A template that never receives the image, or never asks the question,
     cannot answer anything: refused when the config loads, naming the
-    placeholder it lacks, not per frame after the run has started."""
+    placeholder it lacks, not per frame after the run has started. The first
+    element is the program, which `_argv` replaces with the resolved
+    executable, so a placeholder there never reaches the program: it counts
+    only in the arguments after it."""
     with pytest.raises(ValueError) as err:
         _cfg(model={"backend": "command", "command": command})
     assert missing in str(err.value), str(err.value)

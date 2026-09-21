@@ -132,13 +132,18 @@ class ModelConfig(_Base):
     def _command_carries_both_placeholders(cls, command: list[str]) -> list[str]:
         """A template that never receives the image, or never asks the
         question, cannot answer anything: refuse it when the config loads,
-        naming the placeholder, rather than once per frame mid-run."""
+        naming the placeholder, rather than once per frame mid-run. The
+        first element is the program, which the backend replaces with the
+        resolved executable, so a placeholder there never reaches it: only
+        the arguments after the program count."""
         for placeholder in ("{image}", "{prompt}"):
-            if command and not any(placeholder in argument for argument in command):
+            if command and not any(placeholder in argument for argument in command[1:]):
                 raise ValueError(
                     f"[model] command has no argument carrying {placeholder}; the "
-                    "template needs both {image} and {prompt}, for example "
-                    '["my-vlm", "--image", "{image}", "--prompt", "{prompt}"]'
+                    "template needs both {image} and {prompt} in the arguments after "
+                    "the program (the first element is the program and carries no "
+                    'placeholder), for example ["my-vlm", "--image", "{image}", '
+                    '"--prompt", "{prompt}"]'
                 )
         return command
 
