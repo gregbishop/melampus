@@ -1038,7 +1038,9 @@ def pull_updates(model: str, lines: Iterable[bytes | str]) -> Iterator[Update]:
             continue
         try:
             item = json.loads(text)
-        except json.JSONDecodeError as exc:
+        except ValueError as exc:
+            # The decoder's JSONDecodeError, and the plain ValueError it
+            # raises for an integer literal past Python's 4300-digit limit.
             raise DownloadError(f"Ollama's pull reply was not JSON: {text[:120]!r}") from exc
         if not isinstance(item, dict):
             raise DownloadError(f"Ollama's pull reply was not JSON: {text[:120]!r}")
@@ -1163,7 +1165,10 @@ def _ollama_request(model: str, url: str, path: str, body: dict | None = None, *
     RuntimeError for `Ollama answered <status>: <its words>` on an HTTP
     error, a reply that ran past the bound or was not HTTP, or a
     connection that ended mid-reply (a reset, a broken pipe: the raw
-    socket error, named `the connection to Ollama at <url> ended`)."""
+    socket error, named `the connection to Ollama at <url> ended`); and
+    its own, bounded to the reply's first 120 bytes, for a reply the
+    decoder refuses, whatever it raises for it (not JSON, not UTF-8, an
+    integer past Python's digit limit), or that is not a JSON object."""
     request = ollama_request(url, path, body, method=method)
     try:
         raw = OllamaBackend(model, url, timeout=timeout).send(request)
@@ -1171,7 +1176,12 @@ def _ollama_request(model: str, url: str, path: str, body: dict | None = None, *
         raise DownloadError(str(exc)) from exc
     try:
         reply = json.loads(raw or b"{}")
-    except json.JSONDecodeError as exc:
+    except ValueError as exc:
+        # The decoder's JSONDecodeError, the UnicodeDecodeError for bytes
+        # that are not UTF-8 (or the UTF-16 or -32 a leading byte order
+        # mark names) and the plain ValueError for an integer literal past
+        # Python's 4300-digit limit: all three are ValueErrors, and all
+        # three mean the reply is not JSON.
         raise DownloadError(f"Ollama's reply from {url}{path} was not JSON: {raw[:120]!r}") from exc
     if not isinstance(reply, dict):
         raise DownloadError(f"Ollama's reply from {url}{path} was not a JSON object: {raw[:120]!r}")

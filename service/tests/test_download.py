@@ -2454,12 +2454,27 @@ def test_pull_stream_error_line_mid_download_keeps_the_progress_so_far_and_says_
     assert "connection reset" in str(failure.value) and "--download-model" in str(failure.value)
 
 
-def test_pull_stream_that_is_not_json_is_a_failure_not_a_traceback():
+# Two replies Python's JSON decoder refuses with something other than its
+# JSONDecodeError (Codex review, opposing vendor, round 1, security finding
+# 2, download.py:1153): bytes that are not UTF-8 (a UnicodeDecodeError from
+# the bytes' decoding) and an integer literal past its int-to-str limit of
+# 4300 digits (a plain ValueError, `Exceeds the limit`). Both are the
+# server's to write.
+NOT_UTF8 = b"\xff\xfe{"
+PAST_THE_DIGIT_LIMIT = b'{"status": "pulling manifest", "total": ' + b"9" * 5000 + b"}"
+
+
+@pytest.mark.parametrize("line", [b"<html>proxy error</html>", NOT_UTF8, PAST_THE_DIGIT_LIMIT],
+                         ids=["a-page", "not-utf-8", "an-integer-past-the-digit-limit"])
+def test_pull_stream_that_is_not_json_is_a_failure_not_a_traceback(line: bytes):
+    """A line the decoder refuses, whatever it raises for it, is named as
+    not JSON: the message bounded to the line's first 120 characters."""
     from melampus.download import pull_updates
 
     with pytest.raises(DownloadError) as failure:
-        list(pull_updates(FAKE_MODEL, [b"<html>proxy error</html>\n"]))
-    assert "not JSON" in str(failure.value)
+        list(pull_updates(FAKE_MODEL, [line + b"\n"]))
+    assert "not JSON" in str(failure.value), str(failure.value)
+    assert len(str(failure.value)) < 400, "the message is not bounded"
 
 
 @pytest.mark.parametrize(
@@ -3166,9 +3181,11 @@ def test_status_with_no_ollama_answering_says_absent_and_never_fails():
     (b'{"models": [{"name": "%s", "size": true}]}' % FAKE_MODEL.encode(), "a size that is not a count"),
     (b'{"models": [{"name": "%s", "size": %d}]}' % (FAKE_MODEL.encode(), download.MAX_SIZE + 1),
      "a size that is not a count"),
+    (NOT_UTF8, "not JSON"),
+    (b'{"models": [{"name": "%s", "size": ' % FAKE_MODEL.encode() + b"9" * 5000 + b"}]}", "not JSON"),
 ], ids=["not-an-object", "models-not-a-list", "models-entry-not-an-object", "name-not-a-string",
         "model-not-a-string", "size-words", "size-a-list", "size-1e309", "size-negative", "size-fraction",
-        "size-bool", "size-above-MAX_SIZE"])
+        "size-bool", "size-above-MAX_SIZE", "not-utf-8", "size-past-the-digit-limit"])
 def test_status_with_an_ollama_answering_the_list_in_the_wrong_shape_says_absent_and_never_fails(reply, named):
     """Security: the list is whatever listens at the address writes it, and
     `--model-status` is what the Settings dialog waits on when it opens, so
@@ -3188,7 +3205,11 @@ def test_status_with_an_ollama_answering_the_list_in_the_wrong_shape_says_absent
     count is what the MLX status takes as a file's size, a non-negative
     integer of at most MAX_SIZE, not a bool, not a fraction. Those replies
     are the bytes as the server writes them (`json.dumps` cannot write
-    `1e309`)."""
+    `1e309`). And a reply the decoder refuses with something other than
+    its JSONDecodeError (the same review's security finding 2,
+    download.py:1153): bytes that are not UTF-8, and an integer past
+    Python's 4300-digit limit, both named as not JSON, the message bounded,
+    never the UnicodeDecodeError or the ValueError out of --model-status."""
     from conftest import QuietHandler
 
     class WrongShape(QuietHandler):
@@ -3204,11 +3225,57 @@ def test_status_with_an_ollama_answering_the_list_in_the_wrong_shape_says_absent
             download._held(FAKE_MODEL, address)
         assert download.OLLAMA_TAGS in str(failure.value), str(failure.value)
         assert named in str(failure.value), str(failure.value)
+        assert len(str(failure.value)) < 400, "the message is not bounded"
 
         status = ollama_status(FAKE_MODEL, address)
 
     assert status == Status(FAKE_MODEL, installed=False, bytes_total=None, bytes_done=0,
                             path=None, cancel_path=str(cancel_marker_path()))
+
+
+@pytest.mark.parametrize("body", [NOT_UTF8, PAST_THE_DIGIT_LIMIT], ids=["not-utf-8", "an-integer-past-the-digit-limit"])
+def test_the_model_flags_for_ollama_meet_a_reply_the_decoder_refuses_status_absent_exit_0_pull_and_remove_exit_3(
+    monkeypatch: pytest.MonkeyPatch, capsys, tmp_path: Path, body: bytes
+):
+    """Codex review (opposing vendor) round 1, security finding 2
+    (download.py:1153), through the entry point: a listener at `[model]
+    ollama_url` answering every call with bytes Python's JSON decoder
+    refuses with something other than its JSONDecodeError. `--model-status`
+    never fails for the server: exit 0, absent, size unknown;
+    `--download-model` and `--remove-model` are refused with exit 3 and a
+    reason on stderr saying the reply was not JSON, nothing on stdout, no
+    traceback (an exception out of main here would be one)."""
+    from conftest import QuietHandler
+
+    class Undecodable(QuietHandler):
+        def do_GET(self):  # noqa: N802 - http.server's name
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_POST(self):  # noqa: N802 - http.server's name
+            self.rfile.read(int(self.headers.get("Content-Length") or 0))
+            self.do_GET()
+
+        do_DELETE = do_POST  # noqa: N815 - http.server's name
+
+    monkeypatch.setattr(download, "cancel_marker_path", lambda: _marker(tmp_path))
+    with loopback_server(Undecodable) as squatter:
+        address = f"http://127.0.0.1:{squatter.server_port}"
+        flags = ["--backend", "ollama", "--config", str(_ollama_settings(tmp_path, address))]
+
+        assert main(["--model-status", *flags]) == 0
+        out, err = capsys.readouterr()
+        status = json.loads(out)
+        assert status["installed"] is False and status["bytes_total"] is None, out
+        assert "Traceback" not in err, err
+
+        for flag in ("--download-model", "--remove-model"):
+            assert main([flag, *flags]) == 3, flag
+            out, err = capsys.readouterr()
+            assert out == "", (flag, out)
+            assert "not JSON" in err and "Traceback" not in err, (flag, err)
 
 
 def test_remove_deletes_the_pulled_model_from_ollama(fake_ollama: FakeOllama):
