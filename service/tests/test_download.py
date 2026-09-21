@@ -36,6 +36,7 @@ import pytest
 from conftest import (
     AGENT_HARNESS,
     CUT_IN_THE_SECOND_CHUNK,
+    BadStatusLine,
     FAKE_COMMIT,
     FAKE_FILES,
     FAKE_FOLDER,
@@ -2789,6 +2790,25 @@ def test_the_pull_gives_up_on_an_ollama_that_trickles_a_line_naming_the_setting_
     assert took < 3.0, f"the pull ran past its timeout: {took:.1f}s"
     assert "did not answer within 1s" in str(failure.value), str(failure.value)
     assert "raise [model] timeout_seconds" in str(failure.value), str(failure.value)
+
+
+def test_the_pull_names_a_listener_that_does_not_speak_http_as_the_list_and_the_delete_do(tmp_path: Path):
+    """Security (review round 4, download.py:827): a status line http.client
+    cannot parse raises `BadStatusLine`, which urllib lets through unwrapped
+    and the pull caught nowhere, so a listener on the port that does not
+    speak HTTP ended `--download-model` in a traceback: exit 1, the
+    interpreter's frames on stderr, so in the CLI log and the dialog's
+    failure message, where the list and the delete name it through the
+    backend (`Ollama's reply from <url> was not HTTP: <its words>`, in
+    printable characters). Given such a listener, the pull is a
+    DownloadError carrying those words."""
+    with loopback_server(BadStatusLine) as squatter:
+        with pytest.raises(DownloadError) as failure:
+            pull_model(FAKE_MODEL, f"http://127.0.0.1:{squatter.server_port}", on_update=lambda update: None,
+                       cancel_marker=tmp_path / "download-cancel", timeout=5.0)
+    message = str(failure.value)
+    assert f"Ollama's reply from http://127.0.0.1:{squatter.server_port} was not HTTP: [31mHTTP/9.9 OK fake log line" in message, message
+    assert all(c.isprintable() for c in message), message
 
 
 # The cooperative cancel, for Ollama: the marker and the signals end the

@@ -616,8 +616,12 @@ class OllamaBackend(VLMBackend):
         otherwise hold the pull, and the cancel marker read between lines,
         for as long as it liked. At most MAX_REPLY_BYTES of a line is read,
         a longer one refused by name; the stream is closed on leaving the
-        loop, however it is left, which is how Ollama learns to stop."""
-        with self._bounded(request) as deadline, self._urlopen(request, timeout=self.timeout) as response:
+        loop, however it is left, which is how Ollama learns to stop. Every
+        failure is named as `send` names one (`_naming`): the status with
+        Ollama's words, nothing answering, the timeout, a reply that is not
+        HTTP."""
+        with self._bounded(request) as deadline, self._naming(), \
+                self._urlopen(request, timeout=self.timeout) as response:
             while True:
                 deadline.again()
                 line = response.readline(self.MAX_REPLY_BYTES + 1)

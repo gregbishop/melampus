@@ -231,6 +231,16 @@ class Silent(socketserver.BaseRequestHandler):
             self.request.recv(65536)
 
 
+class BadStatusLine(socketserver.BaseRequestHandler):
+    """A listener that answers whatever it is asked with a status line that
+    is not HTTP, carrying an escape sequence and a carriage return."""
+
+    def handle(self) -> None:
+        with contextlib.suppress(OSError):
+            self.request.recv(65536)
+            self.request.sendall(b"\x1b[31mHTTP/9.9 OK\r\x07fake log line\r\n\r\n")
+
+
 class TricklingPull(QuietHandler):
     """A listener answering a pull's stream (POST /api/pull) with two whole
     lines, each after a pause within the deadline the tests give and the

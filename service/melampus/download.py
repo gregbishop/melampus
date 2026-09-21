@@ -47,7 +47,6 @@ import logging  # noqa: E402
 import re  # noqa: E402
 import shutil  # noqa: E402
 import signal  # noqa: E402
-import urllib.error  # noqa: E402
 import urllib.request  # noqa: E402
 from contextlib import AbstractContextManager, ExitStack, closing, contextmanager, nullcontext  # noqa: E402
 from dataclasses import asdict, dataclass  # noqa: E402
@@ -1074,9 +1073,10 @@ def pull_model(
     time and at most the backend's reply bound, as every frame is sent.
 
     Raises DownloadError with the fix in the message: the backend's own
-    not-running words when nothing answers at `url`, Ollama's words for a
-    refusal before the stream starts (an HTTP status with its {"error"}
-    object) or an error line within it. DownloadCancelled from a signal, or
+    words for nothing answering at `url`, for a reply that is not HTTP and
+    for a line not written within `timeout`; Ollama's words for a refusal
+    before the stream starts (an HTTP status with its {"error"} object) or
+    an error line within it. DownloadCancelled from a signal, or
     from `cancel_marker` (the documented path by default) appearing between
     lines, passes through with the stream closed; a stale marker is removed
     on start and the marker on exit, as the MLX download does.
@@ -1097,14 +1097,12 @@ def pull_model(
                 # prints the protocol's `done` from the return, as for mlx.
                 if update.state != DONE:
                     on_update(update)
-    except urllib.error.HTTPError as exc:
-        # The status with the words, as the backend names one: a 3xx from
-        # the address is an answer from the wrong place, and says so.
-        raise _pull_error(model, f"{exc.code} {OllamaBackend.error_text(exc)}") from exc
-    except urllib.error.URLError as exc:
-        raise DownloadError(ollama_not_running(url, exc.reason)) from exc
     except RuntimeError as exc:
-        # The backend's reply bound, as the list's is named.
+        # The backend's words for the status (a 3xx from the address is an
+        # answer from the wrong place, and says so), a reply that is not
+        # HTTP, or one past its bound; Ollama's own error inside them.
+        raise _pull_error(model, exc) from exc
+    except ConnectionError as exc:
         raise DownloadError(str(exc)) from exc
     except (OSError, TimeoutError) as exc:
         raise DownloadError(f"the pull of {model} from {url} failed: {exc}; {RERUN}") from exc

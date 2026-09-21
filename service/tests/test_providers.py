@@ -25,6 +25,7 @@ import urllib.request
 import pytest
 from conftest import (
     PHOTO,
+    BadStatusLine,
     FakeOllama,
     QuietHandler,
     Silent,
@@ -1577,16 +1578,6 @@ def test_ollama_backend_neutralises_control_characters_in_a_servers_error_text(
     message = str(err.value)
     assert message == f"Ollama answered 502: {said}", message
     assert all(c.isprintable() for c in message), message
-
-
-class BadStatusLine(socketserver.BaseRequestHandler):
-    """A listener that answers whatever it is asked with a status line that
-    is not HTTP, carrying an escape sequence and a carriage return."""
-
-    def handle(self) -> None:
-        with contextlib.suppress(OSError):
-            self.request.recv(65536)
-            self.request.sendall(b"\x1b[31mHTTP/9.9 OK\r\x07fake log line\r\n\r\n")
 
 
 def test_ollama_backend_reports_a_malformed_status_line_in_printable_words(tmp_path):
