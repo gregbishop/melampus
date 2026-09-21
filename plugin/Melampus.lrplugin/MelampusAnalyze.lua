@@ -321,15 +321,30 @@ function Analyze.detectEngines()
 		'engines file', function(verdicts) return type(verdicts) == 'table' and verdicts[1] ~= nil end)
 end
 
+--- `parts` with `--backend <engine>` appended, quoted for the shell, when
+-- the user chose an engine (Rules.chosenEngine; nothing appended when the
+-- preference is unset: the CLI decides), and the chosen name after them.
+-- The one place the engine is handed to the executable, for a run and
+-- for each model flag alike. nil plus a message for an engine the plugin
+-- does not know, before the shell.
+local function engineArguments(parts, engine)
+	local chosen, err = Rules.chosenEngine({ engine = engine })
+	if err then return nil, err end
+	if chosen then
+		parts[#parts + 1] = '--backend'
+		parts[#parts + 1] = quote(chosen)
+	end
+	return parts, chosen
+end
+
 --- The model flags act for an engine (card #409): `flag --backend <engine>`,
--- the engine a run passes (Rules.chosenEngine), so the executable fetches
+-- the engine a run passes (engineArguments), so the executable fetches
 -- the MLX model from the hub or asks Ollama to pull its model. nil plus a
 -- message for an engine the plugin does not know, before the shell.
 local function modelFlag(flag, engine)
-	local chosen, err = Rules.chosenEngine({ engine = engine })
-	if err then return nil, err end
-	if chosen then flag = flag .. ' --backend ' .. quote(chosen) end
-	return flag
+	local parts, err = engineArguments({ flag }, engine)
+	if not parts then return nil, err end
+	return table.concat(parts, ' ')
 end
 
 --- Ask the executable about `engine`'s model: `--model-status` (card #408,
@@ -450,8 +465,13 @@ function Analyze.run(previewFolder, resultsPath, profile, engine)
 	local executable, missing = executableOrMessage()
 	if not executable then return false, missing end
 
-	local chosen, engineError = Rules.chosenEngine({ engine = engine })
-	if engineError then return false, engineError end
+	-- Identification and enrichment, one process. --backend only when the
+	-- user chose an engine; otherwise the CLI decides.
+	local parts, chosen = engineArguments({
+		quote(executable), quote(previewFolder),
+		'--profile', quote(profile or 'wildlife'),
+	}, engine)
+	if not parts then return false, chosen end
 
 	local cliLog = cliLogPath()
 	local refusal = windowsPathRefusal({
@@ -462,21 +482,11 @@ function Analyze.run(previewFolder, resultsPath, profile, engine)
 	})
 	if refusal then return false, refusal end
 
-	-- Identification and enrichment, one process. Long-running, so it must not
-	-- be inside any write gate.
+	-- Long-running, so it must not be inside any write gate.
 	-- --yes: this is a non-interactive caller, so the cloud-primary cost gate
 	-- cannot ask. Selecting the photos and configuring a cloud backend with a
 	-- key were the deliberate acts; the estimate is written to melampus-cli.log,
 	-- and the model.max_images ceiling still refuses an oversized run outright.
-	local parts = {
-		quote(executable), quote(previewFolder),
-		'--profile', quote(profile or 'wildlife'),
-	}
-	-- --backend only when the user chose an engine; otherwise the CLI decides.
-	if chosen then
-		parts[#parts + 1] = '--backend'
-		parts[#parts + 1] = quote(chosen)
-	end
 	parts[#parts + 1] = '--plugin-out'
 	parts[#parts + 1] = quote(resultsPath)
 	parts[#parts + 1] = '--yes'
