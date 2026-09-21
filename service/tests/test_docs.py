@@ -10,11 +10,14 @@ docs/brief.md names the pytest command CI actually runs and explains it as
 installing from the lockfile; every doc block that installs the service, and CI, install
 from the lockfile (card #425, Done-when 3 and 2); AGENTS.md points at
 docs/brief.md without restating its values; AGENTS.md points at the standard
-and names the tracker (card #410, Done-when 3); and the Windows job runs the
+and names the tracker (card #410, Done-when 3); the Windows job runs the
 plugin tests, so the command built for cmd.exe is run by cmd.exe (card #401,
-Done-when 3); and every `uv sync` that builds the executable, in CI and in
+Done-when 3); every `uv sync` that builds the executable, in CI and in
 readme.md's build section, installs the extras the executable carries (card
-#434, Done-when 1 and 3).
+#434, Done-when 1 and 3); CI packages one plugin zip per platform through the
+script on every run and, on a pushed v* tag, its release job attaches both to
+the GitHub release, which the install docs name (card #402); and no doc names
+a workflow file that does not exist.
 
 The checks are deliberately dumb — substring presence of the backticked name — so
 they never argue with prose style, only with absence. The one exception runs the
@@ -38,7 +41,9 @@ AGENTS_MD = REPO / "AGENTS.md"
 PLUGIN_CHOICE = REPO / ".agents" / "on-purpose.json"
 INSTALLED_SKILLS = REPO / ".agents" / "skills"
 BRIEF = REPO / "docs" / "brief.md"
-CI_WORKFLOW = REPO / ".github" / "workflows" / "ci.yml"
+WORKFLOWS = REPO / ".github" / "workflows"
+WORKFLOW_SUFFIXES = (".yml", ".yaml")  # GitHub runs both
+CI_WORKFLOW = WORKFLOWS / "ci.yml"
 LUA_PLUGIN_TESTS = REPO / "service" / "tests" / "test_lua_plugin.py"
 PLUGIN_DOC = REPO / "docs" / "plugin.md"
 GITIGNORE = REPO / ".gitignore"
@@ -150,15 +155,34 @@ def test_docs_name_only_the_lowercase_files():
     assert not stale, f"docs name uppercase files that do not exist: {stale}"
 
 
+def _workflows() -> list[Path]:
+    """Every workflow file in .github/workflows, read at call time."""
+    return sorted(path for path in WORKFLOWS.iterdir() if path.suffix in WORKFLOW_SUFFIXES)
+
+
+def test_docs_name_only_workflows_that_exist():
+    """Card #402, round 2: the release steps were folded into ci.yml and
+    release.yml removed. A doc that still names a workflow file that is not
+    in .github/workflows is stale."""
+    suffixes = "|".join(re.escape(suffix) for suffix in WORKFLOW_SUFFIXES)
+    stale = []
+    for doc in DOCS:
+        for lineno, line in enumerate(doc.read_text(encoding="utf-8").splitlines(), 1):
+            for name in re.findall(rf"\.github/workflows/([\w.-]+(?:{suffixes}))", line):
+                if not (WORKFLOWS / name).is_file():
+                    stale.append(f"{doc.relative_to(REPO)}:{lineno}: {name}")
+    assert not stale, f"docs name workflow files that do not exist: {stale}"
+
+
 def _ci_pytest_commands() -> list[str]:
     """The `run:` line of every ci.yml step that invokes pytest."""
-    workflow = CI_WORKFLOW.read_text(encoding="utf-8")
+    text = CI_WORKFLOW.read_text(encoding="utf-8")
     commands = [
         command
-        for command in re.findall(r"^\s*run:\s*(.+?)\s*$", workflow, re.MULTILINE)
+        for command in re.findall(r"^\s*run:\s*(.+?)\s*$", text, re.MULTILINE)
         if "pytest" in command
     ]
-    assert commands, "ci.yml runs no pytest step"
+    assert commands, f"{CI_WORKFLOW.name} runs no pytest step"
     return commands
 
 
@@ -182,12 +206,29 @@ def _fenced_commands(text: str) -> list[str]:
     ]
 
 
-def _readme_section(heading: str) -> str:
-    """The text of readme.md's `## {heading}` section, up to the next `## `."""
-    readme = README.read_text(encoding="utf-8")
-    section = re.search(rf"^## {re.escape(heading)}\n(.*?)^## ", readme, re.MULTILINE | re.DOTALL)
-    assert section, f"readme.md has no ## {heading} section"
-    return section.group(1)
+def _section(text: str, heading: str) -> str | None:
+    """The body of a doc's `## heading` section, up to the next `## ` heading
+    or the end of the doc; None when the doc has no such section."""
+    match = re.search(rf"^## {re.escape(heading)}\n(.*?)(?=^## |\Z)", text, re.MULTILINE | re.DOTALL)
+    return match.group(1) if match else None
+
+
+def test_the_section_reader_takes_the_heading_literally():
+    """Round 7, finding 1: `_section` promises the body under a literal
+    `## heading`, and readme.md has `## Windows (cloud inference)` today, so a
+    heading with regex metacharacters must find its section rather than
+    quietly reporting the doc has none."""
+    text = "## Windows (cloud inference)\ncloud body\n## macOS\nmac body\n"
+    assert _section(text, "Windows (cloud inference)") == "cloud body\n"
+
+
+def test_the_section_reader_reads_a_docs_last_section():
+    """Round 8, finding 1: `_section` promises None only when the doc has no
+    such section, and every doc ends in a section with no `## ` heading after
+    it (readme.md's `## License`, docs/plugin.md's `## Safety`), so the body
+    of the last heading must be read up to the end of the text rather than
+    reported as missing."""
+    assert _section("## A\na\n## B\nb\n", "B") == "b\n"
 
 
 def test_install_blocks_install_from_the_lockfile():
@@ -200,8 +241,9 @@ def test_install_blocks_install_from_the_lockfile():
     is exact, an SDK added with `uv pip install` is removed the next time the
     Install block runs. Running the installs here would need the network, so
     the gate is on the commands themselves."""
-    install = _readme_section("Install")
-    assert any(_installs_from_the_lockfile(c) for c in _fenced_commands(install)), (
+    readme = README.read_text(encoding="utf-8")
+    install = _section(readme, "Install")
+    assert install is not None and any(_installs_from_the_lockfile(c) for c in _fenced_commands(install)), (
         "readme.md's ## Install section must install with `uv sync --locked`"
     )
     unlocked = [
@@ -321,7 +363,9 @@ def test_readme_build_blocks_sync_the_sdk_extras():
     what the build venv has, so every `uv sync` in readme.md's build section
     (the macOS block and the Windows one) names the build, cloud and openai
     extras."""
-    section = _readme_section("Building the executable")
+    readme = README.read_text(encoding="utf-8")
+    section = _section(readme, "Building the executable")
+    assert section is not None, "readme.md has no ## Building the executable section"
     syncs = [c for c in _fenced_commands(section) if re.search(r"\buv sync\b", c)]
     assert syncs, "readme.md's build section has no uv sync command"
     without = _lacking_build_extras(syncs)
@@ -331,13 +375,26 @@ def test_readme_build_blocks_sync_the_sdk_extras():
     )
 
 
+def _jobs() -> dict[str, str]:
+    """ci.yml's jobs, by name, each as its text."""
+    text = CI_WORKFLOW.read_text(encoding="utf-8").split("\njobs:\n", 1)[1]
+    parts = re.split(r"^  (?=\w[\w-]*:\s*$)", text, flags=re.MULTILINE)
+    return {part.split(":", 1)[0]: part for part in parts if part.strip()}
+
+
 def _windows_job() -> str:
     """The text of ci.yml's job on a Windows runner."""
-    workflow = CI_WORKFLOW.read_text(encoding="utf-8")
-    jobs = re.split(r"^  (?=\w[\w-]*:\s*$)", workflow.split("\njobs:\n", 1)[1], flags=re.MULTILINE)
-    windows = [job for job in jobs if re.search(r"runs-on: windows-", job)]
-    assert windows, "ci.yml has no job on a Windows runner"
+    windows = [job for job in _jobs().values() if re.search(r"runs-on: windows-", job)]
+    assert windows, f"{CI_WORKFLOW.name} has no job on a Windows runner"
     return windows[0]
+
+
+def _windows_pytest_commands() -> list[str]:
+    """The pytest commands of ci.yml's Windows job."""
+    job = _windows_job()
+    commands = [c for c in _ci_pytest_commands() if c in job]
+    assert commands, "the Windows job runs no pytest step"
+    return commands
 
 
 def test_ci_builds_and_smoke_tests_the_windows_executable():
@@ -352,8 +409,7 @@ def test_ci_builds_and_smoke_tests_the_windows_executable():
     (-rs), so the log says which tests ran against dist/melampus.exe rather
     than a count of dots."""
     job = _windows_job()
-    pytest_steps = [c for c in _ci_pytest_commands() if c in job]
-    assert pytest_steps, "the Windows job runs no pytest step"
+    pytest_steps = _windows_pytest_commands()
     assert all("--build-binary" in c and "tests/test_binary.py" in c for c in pytest_steps), (
         f"the Windows job's pytest step must build with --build-binary and run "
         f"the binary smoke tests: {pytest_steps}"
@@ -383,8 +439,8 @@ def test_ci_runs_the_plugin_command_through_cmd_exe_on_windows():
         if not line.strip().startswith("#") and "install" in line and re.search(r"\blua\b", line)
     ]
     assert installs_lua, "the Windows job installs no Lua interpreter, so the plugin tests skip there"
-    pytest_steps = [c for c in _ci_pytest_commands() if c in job]
-    assert pytest_steps and all("tests/test_lua_plugin.py" in c for c in pytest_steps), (
+    pytest_steps = _windows_pytest_commands()
+    assert all("tests/test_lua_plugin.py" in c for c in pytest_steps), (
         "the Windows job's pytest step must run tests/test_lua_plugin.py, so the "
         f"command the plugin builds for cmd.exe is run by cmd.exe: {pytest_steps}"
     )
@@ -399,19 +455,142 @@ def test_ci_runs_the_plugin_command_through_cmd_exe_on_windows():
     )
 
 
-def test_ci_pins_every_pip_install_to_an_exact_version():
+def test_every_workflow_pins_every_pip_install_to_an_exact_version():
     """Security: a tool CI installs with pip outside the lockfile (uv, on the
     Windows runner) is fetched from PyPI at build time and then produces the
     executable that is uploaded as an artifact, so `pip install <name>` with no
-    `==` runs whatever PyPI serves that day. Every pip install in ci.yml names
-    an exact version."""
-    workflow = CI_WORKFLOW.read_text(encoding="utf-8")
-    pip_installs = re.findall(r"^\s*run:.*\bpip install\b(.*?)\s*$", workflow, re.MULTILINE)
-    assert pip_installs, "ci.yml has no pip install step"
+    `==` runs whatever PyPI serves that day. Every pip install in every
+    workflow names an exact version: ci.yml's executable is an artifact on a
+    pull request and, on a v* tag, what ships (card #402)."""
+    pip_installs = [
+        (workflow.name, arguments)
+        for workflow in _workflows()
+        for arguments in re.findall(
+            r"^\s*run:.*\bpip install\b(.*?)\s*$", workflow.read_text(encoding="utf-8"), re.MULTILINE
+        )
+    ]
+    assert CI_WORKFLOW.name in {name for name, _ in pip_installs}, (
+        f"ci.yml has no pip install step: {pip_installs}"
+    )
     unpinned = [
-        requirement
-        for arguments in pip_installs
+        f"{name}: {requirement}"
+        for name, arguments in pip_installs
         for requirement in arguments.split()
         if not requirement.startswith("-") and not re.fullmatch(r"[\w.\-\[\]]+==[\w.]+", requirement)
     ]
-    assert not unpinned, f"CI installs from PyPI without an exact version: {unpinned}"
+    assert not unpinned, f"a workflow installs from PyPI without an exact version: {unpinned}"
+
+
+def test_the_pip_pinning_gate_reads_yaml_workflows_too(tmp_path, monkeypatch):
+    """Round 3, finding 2: GitHub runs `.yaml` workflows as well as `.yml`,
+    and the gate above promises every workflow, so an `x.yaml` whose pip
+    install names no `==` must fail it rather than slip past a glob that
+    spells only `.yml`. The folder is a stand-in read at call time; ci.yml is
+    in it, pinned, so the only thing wrong is the .yaml file."""
+    (tmp_path / "ci.yml").write_text("        run: pip install uv==0.8.0\n", encoding="utf-8")
+    (tmp_path / "x.yaml").write_text("        run: pip install uv\n", encoding="utf-8")
+    monkeypatch.setitem(globals(), "WORKFLOWS", tmp_path)
+    with pytest.raises(AssertionError, match=r"x\.yaml: uv"):
+        test_every_workflow_pins_every_pip_install_to_an_exact_version()
+
+
+RELEASE_ZIPS = ("Melampus-macOS.zip", "Melampus-Windows.zip")
+
+
+def _steps(job: str) -> list[str]:
+    """That job's steps, each as its text."""
+    return re.split(r"^      - ", job, flags=re.MULTILINE)[1:]
+
+
+def _unpinned_actions(text: str) -> list[str]:
+    """The `uses:` lines in that text not pinned to a commit SHA with the
+    version in a trailing comment."""
+    return [
+        line.strip()
+        for line in text.splitlines()
+        if re.search(r"^\s*-?\s*uses:", line) and not re.search(r"uses: \S+@[0-9a-f]{40}\s+# v\d", line)
+    ]
+
+
+def test_ci_packages_a_zip_per_platform_and_a_tag_releases_both():
+    """Card #402, Done-when 1: given a tag is pushed, when the workflow runs,
+    then a GitHub release exists with Melampus-macOS.zip and
+    Melampus-Windows.zip attached. The proof is the first tagged run; this
+    gate keeps the workflow honest before it, and there is one workflow:
+    ci.yml, extended (rule 2), not copied, so what ships is what was tested
+    by construction and no second file's brew, choco or pytest lines drift.
+    It triggers on v* tags and still on pull requests; every job that builds
+    (--build-binary) also packages through tools/package_plugin.py, the one
+    place that knows the layout (no second copy in YAML), so the command that
+    ships the zips runs on every pull request, not first on the tag; the
+    Windows job's pytest line names tests/test_package_plugin.py, so the
+    Windows zip ships from a script tested on Windows; both zip names are in
+    it; a `release` job needs every packaging job, runs only on a tag, and
+    alone holds `contents: write`, with no scope beyond contents anywhere in
+    the file; and every action this card adds (the zip uploads and the
+    release job's) is pinned to a commit SHA with the version in a trailing
+    comment. ci.yml's earlier `uses:` lines are card #439's."""
+    ci = CI_WORKFLOW.read_text(encoding="utf-8")
+    copies = [w.name for w in _workflows() if w != CI_WORKFLOW and "pytest" in w.read_text(encoding="utf-8")]
+    assert not copies, f"a second workflow copies ci.yml's build steps; extend ci.yml instead: {copies}"
+
+    on = re.search(r"^on:\n((?:  .*\n)+)", ci, re.MULTILINE)
+    assert on, "ci.yml has no on: block"
+    assert re.search(r"^  push:\n(?:    .*\n)*?    tags:\s*\[\s*['\"]?v\*", on.group(1), re.MULTILINE), (
+        "ci.yml does not trigger on pushed v* tags")
+    assert re.search(r"^  pull_request:", on.group(1), re.MULTILINE), "ci.yml no longer runs on pull requests"
+
+    jobs = _jobs()
+    building = {name for name, job in jobs.items() if "--build-binary" in job}
+    packaging = {name for name, job in jobs.items() if "tools/package_plugin.py" in job}
+    assert building and packaging == building, (
+        f"every job that builds must package through tools/package_plugin.py: builds {sorted(building)}, "
+        f"packages {sorted(packaging)}")
+    windows_steps = _windows_pytest_commands()
+    assert all("tests/test_package_plugin.py" in c for c in windows_steps), (
+        "the Windows job must run tests/test_package_plugin.py, so the Windows zip "
+        f"ships from a script tested on Windows: {windows_steps}")
+    missing = [z for z in RELEASE_ZIPS if z not in ci]
+    assert not missing, f"ci.yml does not name {missing}"
+
+    release = jobs.get("release")
+    assert release, "ci.yml has no release job"
+    assert re.search(r"^\s+if:\s*github\.ref_type == 'tag'\s*$", release, re.MULTILINE), (
+        "the release job must run only on a tag: if: github.ref_type == 'tag'")
+    needs = re.search(r"^\s+needs:\s*\[(.*?)\]", release, re.MULTILINE)
+    needed = {n.strip() for n in needs.group(1).split(",")} if needs else set()
+    assert packaging <= needed, f"the release job must need every packaging job: needs {sorted(needed)}"
+    assert "gh release create" in release, "the release job does not create the release"
+    scopes = re.findall(r"^\s+([\w-]+): (read|write|none)$", ci, re.MULTILINE)
+    other = [f"{scope}: {level}" for scope, level in scopes if scope != "contents"]
+    assert not other, f"ci.yml grants more than contents: {other}"
+    writes = [line for line in ci.splitlines() if re.search(r"^\s+contents: write$", line)]
+    assert len(writes) == 1 and "contents: write" in release, "contents: write must be granted once, on the release job"
+
+    zip_steps = [
+        step for name in packaging for step in _steps(jobs[name]) if any(z in step for z in RELEASE_ZIPS)
+    ]
+    assert zip_steps, "no step uploads a zip"
+    unpinned = _unpinned_actions(release) + [u for step in zip_steps for u in _unpinned_actions(step)]
+    assert not unpinned, f"actions added for the release are not pinned to a SHA with a version comment: {unpinned}"
+
+
+def test_install_docs_name_the_release_zips_and_keep_the_from_source_path():
+    """Card #402: a user installs from a release download, one zip per
+    platform, through Plug-in Manager; readme.md's Lightroom section must name
+    both zips, and keep the copy-from-dist step for a build from source. The
+    section sends the user to docs/plugin.md for the install steps, so that
+    page's ## Install must tell the same story: both zips, and the copy for a
+    build from source, not a bare executable downloaded from a release."""
+    sections = {
+        README: ("Reviewing in Lightroom", README.read_text(encoding="utf-8")),
+        PLUGIN_DOC: ("Install", PLUGIN_DOC.read_text(encoding="utf-8")),
+    }
+    for doc, (heading, text) in sections.items():
+        name = doc.relative_to(REPO).as_posix()
+        section = _section(text, heading)
+        assert section is not None, f"{name} has no ## {heading} section"
+        missing = [z for z in RELEASE_ZIPS if z not in section]
+        assert not missing, f"{name}'s {heading} section does not name {missing}"
+        assert "cp dist/melampus plugin/Melampus.lrplugin/" in section, (
+            f"{name}'s {heading} section lost the from-source install")

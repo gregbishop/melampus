@@ -1,18 +1,25 @@
 name: ci
 
+# Card #402: a pushed v* tag runs this same workflow, so the zips a release
+# ships are built and packaged by the jobs that gate every pull request, and
+# the `release` job at the end attaches them to a GitHub release. Code
+# signing and notarization are card #438.
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
 
 # The token can read the repo and nothing else, even if a workflow step is
-# compromised.
+# compromised. The one job that writes, `release`, widens this to
+# contents: write for itself alone (the release and its assets).
 permissions:
   contents: read
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # A superseded pull-request run is cancelled; a release run is not.
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
 
 jobs:
   test:
@@ -38,6 +45,21 @@ jobs:
       - name: Run service and plugin tests, building the executable first
         working-directory: service
         run: uv sync --locked --extra dev --extra build --extra cloud --extra openai && uv run pytest -q --build-binary
+
+      # Card #402: the plugin folder with the executable inside it, as a
+      # release ships it, from tools/package_plugin.py (the one place that
+      # knows the layout). Packaged on every run, so the command that ships
+      # the zip has run on every pull request before a tag runs it for real.
+      - name: Package Melampus-macOS.zip
+        working-directory: service
+        run: uv run python ../tools/package_plugin.py
+
+      - name: Upload Melampus-macOS.zip
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: Melampus-macOS
+          path: dist/Melampus-macOS.zip
+          if-no-files-found: error
 
   build-windows:
     # Card #400: the Windows executable. MLX does not exist here, so the build
@@ -79,7 +101,7 @@ jobs:
       - name: Build the executable and run its smoke tests and the plugin tests
         working-directory: service
         shell: bash
-        run: uv sync --locked --extra dev --extra build --extra cloud --extra openai && uv run pytest -v -rs tests/test_binary.py tests/test_lua_plugin.py --build-binary
+        run: uv sync --locked --extra dev --extra build --extra cloud --extra openai && uv run pytest -v -rs tests/test_binary.py tests/test_lua_plugin.py tests/test_package_plugin.py --build-binary
 
       - name: Upload melampus.exe
         uses: actions/upload-artifact@v4
@@ -87,3 +109,43 @@ jobs:
           name: melampus-windows
           path: dist/melampus.exe
           if-no-files-found: error
+
+      # Card #402: as the macOS job does, the zip a release ships, on every run.
+      - name: Package Melampus-Windows.zip
+        working-directory: service
+        shell: bash
+        run: uv run python ../tools/package_plugin.py
+
+      - name: Upload Melampus-Windows.zip
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: Melampus-Windows
+          path: dist/Melampus-Windows.zip
+          if-no-files-found: error
+
+  release:
+    # Card #402: on a pushed v* tag, and only then, the zips the two build
+    # jobs just made are attached to a GitHub release for the tag. On a pull
+    # request this job is skipped. Only here does the token write, and only
+    # to contents.
+    if: github.ref_type == 'tag'
+    needs: [test, build-windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: Melampus-*
+          path: release
+          merge-multiple: true
+
+      # gh is on the runner; the token is the workflow's own, scoped above.
+      - name: Create the release with both zips attached
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" --generate-notes
+          release/Melampus-macOS.zip release/Melampus-Windows.zip

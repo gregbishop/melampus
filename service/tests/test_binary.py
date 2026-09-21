@@ -60,7 +60,7 @@ CONFTEST = Path(__file__).with_name("conftest.py")
 VENV_CLI = [sys.executable, "-m", "melampus.cli"]
 
 
-def _no_python_environment(tmp_path: Path) -> dict[str, str]:
+def no_python_environment(tmp_path: Path) -> dict[str, str]:
     """An environment in which no python of any kind can be found."""
     empty = tmp_path / "empty-bin"
     empty.mkdir()
@@ -255,7 +255,7 @@ def test_frozen_prompts_come_from_the_bundle(monkeypatch: pytest.MonkeyPatch, tm
     assert load_config(use_local=False).run.prompts_dir == bundle / "prompts"
 
 
-def _per_user_data_dir(home: Path) -> Path:
+def per_user_data_dir(home: Path) -> Path:
     """Where config._data_root() lands for the executable under this HOME, in a
     bare environment (no LOCALAPPDATA, no XDG_DATA_HOME)."""
     if sys.platform == "darwin":
@@ -269,8 +269,8 @@ def per_user_config(tmp_path: Path, toml: str) -> dict[str, str]:
     """An environment with no python and a fresh HOME whose per-user data
     directory holds `toml` as melampus.local.toml: the way a user configures
     the executable, and the only way the tests do."""
-    env = _no_python_environment(tmp_path)
-    data_dir = _per_user_data_dir(Path(env["HOME"]))
+    env = no_python_environment(tmp_path)
+    data_dir = per_user_data_dir(Path(env["HOME"]))
     data_dir.mkdir(parents=True)
     (data_dir / "melampus.local.toml").write_text(toml, encoding="utf-8")
     return env
@@ -327,7 +327,7 @@ def test_frozen_user_data_lives_in_the_per_user_directory_not_in_the_bundle(
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
     monkeypatch.delenv("LOCALAPPDATA", raising=False)
     monkeypatch.delenv("XDG_DATA_HOME", raising=False)
-    data = _per_user_data_dir(home)
+    data = per_user_data_dir(home)
     data.mkdir(parents=True)
     (data / "melampus.local.toml").write_text('[run]\nprofile = "sport"\n', encoding="utf-8")
     bundle, executable = tmp_path / "unpack", tmp_path / "dist" / "melampus"
@@ -401,7 +401,7 @@ def test_no_local_config_makes_the_config_file_the_whole_configuration(
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
     monkeypatch.delenv("LOCALAPPDATA", raising=False)
     monkeypatch.delenv("XDG_DATA_HOME", raising=False)
-    data = _per_user_data_dir(home)
+    data = per_user_data_dir(home)
     data.mkdir(parents=True)
     # Reaches the fingerprint if read; the synthetic file leaves it alone.
     (data / "melampus.local.toml").write_text("[image]\nmax_edge = 640\n", encoding="utf-8")
@@ -446,7 +446,7 @@ def _request_backend(
     return subprocess.run(
         [str(executable), str(photos), "--backend", backend,
          "--cache", str(tmp_path / "cache.jsonl"), *arguments],
-        env=env or _no_python_environment(tmp_path), capture_output=True, text=True, timeout=600,
+        env=env or no_python_environment(tmp_path), capture_output=True, text=True, timeout=600,
     )
 
 
@@ -457,7 +457,7 @@ def _request_mlx(
     and offline, and a synthetic config file naming SYNTHETIC_MODEL as its
     whole configuration. `env` is the no-python environment to run in; by
     default a fresh one."""
-    env = (env or _no_python_environment(tmp_path)) | {"HF_HUB_OFFLINE": "1", "HF_HOME": str(tmp_path / "hf")}
+    env = (env or no_python_environment(tmp_path)) | {"HF_HUB_OFFLINE": "1", "HF_HOME": str(tmp_path / "hf")}
     return _request_backend(
         executable, photos, tmp_path, "mlx",
         *_synthetic_config(tmp_path, f'[model]\nrepo = "{SYNTHETIC_MODEL}"\n'), env=env,
@@ -559,7 +559,7 @@ def test_executable_prints_the_same_json_as_the_cli_with_no_python_on_the_path(
     expected, expected_enriched = _analyze([*VENV_CLI, *isolated], photos, tmp_path / "venv", env=None)
     actual, actual_enriched = _analyze(
         [str(built_executable), *isolated], photos, tmp_path / "binary",
-        env=_no_python_environment(tmp_path),
+        env=no_python_environment(tmp_path),
     )
     assert [r["file"] for r in expected] == [PHOTO], "the CLI did not analyze the photo"
     assert (expected[0]["run_fingerprint"], expected[0]["retries"]) == _fingerprint_and_retries(
