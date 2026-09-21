@@ -2612,6 +2612,27 @@ def test_command_resolving_to_a_batch_shim_is_refused_and_names_the_real_entry(
     assert "--backend" in message
 
 
+def test_command_resolved_through_a_path_entry_with_a_control_character_is_named_in_printable_words(
+    monkeypatch, no_ambient_keys, no_ambient_ollama
+):
+    """Codex round 18 (providers.py:324), security: the resolved path the
+    batch-shim refusal names is the template's first element joined to a
+    PATH directory, and PATH is inherited from whatever launched melampus
+    (a supervisor, the plugin's host), so a directory carrying an escape
+    sequence would reach the terminal through the message even though the
+    config's element is printable. Given shutil.which resolves the program
+    under such a directory to a `.cmd`, when the backend is asked for,
+    then the refusal names the path in printable words only, through
+    `plain`, the one rule for text the program's side wrote."""
+    shim = "C:\\Tools\x1b[2J\\fake-vlm.cmd"
+    monkeypatch.setattr(providers.shutil, "which", lambda name: shim)
+    with pytest.raises(providers.BackendUnavailable) as err:
+        providers.build_primary_backend(_cfg(model={"backend": "command", "command": COMMAND}))
+    clause = next(line for line in str(err.value).splitlines() if "resolves to" in line)
+    assert "C:\\Tools [2J\\fake-vlm.cmd, a batch file" in clause, clause
+    assert all(c.isprintable() for c in clause), clause
+
+
 def test_command_in_a_process_that_ignores_sigchld_is_refused_and_names_the_fix(
     monkeypatch, no_ambient_keys, no_ambient_ollama
 ):

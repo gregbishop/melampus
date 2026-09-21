@@ -310,6 +310,8 @@ def build_primary_backend(config: MelampusConfig) -> VLMBackend:
                 "(docs/config.md § [model]).",
                 settings.ollama_url,
             )
+        from .backend import CommandBackend
+
         program = settings.command[0]
         executable = shutil.which(program)
         if executable is None:
@@ -320,8 +322,13 @@ def build_primary_backend(config: MelampusConfig) -> VLMBackend:
                 settings.ollama_url,
             )
         if executable.lower().endswith(BATCH_SUFFIXES):
+            # The path is the program (printable: the config refuses one
+            # that is not) under a PATH directory, and PATH came from
+            # whatever launched melampus, so it is shown through plain,
+            # the way a program's stderr is.
             raise _refuse_here(
-                f"The command '{program}' resolves to {executable}, a batch file "
+                f"The command '{program}' resolves to "
+                f"{CommandBackend.plain(executable)}, a batch file "
                 "that Windows runs through cmd.exe whatever it is told, so the "
                 "prompt would be parsed as shell text rather than passed as one "
                 "argument. Name the program's real entry in [model] command "
@@ -343,8 +350,6 @@ def build_primary_backend(config: MelampusConfig) -> VLMBackend:
                 "SIGCHLD's default disposition in the launcher.",
                 settings.ollama_url,
             )
-        from .backend import CommandBackend
-
         return CommandBackend(
             settings.command, executable=executable, timeout=settings.timeout_seconds
         )
