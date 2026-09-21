@@ -123,8 +123,6 @@ LrTasks.startAsyncTask(function()
 							model.progress = text
 							scope:setPortionComplete(portion, 1)
 						end
-						-- Lightroom's own cancel, on its progress bar, cancels too.
-						if scope:isCanceled() and download then download.cancel() end
 					end,
 					function(code, update, tail)
 						scope:done()
@@ -138,7 +136,11 @@ LrTasks.startAsyncTask(function()
 							LrDialogs.message('Melampus', 'The model download failed (exit ' .. tostring(code)
 								.. ').\n\n' .. tostring(tail), 'critical')
 						end
-					end)
+					end,
+					-- Lightroom's own cancel, on its progress bar, cancels too:
+					-- the poller asks on every tick, from the first, so a
+					-- cancel during the executable's start-up holds.
+					function() return scope:isCanceled() end)
 				download = handle
 				if not handle then
 					scope:done()

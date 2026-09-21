@@ -139,7 +139,9 @@ executable's own default):
   starts, and its start takes seconds after the click, so the poller writes
   the marker again on every tick until the command exits: a Cancel clicked
   in that window holds. Lightroom's own cancel on the progress bar does
-  the same.
+  the same: the poller asks the scope on every tick, from the first,
+  whether or not a protocol line has arrived, so a cancel during the
+  executable's start-up holds too.
 - Done (`done <path>`, exit 0): the row reads **Installed**, greyed, beside
   **Remove**, which runs `--remove-model` and flips the row back. Exit 3 shows
   a message with the tail of the download log.

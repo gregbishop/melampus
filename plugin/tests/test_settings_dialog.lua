@@ -44,14 +44,25 @@ local function exists(path)
 	return false
 end
 
+local function readFile(path)
+	local handle = io.open(path, 'r')
+	if not handle then return nil end
+	local text = handle:read('a')
+	handle:close()
+	return text
+end
+
 --- The fake executable playing --download-model, as the onExecute the mock
 --- calls with the command: `lines` land in the progress file (the command's
 --- stdout redirect) one per tick, each after the poller has had its turn,
---- `stderr` in the log (its stderr redirect), and it exits `code`.
-local function fakeDownload(lines, code, stderr)
+--- `stderr` in the log (its stderr redirect), and it exits `code`. `startup`
+--- is how many ticks it spends starting (the one-file unpack, the imports,
+--- the hub's listing) before the first line, the progress file empty.
+local function fakeDownload(lines, code, stderr, startup)
 	return function(command)
 		local target = string.match(command, ">'([^']+)'")
 		local log = string.match(command, "2>'([^']+)'")
+		for _ = 1, startup or 0 do mock.yield() end
 		for _, line in ipairs(lines) do
 			mock.yield()
 			writeFile(target, line .. '\n', 'a')
@@ -78,7 +89,7 @@ end
 --- there); `options.status` what it prints for --model-status (default: the
 --- model absent); `options.download` plays --download-model: its `lines` land
 --- in the progress file one per tick, `stderr` in the log, and it exits
---- `code`; `options.detectionCode` and `options.statusCode` are the exit
+--- `code`, after `startup` ticks with the file empty; `options.detectionCode` and `options.statusCode` are the exit
 --- codes of --detect-engines and --model-status (0); `options.removeCode` is
 --- --remove-model's exit code; `options.onDialog` plays the user while the
 --- dialog is up.
@@ -97,7 +108,7 @@ local function openSettings(options)
 				return options.statusCode or 0
 			elseif string.find(command, '--download-model', 1, true) and target then
 				local download = options.download or { lines = {}, code = 0 }
-				return fakeDownload(download.lines, download.code, download.stderr)(command)
+				return fakeDownload(download.lines, download.code, download.stderr, download.startup)(command)
 			elseif string.find(command, '--remove-model', 1, true) then
 				return options.removeCode or 0
 			end
@@ -519,6 +530,30 @@ t.test('Lightroom\'s own cancel on the progress bar writes the marker too', func
 	os.remove(CANCEL_PATH)
 end)
 
+t.test('Lightroom\'s own cancel while the executable is still starting, the progress file empty, writes the marker on the next tick', function()
+	-- Codex review 3, finding 2 (MelampusSettings.lua:127). The scope's
+	-- cancel was asked only when a protocol line had arrived, so a cancel on
+	-- Lightroom's bar during the executable's start-up (the unpack, the
+	-- imports, the hub's listing: seconds with nothing in the progress file)
+	-- wrote no marker until progress did. The poller asks on every tick.
+	os.remove(CANCEL_PATH)
+	local contents = openSettings({ detection = mock.detectionText(), download = {
+		startup = 3, lines = { 'cancelled' }, code = 4,
+	} })
+	local row, model = modelRow(contents)
+	theButton(row, model, 'Download ' .. REPO, true).action()
+	local progress = mock.state.tempDir .. '/melampus-download.progress'
+	mock.state.cancelled = true
+	mock.tick()
+	t.equals(readFile(progress), '', 'a protocol line reached the file before the tick')
+	t.equals(model.progress, 'Starting…', 'progress reached the dialog before the tick')
+	t.isTrue(exists(CANCEL_PATH), 'the progress bar\'s cancel with nothing in the progress file did not write the marker at ' .. CANCEL_PATH)
+	mock.settle()
+	t.equals(model.phase, 'absent', 'a cancelled download should offer Download again')
+	t.equals(#dialogsShown(false), 0, 'a cancel is not an error')
+	os.remove(CANCEL_PATH)
+end)
+
 t.test('a failed download shows a message with the tail of the log and offers Download again', function()
 	local contents = openSettings({ detection = mock.detectionText(), download = {
 		lines = { 'progress 0 18300000000' }, code = 3,
@@ -720,6 +755,30 @@ t.test('a Cancel clicked while the executable is still starting holds: the marke
 	mock.settle()
 	t.equals(finished.code, 4)
 	t.isFalse(exists(CANCEL_PATH), 'the poller kept writing the marker after the command exited')
+	os.remove(CANCEL_PATH)
+end)
+
+t.test('a cancel asked elsewhere, Lightroom\'s own bar, is looked for on every tick, one with nothing in the progress file included', function()
+	-- Codex review 3, finding 2. The dialog hands the poller a question,
+	-- `cancelAsked`, for the scope's own Cancel; the poller asks it on every
+	-- tick, before any protocol line exists, and once it says yes the cancel
+	-- is held exactly as the handle's cancel() is.
+	os.remove(CANCEL_PATH)
+	local Analyze = loadAnalyze({ existing = { [mock.EXECUTABLE] = true } })
+	mock.state.onExecute = fakeDownload({ 'cancelled' }, 4, nil, 2)
+	local asked, seen, finished = false, {}, nil
+	local handle = Analyze.downloadModel(CANCEL_PATH,
+		function(update) seen[#seen + 1] = update end,
+		function(exit, update) finished = { code = exit, update = update } end,
+		function() return asked end)
+	t.isNotNil(handle, 'the download did not start')
+	asked = true
+	mock.tick()
+	t.equals(#seen, 0, 'a line reached the poller before the tick')
+	t.isTrue(exists(CANCEL_PATH), 'a cancel asked elsewhere was not seen on a tick with nothing in the progress file')
+	mock.settle()
+	t.equals(finished.code, 4)
+	t.equals(finished.update.state, 'cancelled')
 	os.remove(CANCEL_PATH)
 end)
 

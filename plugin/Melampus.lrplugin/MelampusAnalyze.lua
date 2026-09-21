@@ -373,8 +373,11 @@ end
 -- one-file unpack, the imports) takes seconds after the click, so a
 -- cancel is held: once asked for, the poller writes the marker again on
 -- every tick until the command exits, and a start-up removal loses it
--- for a second at most.
-function Analyze.downloadModel(cancelPath, onProgress, onFinish)
+-- for a second at most. `cancelAsked`, optional, is the caller's other
+-- way of cancelling (Lightroom's own progress bar): the poller asks it on
+-- every tick, whether or not a protocol line has arrived, and once it
+-- says so the cancel is held exactly as cancel() holds it.
+function Analyze.downloadModel(cancelPath, onProgress, onFinish, cancelAsked)
 	local command, err = Analyze.downloadCommand()
 	if not command then return nil, err end
 	local progressFile, logFile = Analyze.downloadFiles()
@@ -396,6 +399,7 @@ function Analyze.downloadModel(cancelPath, onProgress, onFinish)
 	LrTasks.startAsyncTask(function()
 		while code == nil do
 			LrTasks.sleep(1)
+			if not cancelled and cancelAsked and cancelAsked() then cancelled = true end
 			-- Not after the exit: the executable removed the marker then,
 			-- and one left behind would be the next run's stale one.
 			if cancelled and code == nil then writeMarker() end
