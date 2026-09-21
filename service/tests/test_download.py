@@ -2023,10 +2023,7 @@ def test_remove_model_flag_exits_3_with_the_refusal_on_stderr_and_nothing_on_std
 
     monkeypatch.setattr(download, "remove_model", refuse)
 
-    assert main(["--remove-model", "--no-local-config"]) == 3
-
-    out, err = capsys.readouterr()
-    assert out == "" and "cancel it first" in err
+    _refused_through_the_cli(capsys, "--remove-model", "cancel it first")
 
 
 @pytest.mark.parametrize("flag", ["--download-model", "--model-status", "--remove-model"])
