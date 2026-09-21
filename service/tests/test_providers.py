@@ -1997,6 +1997,16 @@ def _command_backend(run: _FakeRun, command: list[str] = COMMAND, **kwargs) -> C
     return backend
 
 
+def _given(monkeypatch, module, **constants) -> None:
+    """Give `module` each named constant where this platform has none, so a
+    branch written for another platform can run here; where the platform
+    has the constant, its real value is kept, so the test means the same
+    thing on every platform and asserts against the real names. The value
+    given is the other platform's own."""
+    for name, value in constants.items():
+        monkeypatch.setattr(module, name, getattr(module, name, value), raising=False)
+
+
 def test_command_backend_expands_the_template_into_one_argv(tmp_path):
     """Template expansion: each argument with `{image}` gets the image path as
     given (absolute, the staged file), each with `{prompt}` the prompt in
@@ -2258,7 +2268,7 @@ def test_command_backend_stops_a_tree_on_posix_by_the_group_the_command_heads(mo
     other failure is raised. Runs on every platform: os.killpg is faked,
     and SIGKILL is given where there is none."""
     monkeypatch.setattr(sys, "platform", "linux")
-    monkeypatch.setattr(signal, "SIGKILL", getattr(signal, "SIGKILL", 9), raising=False)
+    _given(monkeypatch, signal, SIGKILL=9)
     calls: list[tuple[int, int]] = []
     answer: list[BaseException | None] = [None]
 
@@ -2285,7 +2295,7 @@ def test_command_backend_starts_the_command_in_its_own_process_group_on_windows(
     with start_new_session, which Windows has no idea of. Runs on every
     platform: the platform and the flag are faked."""
     monkeypatch.setattr(sys, "platform", "win32")
-    monkeypatch.setattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200, raising=False)
+    _given(monkeypatch, subprocess, CREATE_NEW_PROCESS_GROUP=0x200)
     image = tmp_path / "image.jpg"
     image.write_bytes(b"jpeg")
     run = _FakeRun(stdout=ID_OK)
@@ -2293,7 +2303,7 @@ def test_command_backend_starts_the_command_in_its_own_process_group_on_windows(
     _command_backend(run).complete(image, "prompt", 10)
 
     ((_, kwargs),) = run.calls
-    assert kwargs["creationflags"] == 0x200
+    assert kwargs["creationflags"] == subprocess.CREATE_NEW_PROCESS_GROUP
     assert "start_new_session" not in kwargs
 
 
@@ -2325,9 +2335,8 @@ def test_command_backend_sees_the_exit_through_kqueue_and_names_what_each_event_
     the OSError it is, never counted as the exit. Runs on every platform:
     kqueue and kevent are faked, with the constants where there are none."""
     monkeypatch.setattr(sys, "platform", "darwin")
-    for name, value in (("KQ_FILTER_PROC", -5), ("KQ_EV_ADD", 1), ("KQ_EV_ONESHOT", 0x10), ("KQ_EV_CLEAR", 0x20),
-                        ("KQ_EV_EOF", 0x8000), ("KQ_EV_ERROR", 0x4000), ("KQ_NOTE_EXIT", 0x80000000)):
-        monkeypatch.setattr(select, name, value, raising=False)
+    _given(monkeypatch, select, KQ_FILTER_PROC=-5, KQ_EV_ADD=1, KQ_EV_ONESHOT=0x10, KQ_EV_CLEAR=0x20,
+           KQ_EV_EOF=0x8000, KQ_EV_ERROR=0x4000, KQ_NOTE_EXIT=0x80000000)
     monkeypatch.setattr(select, "kevent", lambda *fields: types.SimpleNamespace(fields=fields), raising=False)
     controls: list[tuple[list, int, float]] = []
     answer: list[list] = [[]]
@@ -2378,8 +2387,7 @@ def test_command_backend_sees_the_exit_through_waitid_where_there_is_no_kqueue(m
     constants are given where there are none."""
     monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.delattr(select, "kqueue", raising=False)
-    for name, value in (("P_PID", 1), ("WEXITED", 4), ("WNOWAIT", 0x1000000), ("WNOHANG", 1)):
-        monkeypatch.setattr(os, name, getattr(os, name, value), raising=False)
+    _given(monkeypatch, os, P_PID=1, WEXITED=4, WNOWAIT=0x1000000, WNOHANG=1)
     calls: list[tuple[int, int, int]] = []
     answer: list[object] = [None]
 
@@ -2489,7 +2497,7 @@ def test_command_in_a_process_that_ignores_sigchld_is_refused_and_names_the_fix(
     frame. Runs on every platform: the disposition is faked, and the
     signal's name is given where there is none."""
     monkeypatch.setattr(providers.shutil, "which", lambda name: f"/opt/fake/bin/{name}")
-    monkeypatch.setattr(signal, "SIGCHLD", getattr(signal, "SIGCHLD", 20), raising=False)
+    _given(monkeypatch, signal, SIGCHLD=20)
     asked: list[int] = []
 
     def getsignal(signalnum):
