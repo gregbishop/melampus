@@ -610,11 +610,7 @@ class OllamaBackend(VLMBackend):
         `stream`, beside."""
         with self._bounded(request):
             raw = self._exchange(request)
-        if len(raw) > self.MAX_REPLY_BYTES:
-            raise RuntimeError(
-                f"Ollama's reply from {self.url} ran past {self.MAX_REPLY_BYTES} bytes"
-            )
-        return raw
+        return self._within_bound(raw)
 
     def stream(self, request: urllib.request.Request) -> Iterator[bytes]:
         """The reply's lines as the server writes them, for the model pull
@@ -638,11 +634,7 @@ class OllamaBackend(VLMBackend):
                 line = response.readline(self.MAX_REPLY_BYTES + 1)
                 if not line or deadline.expired.is_set():
                     return
-                if len(line) > self.MAX_REPLY_BYTES:
-                    raise RuntimeError(
-                        f"Ollama's reply from {self.url} ran past {self.MAX_REPLY_BYTES} bytes"
-                    )
-                yield line
+                yield self._within_bound(line)
 
     @contextlib.contextmanager
     def _bounded(self, request: urllib.request.Request) -> Iterator[_Deadline]:
@@ -701,6 +693,16 @@ class OllamaBackend(VLMBackend):
             # otherwise taken by a caller's clause for the not-running
             # failure above, which is the only ConnectionError raised here).
             raise RuntimeError(f"the connection to Ollama at {self.url} ended: {exc}") from exc
+
+    def _within_bound(self, raw: bytes) -> bytes:
+        """`raw` (a reply, or one line of a stream) when it is at most
+        MAX_REPLY_BYTES; the refusal naming the bound past it, the one
+        for `send` and `stream` alike."""
+        if len(raw) > self.MAX_REPLY_BYTES:
+            raise RuntimeError(
+                f"Ollama's reply from {self.url} ran past {self.MAX_REPLY_BYTES} bytes"
+            )
+        return raw
 
     def _timed_out(self) -> TimeoutError:
         return TimeoutError(
