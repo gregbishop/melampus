@@ -47,7 +47,6 @@ import logging  # noqa: E402
 import re  # noqa: E402
 import shutil  # noqa: E402
 import signal  # noqa: E402
-import urllib.request  # noqa: E402
 from contextlib import AbstractContextManager, ExitStack, closing, contextmanager, nullcontext  # noqa: E402
 from dataclasses import asdict, dataclass  # noqa: E402
 from pathlib import Path  # noqa: E402
@@ -85,7 +84,7 @@ from huggingface_hub.utils import WeakFileLock, build_hf_headers, filter_repo_ob
 from huggingface_hub.utils import logging as hub_logging  # noqa: E402 - the library's own logger, where its warnings go
 from huggingface_hub.utils._http import default_client_factory  # noqa: E402 - the library's own client, not a copy of it
 
-from .backend import OllamaBackend, ollama_not_running  # noqa: E402
+from .backend import OllamaBackend, ollama_not_running, ollama_request  # noqa: E402
 from .config import cache_file  # noqa: E402
 
 PROGRESS = "progress"
@@ -1083,13 +1082,8 @@ def pull_model(
     """
     marker = cancel_marker or cancel_marker_path()
     marker.unlink(missing_ok=True)
-    request = urllib.request.Request(
-        f"{url.rstrip('/')}{OLLAMA_PULL}",
-        data=json.dumps({"model": model, "stream": True}).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    backend = OllamaBackend(model, url.rstrip("/"), timeout=timeout, client=opener)
+    request = ollama_request(url, OLLAMA_PULL, {"model": model, "stream": True})
+    backend = OllamaBackend(model, url, timeout=timeout, client=opener)
     try:
         with closing(backend.stream(request)) as lines:
             for update in pull_updates(model, _lines_until_cancelled(lines, marker)):
@@ -1123,19 +1117,13 @@ def _ollama_request(model: str, url: str, path: str, body: dict | None = None, *
     that setting for a call whose failure is shown: the delete's), `Ollama
     answered <status>: <its words>` for an HTTP error, a reply that ran
     past the bound or was not HTTP."""
-    address = url.rstrip("/")
-    request = urllib.request.Request(
-        f"{address}{path}",
-        data=json.dumps(body).encode("utf-8") if body is not None else None,
-        headers={"Content-Type": "application/json"} if body is not None else {},
-        method=method,
-    )
+    request = ollama_request(url, path, body, method=method)
     try:
-        raw = OllamaBackend(model, address, timeout=timeout).send(request)
+        raw = OllamaBackend(model, url, timeout=timeout).send(request)
     except (RuntimeError, ConnectionError, TimeoutError) as exc:
         raise DownloadError(str(exc)) from exc
     except OSError as exc:
-        raise DownloadError(ollama_not_running(address, exc)) from exc
+        raise DownloadError(ollama_not_running(url, exc)) from exc
     try:
         reply = json.loads(raw or b"{}")
     except json.JSONDecodeError as exc:

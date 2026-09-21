@@ -502,6 +502,22 @@ def ollama_opener(*handlers: urllib.request.BaseHandler) -> Callable:
     ).open
 
 
+def ollama_request(
+    address: str, path: str, body: dict | None = None, *, method: str = "POST"
+) -> urllib.request.Request:
+    """The one request to an Ollama endpoint: `path` under `address` (the
+    address as providers.ollama_url hands it, its trailing slash already
+    dropped, so the path appends cleanly), `body` sent as JSON with its
+    content type when given. The backend's frame, the model pull and the
+    list and the delete of download.py (card #409) build theirs here."""
+    return urllib.request.Request(
+        f"{address}{path}",
+        data=json.dumps(body).encode("utf-8") if body is not None else None,
+        headers={"Content-Type": "application/json"} if body is not None else {},
+        method=method,
+    )
+
+
 def ollama_not_running(url: str, reason: object) -> str:
     """The one message for a request Ollama did not answer at `url`: the
     backend's mid-run failure and the model pull (card #409) say the same
@@ -581,12 +597,7 @@ class OllamaBackend(VLMBackend):
             "stream": False,
             "options": {"num_predict": max_tokens, "temperature": self.temperature},
         }
-        return urllib.request.Request(
-            f"{self.url}{self.ENDPOINT}",
-            data=json.dumps(body).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
+        return ollama_request(self.url, self.ENDPOINT, body)
 
     def send(self, request: urllib.request.Request) -> bytes:
         """The reply's bytes, within `timeout` of wall-clock time from
