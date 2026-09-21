@@ -1161,6 +1161,38 @@ def test_a_cancel_marker_that_cannot_be_removed_on_exit_is_a_download_error_nami
     assert status.installed is True and status.bytes_done == FAKE_TOTAL
 
 
+def test_a_cancel_marker_that_cannot_be_removed_on_exit_is_a_download_error_when_the_caller_is_handling_an_exception(
+    fake_hub: FakeHub, tmp_path: Path
+):
+    """Claude review 13, code finding 1 (download.py:635). The `finally`
+    decided "something is in flight" from `sys.exc_info()`, which is the
+    exception any enclosing `except` is handling, not this `try`'s: called
+    from inside a caller's handler, the download completing with a folder
+    at the marker's path returned the snapshot and reported nothing, and
+    the next run refused on start with no warning of why. Whether the
+    caller is handling an exception of its own must not change the
+    outcome: the same DownloadError naming the marker, the model complete."""
+    marker = tmp_path / "data" / "download-cancel"
+    marker.parent.mkdir(parents=True)
+
+    def a_folder_at_the_marker_once_complete(update: Update) -> None:
+        if update.bytes_done == update.bytes_total:
+            marker.mkdir(exist_ok=True)
+
+    with pytest.raises(DownloadError) as failure:
+        try:
+            raise ValueError("the caller's own, being handled while it downloads")
+        except ValueError:
+            download_model(FAKE_REPO, endpoint=fake_hub.endpoint, cache_dir=tmp_path / "hub",
+                           on_update=a_folder_at_the_marker_once_complete, cancel_marker=marker)
+
+    message = str(failure.value)
+    assert str(marker) in message and "by hand" in message, message
+    assert marker.is_dir()
+    status = _status(fake_hub, tmp_path / "hub")
+    assert status.installed is True and status.bytes_done == FAKE_TOTAL
+
+
 def test_a_cancel_marker_that_cannot_be_removed_on_exit_does_not_mask_the_cancellation_in_flight(
     fake_hub: FakeHub, tmp_path: Path
 ):

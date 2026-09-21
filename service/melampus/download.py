@@ -43,7 +43,6 @@ import logging  # noqa: E402
 import re  # noqa: E402
 import shutil  # noqa: E402
 import signal  # noqa: E402
-import sys  # noqa: E402
 from contextlib import contextmanager  # noqa: E402
 from dataclasses import asdict, dataclass  # noqa: E402
 from pathlib import Path  # noqa: E402
@@ -586,6 +585,7 @@ def download_model(
     endpoint = _hub_at(endpoint)
     marker = cancel_marker or cancel_marker_path()
     _remove_marker(marker)
+    completed = False
     with _hub_warnings_redacted():
         try:
             # The folders are the repo's in the cache and beside it, in `.locks`;
@@ -607,7 +607,8 @@ def download_model(
                     _fetch(blob, progress, headers, locks)
             # Every blob is complete and verified: the snapshot of the planned
             # commit points at those blobs and nothing else.
-            return _lay_out(storage, commit, blobs)
+            path = _lay_out(storage, commit, blobs)
+            completed = True
         except GatedRepoError as exc:
             # A GatedRepoError is a RepositoryNotFoundError, but the repo exists:
             # what is missing is the user's access to it.
@@ -632,12 +633,14 @@ def download_model(
         finally:
             # A cancellation or failure already in flight is the outcome; a
             # marker that then cannot be removed is the next run's to name.
-            in_flight = sys.exc_info()[1]
+            # Whether one is in flight is this try's own (`completed`), not
+            # sys.exc_info(), which is whatever the caller is handling.
             try:
                 _remove_marker(marker)
             except DownloadError:
-                if in_flight is None:
+                if completed:
                     raise
+    return path
 
 
 def _remove_marker(marker: Path) -> None:
