@@ -475,6 +475,23 @@ def _verdict(engine: str) -> providers.EngineVerdict:
     return verdict
 
 
+@pytest.fixture()
+def link_to_nowhere(tmp_path: Path) -> Path:
+    """A folder whose one image is a symlink to nowhere, so opening it would
+    fail loudly: the proof that a refusal fired before any image was read."""
+    folder = tmp_path / "photos"
+    folder.mkdir()
+    (folder / "nowhere.jpg").symlink_to(tmp_path / "does-not-exist.jpg")
+    return folder
+
+
+def assert_no_image_was_touched(err: str, check: str) -> None:
+    """The stderr of a run on `link_to_nowhere` never mentions the file: the
+    `check` (named for the message) ran before any image was read."""
+    for about_the_file in ("nowhere", "does-not-exist", "No such file", "unreadable"):
+        assert about_the_file not in err, f"the image was touched before the {check}:\n{err}"
+
+
 def test_detection_lists_the_engines_in_the_owners_order_then_claude_code(
     no_ambient_keys, no_ambient_ollama
 ):
@@ -677,7 +694,9 @@ def _settings_naming_the_fake(monkeypatch, tmp_path):
     return settings
 
 
-def test_ollama_not_running_fires_before_any_image_is_read(monkeypatch, tmp_path, capsys):
+def test_ollama_not_running_fires_before_any_image_is_read(
+    monkeypatch, tmp_path, capsys, link_to_nowhere
+):
     """Card #406, Done-when 2, at the real boundary: nothing listening on the
     port, and the folder's one image is a link to nowhere, so opening it
     would fail loudly. The CLI exits 3 on the not-running message, naming the
@@ -689,12 +708,9 @@ def test_ollama_not_running_fires_before_any_image_is_read(monkeypatch, tmp_path
 
     port = closed_port()
     monkeypatch.setattr(providers, "OLLAMA_URL", f"http://127.0.0.1:{port}")
-    folder = tmp_path / "photos"
-    folder.mkdir()
-    (folder / "nowhere.jpg").symlink_to(tmp_path / "does-not-exist.jpg")
 
     code = main([
-        str(folder), "--backend", "ollama", "--no-local-config",
+        str(link_to_nowhere), "--backend", "ollama", "--no-local-config",
         "--cache", str(tmp_path / "cache.jsonl"),
     ])
 
@@ -702,8 +718,7 @@ def test_ollama_not_running_fires_before_any_image_is_read(monkeypatch, tmp_path
     assert code == 3, err
     assert f"No Ollama server at http://127.0.0.1:{port}" in err
     assert providers.OLLAMA_INSTALL in err
-    for about_the_file in ("nowhere", "does-not-exist", "No such file", "unreadable"):
-        assert about_the_file not in err, f"the image was touched before the Ollama check:\n{err}"
+    assert_no_image_was_touched(err, "Ollama check")
 
 
 def test_cli_backend_ollama_writes_a_json_result_from_the_configured_address(
@@ -3129,7 +3144,9 @@ def test_command_is_refused_at_the_real_boundary_when_sigchld_is_ignored(
     assert "--backend" in message
 
 
-def test_command_not_installed_fires_before_any_image_is_read(tmp_path, capsys, no_ambient_ollama):
+def test_command_not_installed_fires_before_any_image_is_read(
+    tmp_path, capsys, no_ambient_ollama, link_to_nowhere
+):
     """Card #420, Done-when 2, at the real boundary: a command nothing on
     this machine is called, and the folder's one image is a link to
     nowhere, so opening it would fail loudly. The CLI exits 3 on the
@@ -3138,19 +3155,15 @@ def test_command_not_installed_fires_before_any_image_is_read(tmp_path, capsys, 
     developer's own melampus.local.toml keys out of the run (Done-when 3)."""
     from melampus.cli import main
 
-    folder = tmp_path / "photos"
-    folder.mkdir()
-    (folder / "nowhere.jpg").symlink_to(tmp_path / "does-not-exist.jpg")
     settings = _command_settings(tmp_path, ["melampus-no-such-command-420", "{image}", "{prompt}"])
 
-    code = main([str(folder), "--config", str(settings), "--no-local-config",
+    code = main([str(link_to_nowhere), "--config", str(settings), "--no-local-config",
                  "--cache", str(tmp_path / "cache.jsonl")])
 
     err = capsys.readouterr().err
     assert code == 3, err
     assert "'melampus-no-such-command-420' is not installed or not on PATH" in err
-    for about_the_file in ("nowhere", "does-not-exist", "No such file", "unreadable"):
-        assert about_the_file not in err, f"the image was touched before the command check:\n{err}"
+    assert_no_image_was_touched(err, "command check")
 
 
 @posix_only
@@ -3610,7 +3623,9 @@ def test_cli_detect_engines_prints_the_claude_code_verdict(monkeypatch, tmp_path
 
 
 @posix_only
-def test_claude_code_not_signed_in_is_refused_before_any_image_is_read(monkeypatch, tmp_path, capsys):
+def test_claude_code_not_signed_in_is_refused_before_any_image_is_read(
+    monkeypatch, tmp_path, capsys, link_to_nowhere
+):
     """Card #421, Done-when 2 at analysis time, where detection can tell:
     Claude Code installed but not signed in, and the folder's one image is
     a link to nowhere, so opening it would fail loudly. The CLI exits 3 on
@@ -3619,36 +3634,31 @@ def test_claude_code_not_signed_in_is_refused_before_any_image_is_read(monkeypat
     from melampus.cli import main
 
     _fake_claude(monkeypatch, tmp_path, mode="not-signed-in")
-    folder = tmp_path / "photos"
-    folder.mkdir()
-    (folder / "nowhere.jpg").symlink_to(tmp_path / "does-not-exist.jpg")
 
-    code = main([str(folder), "--backend", "claude-code", "--cache", str(tmp_path / "cache.jsonl")])
+    code = main([str(link_to_nowhere), "--backend", "claude-code", "--cache", str(tmp_path / "cache.jsonl")])
 
     err = capsys.readouterr().err
     assert code == 3, err
     assert "not signed in" in err and providers.CLAUDE_CODE_SIGN_IN in err
-    for about_the_file in ("nowhere", "does-not-exist", "No such file", "unreadable"):
-        assert about_the_file not in err, f"the image was touched before the sign-in check:\n{err}"
+    assert_no_image_was_touched(err, "sign-in check")
 
 
-def test_claude_code_not_installed_is_refused_before_any_image_is_read(monkeypatch, tmp_path, capsys):
+def test_claude_code_not_installed_is_refused_before_any_image_is_read(
+    monkeypatch, tmp_path, capsys, link_to_nowhere
+):
     """Done-when 2 at analysis time, not installed: exit 3 naming `claude`,
     where to install it and how to sign in, before any image is read."""
     from melampus.cli import main
 
     _no_claude(monkeypatch, tmp_path)
-    folder = tmp_path / "photos"
-    folder.mkdir()
-    (folder / "nowhere.jpg").symlink_to(tmp_path / "does-not-exist.jpg")
 
-    code = main([str(folder), "--backend", "claude-code", "--cache", str(tmp_path / "cache.jsonl")])
+    code = main([str(link_to_nowhere), "--backend", "claude-code", "--cache", str(tmp_path / "cache.jsonl")])
 
     err = capsys.readouterr().err
     assert code == 3, err
     assert "not installed" in err and providers.CLAUDE_CODE_INSTALL in err
     assert providers.CLAUDE_CODE_SIGN_IN in err
-    assert "nowhere" not in err and "does-not-exist" not in err
+    assert_no_image_was_touched(err, "install check")
 
 
 @posix_only
