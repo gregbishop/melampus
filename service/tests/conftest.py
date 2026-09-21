@@ -706,8 +706,8 @@ def hub_env(fake_hub: FakeHub, tmp_path: Path) -> dict[str, str]:
 # not-found error once they run out); every chat request's JSON body lands on
 # `chats`. `library` is what can be pulled, name -> layer sizes; `models` is
 # what is held, name -> size, filled by a pull, listed by § List Local Models
-# (`GET /api/tags`) and emptied by § Delete a Model (`DELETE /api/delete`,
-# 200, or 404 with the not-found error); `pulls` keeps every pull's body,
+# (`GET /api/tags`) and emptied, with the model's layers, by § Delete a Model
+# (`DELETE /api/delete`, 200, or 404 with the not-found error); `pulls` keeps every pull's body,
 # `deletes` every deletion's name and `requests` every request. `throttle` (bytes per line, seconds
 # between) slows a pull so a cancel can land mid-stream, and a pull the
 # client cut off keeps what each layer had, so the next pull of the same
@@ -781,7 +781,13 @@ class FakeOllama:
                 held = name if name in ollama.models else (name.removesuffix(":latest")
                                                              if name.endswith(":latest") else None)
                 if held in ollama.models:
+                    # The manifest and its layers go together (server/images.go
+                    # removes the layers no other manifest references; the pull's
+                    # own "removing any unused layers"), so the next pull of the
+                    # model downloads them again from zero.
                     del ollama.models[held]
+                    for layer in [key for key in ollama.partial if key[0] == held]:
+                        del ollama.partial[layer]
                     self._answer(200, {})
                 else:
                     self._answer(404, {"error": f"model '{name}' not found"})

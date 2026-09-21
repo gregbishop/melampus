@@ -3395,6 +3395,27 @@ def test_remove_deletes_the_pulled_model_from_ollama(fake_ollama: FakeOllama):
     assert _ollama_status(fake_ollama).installed is False
 
 
+def test_a_pull_after_a_remove_downloads_the_layers_again_from_zero(fake_ollama: FakeOllama):
+    """Code review round 10 (conftest.py:763), Done-when 2, the fake's
+    fidelity: c07a1d7 made `partial` the fake's record of what it holds,
+    and do_DELETE deleted from `models` alone, so a pull after a delete
+    was answered as if every layer were still held, complete, nothing
+    downloaded, where Ollama's delete removes the layers no other
+    manifest references (server/images.go; the stream's own "removing any
+    unused layers") and a real pull after it downloads them from zero.
+    Given a pull, a remove, and a second pull, the second pull's first
+    layer line starts from zero and the fake holds the model whole after."""
+    _pull(fake_ollama)
+    remove_ollama_model(FAKE_MODEL, fake_ollama.endpoint)
+
+    updates = _pull(fake_ollama)
+
+    assert [p["model"] for p in fake_ollama.pulls] == [FAKE_MODEL, FAKE_MODEL]
+    assert updates[0] == Update.progress(0, 3000), f"the second pull did not start from zero: {updates}"
+    assert updates[-2] == Update.progress(4000, 4000) and updates[-1] == Update.done(FAKE_MODEL)
+    assert fake_ollama.models == {FAKE_MODEL: 4000}
+
+
 def test_remove_reaches_an_ollama_behind_a_reverse_proxy_prefix():
     """`[model] ollama_url` may carry a path (an Ollama behind a reverse
     proxy at /ollama, as test_providers.py serves the chat endpoint): the
