@@ -2793,24 +2793,30 @@ else:
 '''
 
 
-def _fake_cli(monkeypatch, tmp_path, *, exit_code: int = 0, stderr: str = "",
-              script: str = _FAKE_CLI_SCRIPT, **fields) -> list[str]:
-    """Write FAKE_CLI, an executable Python script, into a folder put first
-    on PATH, and return the config template that runs it by its bare name:
-    the real shutil.which, the real subprocess, no shell. `exit_code`
-    non-zero makes it fail after reading its arguments, saying `stderr`.
-    `script` is another body in place of the answering CLI's, with `fields`
-    filled in."""
+def _script_on_path(monkeypatch, tmp_path, name: str, text: str) -> Path:
+    """Write `text` as an executable script called `name` into a folder put
+    first on PATH, so the real shutil.which finds it by its bare name ahead
+    of anything else and the real subprocess runs it, no shell."""
     folder = tmp_path / "bin"
     folder.mkdir(exist_ok=True)
-    path = folder / FAKE_CLI
-    path.write_text(script.format(
+    script = folder / name
+    script.write_text(text, encoding="utf-8")
+    script.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{folder}{os.pathsep}{os.environ.get('PATH', '')}")
+    assert shutil.which(name) == str(script)
+    return script
+
+
+def _fake_cli(monkeypatch, tmp_path, *, exit_code: int = 0, stderr: str = "",
+              script: str = _FAKE_CLI_SCRIPT, **fields) -> list[str]:
+    """Put FAKE_CLI on PATH and return the config template that runs it by
+    its bare name. `exit_code` non-zero makes it fail after reading its
+    arguments, saying `stderr`. `script` is another body in place of the
+    answering CLI's, with `fields` filled in."""
+    _script_on_path(monkeypatch, tmp_path, FAKE_CLI, script.format(
         python=sys.executable, routing=ROUTING_OK, identification=ID_OK,
         exit_code=exit_code, stderr=stderr, **fields,
-    ), encoding="utf-8")
-    path.chmod(0o755)
-    monkeypatch.setenv("PATH", f"{folder}{os.pathsep}{os.environ.get('PATH', '')}")
-    assert shutil.which(FAKE_CLI) == str(path)
+    ))
     return [FAKE_CLI, "--image", "{image}", "--prompt", "{prompt}", "--quiet"]
 
 
@@ -3316,23 +3322,16 @@ result("```json\\n" + answer + "\\n```")
 
 
 def _fake_claude(monkeypatch, tmp_path, *, mode: str = "signed-in") -> Path:
-    """Write a `claude` that imitates the real CLI's documented interface into
-    a folder put first on PATH, so the real shutil.which finds it ahead of
-    any real Claude Code and the real subprocess runs it, no shell. Returns
-    the log it appends each invocation's argv and cwd to."""
-    folder = tmp_path / "bin"
-    folder.mkdir(exist_ok=True)
+    """Put a `claude` that imitates the real CLI's documented interface on
+    PATH, ahead of any real Claude Code. Returns the log it appends each
+    invocation's argv and cwd to."""
     log = tmp_path / "claude-calls.jsonl"
-    script = folder / CLAUDE
-    script.write_text(_FAKE_CLAUDE_SCRIPT.format(
+    _script_on_path(monkeypatch, tmp_path, CLAUDE, _FAKE_CLAUDE_SCRIPT.format(
         python=sys.executable, mode=mode, routing=ROUTING_OK, identification=ID_OK, log=str(log),
-    ), encoding="utf-8")
-    script.chmod(0o755)
-    monkeypatch.setenv("PATH", f"{folder}{os.pathsep}{os.environ.get('PATH', '')}")
+    ))
     # conftest's autouse fixture stubs detection out; this test wants the
     # real one, against the fake.
     monkeypatch.setattr(providers, "claude_code_verdict", REAL_CLAUDE_CODE_VERDICT)
-    assert shutil.which(CLAUDE) == str(script)
     return log
 
 
