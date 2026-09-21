@@ -977,8 +977,8 @@ def _pull_error(model: str, error: object) -> DownloadError:
     has and resumes them. The words are the server's and land on stderr,
     so in the CLI log and the terminal: only their printable characters,
     by the backend's one rule for every message carrying them
-    (OllamaBackend._plain)."""
-    words = OllamaBackend._plain(str(error))
+    (OllamaBackend.plain)."""
+    words = OllamaBackend.plain(str(error))
     if "file does not exist" in words:
         return DownloadError(
             f"Ollama has no model named {model} ({words}): check [model] ollama_model "
@@ -1103,7 +1103,7 @@ def pull_model(
     except urllib.error.HTTPError as exc:
         # The status with the words, as the backend names one: a 3xx from
         # the address is an answer from the wrong place, and says so.
-        raise _pull_error(model, f"{exc.code} {OllamaBackend._error_text(exc)}") from exc
+        raise _pull_error(model, f"{exc.code} {OllamaBackend.error_text(exc)}") from exc
     except urllib.error.URLError as exc:
         raise DownloadError(ollama_not_running(url, exc.reason)) from exc
     except (OSError, TimeoutError) as exc:
@@ -1117,7 +1117,7 @@ def _ollama_request(model: str, url: str, path: str, body: dict | None = None, *
                     method: str = "POST", timeout: float) -> dict:
     """One JSON answer from the Ollama server at `url`: `body` sent as JSON
     when given, the reply decoded. Sent as the backend sends a frame for
-    `model`, through `OllamaBackend._send`: straight to the address (no
+    `model`, through `OllamaBackend.send`: straight to the address (no
     proxy, no redirect), the whole exchange within `timeout` of wall-clock
     time, at most `MAX_REPLY_BYTES` of the reply read. Raises DownloadError
     with the backend's words: not-running when nothing answers, the
@@ -1133,7 +1133,7 @@ def _ollama_request(model: str, url: str, path: str, body: dict | None = None, *
         method=method,
     )
     try:
-        raw = OllamaBackend(model, address, timeout=timeout)._send(request)
+        raw = OllamaBackend(model, address, timeout=timeout).send(request)
     except (RuntimeError, ConnectionError, TimeoutError) as exc:
         raise DownloadError(str(exc)) from exc
     except OSError as exc:

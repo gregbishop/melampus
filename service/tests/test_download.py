@@ -2470,7 +2470,7 @@ def test_pull_stream_error_words_keep_none_of_the_servers_control_characters(err
     tail of, and the terminal. Escape sequences and control characters in
     it would move the cursor, recolour the terminal, erase a line, or fake a
     line of the log. The backend neutralises them in every message that
-    carries the server's words (OllamaBackend._plain); the stream's error
+    carries the server's words (OllamaBackend.plain); the stream's error
     line, one more such message, keeps the words and none of the controls,
     on both of its paths."""
     from melampus.download import pull_updates

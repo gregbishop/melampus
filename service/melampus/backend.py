@@ -454,7 +454,7 @@ class _NotedHTTPS(_Noted, http.client.HTTPSConnection):
 
 class _Bounded(urllib.request.HTTPHandler, urllib.request.HTTPSHandler):
     """urllib's HTTP and HTTPS handlers, opening _Noted connections for the
-    request's deadline (OllamaBackend._send puts it on the request). The
+    request's deadline (OllamaBackend.send puts it on the request). The
     https side keeps HTTPSHandler's default context, the verifying one it
     builds when given none, and passes it to _NotedHTTPS as HTTPSHandler
     would to HTTPSConnection."""
@@ -572,12 +572,15 @@ class OllamaBackend(VLMBackend):
             method="POST",
         )
 
-    def _send(self, request: urllib.request.Request) -> bytes:
+    def send(self, request: urllib.request.Request) -> bytes:
         """The reply's bytes, within `timeout` of wall-clock time from
         connecting to the last byte read, error bodies included: a
         _Deadline hangs up the socket when the time is up, and whatever the
         exchange then looks like (a body cut short, a status line that
-        never finished, a reset) is the timeout, not that shape's error."""
+        never finished, a reset) is the timeout, not that shape's error.
+        The one way a request reaches Ollama: a frame's here, the list's
+        and the delete's from download.py, the pull's stream through the
+        same opener."""
         with _Deadline(self.timeout) as deadline:
             request.deadline = deadline
             try:
@@ -602,7 +605,7 @@ class OllamaBackend(VLMBackend):
                 return response.read(self.MAX_REPLY_BYTES + 1)
         except urllib.error.HTTPError as exc:
             raise RuntimeError(
-                f"Ollama answered {exc.code}: {self._error_text(exc)}"
+                f"Ollama answered {exc.code}: {self.error_text(exc)}"
             ) from exc
         except urllib.error.URLError as exc:
             if isinstance(exc.reason, TimeoutError):
@@ -615,7 +618,7 @@ class OllamaBackend(VLMBackend):
             # HTTP (BadStatusLine carries it as sent), a server hanging up
             # before one, a body cut short, a line past http.client's limit.
             raise RuntimeError(
-                f"Ollama's reply from {self.url} was not HTTP: {self._plain(str(exc))}"
+                f"Ollama's reply from {self.url} was not HTTP: {self.plain(str(exc))}"
             ) from exc
 
     def _timed_out(self) -> TimeoutError:
@@ -625,7 +628,7 @@ class OllamaBackend(VLMBackend):
         )
 
     @classmethod
-    def _plain(cls, text: str) -> str:
+    def plain(cls, text: str) -> str:
         """Text the server wrote, as it may reach the frame's error record,
         the log and the terminal: one line of at most MAX_ERROR_BYTES
         printable characters. An escape sequence in it would move the
@@ -640,23 +643,23 @@ class OllamaBackend(VLMBackend):
         return words[: cls.MAX_ERROR_BYTES]
 
     @classmethod
-    def _error_text(cls, exc: urllib.error.HTTPError) -> str:
+    def error_text(cls, exc: urllib.error.HTTPError) -> str:
         """Ollama's own words when the body is its {"error": ...} object,
         else the body as it came (a proxy's HTML, say), else the status
         line's reason; at most MAX_ERROR_BYTES of it read, and only its
-        printable characters (`_plain`), since all three are the server's
+        printable characters (`plain`), since all three are the server's
         to write."""
         body = exc.read(cls.MAX_ERROR_BYTES).decode("utf-8", "replace").strip()
         try:
             error = json.loads(body).get("error")
         except (json.JSONDecodeError, AttributeError):
             error = None
-        return cls._plain(f"{error}" if error else body or exc.reason)
+        return cls.plain(f"{error}" if error else body or exc.reason)
 
     def complete(self, image_path: Path, prompt: str, max_tokens: int) -> Completion:
         request = self._request(image_path, prompt, max_tokens)
         started = time.perf_counter()
-        raw = self._send(request)
+        raw = self.send(request)
         elapsed = time.perf_counter() - started
         try:
             reply = json.loads(raw)
