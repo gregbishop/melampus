@@ -485,6 +485,16 @@ def link_to_nowhere(tmp_path: Path) -> Path:
     return folder
 
 
+@pytest.fixture()
+def api_key_helper(tmp_path: Path) -> Path:
+    """A Claude Code settings file naming an `apiKeyHelper` (a placeholder,
+    /usr/bin/true: the fake `claude` never runs it), so a template carrying
+    `--settings` on it would bill that helper's key, not the subscription."""
+    helper = tmp_path / "helper.json"
+    helper.write_text(json.dumps({"apiKeyHelper": "/usr/bin/true"}), encoding="utf-8")
+    return helper
+
+
 def assert_no_image_was_touched(err: str, check: str) -> None:
     """The stderr of a run on `link_to_nowhere` never mentions the file: the
     `check` (named for the message) ran before any image was read."""
@@ -4053,7 +4063,7 @@ def test_the_status_check_runs_under_the_templates_isolation(monkeypatch, tmp_pa
 
 
 @posix_only
-def test_the_status_check_is_probed_under_the_templates_own_settings_flags(monkeypatch, tmp_path):
+def test_the_status_check_is_probed_under_the_templates_own_settings_flags(monkeypatch, tmp_path, api_key_helper):
     """Codex round 2, C1: a `[model] command` of the user's own under
     claude-code can leave out `--restricted` or add `--settings` naming an
     `apiKeyHelper`, and a print-mode run then bills that helper's key
@@ -4069,8 +4079,6 @@ def test_the_status_check_is_probed_under_the_templates_own_settings_flags(monke
     apiKeyHelper; a user settings file with apiKeyHelper reports the same
     with no flag and authMethod none under `--restricted`."""
     log = _fake_claude(monkeypatch, tmp_path)
-    helper = tmp_path / "helper.json"
-    helper.write_text(json.dumps({"apiKeyHelper": "/usr/bin/true"}), encoding="utf-8")
     template = providers.CLAUDE_CODE_COMMAND
 
     def build(command: list[str]):
@@ -4087,20 +4095,20 @@ def test_the_status_check_is_probed_under_the_templates_own_settings_flags(monke
 
     # `--settings` added to the built-in template: the helper is loaded even
     # under --restricted ("managed settings and --settings still apply").
-    own = [*template[:-1], "--settings", str(helper), template[-1]]
+    own = [*template[:-1], "--settings", str(api_key_helper), template[-1]]
     reason = refused(own)
-    assert f"claude --restricted --settings {helper} auth status --json" in reason
-    assert _status_checks(log) == [["--restricted", "--settings", str(helper), "auth", "status", "--json"]]
+    assert f"claude --restricted --settings {api_key_helper} auth status --json" in reason
+    assert _status_checks(log) == [["--restricted", "--settings", str(api_key_helper), "auth", "status", "--json"]]
 
     # The same helper in the CLI's other spelling, `--settings=file` (Codex
     # round 3, C1 and S1; measured on 2.1.278: `claude --restricted
     # --settings=helper.json auth status --json` reports authMethod
     # api_key_helper, apiKeySource apiKeyHelper, as the two-argument form
     # does): carried as given, and refused the same way.
-    equals = [*template[:-1], f"--settings={helper}", template[-1]]
+    equals = [*template[:-1], f"--settings={api_key_helper}", template[-1]]
     reason = refused(equals)
-    assert f"claude --restricted --settings={helper} auth status --json" in reason
-    assert _status_checks(log) == [["--restricted", f"--settings={helper}", "auth", "status", "--json"]]
+    assert f"claude --restricted --settings={api_key_helper} auth status --json" in reason
+    assert _status_checks(log) == [["--restricted", f"--settings={api_key_helper}", "auth", "status", "--json"]]
 
     # The user's settings file names the helper: the built-in template loads
     # no settings file and is available; a template without --restricted
@@ -4196,7 +4204,7 @@ def test_the_status_check_argv_is_derived_from_the_template():
 
 @posix_only
 def test_cli_detect_engines_probes_the_users_own_template_under_its_flags(
-    monkeypatch, tmp_path, capsys, no_ambient_keys
+    monkeypatch, tmp_path, capsys, no_ambient_keys, api_key_helper
 ):
     """C1 at the dialog (Done-when 2, "the same verdict"): --detect-engines
     probes the configured template under that template's flags, so a
@@ -4205,10 +4213,8 @@ def test_cli_detect_engines_probes_the_users_own_template_under_its_flags(
     from melampus.cli import main
 
     log = _fake_claude(monkeypatch, tmp_path)
-    helper = tmp_path / "helper.json"
-    helper.write_text(json.dumps({"apiKeyHelper": "/usr/bin/true"}), encoding="utf-8")
     template = providers.CLAUDE_CODE_COMMAND
-    own = [*template[:-1], "--settings", str(helper), template[-1]]
+    own = [*template[:-1], "--settings", str(api_key_helper), template[-1]]
     settings = _command_settings(tmp_path, own, backend=providers.CLAUDE_CODE)
 
     assert main(["--detect-engines", "--config", str(settings)]) == 0
@@ -4218,7 +4224,7 @@ def test_cli_detect_engines_probes_the_users_own_template_under_its_flags(
     assert verdicts[-1]["available"] is False, verdicts[-1]["reason"]
     assert "not to a Claude subscription" in verdicts[-1]["reason"]
     assert "remove apiKeyHelper from the settings" in verdicts[-1]["reason"]
-    assert _status_checks(log) == [["--restricted", "--settings", str(helper), "auth", "status", "--json"]]
+    assert _status_checks(log) == [["--restricted", "--settings", str(api_key_helper), "auth", "status", "--json"]]
 
 
 @posix_only
@@ -4335,7 +4341,7 @@ def test_claude_code_on_an_api_key_is_refused_before_any_image_is_read(
 
 @posix_only
 def test_claude_code_on_a_helper_named_by_settings_is_refused_before_any_image_is_read(
-    monkeypatch, tmp_path, capsys, link_to_nowhere
+    monkeypatch, tmp_path, capsys, link_to_nowhere, api_key_helper
 ):
     """Codex round 3, C1 and S1, at analysis time: a `[model] command` of
     the user's own carrying `--settings=helper.json` in the CLI's `=`
@@ -4349,10 +4355,8 @@ def test_claude_code_on_a_helper_named_by_settings_is_refused_before_any_image_i
     from melampus.cli import main
 
     log = _fake_claude(monkeypatch, tmp_path)
-    helper = tmp_path / "helper.json"
-    helper.write_text(json.dumps({"apiKeyHelper": "/usr/bin/true"}), encoding="utf-8")
     template = providers.CLAUDE_CODE_COMMAND
-    own = [*template[:-1], f"--settings={helper}", template[-1]]
+    own = [*template[:-1], f"--settings={api_key_helper}", template[-1]]
     settings = _command_settings(tmp_path, own, backend=providers.CLAUDE_CODE)
 
     code = main([str(link_to_nowhere), "--config", str(settings), "--cache", str(tmp_path / "cache.jsonl")])
@@ -4360,7 +4364,7 @@ def test_claude_code_on_a_helper_named_by_settings_is_refused_before_any_image_i
     err = capsys.readouterr().err
     assert code == 3, err
     assert "not to a Claude subscription" in err and "remove apiKeyHelper from the settings" in err, err
-    assert _status_checks(log) == [["--restricted", f"--settings={helper}", "auth", "status", "--json"]]
+    assert _status_checks(log) == [["--restricted", f"--settings={api_key_helper}", "auth", "status", "--json"]]
     assert_no_image_was_touched(err, "sign-in check")
 
 
