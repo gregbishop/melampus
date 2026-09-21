@@ -1982,9 +1982,6 @@ class _FakeProcess:
         self.returncode = -9 if self.killed else self._run.returncode
         return self.returncode
 
-    def poll(self):
-        return self.returncode
-
     def kill(self):
         self.killed = True
 
@@ -2010,12 +2007,13 @@ def test_command_backend_expands_the_template_into_one_argv(tmp_path):
     and decoded as UTF-8 with replacement, so a stray byte cannot fail the
     frame), nothing on stdin, so a program that reads it cannot hang, and
     its own session (POSIX) or process group (Windows), so a timeout can
-    stop every process it started and not just the first; the config's
-    timeout is the wait's ceiling."""
+    stop every process it started and not just the first (that the
+    config's timeout is the wait's ceiling is proven by the timeout
+    tests, not here)."""
     image = tmp_path / "image.jpg"
     image.write_bytes(b"jpeg")
     run = _FakeRun(stdout=ID_OK)
-    backend = _command_backend(run, timeout=42.0)
+    backend = _command_backend(run)
     prompt = 'Identify the "bird".\n\nReply with JSON: {"taxon": ...}'
 
     backend.complete(image, prompt, 900)
@@ -2032,7 +2030,6 @@ def test_command_backend_expands_the_template_into_one_argv(tmp_path):
     else:
         assert kwargs["start_new_session"] is True
     (process,) = run.processes
-    assert backend.timeout == 42.0
     assert run.stopped == [(process.pid, None)], (
         "what the command started is stopped at its exit, by its pid while it is still the command's own")
 
