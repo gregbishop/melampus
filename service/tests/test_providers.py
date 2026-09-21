@@ -2607,14 +2607,24 @@ def test_command_backend_returns_candidates_in_the_same_shape_as_mlx_on_the_fixt
     assert result.identification.top().scientific_name == "Egretta tricolor"
 
 
+#: The pids `_gone` has proven gone during the current test (the `pid_file`
+#: fixture empties it at setup), so its teardown never signals one of them.
+_PROVEN_GONE: set[int] = set()
+
+
 def _gone(pid: int, within: float) -> bool:
-    """Whether process `pid` is gone (or a zombie no longer running) within
-    `within` seconds; looked for at least once."""
+    """Whether the pid `pid` is gone within `within` seconds: no process
+    holds it, so a signal 0 finds nothing. Looked for at least once. A
+    zombie is not gone: it holds its pid until its parent reaps it, and
+    signal 0 reaches it (macOS answers it with success, as POSIX asks). A
+    pid proven gone is recorded in `_PROVEN_GONE`, so the fixture's
+    teardown never signals it: it may be another process's by then."""
     deadline = time.monotonic() + within
     while True:
         try:
             os.kill(pid, 0)
         except ProcessLookupError:
+            _PROVEN_GONE.add(pid)
             return True
         if time.monotonic() >= deadline:
             return False
@@ -2626,15 +2636,51 @@ def pid_file(tmp_path):
     """The file a fake CLI's script writes a pid into (its worker's, or its
     own) so the test can look for that process afterwards. On teardown,
     the process it names is killed if it is still there, which is the
-    failing case: a passing test has proven it gone, and a pid proven
-    free is never signalled, since it may be another process's by then."""
+    failing case. A pid the test proved gone with `_gone` is never
+    signalled, whatever a look at teardown would answer: between the
+    proof and the teardown it may have been given to a process of
+    someone else's, and a fresh look by number could not tell."""
+    _PROVEN_GONE.clear()
     path = tmp_path / "worker.pid"
     yield path
     if path.exists():
         pid = int(path.read_text(encoding="utf-8"))
-        if not _gone(pid, within=0.0):
+        if pid not in _PROVEN_GONE and not _gone(pid, within=0.0):
             with contextlib.suppress(ProcessLookupError):
                 os.kill(pid, 9)
+
+
+def test_pid_file_teardown_never_signals_a_pid_the_test_proved_gone(monkeypatch, tmp_path):
+    """The `pid_file` fixture's teardown stops a process a failing test left
+    behind, and never a pid the test proved gone with `_gone`, however a
+    look at teardown answers: between the assertion and the teardown that
+    pid can be given to a process of someone else's, and a fresh look by
+    number cannot tell the two apart. Driven here with the fixture's own
+    generator, a real child proven gone, and os.kill faked to answer
+    "alive" for its pid, as a recycled pid would; and, the other way, a
+    pid never proven gone that answers alive is signalled, which is the
+    failing case the teardown exists for."""
+    signals: list[tuple[int, int]] = []
+
+    def kill(pid, sig):
+        signals.append((pid, sig))
+    teardown = pid_file.__wrapped__(tmp_path)
+    path = next(teardown)
+    ended = subprocess.Popen([sys.executable, "-c", "pass"])
+    ended.wait()
+    path.write_text(str(ended.pid), encoding="utf-8")
+    assert _gone(ended.pid, within=10.0)
+    monkeypatch.setattr(os, "kill", kill)
+    with pytest.raises(StopIteration):
+        next(teardown)
+    assert signals == [], f"the teardown signalled a pid the test proved gone: {signals}"
+
+    teardown = pid_file.__wrapped__(tmp_path)
+    path = next(teardown)
+    path.write_text(str(ended.pid + 1), encoding="utf-8")
+    with pytest.raises(StopIteration):
+        next(teardown)
+    assert signals == [(ended.pid + 1, 0), (ended.pid + 1, 9)], "a leftover never proven gone is stopped"
 
 
 def _real_command_backend(monkeypatch, tmp_path, script: str, timeout: float, **fields) -> CommandBackend:
