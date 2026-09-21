@@ -2611,7 +2611,11 @@ def _command_settings(tmp_path, command: list[str]) -> Path:
     return settings
 
 
-posix_only = pytest.mark.skipif(sys.platform == "win32", reason="the fake CLI is a shebang script")
+posix_only = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="the fake CLI is a shebang script, and _gone's look is signal 0, which on Windows "
+           "is CTRL_C_EVENT then TerminateProcess, not a probe, and never a ProcessLookupError",
+)
 
 
 @posix_only
@@ -2689,6 +2693,7 @@ def pid_file(tmp_path):
                 os.kill(pid, 9)
 
 
+@posix_only
 def test_pid_file_teardown_never_signals_a_pid_the_test_proved_gone(monkeypatch, tmp_path):
     """The `pid_file` fixture's teardown stops a process a failing test left
     behind, and never a pid the test proved gone with `_gone`, however a
