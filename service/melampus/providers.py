@@ -21,7 +21,7 @@ from urllib.parse import urlsplit
 from pydantic import SecretStr
 
 from .backend import CommandFailed, VLMBackend, _Deadline, _NotedHTTP, _NotedHTTPS, stderr_lines
-from .config import MelampusConfig
+from .config import MelampusConfig, ModelConfig
 
 #: Where each provider's key is looked for, in order, when the config has none.
 #: Keys never cross providers: an Anthropic key must not silently authorise a
@@ -319,6 +319,17 @@ def claude_code_verdict(program: str | None = None) -> EngineVerdict:
     )
 
 
+def claude_code_program(settings: ModelConfig) -> str | None:
+    """The program a claude-code run would ask and run: the one `[model]
+    command` names when the engine is claude-code and a command is set, else
+    None for the built-in `claude`. Read here, once, by the factory and by
+    --detect-engines, so the verdict the dialog shows is the verdict the run
+    gets (Done-when 2), as the ollama address is."""
+    if (settings.backend or "").strip().lower() == CLAUDE_CODE and settings.command:
+        return settings.command[0]
+    return None
+
+
 def detect_engines(
     ollama_at: str | None = None, claude_code_program: str | None = None
 ) -> list[EngineVerdict]:
@@ -329,7 +340,8 @@ def detect_engines(
     they cannot disagree with what the dialog (card #405) shows. `ollama_at`
     is the configured address, if any (`[model] ollama_url`);
     `claude_code_program` the configured program, if any (a `[model] command`
-    under claude-code naming its own), else the built-in `claude`."""
+    under claude-code naming its own, read by `claude_code_program(settings)`),
+    else the built-in `claude`."""
     apple_silicon = on_apple_silicon()
     url = ollama_url(ollama_at)
     ollama = ollama_answers(url)
@@ -539,7 +551,7 @@ def build_primary_backend(config: MelampusConfig) -> VLMBackend:
         # refused or built, and what runs is the executable that verdict
         # resolved.
         command = list(settings.command or CLAUDE_CODE_COMMAND)
-        verdicts = detect_engines(settings.ollama_url, command[0])
+        verdicts = detect_engines(settings.ollama_url, claude_code_program(settings))
         verdict = next(v for v in verdicts if v.engine == CLAUDE_CODE)
         if not verdict.available:
             raise _refusal(f"{verdict.reason}.", works_here=_works_here(verdicts))

@@ -126,8 +126,12 @@ so that `claude` is on the PATH melampus runs from. How to sign in:
 costs: **every frame bills to that Claude subscription**, its rate limits
 included, and no API key is read or needed here; nothing is charged per call,
 so the cloud guards (the estimate, `max_images`, the cloud cache file) do not
-apply. Detection (`--detect-engines`) reports `claude-code` as not installed
-when nothing on PATH is called `claude`, as not signed in when
+apply. Detection (`--detect-engines`) probes the program a `claude-code` run
+would run, read from the same config: the built-in `claude`, or the first
+element of `[model] command` when one is set under `backend = "claude-code"`,
+so the verdict the dialog shows is the verdict the run gets. It reports
+`claude-code` as not installed when that program is not found (for the
+built-in, nothing on PATH is called `claude`), as not signed in when
 `claude auth status --json` says so (`loggedIn` false, or its documented exit
 1 with nothing on stderr: a cheap check, no model call), as failed in the
 CLI's own words when that check exits some other way (an older `claude`

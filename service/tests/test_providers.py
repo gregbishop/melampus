@@ -3804,6 +3804,35 @@ def test_cli_detect_engines_prints_the_claude_code_verdict(monkeypatch, tmp_path
 
 
 @posix_only
+def test_cli_detect_engines_probes_the_program_the_claude_code_run_would(
+    monkeypatch, tmp_path, capsys, no_ambient_keys
+):
+    """Done-when 2, "the same verdict": as --detect-engines probes the
+    configured Ollama address, it probes the configured Claude Code
+    program, read the way the run reads it, so the dialog cannot disagree
+    with what --backend claude-code would run. A signed-in `claude` at a
+    full path on no PATH, named by [model] command under claude-code, is
+    reported available (the built-in `claude` alone would say not
+    installed), and it is the one asked, once."""
+    from melampus.cli import main
+
+    log = _fake_claude(monkeypatch, tmp_path)
+    script = shutil.which(CLAUDE)
+    _no_claude(monkeypatch, tmp_path)
+    own = [script, "-p", "--output-format", "json", "{image} {prompt}"]
+    settings = tmp_path / "settings.toml"
+    settings.write_text(
+        f'[model]\nbackend = "claude-code"\ncommand = {json.dumps(own)}\n', encoding="utf-8")
+
+    assert main(["--detect-engines", "--config", str(settings)]) == 0
+
+    verdicts = json.loads(capsys.readouterr().out)
+    assert verdicts[-1]["engine"] == "claude-code"
+    assert verdicts[-1]["available"] is True, verdicts[-1]["reason"]
+    assert _status_checks(log) == [["auth", "status", "--json"]]
+
+
+@posix_only
 def test_claude_code_not_signed_in_is_refused_before_any_image_is_read(
     monkeypatch, tmp_path, capsys, link_to_nowhere
 ):

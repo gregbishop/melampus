@@ -23,6 +23,7 @@ from .providers import (
     BackendUnavailable,
     apply_cloud_primary_defaults,
     build_primary_backend,
+    claude_code_program,
     default_engine,
     detect_engines,
     is_cloud_primary,
@@ -448,12 +449,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.detect_engines:
         # The address probed is the configured one, read the way the run
         # reads it (--config and --no-local-config alike), so the verdict
-        # cannot disagree with what --backend ollama would talk to.
+        # cannot disagree with what --backend ollama would talk to; the
+        # Claude Code program probed is the configured one the same way.
         # The dialog's contract (card #404): engine, available, reason. A
         # verdict's resolved executable is the factory's, not the dialog's.
         print(json.dumps([
             {"engine": v.engine, "available": v.available, "reason": v.reason}
-            for v in detect_engines(config.model.ollama_url)
+            for v in detect_engines(config.model.ollama_url, claude_code_program(config.model))
         ], indent=2))
         return 0
     if args.download_model or args.model_status or args.remove_model:
