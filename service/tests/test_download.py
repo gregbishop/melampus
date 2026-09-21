@@ -2955,48 +2955,65 @@ def test_the_model_flags_with_backend_ollama_go_to_the_ollama_functions_with_the
     assert removed == f"removed {FAKE_MODEL}"
 
 
-def test_the_model_flags_take_the_engine_from_the_config_file_and_detection_when_nothing_names_it(
-    monkeypatch, capsys, tmp_path
-):
-    """`[model] backend = "ollama"` in the config picks the pull too. With
-    nothing named, the first engine *with a model* that detection says can
-    run here decides: mlx on this Mac, ollama on a Windows machine with
-    Ollama answering, and mlx on one without (the hub download works on
-    every platform, card #407, where a run would pick a cloud engine that
-    has no model to fetch); `--model` names a hub repo, so it means mlx
-    whatever is running."""
-    import melampus.cli
+def _machine(mlx: bool, ollama: bool) -> list:
+    """Detection's verdicts on a machine where mlx and ollama can or cannot
+    run, the cloud engines always able to."""
     from melampus.providers import EngineVerdict
+
+    return [EngineVerdict("mlx", mlx, ""), EngineVerdict("ollama", ollama, ""),
+            EngineVerdict("openai", True, ""), EngineVerdict("claude", True, "")]
+
+
+FIRST_WITH_A_MODEL = "(the first with a model that can run here"
+
+
+@pytest.mark.parametrize(("machine", "settings", "argv", "asks", "says"), [
+    pytest.param(_machine(mlx=True, ollama=True), '[model]\nbackend = "ollama"\n', [],
+                 ("ollama", ModelConfig().ollama_model), None, id="the config file names ollama"),
+    pytest.param(_machine(mlx=False, ollama=True), None, [],
+                 ("ollama", ModelConfig().ollama_model), f"engine: ollama {FIRST_WITH_A_MODEL}",
+                 id="windows with ollama answering"),
+    pytest.param(_machine(mlx=False, ollama=False), None, [],
+                 ("mlx", ModelConfig().repo), f"engine: mlx {FIRST_WITH_A_MODEL}",
+                 id="windows with nothing local"),
+    pytest.param(_machine(mlx=True, ollama=True), None, [],
+                 ("mlx", ModelConfig().repo), f"engine: mlx {FIRST_WITH_A_MODEL}", id="a mac"),
+    pytest.param(_machine(mlx=False, ollama=True), None, ["--model", "fake-org/other"],
+                 ("mlx", "fake-org/other"), f"engine: mlx {FIRST_WITH_A_MODEL}",
+                 id="--model names a hub repo with ollama answering"),
+])
+def test_the_model_flags_take_the_engine_from_the_config_file_and_detection_when_nothing_names_it(
+    monkeypatch, capsys, tmp_path, machine, settings, argv, asks, says
+):
+    """`[model] backend = "ollama"` in the config picks the pull too, and
+    says nothing about choosing. With nothing named, the first engine *with
+    a model* that detection says can run here decides, said on stderr: mlx
+    on this Mac, ollama on a Windows machine with Ollama answering, and mlx
+    on one without (the hub download works on every platform, card #407,
+    where a run would pick a cloud engine that has no model to fetch);
+    `--model` names a hub repo, so it means mlx whatever is running."""
+    import melampus.cli
 
     asked = []
     monkeypatch.setattr(download, "model_status", lambda repo: asked.append(("mlx", repo)) or Status(
         repo, installed=False, bytes_total=None, bytes_done=0, path=None, cancel_path="/x"))
     monkeypatch.setattr(download, "ollama_status", lambda model, url: asked.append(("ollama", model)) or Status(
         model, installed=False, bytes_total=None, bytes_done=0, path=None, cancel_path="/x"))
-    settings = tmp_path / "settings.toml"
-    settings.write_text('[model]\nbackend = "ollama"\n', encoding="utf-8")
-    assert main(["--model-status", "--config", str(settings)]) == 0
+    monkeypatch.setattr(melampus.cli, "detect_engines", lambda ollama_at=None: machine)
+    if settings is None:
+        config = ["--no-local-config"]
+    else:
+        (tmp_path / "settings.toml").write_text(settings, encoding="utf-8")
+        config = ["--config", str(tmp_path / "settings.toml")]
 
-    def machine(mlx: bool, ollama: bool):
-        verdicts = [EngineVerdict("mlx", mlx, ""), EngineVerdict("ollama", ollama, ""),
-                    EngineVerdict("openai", True, ""), EngineVerdict("claude", True, "")]
-        monkeypatch.setattr(melampus.cli, "detect_engines", lambda ollama_at=None: verdicts)
+    assert main(["--model-status", *config, *argv]) == 0
 
-    machine(mlx=False, ollama=True)  # Windows, Ollama running
-    assert main(["--model-status", "--no-local-config"]) == 0
-    machine(mlx=False, ollama=False)  # Windows, nothing local
-    assert main(["--model-status", "--no-local-config"]) == 0
-    machine(mlx=True, ollama=True)  # a Mac
-    assert main(["--model-status", "--no-local-config"]) == 0
-    machine(mlx=False, ollama=True)  # --model names a hub repo
-    assert main(["--model-status", "--no-local-config", "--model", "fake-org/other"]) == 0
-
-    hub = ModelConfig().repo
-    assert asked == [("ollama", "qwen3-vl:8b-instruct"), ("ollama", "qwen3-vl:8b-instruct"), ("mlx", hub),
-                     ("mlx", hub), ("mlx", "fake-org/other")]
+    assert asked == [asks]
     err = capsys.readouterr().err
-    assert "engine: ollama (the first with a model that can run here" in err
-    assert "engine: mlx (the first with a model that can run here" in err
+    if says is None:
+        assert "engine:" not in err, err
+    else:
+        assert says in err, err
 
 
 @pytest.mark.parametrize("engine", ["openai", "claude", "scripted"])
