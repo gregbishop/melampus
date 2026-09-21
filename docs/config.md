@@ -144,10 +144,10 @@ not a repo id (a pasted hub URL, a path) the way `--download-model` does:
 **exit 3**, the message on stderr naming `[model] repo` or `--model`, before
 the hub is asked anything. Both read the cache through the hub library's scan
 of it, which walks every model folder in the shared cache, other tools'
-models included; a folder the process cannot search or list (or, for the
-status, the repo's own `blobs` folder it counts) is **exit 3** too, the
-message naming the cache and the folder the OS named: check that folder's
-permissions.
+models included; a folder the process cannot search or list (the cache
+itself, when its parent cannot be searched; or, for the status, the repo's
+own `blobs` folder it counts) is **exit 3** too, the message naming the
+cache and the folder the OS named: check that folder's permissions.
 
 - `--model-status` prints one JSON object and exits 0:
   `{"repo", "installed", "bytes_total", "bytes_done", "path", "cancel_path"}`.

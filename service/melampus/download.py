@@ -660,10 +660,13 @@ def _cached(repo: str, cache: Path):
     """The hub library's view of `repo` in its scan of the cache: the
     CachedRepoInfo when a snapshot is laid out, else None. A repo with only
     partial blobs has no snapshots folder, which the scan reports as a
-    warning, not a repo."""
-    if not cache.is_dir():
-        return None
+    warning, not a repo. Every read of the cache here, the guard's stat of
+    the cache itself included (a cache whose parent the process cannot
+    search raises from `is_dir`), is bounded by the one refusal
+    `_cache_unreadable` says."""
     try:
+        if not cache.is_dir():
+            return None
         repos = scan_cache_dir(cache).repos
     except OSError as exc:
         raise _cache_unreadable(cache, exc) from exc

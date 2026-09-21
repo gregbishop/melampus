@@ -1842,6 +1842,39 @@ def test_status_and_remove_refuse_with_the_reason_when_another_repo_in_the_cache
 
 
 @pytest.mark.skipif(sys.platform == "win32" or getattr(os, "geteuid", lambda: 1)() == 0,
+                    reason="an unsearchable folder does not stop a stat here")
+def test_status_and_remove_refuse_with_the_reason_when_the_cache_itself_cannot_be_stat_ed(
+    fake_hub: FakeHub, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+):
+    """Security (Codex review 7, code finding 1; Claude review 14, security
+    finding 1; download.py:664). The cache's own `is_dir` guard ran before
+    the bound round 13 put around the scan: a cache whose parent the
+    process cannot search (`HF_HOME` at mode 000, or the folder `--cache`
+    names under one) raised its PermissionError from `Path.is_dir` through
+    `--model-status` and `--remove-model` as a traceback, exit 1. It is the
+    one DownloadError every read of the cache says, naming the cache, from
+    both, and through the CLI exit 3 with the cache on stderr, nothing on
+    stdout, no traceback; the model stays."""
+    cache = tmp_path / "hf" / "hub"
+    path, _ = _fetch(fake_hub, cache)
+    os.chmod(cache.parent, 0)
+    try:
+        for ask in (lambda: _status(fake_hub, cache), lambda: remove_model(FAKE_REPO, cache_dir=cache)):
+            with pytest.raises(DownloadError) as failure:
+                ask()
+            message = str(failure.value)
+            assert str(cache) in message and "permissions" in message, message
+        monkeypatch.setattr(download.constants, "HF_HUB_CACHE", str(cache))
+        for flag in ("--model-status", "--remove-model"):
+            assert main([flag, "--no-local-config", "--model", FAKE_REPO]) == 3, flag
+            out, err = capsys.readouterr()
+            assert out == "" and str(cache) in err and "Traceback" not in err, (flag, err)
+    finally:
+        os.chmod(cache.parent, 0o700)
+    assert snapshot_files(path) == FAKE_FILES, "the model was removed"
+
+
+@pytest.mark.skipif(sys.platform == "win32" or getattr(os, "geteuid", lambda: 1)() == 0,
                     reason="an unsearchable folder does not stop a count here")
 def test_status_refuses_with_the_reason_when_the_repo_blobs_cannot_be_counted(
     fake_hub: FakeHub, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
