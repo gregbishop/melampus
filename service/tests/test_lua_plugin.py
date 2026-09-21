@@ -17,9 +17,21 @@ import sys
 from pathlib import Path
 
 import pytest
-from conftest import PHOTO, closed_port
+from conftest import (
+    FAKE_FILES,
+    FAKE_FOLDER,
+    FAKE_REPO,
+    FAKE_TOTAL,
+    PHOTO,
+    FakeHub,
+    closed_port,
+    fake_bytes,
+    snapshot_files,
+)
+from huggingface_hub.constants import DOWNLOAD_CHUNK_SIZE
 
 from melampus import providers
+from melampus.download import CANCEL_MARKER, EXIT_CANCELLED, Update
 from test_binary import per_user_config, per_user_data_dir
 
 REPO = Path(__file__).resolve().parents[2]
@@ -490,9 +502,6 @@ def test_the_download_command_the_dialog_builds_fetches_the_model_and_the_status
     download line fills the progress file the poller reads with protocol
     lines ending in `done <path>`, and the status then reports installed
     at that path. No real weights move."""
-    from conftest import FAKE_FILES, FAKE_REPO, FAKE_TOTAL, snapshot_files
-    from melampus.download import Update
-
     plugin_dir = _plugin_folder_holding(built_executable, tmp_path)
     env = per_user_config(tmp_path, f'[model]\nrepo = "{FAKE_REPO}"\n') | hub_env
     data_dir = per_user_data_dir(Path(env["HOME"]))
@@ -528,10 +537,6 @@ def test_the_marker_the_dialog_writes_cancels_the_download_the_dialog_started(
     chunk, the marker is written where the status said (what Cancel does),
     and the executable ends the file with `cancelled`, exit 4, with the
     partial blob kept in HF_HOME."""
-    from conftest import FAKE_FILES, FAKE_FOLDER, FAKE_REPO, FakeHub, fake_bytes
-    from huggingface_hub.constants import DOWNLOAD_CHUNK_SIZE
-    from melampus.download import CANCEL_MARKER, EXIT_CANCELLED, Update
-
     big = fake_bytes(4 * DOWNLOAD_CHUNK_SIZE)
     hub = FakeHub(files={"config.json": FAKE_FILES["config.json"], "model.safetensors": big})
     hub.throttle = (64 * 1024, 0.002)
