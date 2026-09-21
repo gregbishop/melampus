@@ -1059,7 +1059,6 @@ def pull_model(
     on_update: Callable[[Update], None],
     cancel_marker: Path | None = None,
     timeout: float = 180.0,
-    opener: Callable | None = None,
 ) -> str:
     """Ask the Ollama server at `url` to pull `model` (its docs/api.md § Pull
     a Model: POST /api/pull with the model's name, the stream of JSON
@@ -1083,7 +1082,7 @@ def pull_model(
     marker = cancel_marker or cancel_marker_path()
     marker.unlink(missing_ok=True)
     request = ollama_request(url, OLLAMA_PULL, {"model": model, "stream": True})
-    backend = OllamaBackend(model, url, timeout=timeout, client=opener)
+    backend = OllamaBackend(model, url, timeout=timeout)
     try:
         with closing(backend.stream(request)) as lines:
             for update in pull_updates(model, _lines_until_cancelled(lines, marker)):
