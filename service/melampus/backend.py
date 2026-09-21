@@ -872,14 +872,26 @@ class CommandBackend(VLMBackend):
 
     stdout goes through the same JSON extraction and schema validation as
     every other backend's text (identify.py); nothing here parses
-    candidates. stderr is kept for error messages only. `timeout` is the
-    one ceiling on a run; past it the command and every process it started
-    are stopped (OWN_GROUP) before the frame's TimeoutError is raised.
+    candidates. stderr is kept for error messages only. Both are read as
+    they come, at most MAX_OUTPUT_BYTES each, and a program that streams
+    past that is stopped and the frame refused by name. `timeout` is the
+    one ceiling on a run's time; past it the command and every process it
+    started are stopped (OWN_GROUP) before the frame's TimeoutError is
+    raised.
     """
 
     #: How much of stderr an error message carries: enough to say what went
     #: wrong, not a CLI's whole usage text.
     STDERR_LINES = 3
+    #: The most of stdout, and of stderr, that is kept: a JSON reply of
+    #: candidates is kilobytes, and a CLI's progress chatter over a whole
+    #: run is far less than this, so a program that streams megabytes is
+    #: broken, not answering. It is stopped at the ceiling rather than read
+    #: into memory until the timeout (the reviewer's probe held gigabytes
+    #: within seconds), and the frame records the refusal by name.
+    MAX_OUTPUT_BYTES = 4 << 20
+    #: One read from a pipe.
+    CHUNK_BYTES = 1 << 16
     #: The command runs in its own session (POSIX: setsid, so its process
     #: group id is its pid and os.killpg reaches every worker it forked) or
     #: its own process group (Windows, where `taskkill /T` walks the tree),
@@ -942,10 +954,53 @@ class CommandBackend(VLMBackend):
                 os.killpg(pid, signal.SIGKILL)
 
     def _stop(self, process) -> None:
-        """Stop the command and everything it started, and reap it."""
+        """Stop the command and everything it started."""
         self._stop_tree(process.pid)
         process.kill()
-        process.communicate()
+
+    def _drain(self, process, name: str, sink: bytearray, overflowed: list[str]) -> None:
+        """Read the pipe `name` of `process` to its end into `sink`, keeping
+        at most MAX_OUTPUT_BYTES. Past that the program is a runaway: its
+        name goes on `overflowed`, its tree is stopped, and the rest is read
+        and dropped so the pipe still ends."""
+        stream = getattr(process, name)
+        while chunk := stream.read1(self.CHUNK_BYTES):
+            if overflowed:
+                continue
+            if len(sink) + len(chunk) > self.MAX_OUTPUT_BYTES:
+                overflowed.append(name)
+                self._stop_tree(process.pid)
+                continue
+            sink += chunk
+
+    def _wait(self, process, readers: list[threading.Thread]) -> bool:
+        """Whether the command exited and both pipes ended within `timeout`.
+        Past it, or on any other interruption (Ctrl+C), the command and
+        everything it started are stopped, as subprocess.run kills its
+        child: the command does not outlive the run that started it. The
+        command is reaped either way."""
+        deadline = time.monotonic() + self.timeout
+        try:
+            process.wait(timeout=self.timeout)
+            for reader in readers:
+                reader.join(timeout=max(0.0, deadline - time.monotonic()))
+            # A pipe still open after the exit is held by a worker that
+            # outlived the command: it is not an answer either.
+            in_time = not any(reader.is_alive() for reader in readers)
+        except subprocess.TimeoutExpired:
+            in_time = False
+        except BaseException:
+            self._stop(process)
+            raise
+        if not in_time:
+            self._stop(process)
+        for reader in readers:
+            # The pipes end when the tree is gone; one still open is held by
+            # something that left the group (a double-forked daemon) and is
+            # left to it rather than waited on.
+            reader.join(timeout=5.0)
+        process.wait()
+        return in_time
 
     def complete(self, image_path: Path, prompt: str, max_tokens: int) -> Completion:
         argv = self._argv(image_path, prompt)
@@ -955,29 +1010,33 @@ class CommandBackend(VLMBackend):
                 argv,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
                 stdin=subprocess.DEVNULL,
                 **self.OWN_GROUP,
             )
         except OSError as exc:
             raise RuntimeError(f"{self.program} could not be run: {exc}") from exc
-        try:
-            stdout, stderr = process.communicate(timeout=self.timeout)
-        except subprocess.TimeoutExpired as exc:
-            self._stop(process)
+        sinks = {"stdout": bytearray(), "stderr": bytearray()}
+        overflowed: list[str] = []
+        readers = [
+            threading.Thread(target=self._drain, args=(process, name, sink, overflowed), daemon=True)
+            for name, sink in sinks.items()
+        ]
+        for reader in readers:
+            reader.start()
+        in_time = self._wait(process, readers)
+        elapsed = time.perf_counter() - started
+        stdout, stderr = (sinks[name].decode("utf-8", "replace") for name in ("stdout", "stderr"))
+
+        if overflowed:
+            raise RuntimeError(
+                f"{self.program} wrote more than {self.MAX_OUTPUT_BYTES} bytes on "
+                f"{overflowed[0]} and was stopped: a reply is kilobytes"
+            )
+        if not in_time:
             raise TimeoutError(
                 f"{self.program} did not answer within {self.timeout:g}s; "
                 "raise [model] timeout_seconds if it needs longer"
-            ) from exc
-        except BaseException:
-            # As subprocess.run does on any other interruption (Ctrl+C): the
-            # command does not outlive the run that started it.
-            self._stop(process)
-            raise
-        elapsed = time.perf_counter() - started
-
+            )
         if process.returncode != 0:
             said = self._stderr_lines(stderr)
             raise CommandFailed(

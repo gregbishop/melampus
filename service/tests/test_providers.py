@@ -1909,13 +1909,14 @@ def test_command_template_without_a_placeholder_is_refused_at_config_load(comman
 
 class _FakeRun:
     """Stands in for subprocess.Popen at the backend's process edge: records
-    every call, then returns a started process that says `stdout` and
-    `stderr` and exits `returncode`, or raises `error` on starting. `hangs`
-    is a process that never finishes on its own: `communicate(timeout=...)`
-    raises TimeoutExpired until it is killed. `stopped` records the pid of
-    every process tree the backend stopped (the OS edge, faked)."""
+    every call, then returns a started process whose stdout and stderr
+    pipes carry `stdout` and `stderr` (text, or bytes as they came) and that
+    exits `returncode`, or raises `error` on starting. `hangs` is a process
+    that never finishes on its own: `wait(timeout=...)` raises
+    TimeoutExpired until it is killed. `stopped` records the pid of every
+    process tree the backend stopped (the OS edge, faked)."""
 
-    def __init__(self, stdout: str = "", stderr: str = "", returncode: int = 0,
+    def __init__(self, stdout: str | bytes = "", stderr: str | bytes = "", returncode: int = 0,
                  error: Exception | None = None, hangs: bool = False):
         self.stdout, self.stderr, self.returncode, self.error = stdout, stderr, returncode, error
         self.hangs = hangs
@@ -1940,19 +1941,21 @@ class _FakeProcess:
         self.returncode: int | None = None
         self.killed = False
         self.waited: list[float | None] = []
+        self.stdout = io.BytesIO(self._bytes(run.stdout))
+        self.stderr = io.BytesIO(self._bytes(run.stderr))
 
-    def communicate(self, timeout: float | None = None):
+    @staticmethod
+    def _bytes(said: str | bytes) -> bytes:
+        return said if isinstance(said, bytes) else said.encode("utf-8")
+
+    def wait(self, timeout: float | None = None):
         self.waited.append(timeout)
         if self._run.hangs and not self.killed:
             raise subprocess.TimeoutExpired(self.args, timeout)
         self.returncode = -9 if self.killed else self._run.returncode
-        return self._run.stdout, self._run.stderr
-
-    def poll(self):
         return self.returncode
 
-    def wait(self, timeout: float | None = None):
-        self.communicate(timeout)
+    def poll(self):
         return self.returncode
 
     def kill(self):
@@ -1974,10 +1977,12 @@ def test_command_backend_expands_the_template_into_one_argv(tmp_path):
     other argument is passed untouched. The resolved executable stands in
     for the bare name (shutil.which found it, so what was checked is what
     runs). subprocess.Popen is given the list, no
-    shell, the reply as text, stdout and stderr piped back, nothing on stdin,
-    so a program that reads it cannot hang, and its own session (POSIX) or
-    process group (Windows), so a timeout can stop every process it started
-    and not just the first; the config's timeout is the wait's ceiling."""
+    shell, stdout and stderr piped back as bytes (read here with a ceiling,
+    and decoded as UTF-8 with replacement, so a stray byte cannot fail the
+    frame), nothing on stdin, so a program that reads it cannot hang, and
+    its own session (POSIX) or process group (Windows), so a timeout can
+    stop every process it started and not just the first; the config's
+    timeout is the wait's ceiling."""
     image = tmp_path / "image.jpg"
     image.write_bytes(b"jpeg")
     run = _FakeRun(stdout=ID_OK)
@@ -1988,7 +1993,7 @@ def test_command_backend_expands_the_template_into_one_argv(tmp_path):
 
     ((argv, kwargs),) = run.calls
     assert argv == ["/opt/fake/bin/fake-vlm", "--image", str(image), "--prompt", prompt, "--quiet"]
-    assert kwargs["text"] is True
+    assert "text" not in kwargs and "encoding" not in kwargs, "the pipes are read as bytes, with a ceiling"
     assert kwargs["stdout"] is subprocess.PIPE and kwargs["stderr"] is subprocess.PIPE
     assert kwargs["stdin"] is subprocess.DEVNULL
     assert kwargs.get("shell", False) is False
@@ -1998,7 +2003,7 @@ def test_command_backend_expands_the_template_into_one_argv(tmp_path):
     else:
         assert kwargs["start_new_session"] is True
     (process,) = run.processes
-    assert process.waited == [42.0]
+    assert process.waited[0] == 42.0
     assert run.stopped == [], "a process that answered in time is not stopped"
 
 
@@ -2034,6 +2039,9 @@ def test_command_backend_reads_stdout_into_a_completion(tmp_path):
     assert completion.refused is False
     assert completion.seconds >= 0
     assert backend.name == "fake-vlm --image '{image}' --prompt '{prompt}' --quiet"
+
+    stray = _command_backend(_FakeRun(stdout=b"\xff" + ID_OK.encode("utf-8"))).complete(image, "prompt", 900)
+    assert stray.text == "\ufffd" + ID_OK, "a byte that is not UTF-8 is replaced, not a failed frame"
 
 
 @pytest.mark.parametrize(
@@ -2094,6 +2102,36 @@ def test_command_templates_that_differ_only_in_argument_boundaries_cannot_share_
         "fake-vlm --image '{image}' --prompt '{prompt}' --quiet --label 'bird --mode precise'")
     assert shlex.split(_command_backend(_FakeRun(), three_arguments).name) == [
         "fake-vlm", *three_arguments[1:]]
+
+
+@pytest.mark.parametrize("stream", ["stdout", "stderr"])
+def test_command_backend_stops_a_command_that_writes_past_the_ceiling(tmp_path, stream):
+    """A reply of candidates is kilobytes, so a program streaming megabytes
+    on either pipe is broken, not answering: it is stopped, with everything
+    it started, the moment the ceiling is passed, not read into memory
+    until the timeout, and the frame's error is a RuntimeError naming the
+    program, the stream and the ceiling, recorded on the frame while the
+    batch goes on. A stream that stops at the ceiling is read whole."""
+    image = tmp_path / "image.jpg"
+    image.write_bytes(b"jpeg")
+    ceiling = CommandBackend.MAX_OUTPUT_BYTES
+    run = _FakeRun(**{stream: "x" * (ceiling + 1)})
+    backend = _command_backend(run)
+
+    with pytest.raises(RuntimeError) as err:
+        backend.complete(image, "prompt", 10)
+
+    assert not isinstance(err.value, subprocess.SubprocessError)
+    for named in ("fake-vlm", stream, str(ceiling)):
+        assert named in str(err.value), str(err.value)
+    (process,) = run.processes
+    assert run.stopped == [process.pid]
+    assert process.returncode is not None, "the stopped command was not reaped"
+
+    within = (_FakeRun(stdout=ID_OK.ljust(ceiling)) if stream == "stdout"
+              else _FakeRun(stdout=ID_OK, stderr="x" * ceiling))
+    assert _command_backend(within).complete(image, "prompt", 10).text.strip() == ID_OK
+    assert within.stopped == []
 
 
 def test_command_backend_stops_the_whole_process_tree_on_timeout(tmp_path):
@@ -2235,6 +2273,21 @@ print(ROUTING if "router" in args.prompt else IDENTIFICATION)
 '''
 
 
+_RUNAWAY_SCRIPT = '''#!{python}
+"""A CLI that never stops writing to one stream: a broken program, not an
+answer, however long the timeout. Its pid goes to a file so the test can
+look for it afterwards."""
+import os
+import sys
+
+with open({pid_file!r}, "w") as handle:
+    handle.write(str(os.getpid()))
+stream = getattr(sys, {stream!r})
+while True:
+    stream.write("x" * 65536)
+    stream.flush()
+'''
+
 _LAUNCHER_SCRIPT = '''#!{python}
 """A CLI that hands the work to a worker and waits for it, the way one
 wrapping a language server or a daemon does. The worker's pid goes to a
@@ -2345,6 +2398,37 @@ def test_command_backend_timeout_stops_the_worker_the_command_started(monkeypatc
         assert "fake-vlm did not answer within 1s" in str(err.value)
         worker = int(pid_file.read_text(encoding="utf-8"))
         assert _gone(worker, within=10.0), f"worker {worker} is still running after the timeout"
+    finally:
+        if pid_file.exists():
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(int(pid_file.read_text(encoding="utf-8")), 9)
+
+
+@posix_only
+@pytest.mark.parametrize("stream", ["stdout", "stderr"])
+def test_command_backend_stops_a_runaway_command_before_the_timeout(monkeypatch, tmp_path, stream):
+    """At the real boundary: the command writes without end to one stream,
+    under a timeout of a minute. It is stopped as soon as it passes the
+    ceiling, seconds in, not read into memory until the timeout: the frame's
+    error names the program, the stream and the ceiling, and the process is
+    gone."""
+    pid_file = tmp_path / "runaway.pid"
+    command = _fake_cli(monkeypatch, tmp_path, script=_RUNAWAY_SCRIPT,
+                        pid_file=str(pid_file), stream=stream)
+    backend = providers.build_primary_backend(
+        _cfg(model={"backend": "command", "command": command, "timeout_seconds": 60}))
+    image = tmp_path / "image.jpg"
+    image.write_bytes(b"jpeg")
+
+    try:
+        started = time.monotonic()
+        with pytest.raises(RuntimeError) as err:
+            backend.complete(image, "prompt", 10)
+        assert time.monotonic() - started < 20, "the runaway was read until the timeout"
+        for named in ("fake-vlm", stream, str(CommandBackend.MAX_OUTPUT_BYTES)):
+            assert named in str(err.value), str(err.value)
+        pid = int(pid_file.read_text(encoding="utf-8"))
+        assert _gone(pid, within=10.0), f"the runaway {pid} is still running"
     finally:
         if pid_file.exists():
             with contextlib.suppress(ProcessLookupError):
