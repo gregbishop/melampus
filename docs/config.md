@@ -239,6 +239,39 @@ permissions.
   names the set-aside folder: check its permissions, and on Windows that no
   other program holds a file in it open, and delete it by hand.
 
+The bytes move over plain HTTP, through the hub library's own file download
+(its Range request, its size check, its per-file lock), and every finished file
+is checked against the checksum the hub names in its etag (the sha256 of a
+weights file, git's blob sha1 of a regular one) before it becomes a blob in
+the cache, never through the Xet
+transfer that stalls on some networks (docs/troubleshooting.md); the command
+sets `HF_HUB_DISABLE_XET=1` for itself. It also sets
+`HF_HUB_DISABLE_TELEMETRY=1` for itself (a value you set, or `DO_NOT_TRACK`,
+stands): the hub library would otherwise ask the hub which AI coding agents
+exist and name the one it runs under, and the torch version, in every
+request; the command sends the hub nothing about the machine but the
+requests the download needs. The commit `main` points at is
+resolved once, at the start, and recorded in the cache's `refs/main`; every
+file is fetched at that commit, so a branch that moves during the run changes
+nothing. Once every file is in the cache and checked, the command lays out the
+snapshot of that commit from those checked files alone, its pointers made by
+the hub library's own helper exactly as `mlx` will look for them (where
+symlinks are unavailable, Windows without developer mode, the helper copies
+each file into the snapshot instead: the copy is made under a staging name
+and renamed into place once whole, so a cancel or a full disk mid-copy leaves
+nothing under the file's name, and a short copy an earlier run left is
+replaced, never taken as complete); the hub is
+asked nothing more, so what it answers after the plan (another etag for a
+file, say) reaches no path in the cache. A file name the listing gives that
+is a path (absolute, a drive, or traversing) is refused the same way an etag
+that is not a checksum is.
+`HF_ENDPOINT` points the command at another hub,
+which is how the tests prove it against a fake on 127.0.0.1 without ever
+fetching real weights. The user's hub token (`hf auth login`, or `HF_TOKEN`)
+goes only to that hub's own origin, and only over `https://` or to a loopback
+host (127.0.0.1, ::1, localhost): an `http://` hub on another machine gets
+every request without it, rather than the token in cleartext on the wire.
+
 ### The same flags for Ollama
 
 With `--backend ollama` (what the plugin passes for its Ollama row; or
@@ -289,39 +322,6 @@ the backend speaks its chat endpoint (card #409):
 
 The tests prove all three against a fake Ollama on 127.0.0.1 that speaks
 those endpoints and keeps what a cut-off pull had; no model is ever pulled.
-
-The bytes move over plain HTTP, through the hub library's own file download
-(its Range request, its size check, its per-file lock), and every finished file
-is checked against the checksum the hub names in its etag (the sha256 of a
-weights file, git's blob sha1 of a regular one) before it becomes a blob in
-the cache, never through the Xet
-transfer that stalls on some networks (docs/troubleshooting.md); the command
-sets `HF_HUB_DISABLE_XET=1` for itself. It also sets
-`HF_HUB_DISABLE_TELEMETRY=1` for itself (a value you set, or `DO_NOT_TRACK`,
-stands): the hub library would otherwise ask the hub which AI coding agents
-exist and name the one it runs under, and the torch version, in every
-request; the command sends the hub nothing about the machine but the
-requests the download needs. The commit `main` points at is
-resolved once, at the start, and recorded in the cache's `refs/main`; every
-file is fetched at that commit, so a branch that moves during the run changes
-nothing. Once every file is in the cache and checked, the command lays out the
-snapshot of that commit from those checked files alone, its pointers made by
-the hub library's own helper exactly as `mlx` will look for them (where
-symlinks are unavailable, Windows without developer mode, the helper copies
-each file into the snapshot instead: the copy is made under a staging name
-and renamed into place once whole, so a cancel or a full disk mid-copy leaves
-nothing under the file's name, and a short copy an earlier run left is
-replaced, never taken as complete); the hub is
-asked nothing more, so what it answers after the plan (another etag for a
-file, say) reaches no path in the cache. A file name the listing gives that
-is a path (absolute, a drive, or traversing) is refused the same way an etag
-that is not a checksum is.
-`HF_ENDPOINT` points the command at another hub,
-which is how the tests prove it against a fake on 127.0.0.1 without ever
-fetching real weights. The user's hub token (`hf auth login`, or `HF_TOKEN`)
-goes only to that hub's own origin, and only over `https://` or to a loopback
-host (127.0.0.1, ::1, localhost): an `http://` hub on another machine gets
-every request without it, rather than the token in cleartext on the wire.
 
 ---
 
