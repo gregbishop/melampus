@@ -22,6 +22,7 @@ import time
 import types
 import urllib.error
 import urllib.request
+from http.server import ThreadingHTTPServer
 
 import pytest
 from conftest import (
@@ -922,6 +923,61 @@ def test_deadline_again_counts_the_bound_from_now():
         time.sleep(0.6)
         assert not deadline.expired.is_set(), "the deadline counted from the start, not from again()"
         assert deadline.expired.wait(2.0), "the deadline never fired after again()"
+
+
+def test_deadline_watcher_runs_for_the_block_alone():
+    """Code review round 10 (backend.py:386), rule 7: 36147fd gave the
+    deadline a second thread with a lifecycle, the watcher of `cancel`,
+    started in __enter__ and ended by `_over` and joined in __exit__, and
+    nothing asserted it. Given a deadline with a predicate, the block has
+    the timer and the watcher running beside the caller, and after it the
+    watcher is not alive and the thread count is what it was."""
+    before = threading.active_count()
+    with _Deadline(5.0, cancel=lambda: False) as deadline:
+        assert deadline._watcher.is_alive()
+        assert threading.active_count() == before + 2, "the timer and the watcher"
+    assert not deadline._watcher.is_alive(), "the watcher outlived the block"
+    assert threading.active_count() == before, "a thread outlived the block"
+
+
+def test_deadline_hangs_up_a_late_socket_for_a_cancel_as_for_the_timeout():
+    """Code review round 10 (backend.py:386), rule 7: `on()` hangs up a
+    socket given after the event, for the cancellation as for the
+    deadline (a cancel that fired while the caller was still connecting
+    has no socket to hang up). Given the watcher's hang-up with no socket
+    yet, `cancelled` is set and, once the socket is given, the other end
+    reads end-of-stream."""
+    deadline = _Deadline(60.0, cancel=lambda: True)
+    _hang_up(deadline, deadline.cancelled)
+    assert deadline.cancelled.is_set() and not deadline.expired.is_set()
+    ours, theirs = socket.socketpair()
+    with ours, theirs:
+        deadline.on(ours)
+        theirs.settimeout(1.0)
+        assert theirs.recv(1) == b"", "the stream was not ended for the cancellation"
+
+
+def test_ollama_backend_stream_ends_cleanly_within_a_watch_when_its_cancel_turns_true():
+    """Code review round 10 (backend.py:386), rule 7: the stream's `cancel`
+    predicate, watched while a read blocks, had its proof only through
+    pull_model and the entry point at 10 s timeouts. Given a listener
+    writing one line and then nothing, and a predicate true once that
+    line is out, the stream yields the line that arrived and ends with no
+    exception within WATCH plus slack, `cancelled` set and `expired` not:
+    the cancellation, whatever shape the hung-up read took."""
+    from conftest import chunked_pull_answer, stalling_handler
+
+    line = b'{"status": "pulling manifest"}\n'
+    lines: list[bytes] = []
+    with loopback_server(stalling_handler(chunked_pull_answer(line)), ThreadingHTTPServer) as stalled:
+        url = f"http://127.0.0.1:{stalled.server_port}"
+        backend = OllamaBackend("qwen3-vl:8b-instruct", url, timeout=10.0)
+        request = urllib.request.Request(f"{url}/api/pull", data=b"{}", method="POST")
+        with _timed() as took:
+            lines.extend(backend.stream(request, cancel=lambda: bool(lines)))
+    assert lines == [line]
+    assert took.seconds < _Deadline.WATCH + SCHEDULING_SLACK, f"the cancel waited on the read: {took.seconds:.2f}s"
+    assert request.deadline.cancelled.is_set() and not request.deadline.expired.is_set()
 
 
 def _bounded_pull(timeout: float, cancel):
