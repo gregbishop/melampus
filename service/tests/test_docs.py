@@ -801,31 +801,44 @@ def test_docs_say_the_command_runs_once_per_completion():
             f"{doc} does not name the two completions a frame is made of")
 
 
-def test_config_doc_quotes_the_claude_code_template_from_its_one_source():
-    """Card #421: one place holds Claude Code's template,
-    providers.CLAUDE_CODE_COMMAND. docs/config.md quotes it as the
-    `[model] command` a user would set to override it, in a TOML block
-    that parses to exactly that list, so the doc cannot rot into a second
-    copy; and it says what to install, how to sign in, and that runs bill
-    to the subscription."""
+@pytest.mark.parametrize(
+    ("engine", "must_say"),
+    [
+        ("claude-code", ("subscription",)),
+        ("codex", ("usage limit", "bills per call")),
+    ],
+    ids=["claude-code", "codex"],
+)
+def test_config_doc_quotes_the_cli_template_from_its_one_source(engine, must_say):
+    """Cards #421 and #422: one place holds each CLI's template, the
+    CliEngine's `command`. docs/config.md quotes it as the `[model] command`
+    a user would set to override it, in a TOML block that parses to exactly
+    that list, so the doc cannot rot into a second copy; and it says what
+    to install, how to sign in, and what is that CLI's own (`must_say`):
+    that Claude Code's runs bill to the subscription; that Codex's stop at
+    the plan's usage limit and that an API-key sign-in bills per call and
+    is refused. The readme and the architecture doc name the engine and
+    the template's one source."""
     import tomllib
 
     from melampus import providers
 
-    text = (REPO / "docs" / "config.md").read_text(encoding="utf-8")
+    (cli,) = [c for c in (providers.CLAUDE_CODE_CLI, providers.CODEX_CLI) if c.engine == engine]
+    text = CONFIG_DOC.read_text(encoding="utf-8")
     blocks = [
         block for block in re.findall(r"```toml\n(.*?)```", text, re.DOTALL)
-        if 'backend = "claude-code"' in block
+        if f'backend = "{cli.engine}"' in block
     ]
-    assert blocks, "docs/config.md has no ```toml block with backend = \"claude-code\""
+    assert blocks, f"docs/config.md has no ```toml block with backend = \"{cli.engine}\""
     (block,) = blocks
-    assert tomllib.loads(block)["model"]["command"] == providers.CLAUDE_CODE_COMMAND
-    for said in (providers.CLAUDE_CODE_INSTALL, f"`{providers.CLAUDE_CODE_SIGN_IN}`", "subscription"):
+    assert tomllib.loads(block)["model"]["command"] == cli.command
+    for said in (cli.install, f"`{cli.sign_in}`", *must_say):
         assert said in text, f"docs/config.md does not say {said!r}"
     readme = (REPO / "readme.md").read_text(encoding="utf-8")
-    assert "`claude-code`" in readme and "--backend claude-code" in readme
+    assert f"`{cli.engine}`" in readme and f"--backend {cli.engine}" in readme
     architecture = (REPO / "docs" / "architecture.md").read_text(encoding="utf-8")
-    assert "claude-code" in architecture
+    source = f"{cli.engine.upper().replace('-', '_')}_COMMAND"
+    assert f"`{cli.engine}`" in architecture and source in architecture
 
 
 def test_config_doc_command_row_says_where_the_program_runs():
@@ -842,32 +855,3 @@ def test_config_doc_command_row_says_where_the_program_runs():
     command_row = next(line for line in config_doc.splitlines() if line.startswith("| `command` |"))
     for said in ("working directory", "PATH", "absolute path", "launched from"):
         assert said in command_row, f"docs/config.md's command row does not say {said!r}"
-
-
-def test_config_doc_quotes_the_codex_template_from_its_one_source():
-    """Card #422: one place holds Codex CLI's template,
-    providers.CODEX_COMMAND. docs/config.md quotes it as the
-    `[model] command` a user would set to override it, in a TOML block
-    that parses to exactly that list, so the doc cannot rot into a second
-    copy; and it says what to install, how to sign in, that runs bill to
-    the plan, that an API-key sign-in bills per call and is refused, and
-    what happens at its usage limit."""
-    import tomllib
-
-    from melampus import providers
-
-    text = (REPO / "docs" / "config.md").read_text(encoding="utf-8")
-    blocks = [
-        block for block in re.findall(r"```toml\n(.*?)```", text, re.DOTALL)
-        if 'backend = "codex"' in block
-    ]
-    assert blocks, "docs/config.md has no ```toml block with backend = \"codex\""
-    (block,) = blocks
-    assert tomllib.loads(block)["model"]["command"] == providers.CODEX_COMMAND
-    for said in (providers.CODEX_INSTALL, f"`{providers.CODEX_SIGN_IN}`", "usage limit",
-                 "bills per call"):
-        assert said in text, f"docs/config.md does not say {said!r}"
-    readme = (REPO / "readme.md").read_text(encoding="utf-8")
-    assert "`codex`" in readme and "--backend codex" in readme
-    architecture = (REPO / "docs" / "architecture.md").read_text(encoding="utf-8")
-    assert "`codex`" in architecture and "CODEX_COMMAND" in architecture
