@@ -61,6 +61,24 @@ basename: `0A1A2475.jpg` finds `0A1A2475.CR3`. Verified 300/300 on this corpus.
 
 ---
 
+## The engine
+
+Where inference runs is the user's choice (card #403), and the choice has a
+home before it has a dialog: a preference named `engine`, one of `mlx`,
+`ollama`, `openai`, `claude`, in the plugin's preferences beside `profile`.
+When it is set, `MelampusAnalyze.lua` passes it to the executable as
+`--backend <engine>`, and the executable's own rules apply: `ollama` is refused
+as not built yet (card #406), `openai` and `claude` need their key
+(docs/config.md § `[model]`). When it is unset — the default — the command
+carries no `--backend` and the executable decides: `[model] backend` in
+`melampus.local.toml`, else `mlx`; card #404's detection makes that the first
+engine that can run on this machine. A value that is not one of the four is
+refused before anything runs, with the four named, so a stale preference never
+reaches the shell. Card #405 adds the control in Settings; until then the
+preference is unset.
+
+---
+
 ## SDK verification
 
 CLAUDE.md §5.1 and §5.2 mark several items VERIFY. Confirmed against the API
@@ -120,10 +138,10 @@ truncated results file should produce a clear dialog, not a stack trace.
 The Lua tests are driven from pytest so one command covers both languages, and
 skip cleanly when no interpreter is present:
 
-- **20 rules tests** — never-overwrite for ratings, labels and flags; dry-run;
+- **32 rules tests** — never-overwrite for ratings, labels and flags; dry-run;
   idempotency; force; auto-reject staying off; the confidence and burst-agreement
   gates; range-flag routing; abstention; keyword sanitisation; graceful handling
-  of sparse records.
+  of sparse records; the engine preference, every value and the default.
 - **8 JSON tests** plus a parse of 1,093 real records.
 - **`luac -p` over every plugin file**, which has already caught a real bug.
 

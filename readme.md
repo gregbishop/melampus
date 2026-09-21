@@ -89,7 +89,7 @@ Configure the backend and key in `melampus.local.toml` (git-ignored):
 
 ```toml
 [model]
-backend = "anthropic"   # or "openai"; add base_url for any compatible endpoint
+backend = "claude"   # or "openai"; add base_url for any compatible endpoint
 ```
 
 with `MELAMPUS_ANTHROPIC_KEY` (or `MELAMPUS_OPENAI_KEY`) set in your
@@ -99,9 +99,10 @@ environment. Then everything works as on the Mac, plugin included:
 .venv\Scripts\melampus-id.exe fixtures\ --limit 3
 ```
 
-One-off runs can skip the config file: `--backend anthropic`. The Lightroom
-plugin detects the platform itself — nothing to configure beyond the backend
-and key above.
+One-off runs can skip the config file: `--backend claude`. The Lightroom
+plugin detects the platform itself; its `engine` preference (docs/plugin.md
+§ The engine) passes the same name as `--backend`, and left unset it defers to
+the backend and key above.
 
 ### Available models
 
@@ -245,7 +246,7 @@ frontier model, and only the tail is sent.
 ```bash
 # What would be sent, and roughly what it would cost. Needs no key. Sends nothing.
 melampus-id fixtures --report-only --escalate-dry-run
-#   would escalate 3 frame(s) to anthropic/claude-opus-5, est. $0.15 ...
+#   would escalate 3 frame(s) to claude/claude-opus-5, est. $0.15 ...
 
 export MELAMPUS_ANTHROPIC_KEY=sk-ant-...
 melampus-id fixtures --escalate --escalate-max 50
@@ -319,7 +320,7 @@ run everything, which takes about a minute (CI always does this):
 
 The service ships to users as one file, `dist/melampus`, so they install neither
 Python nor uv. It carries the Python runtime, the service, the prompts, the
-anthropic and openai SDKs (`--backend anthropic` and `--backend openai` work on
+anthropic and openai SDKs (`--backend claude` and `--backend openai` work on
 every platform; with no key set the executable asks for one) and, on Apple
 Silicon, the MLX runtime; model weights are not bundled and come from the
 HuggingFace cache as before. PyInstaller bundles what the build venv has, so the

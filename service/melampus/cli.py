@@ -12,6 +12,7 @@ from .identify import Identifier
 from .images import content_hash
 from .providers import (
     BACKEND_CHOICES,
+    KEY_VARIABLES,
     BackendUnavailable,
     apply_cloud_primary_defaults,
     build_primary_backend,
@@ -25,6 +26,19 @@ from .schema import ImageResult
 def _venv_python() -> str:
     """The venv interpreter path for install hints, phrased for this OS."""
     return ".venv\\Scripts\\python.exe" if sys.platform == "win32" else ".venv/bin/python"
+
+
+def _sdk_missing(backend: str) -> int:
+    """The install hint for a cloud backend whose SDK is not here: which
+    backend, and the extra that ships its SDK. Exit 3, for both the primary
+    backend and the escalation provider."""
+    extra = "openai" if backend == "openai" else "cloud"
+    print(
+        f"The SDK for the {backend} backend is not installed. Run:\n"
+        f'  uv pip install --python {_venv_python()} "./service[{extra}]"',
+        file=sys.stderr,
+    )
+    return 3
 
 
 def _humanise(seconds: float) -> str:
@@ -74,13 +88,7 @@ def _run_escalation(paths, local_cache: ResultCache, config, *,
         try:
             identifier = build_cloud_identifier(config)
         except ImportError:
-            extra = "openai" if config.escalation.provider == "openai" else "cloud"
-            print(
-                f"The {config.escalation.provider} SDK is not installed. Run:\n"
-                f'  uv pip install --python {_venv_python()} "./service[{extra}]"',
-                file=sys.stderr,
-            )
-            return 3
+            return _sdk_missing(config.escalation.provider)
         except ValueError as exc:
             print(str(exc), file=sys.stderr)
             return 3
@@ -196,9 +204,10 @@ def main(argv: list[str] | None = None) -> int:
                          "alone, over the defaults, is the whole configuration")
     ap.add_argument("--model", default=None, help="override model repo")
     ap.add_argument("--backend", choices=BACKEND_CHOICES, default=None,
-                    help="what answers: mlx locally (default), a cloud provider "
-                         "for machines with no local runtime, or scripted (a fake "
-                         "that answers nothing; for smoke tests without weights)")
+                    help="which engine answers: mlx locally (default), ollama "
+                         "(not built yet, card #406), openai or claude for machines "
+                         "with no local runtime, or scripted (a fake that answers "
+                         "nothing; for smoke tests without weights)")
     ap.add_argument("--yes", action="store_true",
                     help="skip the cost confirmation when the primary backend is a "
                          "cloud provider (for non-interactive callers)")
@@ -232,8 +241,8 @@ def main(argv: list[str] | None = None) -> int:
     cloud.add_argument("--escalate-max", type=int, default=None,
                        help="ceiling on how many frames one run may bill for")
     cloud.add_argument("--escalate-model", default=None, help="override the cloud model")
-    cloud.add_argument("--escalate-provider", choices=("anthropic", "openai"), default=None,
-                       help="which cloud to ask (default: anthropic)")
+    cloud.add_argument("--escalate-provider", choices=tuple(KEY_VARIABLES), default=None,
+                       help="which cloud to ask (default: claude)")
     cloud.add_argument("--escalate-yes", action="store_true",
                        help="skip the cost confirmation (for non-interactive callers)")
     cloud.add_argument("--escalate-base-url", default=None,
@@ -288,13 +297,7 @@ def main(argv: list[str] | None = None) -> int:
         try:
             backend = build_primary_backend(config)
         except ImportError:
-            extra = "openai" if config.model.backend == "openai" else "cloud"
-            print(
-                f"The {config.model.backend} SDK is not installed. Run:\n"
-                f'  uv pip install --python {_venv_python()} "./service[{extra}]"',
-                file=sys.stderr,
-            )
-            return 3
+            return _sdk_missing(config.model.backend)
         except (BackendUnavailable, ValueError) as exc:
             print(str(exc), file=sys.stderr)
             return 3
