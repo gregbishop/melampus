@@ -4818,10 +4818,20 @@ def test_codex_reply_maps_unauthorized_to_the_sign_in_command():
 def test_codex_reply_surfaces_any_other_failed_turn():
     """Any other turn.failed (a model that is not found, a network that is
     down) is CommandFailed carrying Codex's own words; transient `error`
-    events before a completed turn are not failures."""
+    events before a completed turn are not failures. Codex's failures end
+    in a hex request id (and a cf-ray), so the digits "401" inside one are
+    not the measured "401 Unauthorized": that failure is not a sign-in
+    failure and must not send the user to `codex login`."""
     with pytest.raises(CommandFailed) as err:
         providers.codex_reply(_codex_failure("model not found: gpt-0"))
     assert "model not found: gpt-0" in str(err.value)
+
+    with_request_id = "model not found: gpt-0 (request id: req_5c401e9a7b2d4f0e9a1b2c3d4e5f6a7b)"
+    with pytest.raises(CommandFailed) as err:
+        providers.codex_reply(_codex_failure(with_request_id))
+    assert with_request_id in str(err.value)
+    assert "not signed in" not in str(err.value)
+    assert providers.CODEX_SIGN_IN not in str(err.value)
 
     recovered = _codex_events(
         {"type": "thread.started", "thread_id": "x"},

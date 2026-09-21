@@ -798,9 +798,11 @@ def codex_reply(stdout: str) -> str:
 def _codex_refuse(message: str) -> NoReturn:
     """A failed turn's `message`, as CommandFailed: the usage limit is
     Codex's own refusal, named with the reset time as the CLI said it
-    (measured: "... try again at Sep 19th, 2026 7:46 AM."); a 401 is not
-    signed in, and anything else is Codex's words, both through the
-    refusal shared with Claude Code."""
+    (measured: "... try again at Sep 19th, 2026 7:46 AM."); the measured
+    "401 Unauthorized" is not signed in, read by its word, since Codex's
+    failures end in a hex request id whose digits may contain 401; and
+    anything else is Codex's words, both through the refusal shared with
+    Claude Code."""
     lowered = message.lower()
     if "usage limit" in lowered:
         _, _, when = message.partition("try again at ")
@@ -809,7 +811,7 @@ def _codex_refuse(message: str) -> NoReturn:
             + (f", until {when.strip().rstrip('.')}" if when.strip() else "")
             + f"; wait for it to reset or switch engines (it said: {message})"
         )
-    _cli_refuse(CODEX_CLI, message, signed_out="401" in message or "unauthorized" in lowered)
+    _cli_refuse(CODEX_CLI, message, signed_out="unauthorized" in lowered)
 
 
 #: Codex CLI, as the one verdict and the one factory branch see it. Signed
