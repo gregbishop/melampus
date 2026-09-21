@@ -485,13 +485,18 @@ def link_to_nowhere(tmp_path: Path) -> Path:
     return folder
 
 
+# The Claude Code settings payload naming an `apiKeyHelper` (a placeholder,
+# /usr/bin/true: the fake `claude` never runs it), so a settings file carrying
+# it, loaded by a template, would bill that helper's key, not the subscription.
+API_KEY_HELPER_SETTINGS = {"apiKeyHelper": "/usr/bin/true"}
+
+
 @pytest.fixture()
 def api_key_helper(tmp_path: Path) -> Path:
-    """A Claude Code settings file naming an `apiKeyHelper` (a placeholder,
-    /usr/bin/true: the fake `claude` never runs it), so a template carrying
-    `--settings` on it would bill that helper's key, not the subscription."""
+    """A Claude Code settings file naming the placeholder `apiKeyHelper`, for
+    a template to carry on `--settings`."""
     helper = tmp_path / "helper.json"
-    helper.write_text(json.dumps({"apiKeyHelper": "/usr/bin/true"}), encoding="utf-8")
+    helper.write_text(json.dumps(API_KEY_HELPER_SETTINGS), encoding="utf-8")
     return helper
 
 
@@ -4116,7 +4121,7 @@ def test_the_status_check_is_probed_under_the_templates_own_settings_flags(monke
     # flag's place, likewise; one carrying both keeps --restricted's
     # exclusion (measured on 2.1.278, in either order: authMethod none).
     (Path(os.environ["CLAUDE_CONFIG_DIR"]) / "settings.json").write_text(
-        json.dumps({"apiKeyHelper": "/usr/bin/true"}), encoding="utf-8")
+        json.dumps(API_KEY_HELPER_SETTINGS), encoding="utf-8")
     assert build(list(template)).executable == shutil.which(CLAUDE)
     assert _status_checks(log) == [["--restricted", "auth", "status", "--json"]]
 
