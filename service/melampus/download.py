@@ -52,6 +52,7 @@ from urllib.parse import urlparse  # noqa: E402
 import httpx  # noqa: E402
 from filelock import Timeout  # noqa: E402
 from huggingface_hub import (  # noqa: E402
+    DeleteCacheStrategy,
     HfApi,
     constants,
     get_hf_file_metadata,
@@ -609,17 +610,16 @@ def download_model(
 
 
 def _cached(repo: str, cache: Path):
-    """The hub library's scan of the cache and its view of `repo` in it: the
+    """The hub library's view of `repo` in its scan of the cache: the
     CachedRepoInfo when a snapshot is laid out, else None. A repo with only
     partial blobs has no snapshots folder, which the scan reports as a
     warning, not a repo."""
     if not cache.is_dir():
-        return None, None
-    info = scan_cache_dir(cache)
-    for cached in info.repos:
+        return None
+    for cached in scan_cache_dir(cache).repos:
         if cached.repo_id == repo and cached.repo_type == "model":
-            return info, cached
-    return info, None
+            return cached
+    return None
 
 
 def _bytes_in_cache(storage: Path) -> int:
@@ -641,7 +641,7 @@ def model_status(repo: str, *, endpoint: str | None = None, cache_dir: Path | No
     endpoint = endpoint or constants.ENDPOINT
     set_client_factory(lambda: _hub_client(endpoint))
     cache, storage, _ = _cache_paths(repo, cache_dir)
-    _, cached = _cached(repo, cache)
+    cached = _cached(repo, cache)
     main = next((r for r in cached.revisions if "main" in r.refs), None) if cached else None
     installed, path = main is not None, str(main.snapshot_path) if main else None
     try:
@@ -666,14 +666,18 @@ def _download_running(lock_dir: Path) -> bool:
 
 def remove_model(repo: str, *, cache_dir: Path | None = None) -> Path:
     """Delete `repo` from the cache through the hub library's own deletion
-    (every revision, so the whole repo folder goes) and return that folder.
-    Raises DownloadError when nothing is installed or a download of it is
-    running."""
+    strategy, for this repo alone: every revision of it goes, so the whole
+    repo folder does, and return that folder. The library's `delete_revisions`
+    is not used: it searches the whole cache by commit hash and takes the
+    first repo found at one, which can be a fork cached at the same commit,
+    leaving `repo` installed. Raises DownloadError when nothing is installed
+    or a download of it is running."""
     cache, _, locks = _cache_paths(repo, cache_dir)
-    info, cached = _cached(repo, cache)
+    cached = _cached(repo, cache)
     if cached is None:
         raise DownloadError(f"{repo} is not in the cache at {cache}: nothing to remove")
     if _download_running(locks):
         raise DownloadError(f"a download of {repo} is running; cancel it first, then remove")
-    info.delete_revisions(*(r.commit_hash for r in cached.revisions)).execute()
+    DeleteCacheStrategy(expected_freed_size=cached.size_on_disk, blobs=frozenset(), refs=frozenset(),
+                        repos=frozenset({cached.repo_path}), snapshots=frozenset()).execute()
     return cached.repo_path

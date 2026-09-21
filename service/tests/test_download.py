@@ -47,6 +47,7 @@ from conftest import (
 )
 from huggingface_hub import constants
 from huggingface_hub.constants import DOWNLOAD_CHUNK_SIZE
+from huggingface_hub.file_download import repo_folder_name
 
 from melampus import download
 from melampus.cli import main
@@ -1287,6 +1288,44 @@ def test_remove_deletes_the_installed_model_from_the_cache(fake_hub: FakeHub, tm
     assert not removed.exists() and not path.exists()
     status = _status(fake_hub, tmp_path / "hub")
     assert status.installed is False and status.bytes_done == 0 and status.path is None
+
+
+FAKE_FORK = "fake-org/fake-fork"
+
+
+@pytest.mark.parametrize("removed", [FAKE_REPO, FAKE_FORK], ids=["the model", "its fork"])
+def test_remove_deletes_the_named_model_and_no_other_repo_at_the_same_commit(
+    fake_hub: FakeHub, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, removed: str
+):
+    """Security (Codex review 1 of #16, download.py:675). The removal named
+    the repo's revisions to the hub library's `delete_revisions`, which
+    searches the whole cache by commit hash and takes the first repo found
+    at it: a fork (or a mirror) cached at the same commit could be the one
+    deleted, the model asked for staying installed. Given the model and a
+    fork of it at the same commit in one cache, whichever of the two is
+    removed, that repo's folder goes and the other's snapshot stays. The
+    scan yields its repos in a frozenset's order, which varies by process,
+    so the case is pinned: the other repo comes first."""
+    from dataclasses import replace
+
+    kept = FAKE_FORK if removed == FAKE_REPO else FAKE_REPO
+    paths = {FAKE_REPO: _fetch(fake_hub, tmp_path / "hub")[0]}
+    with FakeHub(repo=FAKE_FORK).serve() as fork:
+        paths[FAKE_FORK] = _fetch(fork, tmp_path / "hub", repo=FAKE_FORK)[0]
+    assert paths[FAKE_REPO].name == paths[FAKE_FORK].name == FAKE_COMMIT, "the two repos do not share the commit"
+    scan = download.scan_cache_dir
+
+    def other_first(cache: Path):
+        info = scan(cache)
+        return replace(info, repos=tuple(sorted(info.repos, key=lambda r: r.repo_id != kept)))
+
+    monkeypatch.setattr(download, "scan_cache_dir", other_first)
+
+    gone = remove_model(removed, cache_dir=tmp_path / "hub")
+
+    assert gone == tmp_path / "hub" / repo_folder_name(repo_id=removed, repo_type="model")
+    assert not gone.exists() and not paths[removed].exists(), f"{removed} is still installed"
+    assert paths[kept].exists() and snapshot_files(paths[kept]) == FAKE_FILES, f"{kept} was removed instead"
 
 
 def test_remove_with_nothing_installed_says_so(fake_hub: FakeHub, tmp_path: Path):
