@@ -2469,6 +2469,39 @@ def test_command_resolving_to_a_batch_shim_is_refused_and_names_the_real_entry(
     assert "--backend" in message
 
 
+def test_command_in_a_process_that_ignores_sigchld_is_refused_and_names_the_fix(
+    monkeypatch, no_ambient_keys, no_ambient_ollama
+):
+    """Given the process melampus runs in ignores SIGCHLD (SIG_IGN, inherited
+    across exec from whatever launched it: a supervisor, a Python parent
+    that set it to avoid zombies), when the command backend is asked for,
+    then it is refused up front through the same shape, naming SIGCHLD and
+    the fix (start melampus from a shell, or restore the default), because
+    the kernel reaps such a process's children the moment they exit: the
+    command's exit could only be seen after its pid was freed, and the tree
+    it started would be stopped by a number that may be someone else's by
+    then. Refused once at exit 3 as a missing program is, not once per
+    frame. Runs on every platform: the disposition is faked, and the
+    signal's name is given where there is none."""
+    monkeypatch.setattr(providers.shutil, "which", lambda name: f"/opt/fake/bin/{name}")
+    monkeypatch.setattr(signal, "SIGCHLD", getattr(signal, "SIGCHLD", 20), raising=False)
+    asked: list[int] = []
+
+    def getsignal(signalnum):
+        asked.append(signalnum)
+        return signal.SIG_IGN
+    monkeypatch.setattr(signal, "getsignal", getsignal)
+    with pytest.raises(providers.BackendUnavailable) as err:
+        providers.build_primary_backend(_cfg(model={"backend": "command", "command": COMMAND}))
+    message = str(err.value)
+    assert asked == [signal.SIGCHLD]
+    assert "ignores SIGCHLD" in message, message
+    assert "shell" in message and "default" in message, message
+    for works_here in ("claude", "openai", "scripted"):
+        assert works_here in message, f"{works_here!r} is not named as working here:\n{message}"
+    assert "--backend" in message
+
+
 def test_command_primary_builds_the_backend_from_the_model_settings(monkeypatch):
     """Given engine command and a template, the factory builds a
     CommandBackend on the template, the path shutil.which resolved its
@@ -2808,6 +2841,30 @@ def test_command_backend_stops_a_runaway_command_before_the_timeout(
         assert named in str(err.value), str(err.value)
     pid = int(pid_file.read_text(encoding="utf-8"))
     assert _gone(pid, within=10.0), f"the runaway {pid} is still running"
+
+
+@posix_only
+def test_command_is_refused_at_the_real_boundary_when_sigchld_is_ignored(
+    monkeypatch, tmp_path, no_ambient_keys, no_ambient_ollama
+):
+    """At the real boundary: SIGCHLD really set to SIG_IGN in this process
+    (restored afterwards), a real fake CLI on PATH found by the real
+    shutil.which, and the factory refuses through BackendUnavailable naming
+    SIGCHLD before anything is started, since with children reaped by the
+    kernel the backend's every stop would signal a pid the command no
+    longer holds."""
+    command = _fake_cli(monkeypatch, tmp_path)
+    before = signal.signal(signal.SIGCHLD, signal.SIG_IGN)
+    try:
+        with pytest.raises(providers.BackendUnavailable) as err:
+            providers.build_primary_backend(
+                _cfg(model={"backend": "command", "command": command, "timeout_seconds": 30}))
+    finally:
+        signal.signal(signal.SIGCHLD, before)
+    message = str(err.value)
+    assert "ignores SIGCHLD" in message, message
+    assert "shell" in message and "default" in message, message
+    assert "--backend" in message
 
 
 def test_command_not_installed_fires_before_any_image_is_read(tmp_path, capsys, no_ambient_ollama):

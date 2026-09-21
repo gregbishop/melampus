@@ -739,6 +739,20 @@ def test_config_doc_says_the_commands_exit_ends_its_answer_and_stops_what_it_sta
         "docs/config.md's timeout_seconds row does not say the stop reaches everything the program started")
 
 
+def test_config_doc_names_the_sigchld_refusal_beside_the_commands_other_refusals():
+    """Card #420: the `command` row of docs/config.md enumerates what the
+    factory refuses up front (a template lacking a placeholder, a program
+    not on PATH, a `.cmd`/`.bat` shim), so it must also name the launcher
+    that ignores SIGCHLD, refused the same way because the kernel would
+    reap the program at its exit and the pid its tree is stopped by could
+    be someone else's by then, and say the fix (a shell, or the default)."""
+    config_doc = CONFIG_DOC.read_text(encoding="utf-8")
+    command_row = next(line for line in config_doc.splitlines() if line.startswith("| `command` |"))
+    assert "SIGCHLD" in command_row, "docs/config.md's command row does not name the SIGCHLD refusal"
+    assert "shell" in command_row and "default" in command_row, (
+        "docs/config.md's command row does not say how to fix a launcher that ignores SIGCHLD")
+
+
 def test_docs_say_the_command_runs_once_per_completion():
     """Card #420: the `command` backend runs its program once per
     completion, not once per frame: a frame is at least two completions

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import platform
 import shutil
+import signal
 import sys
 from dataclasses import dataclass
 from urllib.parse import urlsplit
@@ -325,6 +326,21 @@ def build_primary_backend(config: MelampusConfig) -> VLMBackend:
                 "prompt would be parsed as shell text rather than passed as one "
                 "argument. Name the program's real entry in [model] command "
                 "instead: its .exe, or node and the script the shim wraps.",
+                settings.ollama_url,
+            )
+        # The backend stops the tree the program heads by its pid while the
+        # program is exited but unreaped, so the pid is still its own. A
+        # launcher that ignores SIGCHLD (inherited across exec) has the
+        # kernel reap the program the moment it exits, so every such stop
+        # would signal a number that may be someone else's: refused here,
+        # once, rather than once per frame.
+        if hasattr(signal, "SIGCHLD") and signal.getsignal(signal.SIGCHLD) is signal.SIG_IGN:
+            raise _refuse_here(
+                "The process that started melampus ignores SIGCHLD, so the "
+                "command's exit cannot be seen without losing its pid: the kernel "
+                "reaps the program the moment it exits, and what it started could "
+                "not be stopped safely. Start melampus from a shell, or restore "
+                "SIGCHLD's default disposition in the launcher.",
                 settings.ollama_url,
             )
         from .backend import CommandBackend
