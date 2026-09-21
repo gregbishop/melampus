@@ -17,6 +17,7 @@ import socket
 import socketserver
 import ssl
 import sys
+import threading
 import time
 import types
 import urllib.error
@@ -921,6 +922,73 @@ def test_deadline_again_counts_the_bound_from_now():
         time.sleep(0.6)
         assert not deadline.expired.is_set(), "the deadline counted from the start, not from again()"
         assert deadline.expired.wait(2.0), "the deadline never fired after again()"
+
+
+def _bounded_pull(timeout: float, cancel):
+    """A `_bounded` block of a backend at a closed port, with `cancel` as
+    the stream gives it: what the block does once it ends is the whole of
+    the test, so nothing is sent."""
+    backend = OllamaBackend("qwen3-vl:8b-instruct", "http://127.0.0.1:9", timeout=timeout)
+    request = urllib.request.Request("http://127.0.0.1:9/api/pull", data=b"{}", method="POST")
+    return backend._bounded(request, cancel)
+
+
+@pytest.mark.parametrize("raising", [True, False], ids=["read-raised", "read-returned"])
+def test_bounded_block_ends_cleanly_for_a_cancel_whose_deadline_has_fired_too(raising):
+    """Code review round 10 (backend.py:686), Done-when 1: the timer and
+    the watcher hang up the same socket and set their own event, and
+    `_bounded` read `expired` first on both of its paths, so a cancel asked
+    in the last WATCH before a line's deadline was reported as the timeout,
+    exit 3 with its message, not `cancelled`, exit 4: the outcome the
+    watcher was written to end. Given a block whose deadline (0.3s) and
+    cancel (true from the start) have both fired, ending as the hung-up
+    read ends it, raising or returning, the block ends cleanly with
+    `cancelled` set and nothing raised."""
+    with _bounded_pull(0.3, cancel=lambda: True) as deadline:
+        time.sleep(0.5)
+        assert deadline.expired.is_set() and deadline.cancelled.is_set(), "the case needs both fired"
+        if raising:
+            raise ConnectionResetError("the hung-up read")
+    assert deadline.cancelled.is_set()
+
+
+@pytest.mark.parametrize("raising", [True, False], ids=["read-raised", "read-returned"])
+def test_bounded_block_asks_the_cancel_once_more_when_the_deadline_fired_before_the_watchers_tick(
+    monkeypatch, raising
+):
+    """Code review round 10 (backend.py:686), Done-when 1, the marker the
+    watcher has not seen: written after its last tick and before the timer
+    fired, a window of up to WATCH at the end of each line's deadline. The
+    hang-up is the same hang-up, so once the timer has fired the caller's
+    predicate decides which it was. Given a watcher that never ticks (WATCH
+    held large), a deadline fired, and the predicate true only after it,
+    the block ends cleanly with `cancelled` not set by the watcher and
+    nothing raised, for `_lines_until_cancelled` to name the marker."""
+    monkeypatch.setattr(_Deadline, "WATCH", 60.0)
+    marker = threading.Event()
+    with _bounded_pull(0.3, cancel=marker.is_set) as deadline:
+        assert deadline.expired.wait(2.0), "the deadline never fired"
+        marker.set()
+        if raising:
+            raise ConnectionResetError("the hung-up read")
+    assert not deadline.cancelled.is_set(), "the watcher ticked: the case needs the marker unseen"
+
+
+def test_bounded_block_asks_the_cancel_once_more_when_the_socket_timed_out_before_the_timer(monkeypatch):
+    """Code review round 10 (backend.py:686), Done-when 1, the same window
+    by the socket's clock: `stream` gives urlopen `timeout` as the socket
+    timeout too, and a blocked read is armed with both at once
+    (`again()`, then readline), so at the deadline the socket's timeout
+    and the timer race, and half the time the read ends with the socket's
+    TimeoutError (named by `_naming`) before the timer has fired. That is
+    the timeout the user sees as much as the timer's, so the predicate is
+    asked then too. Given a watcher that never ticks, a deadline not
+    fired, the predicate true, and the read ending with the timeout, the
+    block ends cleanly and nothing is raised."""
+    monkeypatch.setattr(_Deadline, "WATCH", 60.0)
+    with _bounded_pull(60.0, cancel=lambda: True) as deadline:
+        raise TimeoutError("the socket's timeout, as _naming names it")
+    assert not deadline.expired.is_set() and not deadline.cancelled.is_set()
 
 
 def test_ollama_probe_stays_on_loopback_whatever_proxy_the_environment_names(monkeypatch):

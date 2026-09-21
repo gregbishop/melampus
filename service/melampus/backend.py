@@ -679,19 +679,43 @@ class OllamaBackend(VLMBackend):
         return with what arrived) is the timeout, not that shape's error.
         With `cancel` (a stream's), the deadline hangs the socket up for
         the predicate too, and whatever the block then looks like is the
-        cancellation: the block ends, and nothing is raised for its shape."""
+        cancellation: the block ends, and nothing is raised for its shape.
+        The cancellation is read before the timeout: the two hang-ups are
+        the same hang-up, and both may have fired (a cancel in the last
+        WATCH before a line's deadline), so once the block has timed out
+        the predicate decides which it was (`_cancelled`), asked once more
+        for a marker the watcher's tick has not yet seen."""
         with _Deadline(self.timeout, cancel) as deadline:
             request.deadline = deadline
             try:
                 yield deadline
             except Exception as exc:
+                if self._cancelled(deadline, cancel, exc):
+                    return
                 if deadline.expired.is_set():
                     raise self._timed_out() from exc
-                if deadline.cancelled.is_set():
-                    return
                 raise
+        if self._cancelled(deadline, cancel):
+            return
         if deadline.expired.is_set():
             raise self._timed_out()
+
+    @staticmethod
+    def _cancelled(deadline: _Deadline, cancel: Callable[[], bool] | None,
+                   exc: Exception | None = None) -> bool:
+        """Whether the block ended for the cancellation: the watcher saw the
+        predicate true and hung up, or the block timed out and the
+        predicate, asked now, is true. The watcher looks every WATCH
+        seconds, so a cancel asked in the last WATCH before the deadline
+        is one it may not have seen; and the block times out two ways at
+        the same moment, the timer's hang-up (`expired`) or the socket's
+        own timeout on the read, `exc` as `_naming` names it, since the
+        one `timeout` arms both. Never with no `cancel`: `send` has no
+        cancellation."""
+        if deadline.cancelled.is_set():
+            return True
+        timed_out = deadline.expired.is_set() or isinstance(exc, TimeoutError)
+        return timed_out and cancel is not None and cancel()
 
     def _exchange(self, request: urllib.request.Request) -> bytes:
         """One request and what came back, every failure a plain error naming
