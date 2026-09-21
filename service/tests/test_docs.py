@@ -12,7 +12,9 @@ from the lockfile (card #425, Done-when 3 and 2); AGENTS.md points at
 docs/brief.md without restating its values; AGENTS.md points at the standard
 and names the tracker (card #410, Done-when 3); and the Windows job runs the
 plugin tests, so the command built for cmd.exe is run by cmd.exe (card #401,
-Done-when 3).
+Done-when 3); and every `uv sync` that builds the executable, in CI and in
+readme.md's build section, installs the extras the executable carries (card
+#434, Done-when 1 and 3).
 
 The checks are deliberately dumb — substring presence of the backticked name — so
 they never argue with prose style, only with absence. The one exception runs the
@@ -45,6 +47,15 @@ DOCS = [README, AGENTS_MD, *sorted((REPO / "docs").glob("*.md"))]
 
 
 LOCKFILE_FLAGS = ("--locked", "--frozen")
+# What a `uv sync` that builds the executable must install: PyInstaller (the
+# `build` extra) and the SDKs the executable carries (card #434). PyInstaller
+# bundles what the build venv has, so a sync missing one ships without it.
+BUILD_EXTRAS = ("--extra build", "--extra cloud", "--extra openai")
+
+
+def _lacking_build_extras(commands: list[str]) -> list[str]:
+    """The commands among `commands` that do not name every build extra."""
+    return [c for c in commands if any(extra not in c for extra in BUILD_EXTRAS)]
 
 
 def _installs_from_the_lockfile(command: str, flags: tuple[str, ...] = LOCKFILE_FLAGS) -> bool:
@@ -171,6 +182,14 @@ def _fenced_commands(text: str) -> list[str]:
     ]
 
 
+def _readme_section(heading: str) -> str:
+    """The text of readme.md's `## {heading}` section, up to the next `## `."""
+    readme = README.read_text(encoding="utf-8")
+    section = re.search(rf"^## {re.escape(heading)}\n(.*?)^## ", readme, re.MULTILINE | re.DOTALL)
+    assert section, f"readme.md has no ## {heading} section"
+    return section.group(1)
+
+
 def test_install_blocks_install_from_the_lockfile():
     """Card #425, Done-when 3: given a fresh clone, when the README setup runs,
     then the resolved versions match the lockfile. Only `uv sync --locked` (or
@@ -181,9 +200,8 @@ def test_install_blocks_install_from_the_lockfile():
     is exact, an SDK added with `uv pip install` is removed the next time the
     Install block runs. Running the installs here would need the network, so
     the gate is on the commands themselves."""
-    readme = README.read_text(encoding="utf-8")
-    install = re.search(r"^## Install\n(.*?)^## ", readme, re.MULTILINE | re.DOTALL)
-    assert install and any(_installs_from_the_lockfile(c) for c in _fenced_commands(install.group(1))), (
+    install = _readme_section("Install")
+    assert any(_installs_from_the_lockfile(c) for c in _fenced_commands(install)), (
         "readme.md's ## Install section must install with `uv sync --locked`"
     )
     unlocked = [
@@ -215,12 +233,19 @@ def test_ci_builds_and_smoke_tests_the_executable():
     gates merges is CI's, so its pytest step must pass --build-binary and
     install the `build` extra PyInstaller comes from; with either missing, the
     smoke tests in test_binary.py skip on every CI run and Done-when 1 and 2
-    are never checked where it counts."""
-    not_building = [
-        c for c in _ci_pytest_commands() if "--build-binary" not in c or "--extra build" not in c
-    ]
+    are never checked where it counts.
+
+    Card #434, Done-when 1 and 3: every job that builds also syncs the `cloud`
+    and `openai` extras, on every platform alike. PyInstaller bundles what the
+    build venv has, so a job that syncs only dev and build ships an executable
+    whose `--backend anthropic` prints an install hint that means nothing
+    inside a binary (the smoke test in test_binary.py proves the SDKs import;
+    this gate keeps the extras in the command that builds)."""
+    commands = _ci_pytest_commands()
+    lacking_extras = _lacking_build_extras(commands)
+    not_building = [c for c in commands if "--build-binary" not in c or c in lacking_extras]
     assert not not_building, (
-        "CI's pytest step must install `--extra build` and run `pytest --build-binary`: "
+        f"CI's pytest step must install {' '.join(BUILD_EXTRAS)} and run `pytest --build-binary`: "
         f"{not_building}"
     )
 
@@ -289,6 +314,21 @@ def test_docs_name_the_build_and_its_smoke_test():
         if command not in readme
     ]
     assert not missing, f"readme.md does not name: {missing}"
+
+
+def test_readme_build_blocks_sync_the_sdk_extras():
+    """Card #434: the executable carries the cloud SDKs, and PyInstaller bundles
+    what the build venv has, so every `uv sync` in readme.md's build section
+    (the macOS block and the Windows one) names the build, cloud and openai
+    extras."""
+    section = _readme_section("Building the executable")
+    syncs = [c for c in _fenced_commands(section) if re.search(r"\buv sync\b", c)]
+    assert syncs, "readme.md's build section has no uv sync command"
+    without = _lacking_build_extras(syncs)
+    assert not without, (
+        f"readme.md's build section must sync {' '.join(BUILD_EXTRAS)}, or the executable "
+        f"it builds lacks the SDKs: {without}"
+    )
 
 
 def _windows_job() -> str:

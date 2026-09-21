@@ -24,6 +24,11 @@ Done-when 2: given the executable, when it runs with --plugin-out and
 Done-when 3: given the occurrence cache and config, when the executable runs,
 then they resolve under the per-user data directory, never the unpack directory.
 
+Card #434: the executable carries the cloud SDKs on every platform. Done-when 2:
+given the executable with no API key set, when `--backend anthropic` or
+`--backend openai` runs, then it reaches the key check and says the key is
+missing, not that the SDK is missing.
+
 Nothing here downloads a model: the MLX check stops at the point where the
 executable goes looking for weights.
 """
@@ -422,6 +427,29 @@ def test_no_local_config_makes_the_config_file_the_whole_configuration(
 SYNTHETIC_MODEL = "melampus-tests/synthetic-model"
 
 
+MISSING_MODULE = ("ModuleNotFoundError", "ImportError")
+
+
+def _assert_no_missing_module(tail: str, what: str, signs: tuple[str, ...] = MISSING_MODULE) -> None:
+    """The executable's stderr shows none of `signs`: it did not die on a
+    module the bundle lacks. `what` says what that would have meant."""
+    for missing in signs:
+        assert missing not in tail, f"{what}:\n{tail}"
+
+
+def _request_backend(
+    executable: Path, photos: Path, tmp_path: Path, backend: str, *arguments: str,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Ask the executable for `backend` on the photos, with `arguments` after
+    them, in `env`: a no-python environment, by default a fresh one."""
+    return subprocess.run(
+        [str(executable), str(photos), "--backend", backend,
+         "--cache", str(tmp_path / "cache.jsonl"), *arguments],
+        env=env or _no_python_environment(tmp_path), capture_output=True, text=True, timeout=600,
+    )
+
+
 def _request_mlx(
     executable: Path, photos: Path, tmp_path: Path, env: dict[str, str] | None = None
 ) -> subprocess.CompletedProcess[str]:
@@ -429,13 +457,10 @@ def _request_mlx(
     and offline, and a synthetic config file naming SYNTHETIC_MODEL as its
     whole configuration. `env` is the no-python environment to run in; by
     default a fresh one."""
-    env = env or _no_python_environment(tmp_path)
-    env |= {"HF_HUB_OFFLINE": "1", "HF_HOME": str(tmp_path / "hf")}
-    return subprocess.run(
-        [str(executable), str(photos), "--backend", "mlx",
-         "--cache", str(tmp_path / "cache.jsonl"),
-         *_synthetic_config(tmp_path, f'[model]\nrepo = "{SYNTHETIC_MODEL}"\n')],
-        env=env, capture_output=True, text=True, timeout=600,
+    env = (env or _no_python_environment(tmp_path)) | {"HF_HUB_OFFLINE": "1", "HF_HOME": str(tmp_path / "hf")}
+    return _request_backend(
+        executable, photos, tmp_path, "mlx",
+        *_synthetic_config(tmp_path, f'[model]\nrepo = "{SYNTHETIC_MODEL}"\n'), env=env,
     )
 
 
@@ -456,8 +481,7 @@ def test_executable_carries_the_service_and_mlx(built_executable: Path, photos: 
     which means mlx, mlx_vlm and transformers all import inside the bundle — and
     stop there. An executable that does not carry MLX dies on an import error first."""
     tail = _look_for_weights(built_executable, photos, tmp_path)
-    for missing in ("ModuleNotFoundError", "ImportError"):
-        assert missing not in tail, f"the executable does not carry MLX:\n{tail}"
+    _assert_no_missing_module(tail, "the executable does not carry MLX")
     assert "LocalEntryNotFoundError" in tail, f"did not get as far as looking for weights:\n{tail}"
     assert SYNTHETIC_MODEL in tail, f"did not look for the model the synthetic config file names:\n{tail}"
 
@@ -493,8 +517,31 @@ def test_executable_refuses_mlx_off_apple_silicon_and_names_what_works(
     assert "Apple Silicon" in tail, tail
     for works_here in ("anthropic", "openai", "scripted"):
         assert works_here in tail, f"{works_here!r} is not named as working here:\n{tail}"
-    for missing in ("ModuleNotFoundError", "ImportError"):
-        assert missing not in tail, f"the refusal came from a missing module, not the CLI:\n{tail}"
+    _assert_no_missing_module(tail, "the refusal came from a missing module, not the CLI")
+
+
+@pytest.mark.parametrize(
+    ("backend", "needs_a_key"),
+    [("anthropic", "The Anthropic backend needs an API key. Set MELAMPUS_ANTHROPIC_KEY"),
+     ("openai", "The OpenAI backend needs an API key. Set MELAMPUS_OPENAI_KEY")],
+)
+def test_executable_carries_the_cloud_sdks_and_asks_for_the_key(
+    built_executable: Path, photos: Path, tmp_path: Path, backend: str, needs_a_key: str
+):
+    """Card #434, Done-when 2 (and 3: the same test runs on every platform's
+    build). Given the executable with no API key set, when a cloud backend is
+    requested, then it gets as far as the key check and says the key is
+    missing: the SDK imported inside the bundle. An executable built without
+    the cloud and openai extras stops one step earlier, on the CLI's install
+    hint, which means nothing to a user who has no venv to install into. The
+    environment carries no key variable, so nothing is sent anywhere."""
+    proc = _request_backend(built_executable, photos, tmp_path, backend)
+    tail = proc.stderr[-3000:]
+    assert proc.returncode == 3, f"exit {proc.returncode}:\n{tail}"
+    _assert_no_missing_module(
+        tail, f"the executable does not carry the {backend} SDK", ("SDK is not installed", *MISSING_MODULE)
+    )
+    assert needs_a_key in tail, f"did not reach the key check:\n{tail}"
 
 
 def test_executable_prints_the_same_json_as_the_cli_with_no_python_on_the_path(

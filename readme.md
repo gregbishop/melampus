@@ -318,13 +318,17 @@ run everything, which takes about a minute (CI always does this):
 ## Building the executable
 
 The service ships to users as one file, `dist/melampus`, so they install neither
-Python nor uv. It carries the Python runtime, the service, the prompts and, on
-Apple Silicon, the MLX runtime; model weights are not bundled and come from the
-HuggingFace cache as before.
+Python nor uv. It carries the Python runtime, the service, the prompts, the
+anthropic and openai SDKs (`--backend anthropic` and `--backend openai` work on
+every platform; with no key set the executable asks for one) and, on Apple
+Silicon, the MLX runtime; model weights are not bundled and come from the
+HuggingFace cache as before. PyInstaller bundles what the build venv has, so the
+sync names every extra the executable needs: `build` for the pinned PyInstaller,
+`cloud` and `openai` for the SDKs.
 
 ```bash
-# once: the pinned PyInstaller, from the same lockfile as everything else
-VIRTUAL_ENV=.venv uv sync --project service --locked --extra dev --extra build --active
+# once: the pinned PyInstaller and both SDKs, from the same lockfile as everything else
+VIRTUAL_ENV=.venv uv sync --project service --locked --extra dev --extra build --extra cloud --extra openai --active
 .venv/bin/python tools/build_binary.py    # writes dist/melampus, ~200 MB, about a minute
 ```
 
@@ -357,7 +361,7 @@ To build it yourself (PowerShell, from the repo folder):
 
 ```powershell
 uv venv --python 3.12 .venv
-$env:VIRTUAL_ENV = ".venv"; uv sync --project service --locked --extra dev --extra build --active
+$env:VIRTUAL_ENV = ".venv"; uv sync --project service --locked --extra dev --extra build --extra cloud --extra openai --active
 .venv\Scripts\python.exe tools\build_binary.py    # writes dist\melampus.exe
 ```
 
