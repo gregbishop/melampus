@@ -495,24 +495,30 @@ def test_the_mock_hands_its_temp_paths_to_sh_as_data(tmp_path: Path):
 
 def _model_commands_the_dialog_builds(
     plugin_dir: Path, tmp_path: Path, engine: str = "mlx"
-) -> tuple[str, str, Path]:
-    """The two shell commands the Settings dialog builds for `engine`'s model
-    (card #408, #409) under the mock SDK with `_PLUGIN.path` at `plugin_dir`
-    and TMPDIR at `tmp_path`: the `--model-status` line it runs at open, and
-    the `--download-model` line the Download button runs, stdout redirected
-    to the progress file the poller reads, both carrying the engine; and the
-    mock's temp directory, under tmp_path, where both lines put their files."""
+) -> tuple[str, str, str, Path]:
+    """The three shell commands the Settings dialog builds for `engine`'s
+    model (card #408, #409) under the mock SDK with `_PLUGIN.path` at
+    `plugin_dir` and TMPDIR at `tmp_path`: the `--model-status` line it runs
+    at open, the `--download-model` line the Download button runs, stdout
+    redirected to the progress file the poller reads, and the
+    `--remove-model` line the Remove button runs, each as the mock recorded
+    the dialog running it and each carrying the engine; and the mock's temp
+    directory, under tmp_path, where the lines put their files."""
     listing = _plugin_under_the_mock(
         plugin_dir, tmp_path,
         "Analyze.modelStatus(os.getenv('MELAMPUS_ENGINE'))\n"
         "local command, err = Analyze.downloadCommand(os.getenv('MELAMPUS_ENGINE'))\n"
         "assert(command, err)\n"
-        "io.write(mock.state.executed[1] .. '\\n' .. command .. '\\n' .. mock.state.tempDir .. '\\n')\n",
+        "local removed, removeErr = Analyze.removeModel(os.getenv('MELAMPUS_ENGINE'))\n"
+        "assert(removed, removeErr)\n"
+        "io.write(mock.state.executed[1] .. '\\n' .. command .. '\\n' .. mock.state.executed[2]"
+        " .. '\\n' .. mock.state.tempDir .. '\\n')\n",
         MELAMPUS_ENGINE=engine)
-    status, download, temp = listing.splitlines()
-    assert "--model-status" in status and "--download-model" in download
-    assert f"--backend '{engine}'" in status and f"--backend '{engine}'" in download, (status, download)
-    return status, download, Path(temp)
+    status, download, remove, temp = listing.splitlines()
+    assert "--model-status" in status and "--download-model" in download and "--remove-model" in remove
+    for command in (status, download, remove):
+        assert f"--backend '{engine}'" in command, command
+    return status, download, remove, Path(temp)
 
 
 def _status_the_dialog_reads(command: str, env: dict[str, str], temp: Path) -> dict:
@@ -535,7 +541,7 @@ def test_the_download_command_the_dialog_builds_fetches_the_model_and_the_status
     plugin_dir = _plugin_folder_holding(built_executable, tmp_path)
     env = per_user_config(tmp_path, f'[model]\nrepo = "{FAKE_REPO}"\n') | hub_env
     data_dir = per_user_data_dir(Path(env["HOME"]))
-    status_command, download_command, temp = _model_commands_the_dialog_builds(plugin_dir, tmp_path)
+    status_command, download_command, _, temp = _model_commands_the_dialog_builds(plugin_dir, tmp_path)
 
     before = _status_the_dialog_reads(status_command, env, temp)
     assert before["repo"] == FAKE_REPO and before["installed"] is False and before["path"] is None
@@ -574,7 +580,7 @@ def test_the_marker_the_dialog_writes_cancels_the_download_the_dialog_started(
         plugin_dir = _plugin_folder_holding(built_executable, tmp_path)
         env = per_user_config(tmp_path, f'[model]\nrepo = "{FAKE_REPO}"\n') | {
             "HF_ENDPOINT": hub.endpoint, "HF_HOME": str(tmp_path / "hf")}
-        status_command, download_command, temp = _model_commands_the_dialog_builds(plugin_dir, tmp_path)
+        status_command, download_command, _, temp = _model_commands_the_dialog_builds(plugin_dir, tmp_path)
         marker = Path(_status_the_dialog_reads(status_command, env, temp)["cancel_path"])
         assert marker.name == CANCEL_MARKER and not marker.exists()
 
@@ -627,7 +633,7 @@ def test_the_download_command_the_dialog_builds_for_ollama_pulls_the_model_and_t
         env = per_user_config(
             tmp_path, f'[model]\nollama_url = "{ollama.endpoint}"\nollama_model = "{FAKE_MODEL}"\n')
         data_dir = per_user_data_dir(Path(env["HOME"]))
-        status_command, download_command, temp = _model_commands_the_dialog_builds(
+        status_command, download_command, remove_command, temp = _model_commands_the_dialog_builds(
             plugin_dir, tmp_path, engine="ollama")
 
         before = _status_the_dialog_reads(status_command, env, temp)
@@ -649,10 +655,10 @@ def test_the_download_command_the_dialog_builds_for_ollama_pulls_the_model_and_t
         assert after["installed"] is True and after["path"] == FAKE_MODEL
         assert after["bytes_done"] == after["bytes_total"] == 4000
 
-        remove_command = download_command.split(" --download-model ")[0] + " --remove-model --backend 'ollama'"
         removed = run_as_lightroom_would(remove_command, env=env, cwd=tmp_path,
                                          capture_output=True, text=True, timeout=600)
-        assert removed.returncode == 0, removed.stderr[-3000:]
-        assert removed.stdout.strip() == f"removed {FAKE_MODEL}" and ollama.deletes == [FAKE_MODEL]
+        assert removed.returncode == 0, f"exit {removed.returncode}: {_cli_log_tail(temp)}"
+        removal = (temp / "melampus-removed.txt").read_text(encoding="utf-8")
+        assert removal.strip() == f"removed {FAKE_MODEL}" and ollama.deletes == [FAKE_MODEL]
         assert _status_the_dialog_reads(status_command, env, temp)["installed"] is False
         assert {path for _, path in ollama.requests} == {"/api/tags", "/api/pull", "/api/delete"}
