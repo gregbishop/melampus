@@ -2139,10 +2139,12 @@ def test_command_backend_maps_each_failure_to_a_plain_error(tmp_path, run, expec
          RuntimeError, "fake-vlm printed nothing on stdout: [31musage: [0m fake-vlm ..."),
         (_FakeRun(returncode=1, stderr="x" * 5000),
          CommandFailed, "fake-vlm exited 1: " + "x" * CommandBackend.MAX_ERROR_BYTES),
-        (_FakeRun(returncode=2, stderr="\x07\n\x1b\nnot logged in\n"),
+        (_FakeRun(returncode=2, stderr="\x07\n\x1b\n\x00\nnot logged in\n"),
          CommandFailed, "fake-vlm exited 2: not logged in"),
+        (_FakeRun(returncode=2, stderr="\x1b[?25l\n\x07\n\x00\nnot logged in\nrun `fake-vlm login` first\n"),
+         CommandFailed, "fake-vlm exited 2: [?25l / not logged in / run `fake-vlm login` first"),
     ],
-    ids=["non-zero", "empty-stdout", "bounded", "control-only-lines"],
+    ids=["non-zero", "empty-stdout", "bounded", "control-only-lines", "controls-among-words"],
 )
 def test_command_backend_keeps_only_the_printable_words_of_stderr(tmp_path, run, expected, said):
     """The same, for the program's stderr: what it wrote lands in the frame's
