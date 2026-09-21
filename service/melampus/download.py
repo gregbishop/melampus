@@ -642,7 +642,7 @@ def _bytes_in_cache(storage: Path) -> int:
 
 
 def model_status(repo: str, *, endpoint: str | None = None, cache_dir: Path | None = None) -> Status:
-    """Whether `repo` is in the cache, its size on disk, and its whole size from
+    """Whether `repo` is installed, its size on disk, and its whole size from
     the hub. The cache is read without the network; the hub is asked once
     for the file listing (the repo's info with file metadata, the one listing
     call that takes a timeout: STATUS_TIMEOUT) and, when it cannot answer,
@@ -651,18 +651,42 @@ def model_status(repo: str, *, endpoint: str | None = None, cache_dir: Path | No
     ValueError or TypeError decoding it), `bytes_total` is None: the status
     never fails for the network. It raises DownloadError for a `repo` that is
     not a repo id. The hub is asked through `_hub_client`, as the download
-    asks it: the user's token goes only where that client lets it go."""
+    asks it: the user's token goes only where that client lets it go.
+
+    Installed means whole: the snapshot `main` names in the cache holds
+    every file the hub lists, each at the hub's size. A download stopped
+    while the snapshot was being laid out (this module's, or the hub
+    library's own, which mlx-vlm's load runs) leaves `refs/main` naming a
+    snapshot with some of the files, which mlx-vlm cannot load; the blobs
+    stay counted in `bytes_done`, so the next download lays the rest out
+    without fetching them again. When the hub cannot answer, nothing on the
+    machine names the files the repo should hold, and installed is what the
+    cache lays out: the snapshot `main` names, whole as far as the cache
+    knows (the network being down is no reason to offer Download for a
+    model that is there). `path` is the installed snapshot, else None."""
     endpoint = _hub_at(endpoint)
     cache, storage, _ = _cache_paths(repo, cache_dir)
     cached = _cached(repo, cache)
     main = next((r for r in cached.revisions if "main" in r.refs), None) if cached else None
-    installed, path = main is not None, str(main.snapshot_path) if main else None
     try:
         info = HfApi(endpoint=endpoint).model_info(repo, files_metadata=True, timeout=STATUS_TIMEOUT)
-        total: int | None = sum(f.size or 0 for f in info.siblings or [])
+        listed: dict[str, int | None] | None = {f.rfilename: f.size for f in info.siblings or []}
     except (RepositoryNotFoundError, httpx.HTTPError, OSError, ValueError, TypeError):
-        total = None
+        listed = None
+    installed = main is not None and (listed is None or _holds(main, listed))
+    total = sum(size or 0 for size in listed.values()) if listed is not None else None
+    path = str(main.snapshot_path) if installed else None
     return Status(repo, installed, total, _bytes_in_cache(storage), path, str(cancel_marker_path()))
+
+
+def _holds(revision, listed: dict[str, int | None]) -> bool:
+    """Whether the cached revision's snapshot holds every file `listed` (the
+    hub's file names, at the repo's root as the hub spells them, to their
+    sizes; a size the hub did not give asks the name alone), each at the
+    hub's size. The scan's `size_on_disk` is the blob's size, a pointer's
+    target or a copy's own, so a copy cut short is not the file."""
+    on_disk = {f.file_path.relative_to(revision.snapshot_path).as_posix(): f.size_on_disk for f in revision.files}
+    return all(name in on_disk and (size is None or on_disk[name] == size) for name, size in listed.items())
 
 
 def _download_running(lock_dir: Path) -> bool:

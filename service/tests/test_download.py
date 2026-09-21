@@ -1171,6 +1171,48 @@ def test_status_of_an_installed_model_reports_it_with_its_path(fake_hub: FakeHub
     assert status.bytes_done == status.bytes_total == FAKE_TOTAL
 
 
+@pytest.mark.parametrize("left", [
+    pytest.param(lambda pointer: pointer.unlink(), id="a file never laid out"),
+    pytest.param(lambda pointer: (pointer.unlink(), pointer.write_bytes(FAKE_FILES[pointer.name][:1000])),
+                 id="a short copy in place of a file"),
+])
+def test_status_of_a_snapshot_missing_a_file_the_hub_lists_reports_not_installed(
+    fake_hub: FakeHub, tmp_path: Path, left
+):
+    """Codex review 3, finding 1 (download.py:659). A download stopped while
+    the snapshot was being laid out (this module's, one pointer at a time
+    once every blob is whole; or the hub library's own, which mlx-vlm's load
+    runs, a file at a time as each completes) leaves `refs/main` naming a
+    snapshot that holds some of the model, and the status said Installed of
+    it, so Settings offered Remove where the model could not load. Installed
+    means whole: every file the hub lists for the repo is in the snapshot,
+    at the hub's size. The blobs stay counted, so the next download lays the
+    snapshot out without fetching them again."""
+    path, _ = _fetch(fake_hub, tmp_path / "hub")
+    left(path / "model.safetensors")
+
+    status = _status(fake_hub, tmp_path / "hub")
+
+    assert status.installed is False and status.path is None
+    assert status.bytes_total == FAKE_TOTAL and status.bytes_done == FAKE_TOTAL
+
+
+def test_status_of_a_snapshot_missing_a_file_with_no_host_answering_says_what_the_cache_lays_out(
+    fake_hub: FakeHub, tmp_path: Path
+):
+    """With the hub unreachable nothing on the machine names the files the
+    repo should hold, so the status says what the cache lays out: the
+    snapshot `main` names, whole as far as the cache knows. The network
+    being down is not a reason to offer Download for a model that is there
+    (and Download could fetch nothing then anyway)."""
+    path, _ = _fetch(fake_hub, tmp_path / "hub")
+    (path / "model.safetensors").unlink()
+
+    status = model_status(FAKE_REPO, endpoint=f"http://127.0.0.1:{closed_port()}", cache_dir=tmp_path / "hub")
+
+    assert status.installed is True and status.path == str(path) and status.bytes_total is None
+
+
 def test_status_of_an_installed_model_with_no_host_answering_says_the_size_is_unknown_and_the_rest(
     fake_hub: FakeHub, tmp_path: Path
 ):

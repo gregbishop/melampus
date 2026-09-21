@@ -139,8 +139,17 @@ the hub is asked anything.
 
 - `--model-status` prints one JSON object and exits 0:
   `{"repo", "installed", "bytes_total", "bytes_done", "path", "cancel_path"}`.
-  `installed` and `path` (the snapshot folder, or null) come from the hub
-  library's scan of the local cache, without the network; `bytes_done` is
+  `installed` means whole: the snapshot the cache's `refs/main` names (from
+  the hub library's scan of the local cache) holds every file the hub's
+  listing names, each at the hub's size. A download stopped while the
+  snapshot was being laid out, this command's or the hub library's own, which
+  mlx-vlm's load runs, leaves a snapshot with some of the files, which reads
+  as not installed (its blobs still count in `bytes_done`, so the next
+  download lays out the rest without fetching them again). When the hub
+  cannot be reached nothing on the machine names the files the repo should
+  hold, and `installed` is what the cache lays out: the snapshot `refs/main`
+  names, whole as far as the cache knows. `path` is the installed snapshot
+  folder, or null; `bytes_done` is
   every byte the cache holds for the repo, complete files and the partial one
   alike, which is what the next download starts from; `bytes_total` is the
   whole model from the hub's file listing, **null when the hub cannot be
