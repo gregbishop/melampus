@@ -58,6 +58,7 @@ import pytest
 from huggingface_hub.constants import DOWNLOAD_CHUNK_SIZE
 from huggingface_hub.file_download import REGEX_COMMIT_HASH, repo_folder_name
 
+from melampus import providers
 from melampus.download import Update
 
 # pytester runs a pytest inside pytest: how test_binary.py proves what this
@@ -141,8 +142,6 @@ def package_script() -> ModuleType:
     release zip's layout."""
     return _load_tool(PACKAGE_SCRIPT)
 
-
-from melampus import providers
 
 #: The real Claude Code detection, kept for the tests that run it against a
 #: fake `claude` on PATH (test_providers._fake_claude); every other test
