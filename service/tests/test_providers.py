@@ -4473,6 +4473,12 @@ _CODEX_UNAUTHORIZED = (
     "request id: req_8d75516fb1544d9e8b56bb59d3f4fa67"
 )
 
+#: What `codex login status` prints after "Logged in using an API key - "
+#: (measured on 0.155.1 with a synthetic key in a throwaway CODEX_HOME):
+#: the key's first eight characters, `***`, its last five. Key material,
+#: masked by Codex; none of it may reach a verdict.
+_CODEX_API_KEY_FRAGMENT = "syntheti***a-key"
+
 
 def _codex_events(*events: dict) -> str:
     """A `--json` stdout: one event per line, as the docs' sample stream."""
@@ -4513,7 +4519,10 @@ carries a failure's message; without `--json` only the final message is
 on stdout; a run that cannot proceed exits 1 with the failure in the
 stream and progress on stderr; `codex login status` exits 0 when signed
 in ("Logged in using ChatGPT" on stderr) and 1 when not ("Not logged in").
-MODE: "signed-in" answers; "not-signed-in" fails the status check and
+MODE: "signed-in" answers; "api-key" answers too, but the status check
+says "Logged in using an API key - " and a masked fragment of the key,
+first eight characters, `***`, last five (measured on 0.155.1 after
+`codex login --with-api-key`); "not-signed-in" fails the status check and
 every run the measured way (401); "usage-limit" passes the status check
 and fails every run with the measured usage-limit reply; "hung" never
 answers the status check."""
@@ -4527,6 +4536,7 @@ IDENTIFICATION = {identification!r}
 LOG = {log!r}
 USAGE_LIMIT = {usage_limit!r}
 UNAUTHORIZED = {unauthorized!r}
+API_KEY_FRAGMENT = {api_key_fragment!r}
 
 argv = sys.argv[1:]
 with open(LOG, "a", encoding="utf-8") as log:
@@ -4539,6 +4549,9 @@ if argv[:2] == ["login", "status"]:
     if MODE == "not-signed-in":
         print("Not logged in", file=sys.stderr)
         sys.exit(1)
+    if MODE == "api-key":
+        print("Logged in using an API key - " + API_KEY_FRAGMENT, file=sys.stderr)
+        sys.exit(0)
     print("Logged in using ChatGPT", file=sys.stderr)
     sys.exit(0)
 
@@ -4615,6 +4628,7 @@ def _fake_codex(monkeypatch, tmp_path, *, mode: str = "signed-in") -> Path:
     script.write_text(_FAKE_CODEX_SCRIPT.format(
         python=sys.executable, mode=mode, routing=ROUTING_OK, identification=ID_OK, log=str(log),
         usage_limit=_CODEX_USAGE_LIMIT, unauthorized=_CODEX_UNAUTHORIZED,
+        api_key_fragment=_CODEX_API_KEY_FRAGMENT,
     ), encoding="utf-8")
     script.chmod(0o755)
     monkeypatch.setenv("PATH", f"{folder}{os.pathsep}{os.environ.get('PATH', '')}")
@@ -4864,6 +4878,24 @@ def test_detection_codex_at_its_usage_limit_is_still_signed_in(monkeypatch, tmp_
     assert verdict.available, verdict.reason
     calls = [json.loads(line)["argv"] for line in log.read_text(encoding="utf-8").splitlines()]
     assert calls == [["login", "status"]], "detection spent a run to learn the limit"
+
+
+@posix_only
+def test_detection_codex_signed_in_with_an_api_key_names_the_kind_and_never_the_key(
+    monkeypatch, tmp_path
+):
+    """Measured on 0.155.1: after `codex login --with-api-key`, `codex login
+    status` exits 0 with "Logged in using an API key - " and a masked
+    fragment of the key (first eight characters, `***`, last five). The
+    verdict names the account kind, as it does the ChatGPT plan, and never
+    any part of the key: the reason goes to --detect-engines' stdout, to the
+    plugin's melampus-engines.json on disk, and to the settings dialog."""
+    _fake_codex(monkeypatch, tmp_path, mode="api-key")
+    verdict = _verdict("codex")
+    assert verdict.available, verdict.reason
+    assert "API key" in verdict.reason
+    for key_material in (_CODEX_API_KEY_FRAGMENT, "syntheti", "a-key", "***"):
+        assert key_material not in verdict.reason, f"key material in a verdict: {verdict.reason}"
 
 
 @posix_only

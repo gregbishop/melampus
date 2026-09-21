@@ -480,12 +480,13 @@ class CliEngine:
     #: The subscription this engine runs on, for the refusal's sentence.
     subscription: str
     #: The account kinds that bill to that subscription, as `account` names
-    #: them. The guard fails closed: a passed check naming any other kind,
-    #: or one `account` reads nothing from, is refused, and the words it
-    #: could not place are not quoted (a status line is an unversioned
+    #: them. Set, the guard fails closed: a passed check naming any other
+    #: kind, or one `account` reads nothing from, is refused, and the words
+    #: it could not place are not quoted (a status line is an unversioned
     #: CLI's prose; a wording melampus has not measured may carry key
-    #: material, and an account it cannot place may bill per call).
-    subscriptions: tuple[str, ...]
+    #: material, and an account it cannot place may bill per call). Empty,
+    #: any signed-in account is accepted.
+    subscriptions: tuple[str, ...] = ()
     #: The account kinds that bill per call rather than to a subscription,
     #: as `account` names them; signed in with one, the refusal says so.
     bills_per_call: tuple[str, ...] = ()
@@ -594,7 +595,9 @@ def _cli_verdict(cli: CliEngine, command: list[str] | None, probe_seconds: float
             + (f": {said}" if said else " with nothing on stderr"),
         )
     credential = cli.account(status)
-    if credential.kind not in cli.subscriptions:
+    if credential.kind in cli.bills_per_call or (
+        cli.subscriptions and credential.kind not in cli.subscriptions
+    ):
         said = credential.said or (
             f"{credential.kind}, which bills per call" if credential.kind in cli.bills_per_call
             else "nothing about the account this engine can place, and one it cannot place may bill per call"
@@ -648,9 +651,13 @@ def _codex_signed_out(status: subprocess.CompletedProcess) -> bool:
 
 def _codex_account(status: subprocess.CompletedProcess) -> Credential:
     """`codex login status`: "Logged in using ChatGPT" on stderr (measured
-    on 0.154.0); the words after "using" are the account kind."""
+    on 0.154.0); the words after "using" are the account kind. An API-key
+    sign-in (`codex login --with-api-key`) says "Logged in using an API key
+    - " and a masked fragment of the key (measured on 0.155.1): the kind
+    stops at that " - ", so no key material reaches a verdict, which goes
+    to stdout, the plugin's engines file and the settings dialog."""
     _, using, kind = (status.stderr or "").strip().partition("Logged in using ")
-    kind = kind.splitlines()[0].strip() if using else ""
+    kind = kind.splitlines()[0].partition(" - ")[0].strip() if using else ""
     return Credential(kind=kind, signed_in_as=kind)
 
 
@@ -797,7 +804,7 @@ CODEX_CLI = CliEngine(
     CODEX, "Codex CLI", CODEX_PROGRAM, CODEX_INSTALL, CODEX_SIGN_IN,
     CODEX_STATUS, CODEX_COMMAND, codex_reply,
     status_check=lambda command: list(CODEX_STATUS), signed_out=_codex_signed_out,
-    account=_codex_account, subscription="the ChatGPT plan", subscriptions=("ChatGPT",),
+    account=_codex_account, subscription="the ChatGPT plan",
 )
 
 #: The subscription CLIs, in the owner's order: the verdicts after the
