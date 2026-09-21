@@ -55,7 +55,7 @@ class VLMBackend(ABC):
     #: The most of what the model's side wrote that an error message carries:
     #: it lands in the frame's error record (identify.py), so in the cache
     #: and --json-out. Ollama's own errors are one line; a proxy's error
-    #: page is cut here.
+    #: page, or a line of a CLI's usage text, is cut here.
     MAX_ERROR_BYTES = 1 << 10
 
     @abstractmethod
@@ -75,8 +75,8 @@ class VLMBackend(ABC):
         controls, line and paragraph breaks, the unassigned) becomes a
         space, and runs of whitespace collapse to one, so what is left is
         words. The one rule for every message that carries those words:
-        Ollama's error body, and a status line http.client could not
-        parse."""
+        Ollama's error body, a status line http.client could not parse,
+        and a command's stderr."""
         words = " ".join("".join(c if c.isprintable() else " " for c in text).split())
         return words[: cls.MAX_ERROR_BYTES]
 
@@ -952,8 +952,13 @@ class CommandBackend(VLMBackend):
         return [self.executable, *expanded[1:]]
 
     def _stderr_lines(self, stderr: str) -> str:
+        """The first STDERR_LINES lines the program wrote, joined with
+        " / ", each read through `plain`: they land in the frame's error
+        record, the log and the terminal, so an escape sequence in them
+        would clear the screen or recolour it, and a control would fake a
+        line of the log."""
         lines = [line for line in stderr.splitlines() if line.strip()]
-        return " / ".join(lines[: self.STDERR_LINES])
+        return " / ".join(self.plain(line) for line in lines[: self.STDERR_LINES])
 
     def _stop_tree(self, pid: int) -> None:
         """Stop the process tree the command with `pid` heads (OWN_GROUP):

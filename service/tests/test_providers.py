@@ -2130,6 +2130,38 @@ def test_command_backend_maps_each_failure_to_a_plain_error(tmp_path, run, expec
     assert not isinstance(err.value, subprocess.SubprocessError)
 
 
+@pytest.mark.parametrize(
+    ("run", "expected", "said"),
+    [
+        (_FakeRun(returncode=2, stderr="\x1b[2J\rnot logged in\x07\n\x9brun `fake-vlm login`\tfirst\x85"),
+         CommandFailed, "fake-vlm exited 2: [2J / not logged in / run `fake-vlm login` first"),
+        (_FakeRun(stdout="  \n", stderr="\x1b[31musage:\x1b[0m fake-vlm\x07 ...\x9b"),
+         RuntimeError, "fake-vlm printed nothing on stdout: [31musage: [0m fake-vlm ..."),
+        (_FakeRun(returncode=1, stderr="x" * 5000),
+         CommandFailed, "fake-vlm exited 1: " + "x" * CommandBackend.MAX_ERROR_BYTES),
+    ],
+    ids=["non-zero", "empty-stdout", "bounded"],
+)
+def test_command_backend_keeps_only_the_printable_words_of_stderr(tmp_path, run, expected, said):
+    """The same, for the program's stderr: what it wrote lands in the frame's
+    error record, the log and the terminal, so an escape sequence in it
+    would clear the screen or recolour the terminal, a BEL would ring it,
+    and a C1 control or a disguised line break would fake a line of the
+    log. Only its printable characters reach the message, by the one rule
+    the Ollama backend's messages read through (`plain`): each kept line
+    is words, at most MAX_ERROR_BYTES of them, and the three-line cap and
+    the " / " joining stay as they are."""
+    image = tmp_path / "image.jpg"
+    image.write_bytes(b"jpeg")
+    backend = _command_backend(run)
+    with pytest.raises(expected) as err:
+        backend.complete(image, "prompt", 10)
+    message = str(err.value)
+    assert message == said, message
+    assert message.isprintable(), message
+    assert not any(control in message for control in "\x1b\x07\x9b\x85"), message
+
+
 def test_command_templates_that_differ_only_in_argument_boundaries_cannot_share_cached_answers():
     """`["--label", "bird --mode precise"]` (one argument) and `["--label",
     "bird", "--mode", "precise"]` (three) run the program differently, so
