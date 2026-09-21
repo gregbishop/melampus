@@ -8,12 +8,18 @@ retuned for a cloud primary without ever overriding an explicit setting.
 
 from __future__ import annotations
 
+import contextlib
+import http.client
 import json
+import socket
 import sys
+import threading
+import time
 import types
+import urllib.request
 
 import pytest
-from conftest import PHOTO
+from conftest import PHOTO, QuietHandler, fake_platform, loopback_server, recording_handler
 
 from melampus import providers
 from melampus.backend import AnthropicBackend, MLXBackend, OpenAIBackend, ScriptedBackend
@@ -55,20 +61,19 @@ def test_default_backend_is_local_mlx():
     assert backend.repo == config.model.repo
 
 
-def test_mlx_is_refused_on_windows_with_directions(monkeypatch):
-    monkeypatch.setattr(providers.sys, "platform", "win32")
+def test_mlx_is_refused_on_windows_with_directions(monkeypatch, no_ambient_ollama):
+    fake_platform(monkeypatch, "win32", "AMD64")
     with pytest.raises(providers.BackendUnavailable) as err:
         providers.build_primary_backend(_cfg())
     message = str(err.value)
     assert "claude" in message and "openai" in message and "--backend" in message
 
 
-def test_mlx_is_refused_on_intel_mac(monkeypatch):
+def test_mlx_is_refused_on_intel_mac(monkeypatch, no_ambient_ollama):
     """darwin alone is not enough — the pyproject marker also requires arm64,
     so an Intel Mac must get the helpful refusal, not a ModuleNotFoundError
     at warmup."""
-    monkeypatch.setattr(providers.sys, "platform", "darwin")
-    monkeypatch.setattr(providers.platform, "machine", lambda: "x86_64")
+    fake_platform(monkeypatch, "darwin", "x86_64")
     with pytest.raises(providers.BackendUnavailable):
         providers.build_primary_backend(_cfg())
 
@@ -164,7 +169,7 @@ def test_cli_rejects_an_escalation_provider_that_is_not_in_the_registry(photos, 
         assert provider in err, f"the usage error does not name {provider!r}:\n{err}"
 
 
-def test_ollama_is_refused_as_not_built_yet_and_names_what_works(no_ambient_keys):
+def test_ollama_is_refused_as_not_built_yet_and_names_what_works(no_ambient_keys, no_ambient_ollama):
     """Card #403: `ollama` is one of the four names and the CLI must accept it,
     but its backend is card #406's. Until then it is refused the way mlx is
     refused off Apple Silicon: what is wrong, in plain words, and the backends
@@ -182,7 +187,7 @@ def test_ollama_is_refused_as_not_built_yet_and_names_what_works(no_ambient_keys
     assert "--backend" in message
 
 
-def test_cli_backend_ollama_exits_3_with_the_refusal(photos, tmp_path, capsys, no_ambient_keys):
+def test_cli_backend_ollama_exits_3_with_the_refusal(photos, tmp_path, capsys, no_ambient_keys, no_ambient_ollama):
     from melampus.cli import main
 
     code = main([str(photos), "--backend", "ollama", "--cache", str(tmp_path / "cache.jsonl")])
@@ -221,10 +226,11 @@ def test_cli_names_the_backend_whose_sdk_is_missing_and_the_extra_that_ships_it(
     assert f"The {backend} SDK" not in err, f"names an SDK that does not exist:\n{err}"
 
 
-def test_mlx_refusal_does_not_name_ollama_as_working(monkeypatch):
-    """Off Apple Silicon the mlx refusal lists what works here; an engine that
-    is not built yet does not work anywhere, so it stays off that list."""
-    monkeypatch.setattr(providers.sys, "platform", "win32")
+def test_mlx_refusal_does_not_name_ollama_as_working(monkeypatch, no_ambient_ollama):
+    """Off Apple Silicon the mlx refusal lists what works here; with no Ollama
+    server answering (card #404's detection decides), ollama stays off that
+    list."""
+    fake_platform(monkeypatch, "win32", "AMD64")
     with pytest.raises(providers.BackendUnavailable) as err:
         providers.build_primary_backend(_cfg())
     assert "ollama" not in str(err.value)
@@ -338,7 +344,7 @@ def test_cli_backend_scripted_writes_a_result_without_weights(photos, tmp_path, 
 
 
 def test_cli_backend_mlx_on_windows_names_apple_silicon_and_the_backends_that_work(
-    photos, tmp_path, capsys, monkeypatch
+    photos, tmp_path, capsys, monkeypatch, no_ambient_ollama
 ):
     """Card #400, Done-when 2: given the Windows executable, when the local MLX
     engine is requested, then it says clearly that MLX needs Apple Silicon and
@@ -346,8 +352,7 @@ def test_cli_backend_mlx_on_windows_names_apple_silicon_and_the_backends_that_wo
     is not built yet (card #403)."""
     from melampus.cli import main
 
-    monkeypatch.setattr(providers.sys, "platform", "win32")
-    monkeypatch.setattr(providers.platform, "machine", lambda: "AMD64")
+    fake_platform(monkeypatch, "win32", "AMD64")
 
     code = main([str(photos), "--backend", "mlx", "--cache", str(tmp_path / "cache.jsonl")])
 
@@ -357,3 +362,438 @@ def test_cli_backend_mlx_on_windows_names_apple_silicon_and_the_backends_that_wo
     for works_here in ("claude", "openai", "scripted"):
         assert works_here in err, f"{works_here!r} is not named as working here:\n{err}"
     assert "ollama" not in err, f"an engine that is not built yet is named as working:\n{err}"
+
+
+# ---------------------------------------------------------------------------
+# Card #404: which engines can run on this machine.
+
+
+@pytest.fixture()
+def no_ambient_ollama(monkeypatch):
+    """A developer's running Ollama must not decide what these tests assert."""
+    monkeypatch.setattr(providers, "ollama_answers", lambda: False)
+
+
+def _verdict(engine: str) -> providers.EngineVerdict:
+    (verdict,) = [v for v in providers.detect_engines() if v.engine == engine]
+    return verdict
+
+
+def test_detection_lists_the_four_engines_in_the_owners_order(no_ambient_keys, no_ambient_ollama):
+    """The list the dialog (card #405) will show: one verdict per engine, in
+    the order BACKEND_CHOICES names them, never the test fake."""
+    verdicts = providers.detect_engines()
+    assert [v.engine for v in verdicts] == list(ENGINES)
+    for verdict in verdicts:
+        assert isinstance(verdict.available, bool)
+        assert verdict.reason, f"{verdict.engine} has no reason"
+
+
+def test_detection_mlx_is_available_on_apple_silicon(monkeypatch, no_ambient_ollama):
+    """Done-when 1: given Apple Silicon, when detection runs, then mlx is available."""
+    fake_platform(monkeypatch, "darwin", "arm64")
+    assert _verdict("mlx").available
+
+
+@pytest.mark.parametrize(("platform_name", "machine"), [("win32", "AMD64"), ("darwin", "x86_64"), ("linux", "x86_64")])
+def test_detection_mlx_needs_apple_silicon_anywhere_else(monkeypatch, no_ambient_ollama, platform_name, machine):
+    """Done-when 1: given anything else, then mlx is unavailable with the
+    reason "needs Apple Silicon"."""
+    fake_platform(monkeypatch, platform_name, machine)
+    verdict = _verdict("mlx")
+    assert not verdict.available
+    assert verdict.reason == "needs Apple Silicon"
+
+
+def test_detection_ollama_is_available_when_the_server_answers(monkeypatch):
+    """Done-when 2: given Ollama answering on localhost, then ollama is available."""
+    monkeypatch.setattr(providers, "ollama_answers", lambda: True)
+    assert _verdict("ollama").available
+
+
+def test_detection_ollama_points_to_the_install_when_nothing_answers(no_ambient_ollama):
+    """Done-when 2: given no answer, then ollama is unavailable with a pointer
+    to install it, and the address that was tried."""
+    verdict = _verdict("ollama")
+    assert not verdict.available
+    assert providers.OLLAMA_INSTALL in verdict.reason
+    assert providers.OLLAMA_URL in verdict.reason
+
+
+def test_ollama_address_is_one_constant_on_the_documented_default():
+    """docs/faq.mdx in Ollama's repo: "Ollama binds 127.0.0.1 port 11434 by
+    default." One constant, so card #406 can turn it into a config value."""
+    assert providers.OLLAMA_URL == "http://127.0.0.1:11434"
+
+
+@pytest.mark.parametrize("engine", ["openai", "claude"])
+def test_detection_cloud_engines_are_available_and_name_the_key_variable(
+    engine, no_ambient_keys, no_ambient_ollama
+):
+    """Done-when 3: given any machine, then openai and claude are available and
+    each says an API key is required, naming the variable it comes from."""
+    verdict = _verdict(engine)
+    assert verdict.available
+    assert "API key required" in verdict.reason
+    assert providers.KEY_VARIABLES[engine][0] in verdict.reason
+
+
+def test_the_refusal_names_what_detection_says_is_available(monkeypatch):
+    """One truth: the backends the refusal names as working here are the ones
+    detection says are available, plus the test fake. Off Apple Silicon with
+    Ollama answering, that is ollama, openai, claude, scripted, and not mlx."""
+    fake_platform(monkeypatch, "win32", "AMD64")
+    monkeypatch.setattr(providers, "ollama_answers", lambda: True)
+    assert providers._works_here() == ("ollama", "openai", "claude", "scripted")
+    with pytest.raises(providers.BackendUnavailable) as err:
+        providers.build_primary_backend(_cfg())
+    assert "ollama, openai, claude, scripted" in str(err.value)
+
+
+def _closed_port() -> int:
+    """A loopback port nothing listens on."""
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
+def test_default_engine_is_always_one_detection_names_available(
+    monkeypatch, no_ambient_keys, no_ambient_ollama
+):
+    """`default_engine()` is the first verdict that is available, in the
+    owner's order, and nothing else: the cloud engines are available
+    everywhere, so there is always one, and there is no fallback that could
+    quietly name an engine detection did not. Were the list ever to change so
+    that nothing is available, the call raises rather than inventing mlx."""
+    fake_platform(monkeypatch, "linux", "x86_64")
+    verdicts = providers.detect_engines()
+    assert providers.default_engine() == next(v.engine for v in verdicts if v.available) == "openai"
+
+    nothing_available = [providers.EngineVerdict(v.engine, False, v.reason) for v in verdicts]
+    monkeypatch.setattr(providers, "detect_engines", lambda: nothing_available)
+    with pytest.raises(StopIteration):
+        providers.default_engine()
+
+
+@contextlib.contextmanager
+def _ollama_served_by(monkeypatch, handler: type[QuietHandler]):
+    """`handler` on 127.0.0.1 at an ephemeral port, standing in for Ollama:
+    detection is pointed at it for the block."""
+    with loopback_server(handler) as server:
+        monkeypatch.setattr(providers, "OLLAMA_URL", f"http://127.0.0.1:{server.server_port}")
+        yield server
+
+
+# Slack for thread scheduling in the deadline tests: the timer thread fires and
+# the main thread's read returns some tens of milliseconds after the deadline,
+# while waiting out the trickle takes over two seconds.
+SCHEDULING_SLACK = 0.5
+
+
+def _timed_probe(monkeypatch, handler: type[QuietHandler]) -> tuple[bool, float]:
+    """The probe against `handler` standing in for Ollama: what it answered
+    and how many seconds it took."""
+    with _ollama_served_by(monkeypatch, handler):
+        started = time.monotonic()
+        answered = providers.ollama_answers()
+        return answered, time.monotonic() - started
+
+
+@contextlib.contextmanager
+def _fake_ollama(monkeypatch, *, status: int = 200, delay: float = 0.0):
+    """A server speaking Ollama's version endpoint, standing in for Ollama.
+    `status` is what GET /api/version answers; `delay` holds the answer that
+    long."""
+    release = threading.Event()
+
+    class Version(QuietHandler):
+        def do_GET(self):  # noqa: N802 - http.server's name
+            assert self.path == "/api/version", self.path
+            if delay:
+                release.wait(delay)
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"version": "0.0.0-fake"}')
+
+    with _ollama_served_by(monkeypatch, Version) as server:
+        try:
+            yield server
+        finally:
+            release.set()
+
+
+def test_ollama_probe_finds_a_server_answering_on_localhost(monkeypatch):
+    """Done-when 2 and 4, at the real boundary: an HTTP server on loopback
+    standing in for Ollama, GET /api/version (Ollama's docs/api.md § Version)
+    answering 200, and the probe says it is there. No network beyond 127.0.0.1."""
+    with _fake_ollama(monkeypatch):
+        assert providers.ollama_answers()
+        assert _verdict("ollama").available
+
+
+def test_ollama_probe_reports_a_closed_port_without_raising(monkeypatch):
+    """Nothing listening: connection refused is "not installed or not
+    running", never a traceback."""
+    closed_port = _closed_port()
+    monkeypatch.setattr(providers, "OLLAMA_URL", f"http://127.0.0.1:{closed_port}")
+    assert providers.ollama_answers() is False
+    verdict = _verdict("ollama")
+    assert not verdict.available
+    assert f"127.0.0.1:{closed_port}" in verdict.reason
+
+
+def test_ollama_probe_treats_a_non_200_as_unavailable(monkeypatch):
+    with _fake_ollama(monkeypatch, status=503):
+        assert providers.ollama_answers() is False
+
+
+def test_ollama_probe_gives_up_after_its_timeout(monkeypatch):
+    """A server that accepts and never answers must not stall detection: the
+    probe waits OLLAMA_PROBE_SECONDS (one second in production) and reports
+    unavailable."""
+    monkeypatch.setattr(providers, "OLLAMA_PROBE_SECONDS", 0.2)
+    with _fake_ollama(monkeypatch, delay=5.0):
+        assert providers.ollama_answers() is False
+
+
+class Trickling(QuietHandler):
+    """A listener that sends a valid 200 one header byte every hundred
+    milliseconds, over two seconds: each byte within the socket timeout, the
+    whole well past the probe's deadline."""
+
+    def do_GET(self):  # noqa: N802 - http.server's name
+        # Once the probe hangs up, the next write raises; that ends the trickle.
+        with contextlib.suppress(OSError):
+            self.wfile.write(b"HTTP/1.1 200 OK\r\n")
+            for byte in b"Content-Length: 2\r\n\r\n":
+                time.sleep(0.1)
+                self.wfile.write(bytes([byte]))
+            self.wfile.write(b"{}")
+
+
+def test_ollama_probe_gives_up_at_its_deadline_when_the_headers_trickle(monkeypatch):
+    """Security: OLLAMA_PROBE_SECONDS is a deadline on the whole probe, not on
+    each read. A socket timeout is per operation, so whatever listens on the
+    port when Ollama does not could send the status line and then one header
+    byte every hundred milliseconds, each within the timeout, and hold
+    detection, and the CLI's startup behind it, for as long as it liked. Given
+    a server that trickles a valid 200 over two seconds, the probe reports
+    unavailable and returns within its deadline, not after the trickle."""
+    deadline = 0.3
+    monkeypatch.setattr(providers, "OLLAMA_PROBE_SECONDS", deadline)
+    answered, elapsed = _timed_probe(monkeypatch, Trickling)
+    assert elapsed < deadline + SCHEDULING_SLACK, f"the probe read past its deadline: {elapsed:.2f}s"
+    assert answered is False
+
+
+def test_ollama_probe_gives_up_at_its_deadline_when_it_fires_during_connect(monkeypatch):
+    """Security: the deadline must bound the probe whichever side of the
+    handshake it lands on. The timer hangs up the connection's socket, and
+    there is none until connect() returns; a deadline that fires while the
+    probe is still connecting hangs up nothing, and if the handshake then
+    completes, the reads that follow are bounded per byte only, and a
+    trickling listener holds detection for as long as it likes again. The
+    kernel's handshake timing is not reproducible, so connect() is held past
+    the deadline here. Given a connect that completes just after the deadline
+    against a trickling server, the probe reports unavailable and returns
+    within the deadline plus the hold, not after the trickle."""
+    deadline = 0.3
+    hold = 0.05  # how long past the deadline connect() is held
+    monkeypatch.setattr(providers, "OLLAMA_PROBE_SECONDS", deadline)
+    connect = http.client.HTTPConnection.connect
+
+    def held(connection):
+        time.sleep(deadline + hold)
+        connect(connection)
+
+    monkeypatch.setattr(http.client.HTTPConnection, "connect", held)
+    answered, elapsed = _timed_probe(monkeypatch, Trickling)
+    assert elapsed < deadline + hold + SCHEDULING_SLACK, f"the probe read past its deadline: {elapsed:.2f}s"
+    assert answered is False
+
+
+def test_ollama_probe_timeout_is_one_second():
+    assert providers.OLLAMA_PROBE_SECONDS == 1.0
+
+
+def test_hang_up_survives_the_connection_closing_between_its_reads():
+    """Security: `_hang_up` runs on the timer thread while the main thread may
+    be closing the connection (`ollama_answers`'s `finally`, or `getresponse`
+    itself when the response says close), and `HTTPConnection.close()` sets
+    `sock` to None. Given a connection whose socket is there on the first
+    read and gone on the second, `_hang_up` returns without raising, as its
+    docstring says, and the deadline is still recorded."""
+    reads = 0
+
+    class Closing:
+        def __init__(self, sock):
+            self._sock = sock
+
+        @property
+        def sock(self):
+            nonlocal reads
+            reads += 1
+            return self._sock if reads == 1 else None
+
+    expired = threading.Event()
+    with socket.socket() as sock:
+        providers._hang_up(Closing(sock), expired)
+    assert expired.is_set()
+
+
+def test_ollama_probe_stays_on_loopback_whatever_proxy_the_environment_names(monkeypatch):
+    """Security: the probe is a loopback call and must stay one. urlopen's
+    default opener honours `http_proxy` (and, on a Mac, the system proxy
+    settings, whose default bypass list does not cover 127.0.0.1), which
+    would send the probe off the machine and let the proxy's answer stand in
+    for Ollama's: a captive portal or a corporate proxy that answers 200 to
+    anything would make detection report a server that is not there, and the
+    default engine would follow it. Given a proxy in the environment that
+    answers 200 to everything and nothing at OLLAMA_URL, the probe reports
+    unavailable and the proxy never hears from it."""
+    seen: list[str] = []
+    monkeypatch.setattr(providers, "OLLAMA_URL", f"http://127.0.0.1:{_closed_port()}")
+    for name in ("no_proxy", "NO_PROXY"):
+        monkeypatch.delenv(name, raising=False)
+    # urlopen builds its default opener once, reading the proxy variables then;
+    # start it fresh so the environment set here is the one it would see.
+    monkeypatch.setattr(urllib.request, "_opener", None)
+    with loopback_server(recording_handler(seen)) as proxy:
+        monkeypatch.setenv("http_proxy", f"http://127.0.0.1:{proxy.server_port}")
+        assert providers.ollama_answers() is False
+    assert seen == [], f"the probe left the machine through the proxy: {seen}"
+
+
+def test_ollama_probe_refuses_a_redirect_off_loopback(monkeypatch):
+    """Security: the probe asks one address and takes only that address's
+    answer. build_opener installs HTTPRedirectHandler by default, so whatever
+    listens on port 11434 (any local process can bind it when Ollama is not
+    running) could answer 3xx with a Location anywhere, and the probe would
+    make an outbound request there and let that server's 200 stand in for
+    Ollama's. Given a server at OLLAMA_URL answering 302 towards a second
+    server that records every request, the probe reports unavailable and the
+    redirected destination never hears from it."""
+    seen: list[str] = []
+    with loopback_server(recording_handler(seen)) as destination:
+        elsewhere = f"http://127.0.0.1:{destination.server_port}/api/version"
+
+        class Redirecting(QuietHandler):
+            def do_GET(self):  # noqa: N802 - http.server's name
+                self.send_response(302)
+                self.send_header("Location", elsewhere)
+                self.end_headers()
+
+        with _ollama_served_by(monkeypatch, Redirecting):
+            answered = providers.ollama_answers()
+    assert seen == [], f"the probe followed the redirect off loopback: {seen}"
+    assert answered is False
+
+
+# ---------------------------------------------------------------------------
+# Card #404 through the CLI: `--detect-engines`, and the default engine.
+
+
+def test_cli_detect_engines_prints_the_verdicts_as_json_in_order(
+    monkeypatch, capsys, no_ambient_keys, no_ambient_ollama
+):
+    """Acceptance for Done-when 1 to 3: `melampus-id --detect-engines` needs no
+    folder, prints one JSON list to stdout, in the owner's order, each item
+    {engine, available, reason}, and exits 0. Faked off Apple Silicon with no
+    Ollama: mlx and ollama say why not, the cloud engines say which key."""
+    from melampus.cli import main
+
+    fake_platform(monkeypatch, "win32", "AMD64")
+
+    code = main(["--detect-engines"])
+
+    out, err = capsys.readouterr()
+    assert code == 0, err
+    verdicts = json.loads(out)
+    assert [v["engine"] for v in verdicts] == list(ENGINES)
+    assert all(set(v) == {"engine", "available", "reason"} for v in verdicts)
+    by_engine = {v["engine"]: v for v in verdicts}
+    assert by_engine["mlx"] == {"engine": "mlx", "available": False, "reason": "needs Apple Silicon"}
+    assert by_engine["ollama"]["available"] is False
+    assert providers.OLLAMA_INSTALL in by_engine["ollama"]["reason"]
+    for engine in ("openai", "claude"):
+        assert by_engine[engine]["available"] is True
+        assert "API key required" in by_engine[engine]["reason"]
+        assert providers.KEY_VARIABLES[engine][0] in by_engine[engine]["reason"]
+
+
+def test_cli_detect_engines_reports_ollama_when_it_answers(monkeypatch, capsys):
+    from melampus.cli import main
+
+    with _fake_ollama(monkeypatch):
+        assert main(["--detect-engines"]) == 0
+    verdicts = {v["engine"]: v for v in json.loads(capsys.readouterr().out)}
+    assert verdicts["ollama"]["available"] is True
+
+
+def test_cli_still_requires_a_folder_without_detect_engines(capsys):
+    from melampus.cli import main
+
+    with pytest.raises(SystemExit) as exit_:
+        main(["--backend", "scripted"])
+    assert exit_.value.code == 2
+    assert "folder" in capsys.readouterr().err
+
+
+def _chosen_engine(monkeypatch, argv: list[str]) -> str:
+    """Run the CLI to the backend seam and answer which engine it chose there;
+    the seam refuses, so nothing loads or runs. `--no-local-config` keeps the
+    developer's melampus.local.toml from setting the engine under a test about
+    what happens when nothing sets it."""
+    import melampus.cli
+
+    chosen: list[str] = []
+
+    def refuse(config):
+        chosen.append(config.model.backend)
+        raise providers.BackendUnavailable("stopped at the seam")
+
+    monkeypatch.setattr(melampus.cli, "build_primary_backend", refuse)
+    assert melampus.cli.main([*argv, "--no-local-config"]) == 3
+    (engine,) = chosen
+    return engine
+
+
+def test_cli_default_engine_is_the_first_that_can_run_here(
+    monkeypatch, photos, tmp_path, capsys, no_ambient_keys
+):
+    """No `--backend` and no `[model] backend`: the CLI picks the first engine
+    detection says is available, in the owner's order. Off Apple Silicon with
+    Ollama answering, that is ollama; the log line says so and how to choose."""
+    fake_platform(monkeypatch, "win32", "AMD64")
+    monkeypatch.setattr(providers, "ollama_answers", lambda: True)
+
+    engine = _chosen_engine(monkeypatch, [str(photos), "--cache", str(tmp_path / "cache.jsonl")])
+
+    assert engine == "ollama"
+    err = capsys.readouterr().err
+    assert "engine: ollama" in err and "--backend" in err, err
+
+
+def test_cli_default_engine_is_mlx_on_apple_silicon_and_openai_with_nothing_local(
+    monkeypatch, photos, tmp_path, no_ambient_keys, no_ambient_ollama
+):
+    argv = [str(photos), "--cache", str(tmp_path / "cache.jsonl")]
+    fake_platform(monkeypatch, "darwin", "arm64")
+    assert _chosen_engine(monkeypatch, argv) == "mlx"
+    fake_platform(monkeypatch, "linux", "x86_64")
+    assert _chosen_engine(monkeypatch, argv) == "openai"
+
+
+def test_cli_detection_never_overrides_a_chosen_engine(
+    monkeypatch, photos, tmp_path, no_ambient_keys
+):
+    """`--backend` and `[model] backend` are the user's word; detection only
+    fills the blank. Faked so detection would say ollama."""
+    fake_platform(monkeypatch, "win32", "AMD64")
+    monkeypatch.setattr(providers, "ollama_answers", lambda: True)
+    argv = [str(photos), "--cache", str(tmp_path / "cache.jsonl")]
+    assert _chosen_engine(monkeypatch, [*argv, "--backend", "mlx"]) == "mlx"
+    config = tmp_path / "settings.toml"
+    config.write_text('[model]\nbackend = "claude"\n', encoding="utf-8")
+    assert _chosen_engine(monkeypatch, [*argv, "--config", str(config)]) == "claude"

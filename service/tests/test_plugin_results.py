@@ -25,13 +25,11 @@ from __future__ import annotations
 
 import importlib.util
 import json
-import threading
 import urllib.parse
-from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 import pytest
-from conftest import FIXTURE, PHOTO
+from conftest import FIXTURE, PHOTO, QuietHandler, loopback_server
 from PIL import Image
 
 from melampus import cli, occurrence
@@ -253,7 +251,7 @@ def offline_gbif(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, int | None]
     return calls
 
 
-class _GBIFOccurrenceSearch(BaseHTTPRequestHandler):
+class _GBIFOccurrenceSearch(QuietHandler):
     """GBIF's /v1/occurrence/search, as far as the client reads it: the count for
     the species in the query, in the JSON shape the real API answers with."""
 
@@ -271,27 +269,17 @@ class _GBIFOccurrenceSearch(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def log_message(self, *_args) -> None:
-        """Keep the request log out of pytest's output."""
-
 
 @pytest.fixture()
 def gbif_server(monkeypatch: pytest.MonkeyPatch):
     """A fake speaking the real protocol: GBIF's occurrence search on loopback,
     on an ephemeral port, with the unmodified GBIFClient pointed at it. Yields
     the server; `requests` holds every (path, query, user agent) it answered."""
-    server = HTTPServer(("127.0.0.1", 0), _GBIFOccurrenceSearch)
-    server.requests = []
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    monkeypatch.setattr(
-        occurrence, "GBIF_SEARCH", f"http://127.0.0.1:{server.server_port}/v1/occurrence/search")
-    try:
+    with loopback_server(_GBIFOccurrenceSearch) as server:
+        server.requests = []
+        monkeypatch.setattr(
+            occurrence, "GBIF_SEARCH", f"http://127.0.0.1:{server.server_port}/v1/occurrence/search")
         yield server
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=5)
 
 
 def dated_frame(folder: Path, name: str, when: str | None) -> Path:

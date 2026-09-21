@@ -33,6 +33,13 @@ Card #403 names the engines mlx, ollama, openai, claude. The executable must
 accept every one of them; `--backend ollama` is refused as not built yet
 (card #406) with the backends that do work here, exit 3.
 
+Card #404: `--detect-engines` from the executable prints, as JSON, which of
+the four can run on this machine and why or why not. The executable's mlx and
+ollama verdicts are checked against the same two questions asked from the
+test process (is this Apple Silicon; does a server answer at OLLAMA_URL over
+loopback), so a developer's running Ollama decides nothing the test did not
+measure too.
+
 Nothing here downloads a model: the MLX check stops at the point where the
 executable goes looking for weights.
 """
@@ -41,7 +48,6 @@ from __future__ import annotations
 
 import json
 import os
-import platform
 import shutil
 import subprocess
 import sys
@@ -50,7 +56,7 @@ import types
 from pathlib import Path
 
 import pytest
-from conftest import PHOTO
+from conftest import PHOTO, fake_platform
 
 from melampus import config
 from melampus.backend import ScriptedBackend
@@ -131,8 +137,7 @@ def build(build_script: types.ModuleType, monkeypatch: pytest.MonkeyPatch, tmp_p
     Apple Silicon."""
     monkeypatch.setattr(build_script, "DIST", tmp_path / "dist")
     monkeypatch.setattr(build_script, "WORK", tmp_path / "build" / "pyinstaller")
-    monkeypatch.setattr(sys, "platform", "darwin")
-    monkeypatch.setattr(platform, "machine", lambda: "arm64")
+    fake_platform(monkeypatch, "darwin", "arm64")
     return build_script
 
 
@@ -352,8 +357,7 @@ def test_build_plan_on_windows_names_the_exe_and_leaves_mlx_out(
     dist/melampus.exe and not ask PyInstaller to collect mlx (there is no such
     package there, and PyInstaller refuses to collect a package it cannot
     find)."""
-    monkeypatch.setattr(sys, "platform", "win32")
-    monkeypatch.setattr(platform, "machine", lambda: "AMD64")
+    fake_platform(monkeypatch, "win32", "AMD64")
     assert build_script.executable_path() == repo / "dist" / "melampus.exe"
     arguments = build_script.pyinstaller_arguments(Path("entry.py"))
     assert "--collect-all" not in arguments
@@ -624,3 +628,37 @@ def test_executable_writes_the_enriched_results_and_reads_config_from_the_per_us
     assert row["burst_agreement"] == 1.0 and row["range_flag"] is False
     assert row["encounter"] == 0 and row["encounter_frames"] == 1 and row["quality_rank"] == 0.0
     assert 0 < row["quality"] <= 100, "quality was not scored on the pixels"
+
+
+def test_executable_detects_engines_as_json_with_no_python_on_the_path(
+    built_executable: Path, tmp_path: Path
+):
+    """Card #404, from the executable alone: valid JSON on stdout, the four
+    engines in the owner's order, exit 0, no folder needed. Each local verdict
+    mirrors the machine running the suite, never a guess about it: mlx's is
+    whether this is Apple Silicon, ollama's is whether a server answers at
+    OLLAMA_URL, asked from this process over loopback (Done-when 4: a
+    developer's running Ollama decides nothing the test did not measure too),
+    with the install pointer when none does; the cloud engines are available
+    and name their key variable."""
+    from melampus import providers
+
+    proc = subprocess.run(
+        [str(built_executable), "--detect-engines"],
+        env=no_python_environment(tmp_path), capture_output=True, text=True, timeout=600,
+    )
+    assert proc.returncode == 0, proc.stderr[-3000:]
+    verdicts = json.loads(proc.stdout)
+    assert [v["engine"] for v in verdicts] == ["mlx", "ollama", "openai", "claude"]
+    by_engine = {v["engine"]: v for v in verdicts}
+    assert by_engine["mlx"]["available"] is on_apple_silicon()
+    if not on_apple_silicon():
+        assert by_engine["mlx"]["reason"] == "needs Apple Silicon"
+    ollama_here = providers.ollama_answers()
+    assert by_engine["ollama"]["available"] is ollama_here
+    if not ollama_here:
+        assert providers.OLLAMA_INSTALL in by_engine["ollama"]["reason"]
+    for engine in ("openai", "claude"):
+        assert by_engine[engine]["available"] is True
+        assert "API key required" in by_engine[engine]["reason"]
+        assert providers.KEY_VARIABLES[engine][0] in by_engine[engine]["reason"]

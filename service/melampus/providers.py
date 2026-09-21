@@ -9,8 +9,14 @@ live here and both callers import them.
 
 from __future__ import annotations
 
+import contextlib
+import http.client
 import platform
+import socket
 import sys
+import threading
+from dataclasses import dataclass
+from urllib.parse import urlsplit
 
 from pydantic import SecretStr
 
@@ -47,9 +53,21 @@ SCRIPTED = "scripted"
 OLLAMA = "ollama"
 
 #: The engines the user chooses between, in the owner's order, then the fake.
-#: Card #404's detection will try them in this order for a default: the first
-#: that can run on this machine. Until it lands, no `--backend` means mlx.
+#: `detect_engines` tries them in this order for a default (card #404): the
+#: first that can run on this machine.
 BACKEND_CHOICES = ("mlx", OLLAMA, "openai", "claude", SCRIPTED)
+
+#: Where the local Ollama server listens. Ollama's docs/faq.mdx: "Ollama binds
+#: 127.0.0.1 port 11434 by default." One constant, so card #406 can make it a
+#: config value.
+OLLAMA_URL = "http://127.0.0.1:11434"
+
+#: How long the probe waits for the local server. Loopback answers in
+#: milliseconds or not at all; a second is a firewall's silence, not Ollama's.
+OLLAMA_PROBE_SECONDS = 1.0
+
+#: Where to get Ollama when nothing answers at OLLAMA_URL.
+OLLAMA_INSTALL = "https://ollama.com/download"
 
 #: The backends that run on this machine and bill nobody.
 LOCAL_BACKENDS = ("mlx", OLLAMA, SCRIPTED)
@@ -77,13 +95,114 @@ def _refusal(reason: str, *, works_here: tuple[str, ...]) -> BackendUnavailable:
     )
 
 
-def _works_here() -> tuple[str, ...]:
-    """The backends this machine can run: mlx only on Apple Silicon, and never
-    an engine that is not built yet."""
-    return tuple(
-        b for b in BACKEND_CHOICES
-        if b != OLLAMA and (b != "mlx" or on_apple_silicon())
+def _hang_up(connection: http.client.HTTPConnection, expired: threading.Event) -> None:
+    """The deadline, from its timer. Not connection.close(): the response
+    being read holds the socket's file object, and socket.close() waits for
+    that to go before it really closes, so the blocked read would read on.
+    shutdown(SHUT_RDWR) ends the stream now. And `expired`, because
+    http.client takes end-of-stream as the end of the headers: a status line
+    that arrived before the trickle would still parse as a 200, and the
+    probe must know the deadline finished the response, not the server. No
+    socket yet means the probe is still connecting: the socket timeout bounds
+    that, and the probe checks `expired` once connected, since a timer that
+    fired before the socket existed had nothing to hang up and the reads
+    after a late handshake would otherwise be bounded per byte only. The
+    socket is read once: the main thread's close() sets it to None at any
+    moment, and a socket it already closed raises OSError, which is
+    suppressed; None between two reads would not be."""
+    expired.set()
+    sock = connection.sock
+    if sock is not None:
+        with contextlib.suppress(OSError):
+            sock.shutdown(socket.SHUT_RDWR)
+
+
+def ollama_answers() -> bool:
+    """Whether an Ollama server answers at OLLAMA_URL: GET /api/version
+    (Ollama's docs/api.md § Version) within OLLAMA_PROBE_SECONDS, status 200.
+    Connection refused, a timeout, a non-200: unavailable. Never raises; a
+    probe reports. Straight to the address, never through a proxy: urlopen
+    honours http_proxy and the system proxy settings, which would send a
+    loopback probe off the machine and let the proxy's answer stand in for
+    Ollama's; http.client consults neither. And never past the address:
+    http.client follows no redirect, and a 3xx is a non-200, so whatever
+    listens on the port when Ollama does not cannot point the probe at another
+    host and have that host's 200 stand in for Ollama's. And never past the
+    deadline: the socket timeout bounds each read, not the probe, so a
+    listener trickling headers a byte at a time could hold detection for as
+    long as it liked; a timer hangs up at OLLAMA_PROBE_SECONDS, and whatever
+    was read by then, the probe reports unavailable."""
+    address = urlsplit(OLLAMA_URL)
+    connection = http.client.HTTPConnection(
+        address.hostname, address.port, timeout=OLLAMA_PROBE_SECONDS
     )
+    expired = threading.Event()
+    deadline = threading.Timer(OLLAMA_PROBE_SECONDS, _hang_up, [connection, expired])
+    deadline.start()
+    try:
+        connection.request("GET", "/api/version")
+        # A timer that fired during connect() found no socket to hang up;
+        # a late handshake must not start a read the deadline cannot end.
+        if expired.is_set():
+            return False
+        answered = connection.getresponse().status == 200
+    except Exception:  # noqa: BLE001 - every failure means the same thing: not here
+        return False
+    finally:
+        deadline.cancel()
+        connection.close()
+    return answered and not expired.is_set()
+
+
+@dataclass(frozen=True, slots=True)
+class EngineVerdict:
+    """Whether one engine can run on this machine, and why or why not, in the
+    words a user sees: the reason is what makes an unavailable engine a
+    greyed-out choice rather than a mystery (card #404)."""
+
+    engine: str
+    available: bool
+    reason: str
+
+
+def _key_required(engine: str) -> str:
+    specific, generic = KEY_VARIABLES[engine]
+    return f"API key required: set {specific} (or {generic})"
+
+
+def detect_engines() -> list[EngineVerdict]:
+    """One verdict per engine, in the owner's order (BACKEND_CHOICES without the
+    test fake). This is the one place that knows whether an engine can run
+    here: the refusals' "what works" list and the CLI's default both come from
+    it, so they cannot disagree with what the dialog (card #405) shows."""
+    apple_silicon = on_apple_silicon()
+    ollama = ollama_answers()
+    return [
+        EngineVerdict(
+            "mlx", apple_silicon,
+            "runs locally on this Apple Silicon Mac" if apple_silicon else "needs Apple Silicon",
+        ),
+        EngineVerdict(
+            OLLAMA, ollama,
+            f"Ollama is answering at {OLLAMA_URL}" if ollama
+            else f"no Ollama server at {OLLAMA_URL}; install it from {OLLAMA_INSTALL}",
+        ),
+        EngineVerdict("openai", True, _key_required("openai")),
+        EngineVerdict("claude", True, _key_required("claude")),
+    ]
+
+
+def _works_here() -> tuple[str, ...]:
+    """The backends this machine can run, as detection says, plus the fake."""
+    return (*(v.engine for v in detect_engines() if v.available), SCRIPTED)
+
+
+def default_engine() -> str:
+    """What runs when nothing names an engine: the first detection says is
+    available, in the owner's order. There is always one, because the cloud
+    engines are available everywhere; no fallback, so if the list ever
+    changes that invariant breaks loudly here rather than naming mlx."""
+    return next(v.engine for v in detect_engines() if v.available)
 
 
 def normalise_provider(provider: str | None) -> str:
@@ -121,10 +240,12 @@ def is_cloud_primary(config: MelampusConfig) -> bool:
 def build_primary_backend(config: MelampusConfig) -> VLMBackend:
     """The backend the main pipeline talks to, per `[model] backend`.
 
-    `mlx` is the default and the local-first path; it exists only on Apple
-    Silicon. The cloud choices are for machines without a local runtime —
-    they reuse the exact classes escalation uses, so prompts, schema validation
-    and the corrective retry are identical wherever the answer comes from.
+    Nothing set, the CLI has already written `default_engine()` here: the
+    first engine detection says can run on this machine (card #404). `mlx` is
+    the local-first path and exists only on Apple Silicon. The cloud choices
+    are for machines without a local runtime — they reuse the exact classes
+    escalation uses, so prompts, schema validation and the corrective retry
+    are identical wherever the answer comes from.
     """
     kind = (config.model.backend or "mlx").strip().lower()
 

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
+from dataclasses import asdict
 from pathlib import Path
 
 from .cache import ResultCache
@@ -16,6 +18,8 @@ from .providers import (
     BackendUnavailable,
     apply_cloud_primary_defaults,
     build_primary_backend,
+    default_engine,
+    detect_engines,
     is_cloud_primary,
 )
 from .report import name_quality, raw_table, score
@@ -197,17 +201,21 @@ def _write_plugin_results(paths: list[Path], cache: ResultCache, config, destina
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     ap = argparse.ArgumentParser(prog="melampus-id", description=__doc__)
-    ap.add_argument("folder", type=Path, help="folder of JPEGs")
+    ap.add_argument("folder", type=Path, nargs="?", help="folder of JPEGs")
     ap.add_argument("--config", type=Path, default=None)
     ap.add_argument("--no-local-config", action="store_true",
                     help="do not read melampus.local.toml beside the data: --config "
                          "alone, over the defaults, is the whole configuration")
     ap.add_argument("--model", default=None, help="override model repo")
     ap.add_argument("--backend", choices=BACKEND_CHOICES, default=None,
-                    help="which engine answers: mlx locally (default), ollama "
-                         "(not built yet, card #406), openai or claude for machines "
-                         "with no local runtime, or scripted (a fake that answers "
-                         "nothing; for smoke tests without weights)")
+                    help="which engine answers: mlx locally, ollama (not built "
+                         "yet, card #406), openai or claude for machines with no "
+                         "local runtime, or scripted (a fake that answers nothing; "
+                         "for smoke tests without weights). Default: the first "
+                         "that can run here, per --detect-engines")
+    ap.add_argument("--detect-engines", action="store_true",
+                    help="print, as JSON, which engines can run on this machine "
+                         "and why or why not, then exit; needs no folder")
     ap.add_argument("--yes", action="store_true",
                     help="skip the cost confirmation when the primary backend is a "
                          "cloud provider (for non-interactive callers)")
@@ -250,6 +258,12 @@ def main(argv: list[str] | None = None) -> int:
 
     args = ap.parse_args(argv)
 
+    if args.detect_engines:
+        print(json.dumps([asdict(v) for v in detect_engines()], indent=2))
+        return 0
+    if args.folder is None:
+        ap.error("the following arguments are required: folder")
+
     overrides: dict = {}
     if args.model:
         overrides.setdefault("model", {})["repo"] = args.model
@@ -270,6 +284,17 @@ def main(argv: list[str] | None = None) -> int:
     if args.escalate_base_url:
         overrides.setdefault("escalation", {})["base_url"] = args.escalate_base_url
     config = load_config(args.config, use_local=not args.no_local_config, **overrides)
+
+    if "backend" not in config.model.model_fields_set:
+        # Nothing named an engine: neither --backend nor [model] backend. The
+        # first that can run here answers (card #404), before anything reads
+        # the choice: the cloud retuning below, the cache file, the refusals.
+        config.model.backend = default_engine()
+        print(
+            f"engine: {config.model.backend} (the first that can run here; "
+            "--backend or [model] backend chooses, --detect-engines explains)",
+            file=sys.stderr,
+        )
 
     cloud_primary = is_cloud_primary(config)
     if cloud_primary:

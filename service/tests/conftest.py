@@ -12,14 +12,31 @@ loaded here rather than having its answer restated. The packaging script
 
 `photos` is the one-frame folder the scripted backend is run against, from
 the executable and from the CLI alike.
+
+`loopback_server` is the one fake-server plumbing for tests at a real HTTP
+boundary (GBIF's occurrence search, Ollama's version endpoint): a handler
+speaking the real protocol, served on 127.0.0.1 at an ephemeral port. Every
+handler derives from `QuietHandler`, which keeps http.server's request log
+out of pytest's output, and `recording_handler` is the one that answers 200
+to anything and remembers what it was asked, for the assertion "this server
+never heard from the client".
+
+`fake_platform` is the one way the suite fakes the machine `on_apple_silicon`
+reads (sys.platform and platform.machine(), together), whether the caller is
+a providers test or the build plan.
 """
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
+import platform
 import shutil
 import subprocess
 import sys
+import threading
+from collections.abc import Iterator
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from types import ModuleType
 
@@ -89,6 +106,54 @@ def photos(tmp_path: Path) -> Path:
     folder.mkdir()
     shutil.copy(FIXTURE, folder / PHOTO)
     return folder
+
+
+def fake_platform(monkeypatch: pytest.MonkeyPatch, platform_name: str, machine: str) -> None:
+    """The machine as `on_apple_silicon` sees it: sys.platform and
+    platform.machine(), faked together, the only way the suite fakes them."""
+    monkeypatch.setattr(sys, "platform", platform_name)
+    monkeypatch.setattr(platform, "machine", lambda: machine)
+
+
+class QuietHandler(BaseHTTPRequestHandler):
+    """The base of every fake server's handler: http.server logs each request
+    to stderr, and a test's output is its assertions, not the fake's log."""
+
+    def log_message(self, *_args) -> None:
+        return None
+
+
+def recording_handler(seen: list[str]) -> type[QuietHandler]:
+    """A handler that answers 200 `{}` to any GET and appends the path it was
+    asked to `seen`: the server a test stands up to prove the client under
+    test never reached it (a proxy, a redirect's destination)."""
+
+    class Recording(QuietHandler):
+        def do_GET(self) -> None:  # noqa: N802 - http.server's name
+            seen.append(self.path)
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"{}")
+
+    return Recording
+
+
+@contextlib.contextmanager
+def loopback_server(handler: type[BaseHTTPRequestHandler]) -> Iterator[HTTPServer]:
+    """An HTTP server on 127.0.0.1 at an ephemeral port, serving `handler` on
+    a daemon thread until exit, then stopped and joined. The caller points the
+    client under test at `server.server_port`; nothing leaves the machine."""
+    server = HTTPServer(("127.0.0.1", 0), handler)
+    thread = threading.Thread(
+        target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True
+    )
+    thread.start()
+    try:
+        yield server
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
 
 
 @pytest.fixture(scope="session")
