@@ -182,6 +182,14 @@ def _fenced_commands(text: str) -> list[str]:
     ]
 
 
+def _readme_section(heading: str) -> str:
+    """The text of readme.md's `## {heading}` section, up to the next `## `."""
+    readme = README.read_text(encoding="utf-8")
+    section = re.search(rf"^## {re.escape(heading)}\n(.*?)^## ", readme, re.MULTILINE | re.DOTALL)
+    assert section, f"readme.md has no ## {heading} section"
+    return section.group(1)
+
+
 def test_install_blocks_install_from_the_lockfile():
     """Card #425, Done-when 3: given a fresh clone, when the README setup runs,
     then the resolved versions match the lockfile. Only `uv sync --locked` (or
@@ -192,9 +200,8 @@ def test_install_blocks_install_from_the_lockfile():
     is exact, an SDK added with `uv pip install` is removed the next time the
     Install block runs. Running the installs here would need the network, so
     the gate is on the commands themselves."""
-    readme = README.read_text(encoding="utf-8")
-    install = re.search(r"^## Install\n(.*?)^## ", readme, re.MULTILINE | re.DOTALL)
-    assert install and any(_installs_from_the_lockfile(c) for c in _fenced_commands(install.group(1))), (
+    install = _readme_section("Install")
+    assert any(_installs_from_the_lockfile(c) for c in _fenced_commands(install)), (
         "readme.md's ## Install section must install with `uv sync --locked`"
     )
     unlocked = [
@@ -314,10 +321,8 @@ def test_readme_build_blocks_sync_the_sdk_extras():
     what the build venv has, so every `uv sync` in readme.md's build section
     (the macOS block and the Windows one) names the build, cloud and openai
     extras."""
-    readme = README.read_text(encoding="utf-8")
-    section = re.search(r"^## Building the executable\n(.*?)^## ", readme, re.MULTILINE | re.DOTALL)
-    assert section, "readme.md has no ## Building the executable section"
-    syncs = [c for c in _fenced_commands(section.group(1)) if re.search(r"\buv sync\b", c)]
+    section = _readme_section("Building the executable")
+    syncs = [c for c in _fenced_commands(section) if re.search(r"\buv sync\b", c)]
     assert syncs, "readme.md's build section has no uv sync command"
     without = _lacking_build_extras(syncs)
     assert not without, (
