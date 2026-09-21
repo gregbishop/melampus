@@ -14,6 +14,7 @@ both directions: the lines the command prints, and the parse the plugin will do.
 
 from __future__ import annotations
 
+import contextlib
 import errno
 import json
 import os
@@ -1054,6 +1055,12 @@ def test_cli_cancelled_by_a_signal_keeps_the_partial_file_and_the_next_run_resum
 # `cancelled`, exit 4, the partial file kept for the next run to resume.
 
 
+def _marker(tmp_path: Path) -> Path:
+    """The cancel marker under a data folder of the test's own, where
+    `cancel_marker_path` would put it under the per-user data directory."""
+    return tmp_path / "data" / "download-cancel"
+
+
 @pytest.mark.parametrize(
     "fake_hub",
     [{"config.json": FAKE_FILES["config.json"], "model.safetensors": fake_bytes(4 * DOWNLOAD_CHUNK_SIZE)}],
@@ -1068,7 +1075,7 @@ def test_download_stops_when_the_cancel_marker_appears_and_the_next_run_resumes(
     exits 4 through one path), the chunk stays in the cache, the marker is
     gone on exit, and the re-run asks the host for the rest by Range."""
     fake_hub.throttle = (64 * 1024, 0.002)
-    marker = tmp_path / "data" / "download-cancel"
+    marker = _marker(tmp_path)
     big = fake_hub.files["model.safetensors"]
     seen: list[Update] = []
 
@@ -1100,7 +1107,7 @@ def test_download_stops_when_the_cancel_marker_appears_and_the_next_run_resumes(
 def test_a_stale_cancel_marker_is_removed_when_a_download_starts(fake_hub: FakeHub, tmp_path: Path):
     """A marker left by an earlier click must not cancel the next download
     before it begins: it is removed on start, and the run completes."""
-    marker = tmp_path / "data" / "download-cancel"
+    marker = _marker(tmp_path)
     marker.parent.mkdir(parents=True)
     marker.touch()
 
@@ -1122,7 +1129,7 @@ def test_a_cancel_marker_that_cannot_be_removed_on_start_is_a_download_error_nam
     download at its first chunk, so the start refuses instead: the failure
     is a DownloadError naming the path and what to do, raised before the
     hub is asked anything."""
-    marker = tmp_path / "data" / "download-cancel"
+    marker = _marker(tmp_path)
     marker.mkdir(parents=True)
 
     with pytest.raises(DownloadError) as failure:
@@ -1135,57 +1142,47 @@ def test_a_cancel_marker_that_cannot_be_removed_on_start_is_a_download_error_nam
     assert marker.is_dir()
 
 
+@contextlib.contextmanager
+def _handling_an_exception_of_the_callers_own():
+    try:
+        raise ValueError("the caller's own, being handled while it downloads")
+    except ValueError:
+        yield
+
+
+@pytest.mark.parametrize("called", [
+    pytest.param(contextlib.nullcontext, id="plainly"),
+    pytest.param(_handling_an_exception_of_the_callers_own, id="from inside the caller's handler"),
+])
 def test_a_cancel_marker_that_cannot_be_removed_on_exit_is_a_download_error_naming_it_with_the_model_complete(
-    fake_hub: FakeHub, tmp_path: Path
+    fake_hub: FakeHub, tmp_path: Path, called
 ):
     """Codex review 5, code finding 1 (Claude review 12, security finding 2;
     download.py:628). The exit's unlink in the `finally` raised the same
     bare OSError: a folder that appeared at the marker's path as the last
     chunk was counted (nothing looked for it after) left the model complete
     and the command in a traceback. The failure names the marker and what
-    to do; the snapshot is laid out and the status reads installed."""
-    marker = tmp_path / "data" / "download-cancel"
+    to do; the snapshot is laid out and the status reads installed.
+
+    From inside the caller's handler (Claude review 13, code finding 1;
+    download.py:635): the `finally` decided "something is in flight" from
+    `sys.exc_info()`, which is the exception any enclosing `except` is
+    handling, not this `try`'s: called from inside a caller's handler, the
+    download completing with a folder at the marker's path returned the
+    snapshot and reported nothing, and the next run refused on start with
+    no warning of why. Whether the caller is handling an exception of its
+    own must not change the outcome: the same DownloadError naming the
+    marker, the model complete."""
+    marker = _marker(tmp_path)
     marker.parent.mkdir(parents=True)
 
     def a_folder_at_the_marker_once_complete(update: Update) -> None:
         if update.bytes_done == update.bytes_total:
             marker.mkdir(exist_ok=True)
 
-    with pytest.raises(DownloadError) as failure:
+    with pytest.raises(DownloadError) as failure, called():
         download_model(FAKE_REPO, endpoint=fake_hub.endpoint, cache_dir=tmp_path / "hub",
                        on_update=a_folder_at_the_marker_once_complete, cancel_marker=marker)
-
-    message = str(failure.value)
-    assert str(marker) in message and "by hand" in message, message
-    assert marker.is_dir()
-    status = _status(fake_hub, tmp_path / "hub")
-    assert status.installed is True and status.bytes_done == FAKE_TOTAL
-
-
-def test_a_cancel_marker_that_cannot_be_removed_on_exit_is_a_download_error_when_the_caller_is_handling_an_exception(
-    fake_hub: FakeHub, tmp_path: Path
-):
-    """Claude review 13, code finding 1 (download.py:635). The `finally`
-    decided "something is in flight" from `sys.exc_info()`, which is the
-    exception any enclosing `except` is handling, not this `try`'s: called
-    from inside a caller's handler, the download completing with a folder
-    at the marker's path returned the snapshot and reported nothing, and
-    the next run refused on start with no warning of why. Whether the
-    caller is handling an exception of its own must not change the
-    outcome: the same DownloadError naming the marker, the model complete."""
-    marker = tmp_path / "data" / "download-cancel"
-    marker.parent.mkdir(parents=True)
-
-    def a_folder_at_the_marker_once_complete(update: Update) -> None:
-        if update.bytes_done == update.bytes_total:
-            marker.mkdir(exist_ok=True)
-
-    with pytest.raises(DownloadError) as failure:
-        try:
-            raise ValueError("the caller's own, being handled while it downloads")
-        except ValueError:
-            download_model(FAKE_REPO, endpoint=fake_hub.endpoint, cache_dir=tmp_path / "hub",
-                           on_update=a_folder_at_the_marker_once_complete, cancel_marker=marker)
 
     message = str(failure.value)
     assert str(marker) in message and "by hand" in message, message
@@ -1203,7 +1200,7 @@ def test_a_cancel_marker_that_cannot_be_removed_on_exit_does_not_mask_the_cancel
     `finally`'s unlink, refused by the folder, must not replace that
     DownloadCancelled (exit 4, `cancelled`, the partial kept) with its own
     failure."""
-    marker = tmp_path / "data" / "download-cancel"
+    marker = _marker(tmp_path)
     marker.parent.mkdir(parents=True)
 
     def a_folder_at_the_marker_after_the_first_chunk(update: Update) -> None:
@@ -1227,7 +1224,7 @@ def test_download_model_flag_exits_3_naming_the_marker_it_cannot_remove_with_not
     path `--model-status` reports as `cancel_path`, then `--download-model`.
     Exit 3 with the reason on stderr naming the marker, no traceback, nothing
     on stdout, the hub (a closed port here) never asked."""
-    marker = tmp_path / "data" / "download-cancel"
+    marker = _marker(tmp_path)
     marker.mkdir(parents=True)
     monkeypatch.setattr(download, "cancel_marker_path", lambda: marker)
     monkeypatch.setattr(constants, "ENDPOINT", f"http://127.0.0.1:{closed_port()}")
@@ -1242,7 +1239,7 @@ def test_the_download_watches_the_documented_marker_by_default(monkeypatch, tmp_
     """`--download-model` passes no marker: the download watches the path
     `--model-status` reports (the one docs/config.md documents), which is
     what the plugin writes to."""
-    marker = tmp_path / "data" / "download-cancel"
+    marker = _marker(tmp_path)
     monkeypatch.setattr(download, "cancel_marker_path", lambda: marker)
     marker.parent.mkdir(parents=True)
     marker.touch()
