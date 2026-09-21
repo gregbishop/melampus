@@ -132,6 +132,16 @@ REPO_LOCK = "repo.lock"
 # before refusing.
 LOCK_TIMEOUT: float = 5
 
+# The largest size, of a file or of the model, the status takes from the
+# hub's listing: the largest integer a double carries exactly, so the
+# plugin's JSON decoder (MelampusJson.lua, `tonumber`) reads it as the hub
+# gave it; a real file is far below it (nine petabytes). Above it, or with
+# a total above it, the listing is not a hub's: `json.dumps` cannot print
+# an integer of more than 4300 digits (Python's int-to-str limit, which its
+# JSON decoder shares, so two sizes of 4300 digits pass and their sum does
+# not), and the plugin reads a shorter one as `inf` or as a rounded number.
+MAX_SIZE = 2**53
+
 # The query string of any URL in a piece of text: an LFS file's bytes come
 # from the CDN at a signed URL, whose query is the signature and its expiry,
 # a credential for that file. Nothing this command prints carries it.
@@ -739,12 +749,14 @@ def model_status(repo: str, *, endpoint: str | None = None, cache_dir: Path | No
     does not within that time, or answers with something that is not a hub's
     answer (a captive portal's page, a proxy's block page, a JSON error page
     or a listing of another shape: a file's name that is not a string, a
-    size that is not a non-negative integer (a string, a bool, a negative
-    number, a fraction, or `1e309`, a float, infinite, which the plugin's
-    JSON decoder rejects), a date or an evaluation result the library
-    cannot read, a repo id or a name missing, a page that is not JSON at
-    all), `bytes_total` is None and the listing is as if the hub had not
-    answered: the status never fails for the network. Whatever the answer
+    size that is not a non-negative integer of at most MAX_SIZE (a string,
+    a bool, a negative number, a fraction, `1e309`, a float, infinite,
+    which the plugin's JSON decoder rejects, or an integer above MAX_SIZE,
+    no file's and not one the plugin's decoder or `json.dumps` carries
+    exactly, a total above it included), a date or an evaluation result
+    the library cannot read, a repo id or a name missing, a page that is
+    not JSON at all), `bytes_total` is None and the listing is as if the
+    hub had not answered: the status never fails for the network. Whatever the answer
     does wrong is caught as one class, every exception the library's
     request, its constructor or the reading of the listing raises, since
     what the library's parsing can raise is the library's to enumerate, not
@@ -776,10 +788,13 @@ def model_status(repo: str, *, endpoint: str | None = None, cache_dir: Path | No
         if not all(isinstance(name, str) for name in listed):
             raise TypeError("a file name in the listing is not a string")
         # A bool is an int in Python; 1e309 is a float, inf, which the plugin's
-        # JSON decoder rejects as `Infinity`.
-        if not all(size is None or (type(size) is int and size >= 0) for size in listed.values()):
-            raise TypeError("a file size in the listing is not a non-negative integer")
+        # JSON decoder rejects as `Infinity`; above MAX_SIZE, a size or the
+        # total is one `json.dumps` or the plugin's decoder cannot carry.
+        if not all(size is None or (type(size) is int and 0 <= size <= MAX_SIZE) for size in listed.values()):
+            raise TypeError("a file size in the listing is not a non-negative integer, or is above MAX_SIZE")
         total: int | None = sum(size or 0 for size in listed.values())
+        if total > MAX_SIZE:
+            raise TypeError("the sizes in the listing add up to more than MAX_SIZE")
         installed = main is not None and _holds(main, listed)
     except Exception:  # noqa: BLE001 - the hub's answer, whatever it did wrong, is as if it had not answered
         total, installed = None, main is not None

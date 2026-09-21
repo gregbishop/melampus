@@ -1499,6 +1499,16 @@ _NOT_A_HUBS_ANSWER = [
     *[(f"a size that is not a non-negative integer: {size.decode()}", "application/json",
        b'{"id": "fake-org/fake-model", "siblings": [{"rfilename": "model.safetensors", "size": ' + size + b'}]}')
       for size in (b"1e309", b"-1", b"1.5", b"true")],
+    *[(f"a size above the ceiling: {name}", "application/json",
+       b'{"id": "fake-org/fake-model", "siblings": [' + b", ".join(
+           b'{"rfilename": "' + filename + b'", "size": ' + size + b'}' for filename, size in files) + b']}')
+      for name, files in (
+          ("two sizes of 4300 digits, whose sum json.dumps cannot print",
+           ((b"model.safetensors", b"9" * 4300), (b"config.json", b"9" * 4300))),
+          ("one size above 2**53", ((b"model.safetensors", str(2**53 + 1).encode()),)),
+          ("two sizes of 2**53, whose sum is above it",
+           ((b"model.safetensors", str(2**53).encode()), (b"config.json", str(2**53).encode()))),
+      )],
     ("a name that is null", "application/json",
      b'{"id": "fake-org/fake-model", "siblings": [{"rfilename": null, "size": 3}]}'),
     ("a name that is a number", "application/json",
@@ -1545,7 +1555,16 @@ def test_status_treats_a_hub_answering_200_with_something_else_as_unreachable(
     `json.dumps` writes as `Infinity`, which the plugin's decoder
     (MelampusJson.lua) rejects, hiding the row instead of showing "size
     unknown"; `-1` and `1.5` summed to a total that is not a size, and
-    `true` (a bool is an int in Python) to 1. The status never
+    `true` (a bool is an int in Python) to 1. And for a size that is a
+    non-negative integer above MAX_SIZE, 2**53 (Claude review 16, security
+    finding 1, download.py:743): two sizes of 4300 digits each passed the
+    check (Python's JSON decoder reads an integer of up to 4300 digits, its
+    int-to-str limit) and summed to 4301, which `json.dumps` cannot print,
+    a ValueError out of `Status.json()` that the CLI does not catch, a
+    traceback and exit 1 again; one of 4300 digits printed and the
+    plugin's decoder read it as `inf`, the button saying "(inf GB)"; and
+    above 2**53 a double, the plugin's number, rounds. No file is that
+    large, so such a size, or a total above it, is not a hub's. The status never
     fails for the network: whatever the hub's answer does wrong, such a hub
     is one that could not be reached, the size unknown and installed what
     the cache lays out; through the CLI that is exit 0, the JSON on stdout
