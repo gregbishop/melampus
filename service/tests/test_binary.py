@@ -75,7 +75,7 @@ from conftest import (
     fake_platform,
 )
 
-from melampus import config
+from melampus import config, providers
 from melampus.backend import ScriptedBackend
 from melampus.config import load_config
 from melampus.identify import Identifier
@@ -609,40 +609,25 @@ def test_executable_refuses_a_command_that_is_not_installed(
         assert works_here in tail, f"{works_here!r} is not named as working here:\n{tail}"
 
 
-def test_executable_refuses_claude_code_that_is_not_installed(
-    built_executable: Path, photos: Path, tmp_path: Path
+@pytest.mark.parametrize(
+    "cli", [providers.CLAUDE_CODE_CLI, providers.CODEX_CLI], ids=lambda cli: cli.engine
+)
+def test_executable_refuses_a_cli_engine_that_is_not_installed(
+    built_executable: Path, photos: Path, tmp_path: Path, cli: providers.CliEngine
 ):
-    """Card #421, Done-when 2 in the frozen build: `--backend claude-code`
-    on a PATH with no `claude`, and the executable exits 3 on the
-    not-installed message, naming where to install it and how to sign in,
-    and the backends that do work here, before any image is read."""
+    """Cards #421 and #422, Done-when 2 in the frozen build: `--backend
+    <engine>` on a PATH with no `<program>`, and the executable exits 3 on
+    the not-installed message, naming the CLI, where to install it and how
+    to sign in, and the backends that do work here, before any image is
+    read. One test per CliEngine: the refusal's words are its fields."""
     env = no_python_environment(tmp_path)
-    assert shutil.which("claude", path=env["PATH"]) is None
-    proc = _request_backend(built_executable, photos, tmp_path, "claude-code", env=env)
+    assert shutil.which(cli.program, path=env["PATH"]) is None
+    proc = _request_backend(built_executable, photos, tmp_path, cli.engine, env=env)
     tail = proc.stderr[-3000:]
     assert proc.returncode == 3, f"exit {proc.returncode}:\n{tail}"
-    assert "invalid choice" not in tail, f"the executable does not accept claude-code:\n{tail}"
-    assert "Claude Code is not installed" in tail, tail
-    assert "https://code.claude.com/docs/en/setup" in tail and "claude auth login" in tail, tail
-    for works_here in ("claude", "openai", "scripted"):
-        assert works_here in tail, f"{works_here!r} is not named as working here:\n{tail}"
-
-
-def test_executable_refuses_codex_that_is_not_installed(
-    built_executable: Path, photos: Path, tmp_path: Path
-):
-    """Card #422, Done-when 2 in the frozen build: `--backend codex` on a
-    PATH with no `codex`, and the executable exits 3 on the not-installed
-    message, naming where to install it and how to sign in, and the
-    backends that do work here, before any image is read."""
-    env = no_python_environment(tmp_path)
-    assert shutil.which("codex", path=env["PATH"]) is None
-    proc = _request_backend(built_executable, photos, tmp_path, "codex", env=env)
-    tail = proc.stderr[-3000:]
-    assert proc.returncode == 3, f"exit {proc.returncode}:\n{tail}"
-    assert "invalid choice" not in tail, f"the executable does not accept codex:\n{tail}"
-    assert "Codex CLI is not installed" in tail, tail
-    assert "https://developers.openai.com/codex/cli" in tail and "codex login" in tail, tail
+    assert "invalid choice" not in tail, f"the executable does not accept {cli.engine}:\n{tail}"
+    assert f"{cli.title} is not installed" in tail, tail
+    assert cli.install in tail and cli.sign_in in tail, tail
     for works_here in ("claude", "openai", "scripted"):
         assert works_here in tail, f"{works_here!r} is not named as working here:\n{tail}"
 
@@ -723,8 +708,6 @@ def test_executable_detects_engines_as_json_with_no_python_on_the_path(
     when none does; the cloud engines are available and name their key
     variable; with no `claude` or `codex` on the PATH, both CLIs are not
     installed, with where to get them."""
-    from melampus import providers
-
     proc = subprocess.run(
         [str(built_executable), "--detect-engines"],
         env=no_python_environment(tmp_path), capture_output=True, text=True, timeout=600,
