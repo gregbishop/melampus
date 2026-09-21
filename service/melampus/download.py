@@ -132,6 +132,11 @@ REPO_LOCK = "repo.lock"
 # before refusing.
 LOCK_TIMEOUT: float = 5
 
+# How long the removal's probe waits at each lock it tries, the repo's and
+# every blob's: it asks whether a download holds one, it does not wait for
+# the download to finish.
+PROBE_TIMEOUT: float = 0.1
+
 # The largest size, of a file or of the model, the status takes from the
 # hub's listing: the largest integer a double carries exactly, so the
 # plugin's JSON decoder (MelampusJson.lua, `tonumber`) reads it as the hub
@@ -830,8 +835,8 @@ def _download_running(lock_dir: Path, held: ExitStack) -> bool:
     download starting in between refuses (`download_model`'s own timeout
     on the repo's lock, the one it takes first) or waits and starts from
     nothing once the removal is done."""
-    locks = [_repo_lock(lock_dir, 0.1)]
-    locks += [WeakFileLock(lock, timeout=0.1) for lock in lock_dir.glob("*.lock") if lock.name != REPO_LOCK]
+    locks = [_repo_lock(lock_dir, PROBE_TIMEOUT)]
+    locks += [WeakFileLock(lock, timeout=PROBE_TIMEOUT) for lock in lock_dir.glob("*.lock") if lock.name != REPO_LOCK]
     for lock in locks:
         try:
             held.enter_context(lock)
