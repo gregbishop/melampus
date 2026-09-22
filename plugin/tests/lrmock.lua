@@ -494,8 +494,11 @@ namespaces.LrFileUtils = {
 		-- (see windowsTemp): nothing is made there, as nothing is run. On a
 		-- Windows host cmd.exe's mkdir makes the whole path itself.
 		if WIN_ENV and not HOST_IS_WINDOWS then return false end
+		-- Either shell's mkdir is silenced: when the path cannot be made
+		-- (its parent is a file) the outcome is the caller's to read from
+		-- exists afterwards, and a green suite prints only its summary.
 		if HOST_IS_WINDOWS then os.execute('mkdir "' .. path .. '" 2>nul') return true end
-		os.execute('mkdir -p ' .. sh(path))
+		os.execute('mkdir -p ' .. sh(path) .. ' 2>/dev/null')
 		return true
 	end,
 	files = function(folder)
