@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
+from conftest import metadata_laden
 from melampus.backend import ScriptedBackend
 from melampus.cache import ResultCache
 from melampus.config import load_config
@@ -70,33 +71,6 @@ def test_staged_image_is_renamed_and_stripped(photo: Path):
             assert "XML:com.adobe.xmp" not in img.info
 
 
-def _metadata_laden(path: Path) -> dict[str, bytes | str]:
-    """An image carrying every metadata channel a real camera file would.
-
-    The previous version of the stripping test used a freshly-constructed image
-    with no metadata at all, so it asserted the absence of something that was
-    never there. It would have passed unchanged if staging had been rewritten to
-    copy EXIF straight through. This builds the adversarial case instead.
-    """
-    exif = Image.Exif()
-    exif[0x010F] = "Canon"                       # Make
-    exif[0x0110] = "Canon EOS R3"                # Model
-    exif[0x013B] = "SECRET_PHOTOGRAPHER_NAME"    # Artist
-    exif[0x010E] = "SECRET_CAPTION_TEXT"         # ImageDescription
-    exif[0x0132] = "2026:06:14 05:23:37"         # DateTime
-    exif[0x8825] = {1: "N", 2: (28.0, 39.0, 0.0), 3: "W", 4: (80.0, 43.0, 0.0)}  # GPS IFD
-
-    markers: dict[str, bytes | str] = {
-        "exif": exif.tobytes(),
-        "xmp": b'<?xpacket?><x:xmpmeta xmlns:x="adobe:ns:meta/">'
-               b"<dc:subject>SECRET_KEYWORD</dc:subject></x:xmpmeta>",
-        "comment": b"SECRET_JFIF_COMMENT",
-        "icc_profile": b"\x00\x00\x02\x0cSECRET_ICC_PROFILE" + b"\x00" * 500,
-    }
-    Image.new("RGB", (1200, 800), (70, 100, 60)).save(path, format="JPEG", **markers)
-    return markers
-
-
 def test_staging_strips_every_metadata_channel(tmp_path: Path):
     """The project's single most important rule, tested adversarially.
 
@@ -105,7 +79,7 @@ def test_staging_strips_every_metadata_channel(tmp_path: Path):
     JFIF comment and an ICC profile, then asserts none of it survives staging.
     """
     source = tmp_path / "SECRET_SPECIES_NAME.jpg"
-    _metadata_laden(source)
+    metadata_laden(source)
 
     # Sanity: the fixture must actually carry the metadata, or the test is vacuous
     # in exactly the way the old one was.

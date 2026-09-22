@@ -24,7 +24,7 @@ from pathlib import Path
 import pytest
 from PIL import Image, UnidentifiedImageError
 
-from conftest import FIXTURE, REPO
+from conftest import FIXTURE, REPO, metadata_laden
 
 # POSIX ERE, for git grep.
 HOME_PATH = "/(Users|home)/[^/[:space:]`'\"]+/"
@@ -215,10 +215,15 @@ def test_a_frame_over_the_ceiling_is_refused():
     assert any("over the" in problem for problem in _frame_problems(big))
 
 
-def test_a_frame_with_exif_is_refused():
-    exif = Image.Exif()
-    exif[0x010F] = "Camera"  # Make
-    assert _frame_problems(_frame(exif=exif)) == ["carries EXIF"]
+def _tagged_frame(tmp_path: Path) -> bytes:
+    """The camera-record-laden frame the staging test is proven against."""
+    path = tmp_path / "tagged.jpg"
+    metadata_laden(path)
+    return path.read_bytes()
+
+
+def test_a_frame_with_exif_is_refused(tmp_path):
+    assert _frame_problems(_tagged_frame(tmp_path)) == ["carries EXIF"]
 
 
 def test_a_small_stripped_frame_passes():
@@ -229,9 +234,7 @@ def test_the_gate_judges_the_index_not_the_working_tree(tmp_path):
     """What a push carries is the staged blob. A clean frame staged and then
     overwritten on disk by a tagged one still passes; the reverse is refused."""
     repo = _throwaway_repo(tmp_path)
-    exif = Image.Exif()
-    exif[0x010F] = "Camera"  # Make
-    plain, tagged = _frame(), _frame(exif=exif)
+    plain, tagged = _frame(), _tagged_frame(tmp_path)
 
     (repo / "frame.jpg").write_bytes(plain)
     _git("add", "frame.jpg", repo=repo)
