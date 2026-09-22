@@ -823,8 +823,6 @@ def test_config_doc_quotes_the_cli_template_from_its_one_source(engine, must_say
     the architecture doc name the engine and the template's one source."""
     import tomllib
 
-    from melampus import providers
-
     (cli,) = [c for c in providers.CLI_ENGINES if c.engine == engine]
     text = CONFIG_DOC.read_text(encoding="utf-8")
     blocks = [
