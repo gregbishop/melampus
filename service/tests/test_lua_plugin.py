@@ -387,8 +387,6 @@ def test_the_cli_engine_preference_reaches_the_executable_through_the_command_th
     that is not installed, naming where to get it, exit 3, in the CLI log
     the plugin points a failed run at. Nothing runs, nothing is sent
     anywhere."""
-    from melampus import providers
-
     cli = {"claude-code": providers.CLAUDE_CODE_CLI, "codex": providers.CODEX_CLI}[engine]
     plugin_dir = _plugin_folder_holding(built_executable, tmp_path)
     env = no_python_environment(tmp_path)
