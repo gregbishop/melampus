@@ -15,7 +15,7 @@ local mock = require('lrmock')
 
 local PLUGIN = mock.PLUGIN
 local ENGINES = mock.loadPluginFile('MelampusRules').ENGINES
-local OLLAMA_DOWNLOAD = 'https://ollama.com/download'
+local OLLAMA_DOWNLOAD = mock.OLLAMA_INSTALL
 local CLAUDE_CODE_INSTALL = mock.CLAUDE_CODE_INSTALL
 -- The canned answer, its titles, its reasons and the signed-in verdicts come
 -- from lrmock, spelled once for every suite.
