@@ -2946,7 +2946,8 @@ def _fake_cli(monkeypatch, tmp_path, *, exit_code: int = 0, stderr: str = "",
 
 def _command_settings(tmp_path, command: list[str], backend: str = providers.COMMAND) -> Path:
     """A config file naming `command` as the template under `backend`:
-    `command` itself, or `claude-code` for a template of the user's own."""
+    `command` itself, or a CLI engine's (any `cli.engine` in
+    providers.CLI_ENGINES) for a template of the user's own."""
     settings = tmp_path / "settings.toml"
     settings.write_text(
         f'[model]\nbackend = {json.dumps(backend)}\ncommand = {json.dumps(command)}\n', encoding="utf-8")
