@@ -21,8 +21,10 @@ workflow file that does not exist; no doc states a test count, because the
 suite grows with every card and CI checks no such number (card #437,
 Done-when 1); readme.md's opening lists exactly the engines providers.py
 offers, with what each bills, and names the build specification (card #491,
-Done-when 1 and 3); and a page whose opening says this runs on macOS and
-Windows does not still offer Linux further down.
+Done-when 1 and 3), and it is the only opening that lists them — the brief's
+and architecture's cite that table instead of copying it; and a page whose
+opening says this runs on macOS and Windows does not still offer Linux
+further down.
 
 The checks are deliberately dumb — substring presence of the backticked name — so
 they never argue with prose style, only with absence. The one exception runs the
@@ -678,6 +680,32 @@ def test_the_openings_privacy_claim_names_the_setting_that_can_send_the_image_el
         assert setting in opening, (
             f"{doc.name}'s opening promises no image leaves the machine without naming "
             f"`{setting}`, the setting that can point the ollama engine at another host")
+
+
+def test_only_the_readme_opening_lists_the_engines_the_other_openings_point_at_it():
+    """Review round 1, finding 3: readme.md's opening carries the one list of
+    the engines, and the gate above holds it to providers.py. The brief's and
+    architecture's openings may name the shape — local first, or a cloud API,
+    or a subscription CLI — and cite that table; they may not restate the
+    names, by key or by the title providers.py gives them, because a copy no
+    gate reads is exactly what drifted before this card. A sentence that names
+    one engine to qualify a claim about it (`[model] ollama_url`, the privacy
+    caveat above) is not a list and does not trip this: engine keys are read
+    as backticked tokens, titles as whole words."""
+    from melampus import providers
+
+    titles = [t.split(" — ")[0] for t in providers.ENGINE_TITLES.values()]
+    names = [*providers.ENGINE_TITLES, providers.CLAUDE_CODE, providers.CODEX]
+    words = [*titles, providers.CLAUDE_CODE_CLI.title, providers.CODEX_CLI.title]
+    for doc in (BRIEF, ARCHITECTURE_DOC):
+        opening = doc.read_text(encoding="utf-8").split("\n## ", 1)[0]
+        assert "readme.md" in opening, (
+            f"{doc.name}'s opening does not cite readme.md, which carries the engine list")
+        restated = [n for n in names if n in re.findall(r"`([\w-]+)`", opening)]
+        restated += [w for w in words if re.search(rf"\b{re.escape(w)}\b", opening)]
+        assert not restated, (
+            f"{doc.name}'s opening restates readme.md's engine list ({restated}); only the "
+            "README's copy is held to providers.py, so name the shape and cite the table")
 
 
 def test_a_doc_whose_opening_says_macos_and_windows_does_not_still_offer_linux():

@@ -10,13 +10,13 @@ ratings, flags, colour labels and keywords.
 Named for the Greek seer who could understand the speech of animals — birds
 especially. *meh-LAM-pus*.
 
-Local first: MLX on Apple Silicon, or Ollama on macOS or Windows, and on
-either no image leaves the machine — Ollama so long as `ollama_url` is not
-pointed at another host. Or OpenAI, Claude, Claude Code or Codex CLI, picked
-in the plugin's Settings dialog. macOS and Windows. The plugin is a folder
-with the one-file executable inside it; a user installs no Python.
-`readme.md`'s opening lists the six engines and what each bills, and a test
-holds that list to `providers.py`.
+Local first, or a cloud API, or a subscription CLI: six engines, picked in
+the plugin's Settings dialog. `readme.md`'s opening is the one list of them
+and of what each bills, and a test holds that list to `providers.py`. On a
+local engine no image leaves the machine — so long as `[model] ollama_url`
+is not pointed at another host, which sends every frame there. macOS and
+Windows. The plugin is a folder with the one-file executable inside it; a
+user installs no Python.
 
 The original 368-line build spec now lives in `docs/build-spec.md`. It is
 still the reference for architecture and phasing; it is not a page to reload
