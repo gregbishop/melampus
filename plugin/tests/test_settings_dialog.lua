@@ -183,6 +183,18 @@ local function titlesMatching(contents, needle)
 	return out
 end
 
+--- Clicks the one clickable link (a static text with a mouse_down) whose
+--- title carries `address`, and checks the browser was opened at it.
+local function clickTheOneLinkTo(contents, address)
+	local clickable = {}
+	for _, view in ipairs(titlesMatching(contents, address)) do
+		if type(view.mouse_down) == 'function' then clickable[#clickable + 1] = view end
+	end
+	t.equals(#clickable, 1, 'expected exactly one clickable link to ' .. address)
+	clickable[1].mouse_down()
+	t.equals(mock.state.openedUrls[#mock.state.openedUrls], address, 'the click did not open the browser at ' .. address)
+end
+
 --- The rows of the engine group that hold a model's buttons: the ones bound
 --- to a property table with a `phase`, each with the table.
 local function modelRows(contents)
@@ -315,13 +327,7 @@ t.test('a CLI that is not installed, and one not signed in, are greyed with the 
 	t.equals(byValue.codex.title, TITLES.codex .. ' (not available)')
 	t.isTrue(#titlesMatching(contents, CLAUDE_CODE_NOT_INSTALLED) > 0, 'the claude-code reason is not shown')
 	t.isTrue(#titlesMatching(contents, CODEX_NOT_SIGNED_IN) > 0, 'the codex reason is not shown')
-	local clickable = {}
-	for _, view in ipairs(titlesMatching(contents, CLAUDE_CODE_INSTALL)) do
-		if type(view.mouse_down) == 'function' then clickable[#clickable + 1] = view end
-	end
-	t.equals(#clickable, 1, 'expected one clickable link to ' .. CLAUDE_CODE_INSTALL)
-	clickable[1].mouse_down()
-	t.equals(mock.state.openedUrls[#mock.state.openedUrls], CLAUDE_CODE_INSTALL)
+	clickTheOneLinkTo(contents, CLAUDE_CODE_INSTALL)
 end)
 
 t.test('a CLI that is signed in is offered, and picked, says what every frame bills to', function()
@@ -342,15 +348,8 @@ end)
 -- ── the Ollama link ────────────────────────────────────────────────────────
 t.test('when ollama is unavailable a link opens the Ollama download page', function()
 	local contents = openSettings({ detection = mock.detectionText() })
-	local links = titlesMatching(contents, OLLAMA_DOWNLOAD)
-	local clickable = {}
-	for _, view in ipairs(links) do
-		if type(view.mouse_down) == 'function' then clickable[#clickable + 1] = view end
-	end
-	t.equals(#clickable, 1, 'expected exactly one clickable link to ' .. OLLAMA_DOWNLOAD)
-	clickable[1].mouse_down()
-	t.equals(#mock.state.openedUrls, 1, 'the click did not open the browser')
-	t.equals(mock.state.openedUrls[1], OLLAMA_DOWNLOAD)
+	clickTheOneLinkTo(contents, OLLAMA_DOWNLOAD)
+	t.equals(#mock.state.openedUrls, 1, 'the click opened more than the one page')
 end)
 
 t.test('when ollama is available there is no link', function()
