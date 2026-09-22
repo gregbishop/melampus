@@ -131,10 +131,11 @@ end
 
 --- The engine picker's items from what the executable said (card #405):
 -- `verdicts` is the decoded JSON of --detect-engines, a list of
--- { engine, title, available, reason }. The first item leaves the choice to
--- the executable (the unset preference); then Rules.ENGINES in order, each
--- titled as its verdict says (the executable is the one place that names
--- an engine; card #423), disabled when detection said it cannot run here.
+-- { engine, title, available, reason, install }. The first item leaves the
+-- choice to the executable (the unset preference); then Rules.ENGINES in
+-- order, each titled as its verdict says (the executable is the one place
+-- that names an engine; card #423), disabled when detection said it cannot
+-- run here.
 -- A disabled item whose verdict carries an install page (`install`: where
 -- to go and get the engine, when going and getting it is the fix) carries
 -- that address as `link`. An address a reason merely names stays text in
