@@ -270,6 +270,57 @@ def test_staging_refuses_a_root_that_reaches_the_shared_temp_directories_by_syml
             "staging wrote through the link into the granted directory before refusing")
 
 
+def test_cli_stops_the_run_at_exit_3_when_the_staging_root_is_inside_the_grant(
+    tmp_path: Path, monkeypatch, capsys
+):
+    """Codex review round 10, C1: this is a configuration refusal, not a bad frame.
+
+    The refusal fires inside `staged_pixels`, and `Identifier.identify`
+    turns everything but a batch-fatal failure into a per-image error so
+    that one unreadable frame cannot end a multi-thousand-image run. A
+    staging root inside the grant is not one frame's problem: every frame
+    fails the same way, so the run records the same error on each of them
+    in turn and exits 0, and the one thing the owner has to fix scrolls
+    past above the table.
+
+    It belongs where the repository already puts an engine that cannot run
+    here — a not-installed command, a signed-out CLI, an Ollama with no
+    server: the run stops at exit 3 on a message naming the fix, with
+    nothing cached and no results file. This drives the real CLI over two
+    frames and holds it to that.
+    """
+    from melampus.cli import main
+
+    folder = tmp_path / "frames"
+    folder.mkdir()
+    for index, tint in enumerate(((70, 100, 60), (60, 70, 110))):
+        Image.new("RGB", (1200, 800), tint).save(
+            folder / f"SECRET_SPECIES_NAME_{index}.jpg", format="JPEG")
+
+    settings = tmp_path / "melampus.toml"
+    settings.write_text(
+        f"[run]\nprompts_dir = '{(REPO / 'prompts').as_posix()}'\n", encoding="utf-8")
+    cache = tmp_path / "cache.jsonl"
+    out = tmp_path / "results.json"
+
+    with _granted_temp_directory() as granted:
+        monkeypatch.setattr(melampus_config, "_CHECKOUT", Path(granted))
+        staging = cache_file(STAGING_ROOT).resolve()
+        assert any(staging.is_relative_to(d) for d in MINIMAL_GRANTED_TEMP), (
+            "the layout under test does not put the staging root in the grant")
+
+        code = main([str(folder), "--backend", "scripted", "--config", str(settings),
+                     "--no-local-config", "--cache", str(cache), "--json-out", str(out)])
+
+    err = capsys.readouterr().err
+    assert code == 3, f"the run did not refuse: {err}"
+    assert str(staging) in err, f"the refusal does not name the staging root: {err}"
+    assert "run again" in err, f"the refusal does not say what to fix: {err}"
+    assert not cache.exists(), (
+        "the refusal was recorded on the frames instead of stopping the run")
+    assert not out.exists(), "a results file was written for a run that never ran"
+
+
 def test_backend_never_receives_original_filename(photo: Path, config):
     backend = ScriptedBackend([ROUTING_OK, ID_OK])
     Identifier(backend, config).identify(photo)

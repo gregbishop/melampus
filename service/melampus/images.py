@@ -18,6 +18,7 @@ from pathlib import Path
 from PIL import Image, ImageOps
 
 from .config import cache_file
+from .providers import BackendUnavailable
 
 # Fixed name for every staged file: carries zero information about the original.
 NEUTRAL_NAME = "image.jpg"
@@ -72,11 +73,19 @@ def staging_root() -> Path:
     would also move the user's data somewhere they never configured. The
     refusal names the root, the granted directory it sits in, and the one
     thing that fixes it.
+
+    It is refused as `providers.BackendUnavailable`, the refusal this machine
+    cannot run as configured already has: an uninstalled command, a signed-out
+    CLI, an Ollama with no server. That is what makes it stop the run
+    (`providers.BATCH_FATAL`, exit 3) rather than being recorded as one more
+    frame's error — the root is the same on every frame, so a per-frame error
+    would be written once per photograph with the fix scrolling past above the
+    table (Codex review round 10, C1).
     """
     root = cache_file(STAGING_ROOT).resolve()
     granted = next((d for d in MINIMAL_GRANTED_TEMP if root.is_relative_to(d)), None)
     if granted is not None:
-        raise RuntimeError(
+        raise BackendUnavailable(
             f"melampus would stage images in {root}, which is inside {granted}: one of "
             "the shared temp directories a CLI engine's permission profile grants whole "
             "and writable (providers.CODEX_COMMAND), so the run analysing one frame "

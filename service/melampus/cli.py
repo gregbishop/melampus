@@ -9,13 +9,13 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
-from .backend import CommandFailed
 from .cache import ResultCache
 from .config import load_config
 from .identify import Identifier
 from .images import content_hash
 from .providers import (
     BACKEND_CHOICES,
+    BATCH_FATAL,
     CLAUDE_CODE,
     CODEX,
     COMMAND,
@@ -559,9 +559,10 @@ def main(argv: list[str] | None = None) -> int:
                 paths, identifier, cache,
                 force=args.force, limit=args.limit, on_result=progress,
             )
-        except CommandFailed as exc:
-            # The engine is broken, not the frame: stop here with the message
-            # rather than recording the same failure on every frame in turn.
+        except BATCH_FATAL as exc:
+            # The engine is broken, or this machine cannot run as configured —
+            # not the frame: stop here with the message rather than recording
+            # the same failure on every frame in turn.
             return _fail(str(exc))
         print(
             f"\nprocessed {stats.processed}  skipped {stats.skipped}  "

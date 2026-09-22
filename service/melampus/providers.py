@@ -402,7 +402,23 @@ LOCAL_BACKENDS = ("mlx", OLLAMA, COMMAND, CLAUDE_CODE, CODEX, SCRIPTED)
 
 
 class BackendUnavailable(RuntimeError):
-    """This machine cannot run the configured backend; the message says what to do."""
+    """This machine cannot run melampus as configured; the message says what to do.
+
+    An uninstalled command, a signed-out CLI, an Ollama with no server — and
+    `images.staging_root`, which refuses a staging root inside the directories
+    a CLI engine's permission profile grants whole. All of them are settled
+    before a frame is read and none of them changes from frame to frame.
+    """
+
+
+#: The failures that stop a batch instead of being recorded on the frame in
+#: flight: every frame would fail the same way, so recording them one per
+#: photograph buries the one message that says what to fix. `identify` and
+#: `run_batch` re-raise these past their per-frame handlers and the CLI turns
+#: them into exit 3 (cli._fail). Stated here because this is the one module
+#: that sees both: CommandFailed is backend's, BackendUnavailable is this
+#: one's.
+BATCH_FATAL = (CommandFailed, BackendUnavailable)
 
 
 def on_apple_silicon() -> bool:

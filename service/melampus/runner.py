@@ -8,10 +8,10 @@ from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .backend import CommandFailed
 from .cache import ResultCache
 from .identify import Identifier
 from .images import content_hash
+from .providers import BATCH_FATAL
 from .schema import ImageResult
 
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
@@ -91,8 +91,9 @@ def run_batch(
 
         try:
             result = identifier.identify(path)
-        except CommandFailed:
-            # The engine, not the file: nothing to record, the batch stops.
+        except BATCH_FATAL:
+            # The engine or the configuration, not the file: nothing to
+            # record, the batch stops.
             raise
         except Exception as exc:  # noqa: BLE001 - batch resilience is the whole point
             result = ImageResult(
