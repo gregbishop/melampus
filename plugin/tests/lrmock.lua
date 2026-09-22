@@ -478,6 +478,9 @@ namespaces.LrBinding = {
 
 namespaces.LrFileUtils = {
 	exists = function(path)
+		-- Asking the disk yields in the real SDK, as readFile does; mark it
+		-- when it happens inside a gate.
+		if M.state.inWriteGate then M.state.yieldInsideWrite = true end
 		if M.state.existing[path] ~= nil then
 			return M.state.existing[path] and 'file' or false
 		end
@@ -486,6 +489,7 @@ namespaces.LrFileUtils = {
 		return false
 	end,
 	createAllDirectories = function(path)
+		if M.state.inWriteGate then M.state.yieldInsideWrite = true end
 		-- A fake Windows Lightroom's folders exist nowhere on another host
 		-- (see windowsTemp): nothing is made there, as nothing is run. On a
 		-- Windows host cmd.exe's mkdir makes the whole path itself.

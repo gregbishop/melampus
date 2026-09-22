@@ -233,7 +233,13 @@ state into a plain table, calls `planFor`, and applies the returned plan.
 **Everything async finishes before a write transaction opens.** File reading,
 JSON parsing, and reading existing photo state all happen in a first pass;
 writes happen in a second. File I/O yields, and yielding inside
-`withWriteAccessDo` is what produces "yielding is not allowed" errors.
+`withWriteAccessDo` is what produces "yielding is not allowed" errors. The
+plugin's own log is the one thing written from inside a gate (a keyword that
+cannot be made is warned about there), so `MelampusLog.lua` checks and makes
+its folder through `LrFileUtils` only until a line has landed, which every
+run's first line does outside any gate; a line logged inside a gate reaches
+only `io.open`. The mock marks `LrFileUtils.exists`, `createAllDirectories`
+and `readFile` inside a gate, and the import suite holds that mark false.
 
 **Writes are chunked at 100 photos**, each chunk its own transaction, so a crash
 or a cancel keeps completed work.
@@ -274,7 +280,9 @@ skip cleanly when no interpreter is present:
   Cancel writing the marker, exit 3's message with the log tail; the log's
   path on a fake macOS and a fake Windows Lightroom, a line written through
   the module landing in that file, and the Show log file button revealing it
-  (card #442). In `test_lua_plugin.py` the commands the dialog builds also
+  (card #442); in the import suite, a keyword the catalog already holds
+  elsewhere warned about from inside the write gate with no SDK file call
+  there. In `test_lua_plugin.py` the commands the dialog builds also
   run through `sh` against `dist/melampus` with `HF_ENDPOINT` at the fake
   hub: the progress file ends in `done`, the status flips to installed, and
   the marker written where the status said ends a throttled download with

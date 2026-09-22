@@ -13,18 +13,30 @@ local LrPathUtils = import 'LrPathUtils'
 
 local Log = {}
 
+--- Whether the folder is known to exist: set once a line has landed, so
+-- every later open reaches only io.open. The LrFileUtils calls that check
+-- and make the folder yield, and a line logged inside a catalog write gate
+-- (keywordFromPath in MelampusImport.lua warns from one) must not yield;
+-- every run's first line is outside any gate, so the folder is known by
+-- the time a gate opens.
+local folderMade = false
+
 --- The log, open for appending, its folder made on first use; nil when the
 -- folder cannot be made or the file cannot be opened. A log that cannot be
 -- written is not an error worth raising over in the middle of a run. The
 -- folder is checked, not the call's result, because io.open of a path whose
 -- folder is missing does not fail the same way everywhere.
 local function open()
-	local folder = Log.folder()
-	if not LrFileUtils.exists(folder) then
-		LrFileUtils.createAllDirectories(folder)
-		if not LrFileUtils.exists(folder) then return nil end
+	if not folderMade then
+		local folder = Log.folder()
+		if not LrFileUtils.exists(folder) then
+			LrFileUtils.createAllDirectories(folder)
+			if not LrFileUtils.exists(folder) then return nil end
+		end
 	end
-	return io.open(Log.path(), 'a')
+	local handle = io.open(Log.path(), 'a')
+	folderMade = handle ~= nil
+	return handle
 end
 
 local function write(level, message)
