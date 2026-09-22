@@ -73,6 +73,7 @@ import subprocess
 import sys
 import tomllib
 import types
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -157,6 +158,20 @@ def _fake_pyinstaller(monkeypatch: pytest.MonkeyPatch, run) -> None:
     monkeypatch.setitem(sys.modules, "PyInstaller.__main__", package.__main__)
 
 
+def _pyinstaller_that_writes_the_executable(
+    monkeypatch: pytest.MonkeyPatch, build, observe: Callable[[list[str]], None] = lambda arguments: None
+) -> None:
+    """A PyInstaller that writes the executable where the script expects it,
+    dist/<name>, after handing `observe` the arguments it was run with."""
+
+    def run(arguments: list[str]) -> None:
+        observe(arguments)
+        build.DIST.mkdir()
+        (build.DIST / build.NAME).write_text("the executable", encoding="utf-8")
+
+    _fake_pyinstaller(monkeypatch, run)
+
+
 @pytest.fixture()
 def build(build_script: types.ModuleType, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> types.ModuleType:
     """The build script (conftest loads it once), writing under tmp_path
@@ -194,13 +209,7 @@ def test_build_bundles_the_service_the_prompts_and_the_mlx_runtime(
     submodule of the packages that import model code by name at run time —
     written to dist/melampus, no suffix."""
     calls: list[list[str]] = []
-
-    def run(arguments: list[str]) -> None:
-        calls.append(arguments)
-        build.DIST.mkdir()
-        (build.DIST / build.NAME).write_text("the executable", encoding="utf-8")
-
-    _fake_pyinstaller(monkeypatch, run)
+    _pyinstaller_that_writes_the_executable(monkeypatch, build, calls.append)
     assert build.main() == 0
     assert build.executable_path() == build.DIST / "melampus"
     (arguments,) = calls
@@ -227,12 +236,10 @@ def _pyinstaller_that_records_its_environment(monkeypatch: pytest.MonkeyPatch, b
     PYINSTALLER_CONFIG_DIR it saw when it ran."""
     seen: dict[str, str | None] = {}
 
-    def run(arguments: list[str]) -> None:
+    def record(arguments: list[str]) -> None:
         seen[CONFIG_DIR_VARIABLE] = os.environ.get(CONFIG_DIR_VARIABLE)
-        build.DIST.mkdir()
-        (build.DIST / build.NAME).write_text("the executable", encoding="utf-8")
 
-    _fake_pyinstaller(monkeypatch, run)
+    _pyinstaller_that_writes_the_executable(monkeypatch, build, record)
     return seen
 
 
