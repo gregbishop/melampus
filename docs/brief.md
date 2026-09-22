@@ -61,8 +61,8 @@ Two things here differ from every other python repo, both deliberately:
   drifted from `service/pyproject.toml`). CI always passes `--build-binary`,
   so the executable is built and smoke-tested on the run that gates merges;
   locally it is opt-in because the build takes a minute. The two runs differ
-  only in the build: without `--build-binary` the executable's smoke tests use
-  an existing build, or skip and say how to get one. `test_escalation.py`
+  only in skips: without `--build-binary` the executable's smoke tests skip
+  unless an existing build is there to run against. `test_escalation.py`
   skips either way (with the anthropic and openai SDKs absent, the tests that
   need them; with the SDKs installed, as CI's `cloud` and `openai` extras do,
   those that assert their absence); in CI the corpus-backed tests in
