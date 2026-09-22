@@ -839,6 +839,33 @@ def test_a_signal_inside_cancel_on_signals_raises_cancelled_and_the_handler_is_r
     assert (signal.getsignal(signal.SIGINT), signal.getsignal(signal.SIGTERM)) == before
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="os.kill cannot send SIGINT to this process on Windows")
+def test_a_cancel_from_a_signal_is_not_caught_by_a_library_s_own_except_exception():
+    """Card #502: the signal lands on whatever bytecode is running, and the
+    Ollama pull arms a fresh timer thread for every line of the stream
+    (backend._Deadline.again), so one of the bytecodes it can land on is
+    inside threading.Thread.start(), between the thread being created and
+    start() returning. Thread.start()'s own `except Exception` cleanup takes
+    a cancel raised there for a thread that failed to start and forgets a
+    thread that is in fact running; the thread then raises KeyError in
+    threading's bookkeeping and the interpreter writes "Exception ignored in
+    thread started by ..." to stderr, where the cancel path promises the
+    plugin nothing but `cancelled`. So a cancel is not an Exception, for the
+    reason KeyboardInterrupt is not one: a library's cleanup handler catches
+    what its own block did wrong, never a signal passing through it."""
+    caught = cancelled = None
+    try:
+        with cancel_on_signals():
+            try:
+                os.kill(os.getpid(), signal.SIGINT)
+            except Exception as exc:  # noqa: BLE001 - stands for a library's own cleanup handler
+                caught = exc
+    except DownloadCancelled as exc:
+        cancelled = exc
+    assert caught is None, f"a library's `except Exception` caught the cancel: {caught!r}"
+    assert str(cancelled) == "SIGINT"
+
+
 def test_download_model_flag_needs_no_folder_and_passes_the_configured_repo(monkeypatch, capsys, tmp_path):
     """Exit 0 with the `done <path>` line once the model is complete. The repo
     is [model] repo, or --model. `--no-local-config` keeps a developer's own
