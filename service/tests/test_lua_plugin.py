@@ -114,6 +114,11 @@ def run_as_lightroom_would(command: str, **kwargs) -> subprocess.CompletedProces
 # #423 detection run to hold the plugin's list against.
 PICKER_ENGINES = [*(b for b in providers.BACKEND_CHOICES if b != providers.SCRIPTED),
                   providers.CLAUDE_CODE, providers.CODEX]
+# A synthetic key as LrPasswords would hold it, for the runs against the built
+# executable: carried into the command for openai (#405), and kept out of it
+# for a subscription CLI (#423). Spelled once, so the absence is checked
+# against the value that was stored.
+STORED_KEY = "stored-in-lrpasswords-not-a-real-key-9b2d"
 
 
 def _engines_the_plugin_knows(tmp_path: Path) -> list[str]:
@@ -398,14 +403,14 @@ def test_the_cli_engine_preference_reaches_the_executable_through_the_command_th
 
     command = _command_the_plugin_builds(
         plugin_dir, photos, photos / "results.json", tmp_path, engine=engine,
-        stored_key="stored-in-lrpasswords-not-a-real-key-9b2d")
+        stored_key=STORED_KEY)
     assert f"--backend {as_the_shell_receives_it(engine)}" in command, command
     # The executable first: on Windows after the quote the whole line is
     # wrapped in for cmd.exe, on macOS at the very start.
     line = command[1:] if WINDOWS else command
     assert line.startswith(as_the_shell_receives_it(plugin_dir / built_executable.name)), (
         f"something is set ahead of the executable for an engine that needs no key:\n{command}")
-    assert "MELAMPUS_" not in command and "not-a-real-key" not in command, command
+    assert "MELAMPUS_" not in command and STORED_KEY not in command, command
 
     proc = run_as_lightroom_would(command, env=env, cwd=tmp_path,
                                   capture_output=True, text=True, timeout=600)
@@ -417,7 +422,7 @@ def test_the_cli_engine_preference_reaches_the_executable_through_the_command_th
     assert "invalid choice" not in tail, f"the executable does not accept {engine}:\n{tail}"
 
 
-@pytest.mark.parametrize("stored_key", ["", "stored-in-lrpasswords-not-a-real-key-9b2d"])
+@pytest.mark.parametrize("stored_key", ["", STORED_KEY])
 def test_the_stored_key_reaches_the_executable_through_the_command_the_plugin_builds(
     built_executable: Path, photos: Path, tmp_path: Path, stored_key: str
 ):
