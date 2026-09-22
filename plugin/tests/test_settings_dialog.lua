@@ -288,7 +288,9 @@ end)
 
 -- ── the subscription CLIs (card #423) ──────────────────────────────────────
 --- The picked engine's line under the picker: the one static_text whose
---- title is bound to prefs.engine, and what it shows for `engine`.
+--- title is bound to prefs.engine, and what it shows for `engine`. The
+--- binding names the preferences with the SDK's own spelling
+--- (`bind_to_object`; anything else the SDK ignores).
 local function pickedReasonShown(contents, engine)
 	local found = nil
 	for _, entry in ipairs(viewsOfKind(contents, 'static_text')) do
@@ -298,6 +300,7 @@ local function pickedReasonShown(contents, engine)
 		end
 	end
 	t.isNotNil(found, 'no line under the picker follows the picked engine')
+	t.isTrue(found.title.bind_to_object == mock.state.prefs, 'the title binding does not name the preferences as bind_to_object')
 	t.equals(type(found.title.transform), 'function', 'the line has no transform')
 	return found.title.transform(engine, mock.state.prefs)
 end
