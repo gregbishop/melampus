@@ -324,18 +324,32 @@ CODEX_PROGRAM = "codex"
 #: the selected config profile sets sandbox_mode, Codex uses those older
 #: sandbox settings instead of default_permissions" (config-reference:
 #: "Don't combine with sandbox_mode"). A profile's commands have no
-#: network unless `network.enabled` says so, and nothing is writable: the
-#: profile names no "write". Measured on 0.155.1 with `codex sandbox -P`
+#: network unless `network.enabled` says so, and writes are denied
+#: everywhere the profile governs except the shared temp directories
+#: `:minimal` grants. Measured on 0.155.1 with `codex sandbox -P`
 #: under this profile from a staged folder under $TMPDIR, no model call:
 #: the staged file read; a file in a sibling temp folder, and the home
-#: folder, "Operation not permitted"; a write in the staged folder denied;
-#: `curl` could not resolve a host. What `:minimal` grants is Codex's, not
-#: ours: /etc/hosts and /tmp (with /private/tmp and /private/var/tmp) read
+#: folder, "Operation not permitted"; a write in the staged folder, in a
+#: sibling temp folder and in the home folder denied; `curl` could not
+#: resolve a host. What `:minimal` grants is Codex's, not ours:
+#: /etc/hosts and /tmp (with /private/tmp and /private/var/tmp) read
 #: as before, even under an explicit deny (measured); the user's home,
 #: other temp folders and everything else outside the staged folder do
-#: not. Permission profiles are documented as beta ("under active
-#: development and may change"); the shape here is the documentation's
-#: own example, pinned by test_codex_template_is_the_documented_exec_invocation.
+#: not. The same grant is where the write boundary stops (security review
+#: round 9, measured the same way): /tmp, /private/tmp, /var/tmp and
+#: /private/var/tmp are writable, and a command may execute what it wrote
+#: there, which is still on disk after the run. The profile cannot close
+#: that at this version: all four named "deny" in the filesystem table
+#: still allowed the write, and dropping `":minimal"="read"` left the
+#: session producing no output at all. So a photograph's text can leave a
+#: payload or an instruction in those directories for the next run to read
+#: back: `--ephemeral` keeps no session per frame, but the channel
+#: survives from one frame to the next. Whether that is acceptable for
+#: this engine is the owner's call, on its own card; docs/config.md says
+#: the same and test_docs.py pins it. Permission profiles are documented
+#: as beta ("under active development and may change"); the shape here is
+#: the documentation's own example, pinned by
+#: test_codex_template_is_the_documented_exec_invocation.
 #: `--color never` keeps ANSI out of the stderr the error messages quote.
 #: The prompt is the positional argument, last: the pipeline's prompt in
 #: full; the image needs no mention, it is attached.

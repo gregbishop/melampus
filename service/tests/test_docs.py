@@ -868,6 +868,28 @@ def test_config_doc_says_what_environment_the_cli_is_launched_with(cli):
     assert "CLI_ENVIRONMENT" in architecture, "docs/architecture.md does not name the CLI environment"
 
 
+def test_config_doc_says_the_codex_profile_leaves_the_shared_temp_directories_writable():
+    """Security review round 9, S1: the permission profile `CODEX_COMMAND`
+    carries denies writes everywhere it governs except the shared temp
+    directories `":minimal" = "read"` grants. Measured on codex-cli 0.155.1
+    with `codex sandbox -P` under that exact profile, no model call: a
+    command wrote to `/tmp`, `/private/tmp`, `/var/tmp` and
+    `/private/var/tmp`, made one of them executable and ran it, and the
+    files were still on disk outside the sandbox afterwards, while a write
+    in the staged folder and in the home folder was "Operation not
+    permitted". So a photograph's text has a channel that outlives the
+    frame `--ephemeral` ends. The suite never runs the real Codex, so the
+    prose is what can be pinned: docs/config.md must name those paths as
+    writable and must not say the profile writes nowhere."""
+    prose = " ".join(CONFIG_DOC.read_text(encoding="utf-8").split())
+    for path in ("`/tmp`", "`/private/tmp`", "`/var/tmp`", "`/private/var/tmp`"):
+        assert path in prose, f"docs/config.md does not name {path} under the profile"
+    for said in ("writable", "execute what it wrote", "from one frame to the next"):
+        assert said in prose, f"docs/config.md does not say {said!r} of the shared temp directories"
+    assert "no write anywhere" not in prose, (
+        "docs/config.md still says the profile writes nowhere; writes land in the shared temp directories")
+
+
 def test_the_docs_say_a_claude_code_key_comes_from_the_settings_not_the_environment():
     """Review round 8, C1 (review round 7, C2's defect in one more place):
     melampus's own environment never reaches Claude Code

@@ -5113,7 +5113,15 @@ def test_codex_template_is_the_documented_exec_invocation():
     folder's file and the home folder "Operation not permitted", a write
     in the staged folder denied, a command's network off. What this test
     pins is the template's one copy: the profile's overrides parse to
-    exactly that shape, granting read to nothing else. The prompt is the
+    exactly that shape, granting read to nothing else. The `"write" not in
+    repr(profile)` below pins that text too — the profile names no "write"
+    — and nothing more: it is not evidence that nothing is writable.
+    Security review round 9, S1 measured the same profile allowing a write,
+    and the execution of what was written, in the shared temp directories
+    `:minimal` grants (/tmp, /private/tmp, /var/tmp, /private/var/tmp).
+    That boundary is stated in providers.py and docs/config.md, and pinned
+    by test_docs.py's
+    test_config_doc_says_the_codex_profile_leaves_the_shared_temp_directories_writable. The prompt is the
     positional argument, last, the pipeline's prompt in full. It is a
     valid `[model] command` by the config's own rule."""
     import tomllib

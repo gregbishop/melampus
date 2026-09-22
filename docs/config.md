@@ -263,8 +263,9 @@ whose filesystem rules are `":root" = "deny"` (the documentation's own
 words: "By default, deny read access to all files on disk"), `":minimal" =
 "read"` ("a 'minimal' set of files and folders, as determined by Codex",
 the paths common tools need) and the session's workspace root, the staged
-folder, readable and nothing else, with no write anywhere and no network
-for the commands it runs. There is no `--sandbox` flag because the
+folder, readable and nothing else. Writes are denied everywhere the profile
+governs except the shared temp directories `:minimal` grants, and the
+commands it runs have no network. There is no `--sandbox` flag because the
 documentation says that with one "Codex uses those older sandbox settings
 instead of default_permissions": `--sandbox read-only` stopped writes but
 confined no read (Codex's default exec policy is the whole disk readable),
@@ -273,11 +274,24 @@ machine into its cloud conversation; this profile is the same page's "File
 access limited to workspace" example, read-only. Measured on 0.155.1 with
 `codex sandbox` under this profile, no model call: the staged file is
 read; a file in a sibling temp folder, and the home folder, are "Operation
-not permitted"; a write in the staged folder is denied; `curl` cannot
-resolve a host. What `:minimal` grants is Codex's choice, not this
-project's: `/etc/hosts` and `/tmp` stay readable (measured, even under an
-explicit deny); the home folder, other temp folders and everything else
-outside the staged folder do not. Claude Code's template confines reads
+not permitted"; a write in the staged folder, in a sibling temp folder and
+in the home folder is denied; `curl` cannot resolve a host. What `:minimal`
+grants is Codex's choice, not this project's: `/etc/hosts` and `/tmp` stay
+readable (measured, even under an explicit deny); the home folder, other
+temp folders and everything else outside the staged folder do not. That
+grant is also where the write boundary stops (security review round 9,
+measured the same way): `/tmp`, `/private/tmp`, `/var/tmp` and
+`/private/var/tmp` are **writable**, a command may execute what it wrote
+there, and what it wrote is still on disk after the run. The profile cannot
+close that at 0.155.1 — naming all four `"deny"` in the filesystem table
+still allowed the write, the same way their reads survive an explicit deny,
+and dropping `":minimal" = "read"` left the session producing no output at
+all — so text rendered in a photograph can leave a payload or an
+instruction in those directories for the next run to read back.
+`--ephemeral` keeps no session per frame, but it does not close that
+channel: it survives from one frame to the next. Whether that is acceptable
+for this engine is the owner's call, tracked on its own card.
+Claude Code's template confines reads
 the same way with its own mechanism (`--tools Read`, `--allowedTools
 Read(/{image})`, *Claude Code* above). What the commands Codex runs can
 see of the environment is closed one layer up, at the seam (Codex review
