@@ -800,7 +800,6 @@ def test_config_doc_quotes_the_codex_template_from_its_one_source():
     assert "`codex`" in architecture and "CODEX_COMMAND" in architecture
 
 
-TEST_COUNT_DOCS = (README, BRIEF, PLUGIN_DOC, ARCHITECTURE_DOC)
 # "182 tests", "46 rules tests", "11 corpus-backed tests", "410 passed",
 # "26 skipped", "skips 2": a number and a test noun, with at most one word between.
 TEST_COUNT = re.compile(
@@ -838,7 +837,7 @@ def test_docs_state_no_test_count():
     tests", "410 passed", "26 skipped", "skips 2", and "126 Python, 56 Lua"
     in a sentence about tests."""
     stated = []
-    for doc in TEST_COUNT_DOCS:
+    for doc in DOCS:
         for sentence in _sentences(doc.read_text(encoding="utf-8")):
             if _states_a_test_count(sentence):
                 stated.append(f"{doc.relative_to(REPO)}: {sentence}")
@@ -861,3 +860,16 @@ def test_the_test_count_gate_reads_every_form_of_a_count():
         assert _states_a_test_count(counted), f"the gate misses a stated count: {counted!r}"
     for uncounted in ("Run the tests with pytest before you push.", "The plugin is 126 Python."):
         assert not _states_a_test_count(uncounted), f"the gate calls this a test count: {uncounted!r}"
+
+
+def test_the_test_count_gate_reads_every_doc(tmp_path, monkeypatch):
+    """Round 1, finding 2: `DOCS` (:54) is the list every doc-wide gate in
+    this file iterates, and a doc written later must be inside this gate by
+    default rather than outside it, so the gate reads `DOCS` itself rather
+    than a re-listed subset of it. The folder is a stand-in read at call
+    time, holding one doc, which states a count."""
+    (tmp_path / "later.md").write_text("The suite is 182 tests today.\n", encoding="utf-8")
+    monkeypatch.setitem(globals(), "REPO", tmp_path)
+    monkeypatch.setitem(globals(), "DOCS", [tmp_path / "later.md"])
+    with pytest.raises(AssertionError, match=r"later\.md: The suite is 182 tests today\."):
+        test_docs_state_no_test_count()
