@@ -2346,23 +2346,37 @@ def test_command_backend_uses_the_reply_of_a_command_that_exited_leaving_its_pip
     assert process.returncode == 0, "the command was reaped last"
 
 
-def test_command_backend_leaves_a_pipe_still_held_past_the_reader_bound_to_its_holder(tmp_path):
+@pytest.mark.parametrize(
+    ("timeout", "at_least", "under"),
+    [(5.0, 4.5, 7), (1.5, 1.5, 2.5)],
+    ids=["five-second-bound-wins", "timeout-wins"],
+)
+def test_command_backend_leaves_a_pipe_still_held_past_the_reader_bound_to_its_holder(
+        tmp_path, timeout, at_least, under):
     """A pipe still held when the readers' bound runs out (by something the
     tree stop could not reach: a daemon that left the session) is left to
     its holder, not closed from here: closing a BufferedReader from another
     thread waits for the read1 in flight to return, which is a wait on the
     holder for as long as it lives, past the config's timeout. The reply
     is used at the bound, the pipe that did end is closed, and the one
-    still held is not. The fake's stdout is a real pipe whose write end
-    the test holds for longer than the bound, so a close that waits shows
-    as elapsed time rather than a hang."""
+    still held is not. The config's timeout is the ceiling on the call as
+    a whole, the readers' bound included: a command that exited in time
+    and left its stdout held by something the tree stop could not reach
+    gives the readers until the timeout or five seconds, whichever comes
+    first, not five seconds past a shorter timeout. The fake's stdout is
+    a real pipe whose write end the test holds for longer than either
+    bound, so a close that waits shows as elapsed time rather than a
+    hang; under a timeout longer than five seconds the reply is used at
+    the five seconds, and under one shorter, 1.5s here, at the timeout,
+    the call never nearing the five seconds a bound clamped to nothing
+    would take."""
     image = tmp_path / "image.jpg"
     image.write_bytes(b"jpeg")
     read_end, write_end = os.pipe()
     os.write(write_end, ID_OK.encode("utf-8"))
     stdout = os.fdopen(read_end, "rb")
     run = _FakeRun(stdout=stdout, stderr="warning: slow")
-    backend = _command_backend(run, timeout=5.0)
+    backend = _command_backend(run, timeout=timeout)
     held = [write_end]
 
     def let_go() -> None:
@@ -2375,48 +2389,7 @@ def test_command_backend_leaves_a_pipe_still_held_past_the_reader_bound_to_its_h
         took = time.monotonic() - started
 
         assert completion.text == ID_OK
-        assert 4.5 <= took < 7, f"the call took {took:.2f}s: held past the reader bound"
-        (process,) = run.processes
-        assert process.stderr.closed, "the pipe read to its end is closed"
-        assert not process.stdout.closed, "the pipe still held was closed from under its reader"
-        assert process.returncode == 0, "the command was reaped last"
-    finally:
-        holder.cancel()
-        holder.join()
-        if held:
-            let_go()
-        stdout.close()
-
-
-def test_command_backend_keeps_the_readers_bound_inside_the_timeout(tmp_path):
-    """The config's timeout is the ceiling on the call as a whole, the
-    readers' bound included: a command that exited in time and left its
-    stdout held by something the tree stop could not reach gives the
-    readers until the timeout or five seconds, whichever comes first, not
-    five seconds past a shorter timeout. The fake's stdout is a real pipe
-    whose write end the test holds for longer than either, so the reply
-    is used at the timeout, 1.5s here, and the call never nears the five
-    seconds a bound clamped to nothing would take."""
-    image = tmp_path / "image.jpg"
-    image.write_bytes(b"jpeg")
-    read_end, write_end = os.pipe()
-    os.write(write_end, ID_OK.encode("utf-8"))
-    stdout = os.fdopen(read_end, "rb")
-    run = _FakeRun(stdout=stdout, stderr="warning: slow")
-    backend = _command_backend(run, timeout=1.5)
-    held = [write_end]
-
-    def let_go() -> None:
-        os.close(held.pop())  # the holder dies and the pipe ends
-    holder = threading.Timer(8.0, let_go)
-    holder.start()
-    try:
-        started = time.monotonic()
-        completion = backend.complete(image, "prompt", 10)
-        took = time.monotonic() - started
-
-        assert completion.text == ID_OK
-        assert 1.5 <= took < 2.5, f"the call took {took:.2f}s: the readers were given past the timeout"
+        assert at_least <= took < under, f"the call took {took:.2f}s: held past the reader bound"
         (process,) = run.processes
         assert process.stderr.closed, "the pipe read to its end is closed"
         assert not process.stdout.closed, "the pipe still held was closed from under its reader"
