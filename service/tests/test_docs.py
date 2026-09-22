@@ -824,7 +824,7 @@ def test_config_doc_quotes_the_cli_template_from_its_one_source(engine, must_say
 
     from melampus import providers
 
-    (cli,) = [c for c in (providers.CLAUDE_CODE_CLI, providers.CODEX_CLI) if c.engine == engine]
+    (cli,) = [c for c in providers.CLI_ENGINES if c.engine == engine]
     text = CONFIG_DOC.read_text(encoding="utf-8")
     blocks = [
         block for block in re.findall(r"```toml\n(.*?)```", text, re.DOTALL)

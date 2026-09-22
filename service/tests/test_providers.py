@@ -3730,13 +3730,12 @@ if not args.json:
 
 # --- cards #421 and #422: the two CLIs behind the one verdict and factory ---
 
-#: The two CLIs, as the one verdict and the one factory branch see them:
+#: The subscription CLIs, as the one verdict and the one factory branch see
+#: them, from the tuple providers holds (review round 4, C2: a CLI added
+#: there reaches every test in this section, not only cli_commands):
 #: every test in this section runs once per CLI and asserts on the
 #: CliEngine's fields, never on a copy of them.
-CLIS = [
-    pytest.param(providers.CLAUDE_CODE_CLI, id="claude-code"),
-    pytest.param(providers.CODEX_CLI, id="codex"),
-]
+CLIS = [pytest.param(cli, id=cli.engine) for cli in providers.CLI_ENGINES]
 
 
 class _Fake(NamedTuple):

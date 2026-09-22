@@ -609,9 +609,7 @@ def test_executable_refuses_a_command_that_is_not_installed(
         assert works_here in tail, f"{works_here!r} is not named as working here:\n{tail}"
 
 
-@pytest.mark.parametrize(
-    "cli", [providers.CLAUDE_CODE_CLI, providers.CODEX_CLI], ids=lambda cli: cli.engine
-)
+@pytest.mark.parametrize("cli", providers.CLI_ENGINES, ids=lambda cli: cli.engine)
 def test_executable_refuses_a_cli_engine_that_is_not_installed(
     built_executable: Path, photos: Path, tmp_path: Path, cli: providers.CliEngine
 ):
