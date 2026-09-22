@@ -20,7 +20,9 @@ Two checks read the working tree instead, because each judges what the next
 commit would do rather than what the last one carried: that the lockfile is
 current with service/pyproject.toml, and the ignore rules, which are checked
 from the working-tree .gitignore because that is the file `git add -A` consults
-when a corpus is about to be staged.
+when a corpus is about to be staged. The ignore verdict is the rule git matched
+rather than its exit status, which reads the same whether a rule ignores a path
+or re-includes it.
 """
 
 import io
@@ -131,6 +133,9 @@ CORPUS_PATHS = [
 ]
 # conftest.FIXTURE names the frame; git paths are POSIX strings from the root.
 COMMITTED_FRAME = FIXTURE.relative_to(REPO).as_posix()
+# The one folder .gitignore re-includes: neither it nor the frame it holds is
+# ignored, and no other fixtures folder may hold a tracked file.
+FIXTURES_DIR = FIXTURE.parent.relative_to(REPO).as_posix()
 
 
 def test_the_frame_sits_under_the_repository_through_a_symlink(tmp_path):
@@ -145,25 +150,48 @@ def test_the_frame_sits_under_the_repository_through_a_symlink(tmp_path):
     )
 
 
-def _check_ignore(tmp_path: Path, path: str) -> subprocess.CompletedProcess[str]:
-    """`git check-ignore -v` verdict for `path` under the checkout's .gitignore."""
+def _check_ignore(tmp_path: Path, path: str, extra: str = "") -> tuple[bool, str]:
+    """Whether the checkout's .gitignore ignores `path`, and the rule that says
+    so (`source:line:pattern`, or why no rule matched).
+
+    The verdict is the matched pattern, not the exit status: `git check-ignore
+    -v` exits 0 for a negated rule too, printing the `!`-prefixed pattern that
+    re-includes the path -- a path git would happily commit. `extra` appends
+    rules to the copy, which is how that case is proven.
+    """
     repo = _throwaway_repo(tmp_path)
-    (repo / ".gitignore").write_bytes((REPO / ".gitignore").read_bytes())
-    # 0: ignored (stdout names the source rule); 1: not ignored; other: error.
-    return _git("check-ignore", "-v", "--", path, check=False, repo=repo)
+    rules = (REPO / ".gitignore").read_bytes() + extra.encode()
+    (repo / ".gitignore").write_bytes(rules)
+    # 0: a rule matched, stdout "source:line:pattern\tpath"; 1: none did.
+    verdict = _git("check-ignore", "-v", "--", path, check=False, repo=repo)
+    if verdict.returncode != 0:
+        return False, f"no rule matches {path}: {verdict.stderr.strip()}"
+    rule = verdict.stdout.split("\t", 1)[0]
+    return not rule.split(":", 2)[2].startswith("!"), rule
 
 
 @pytest.mark.parametrize("path", CORPUS_PATHS)
 def test_a_corpus_folder_is_ignored_anywhere_in_the_checkout(tmp_path, path):
-    verdict = _check_ignore(tmp_path, path)
-    assert verdict.returncode == 0, f"{path} is committable: {verdict.stderr}"
-    source = verdict.stdout.split(":", 1)[0]
-    assert source == ".gitignore", verdict.stdout
+    ignored, rule = _check_ignore(tmp_path, path)
+    assert ignored, f"{path} is committable: {rule}"
+    # The rule is the checkout's own, not a global excludes file git also reads.
+    assert rule.startswith(".gitignore:"), rule
 
 
-def test_the_committed_frame_is_not_ignored(tmp_path):
-    verdict = _check_ignore(tmp_path, COMMITTED_FRAME)
-    assert verdict.returncode == 1, f"{COMMITTED_FRAME} is ignored: {verdict.stdout}"
+def test_a_negation_is_not_an_ignore(tmp_path):
+    """The check that makes the corpus gate above mean anything. A negated rule
+    re-includes the path, and `git check-ignore -v` still exits 0 on it: read
+    that status alone and `!/fixtures` in .gitignore would leave the corpus
+    symlink committable with every case above still passing."""
+    ignored, rule = _check_ignore(tmp_path, "fixtures", extra="\n!/fixtures\n")
+    assert not ignored, f"a negated rule was read as an ignore: {rule}"
+    assert rule.endswith(":!/fixtures"), rule
+
+
+@pytest.mark.parametrize("path", [COMMITTED_FRAME, FIXTURES_DIR])
+def test_the_committed_frame_is_not_ignored(tmp_path, path):
+    ignored, rule = _check_ignore(tmp_path, path)
+    assert not ignored, f"{path} is ignored: {rule}"
 
 
 # Card #441, Done-when 2. service/tests/fixtures/ holds one frame, downscaled
@@ -176,7 +204,6 @@ def test_the_committed_frame_is_not_ignored(tmp_path):
 # BMP in unopened, and a raw carries the whole camera record, while an exemption
 # by suffix would let the same bytes in under a .txt name.
 FRAME_CEILING = 400 * 1024
-FIXTURES_DIR = FIXTURE.parent.relative_to(REPO).as_posix()
 CORPUS_DIRS = {"fixtures", "fixtures_full"}
 
 
