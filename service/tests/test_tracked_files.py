@@ -122,6 +122,12 @@ CORPUS_PATHS = [
     "plugin/fixtures/x.jpg",
     "service/tests/quality/fixtures/x.jpg",
     "fixtures_full/nested/x.jpg",
+    # A corpus folder nested under the re-included one. This is where
+    # `!/service/tests/fixtures` could over-reach: the negation exempts the
+    # committed frame's folder, and a corpus dropped inside it is still a
+    # corpus. The root-only rules it replaces let both of these through.
+    "service/tests/fixtures/fixtures/x.jpg",
+    "service/tests/fixtures/fixtures_full/x.jpg",
 ]
 # conftest.FIXTURE names the frame; git paths are POSIX strings from the root.
 COMMITTED_FRAME = FIXTURE.relative_to(REPO).as_posix()
