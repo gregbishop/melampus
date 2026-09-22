@@ -13,9 +13,11 @@ path, and service/uv.lock is tracked. One check against the working tree: that
 lockfile is current with service/pyproject.toml. Card #441 adds the corpus
 gates: .gitignore ignores a photo corpus folder wherever it lands in the
 checkout, no tracked file sits under any other fixtures folder, and every frame
-in service/tests/fixtures/ is small and EXIF-free like the first one.
+in service/tests/fixtures/ is small and EXIF-free like the first one. The frame
+gate reads each blob from the index, so it judges the bytes a push would carry.
 """
 
+import io
 import subprocess
 from pathlib import Path
 
@@ -27,10 +29,22 @@ REPO = Path(__file__).resolve().parents[2]
 HOME_PATH = "/(Users|home)/[^/[:space:]`'\"]+/"
 
 
-def _git(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+def _git(*args: str, check: bool = True, text: bool = True, repo: Path = REPO):
     return subprocess.run(
-        ["git", "-C", str(REPO), *args], check=check, capture_output=True, text=True
+        ["git", "-C", str(repo), *args], check=check, capture_output=True, text=text
     )
+
+
+def _index_bytes(path: str, repo: Path = REPO) -> bytes:
+    """The blob staged for `path`: what a push carries, whatever is on disk."""
+    return _git("cat-file", "-p", f":{path}", text=False, repo=repo).stdout
+
+
+def _throwaway_repo(tmp_path: Path) -> Path:
+    repo = tmp_path / "repo"
+    repo.mkdir(exist_ok=True)
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    return repo
 
 
 def _tracked_symlinks():
@@ -107,10 +121,8 @@ COMMITTED_FRAME = "service/tests/fixtures/0A1A2829.jpg"
 
 def _check_ignore(tmp_path: Path, path: str) -> subprocess.CompletedProcess[str]:
     """`git check-ignore -v` verdict for `path` under the checkout's .gitignore."""
-    repo = tmp_path / "repo"
-    repo.mkdir(exist_ok=True)
+    repo = _throwaway_repo(tmp_path)
     (repo / ".gitignore").write_bytes((REPO / ".gitignore").read_bytes())
-    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
     # 0: ignored (stdout names the source rule); 1: not ignored; other: error.
     return subprocess.run(
         ["git", "check-ignore", "-v", "--", path],
@@ -147,13 +159,14 @@ FIXTURES_DIR = "service/tests/fixtures"
 CORPUS_DIRS = {"fixtures", "fixtures_full"}
 
 
-def _frame_problems(path: Path) -> list[str]:
+def _frame_problems(data: bytes) -> list[str]:
+    """Why `data` (a blob from the index) is not a committable frame."""
     problems = []
-    size = path.stat().st_size
+    size = len(data)
     if size > FRAME_CEILING:
         problems.append(f"{size} bytes, over the {FRAME_CEILING} byte ceiling")
     try:
-        with Image.open(path) as image:
+        with Image.open(io.BytesIO(data)) as image:
             if image.getexif() or "exif" in image.info:
                 problems.append("carries EXIF")
     except UnidentifiedImageError:
@@ -187,41 +200,58 @@ def _gated_fixtures(tracked):
     ]
 
 
-def _frame(tmp_path: Path, name: str, **save) -> Path:
-    path = tmp_path / name
-    Image.new("RGB", (8, 8)).save(path, **save)
-    return path
+def _frame(image: Image.Image | None = None, **save) -> bytes:
+    """A JPEG's bytes, the way the gate sees a blob."""
+    buffer = io.BytesIO()
+    (image or Image.new("RGB", (8, 8))).save(buffer, format="JPEG", **save)
+    return buffer.getvalue()
 
 
 def test_the_committed_frame_passes_the_gate():
-    assert _frame_problems(REPO / COMMITTED_FRAME) == []
+    assert _frame_problems(_index_bytes(COMMITTED_FRAME)) == []
 
 
-def test_a_frame_over_the_ceiling_is_refused(tmp_path):
-    path = tmp_path / "big.jpg"
+def test_a_frame_over_the_ceiling_is_refused():
     # Noise does not compress: 1200 x 800 at quality 100 is well over 1 MB.
-    Image.effect_noise((1200, 800), 64).save(path, quality=100)
-    assert any("over the" in problem for problem in _frame_problems(path))
+    big = _frame(Image.effect_noise((1200, 800), 64), quality=100)
+    assert any("over the" in problem for problem in _frame_problems(big))
 
 
-def test_a_frame_with_exif_is_refused(tmp_path):
+def test_a_frame_with_exif_is_refused():
     exif = Image.Exif()
     exif[0x010F] = "Camera"  # Make
-    assert _frame_problems(_frame(tmp_path, "tagged.jpg", exif=exif)) == [
+    assert _frame_problems(_frame(exif=exif)) == ["carries EXIF"]
+
+
+def test_a_small_stripped_frame_passes():
+    assert _frame_problems(_frame()) == []
+
+
+def test_the_gate_judges_the_index_not_the_working_tree(tmp_path):
+    """What a push carries is the staged blob. A clean frame staged and then
+    overwritten on disk by a tagged one still passes; the reverse is refused."""
+    repo = _throwaway_repo(tmp_path)
+    exif = Image.Exif()
+    exif[0x010F] = "Camera"  # Make
+    plain, tagged = _frame(), _frame(exif=exif)
+
+    (repo / "frame.jpg").write_bytes(plain)
+    _git("add", "frame.jpg", repo=repo)
+    (repo / "frame.jpg").write_bytes(tagged)
+    assert _frame_problems(_index_bytes("frame.jpg", repo=repo)) == []
+
+    _git("add", "frame.jpg", repo=repo)
+    (repo / "frame.jpg").write_bytes(plain)
+    assert _frame_problems(_index_bytes("frame.jpg", repo=repo)) == [
         "carries EXIF"
     ]
 
 
-def test_a_small_stripped_frame_passes(tmp_path):
-    assert _frame_problems(_frame(tmp_path, "plain.jpg")) == []
-
-
-def test_a_frame_the_gate_cannot_read_is_refused(tmp_path):
+def test_a_frame_the_gate_cannot_read_is_refused():
     # A raw file (CR3, DNG, HEIC) carries the full camera record and Pillow
     # cannot read it, so the gate cannot prove it stripped: refused, by name.
-    path = tmp_path / "frame.cr3"
-    path.write_bytes(bytes(range(256)) * 8)
-    assert _frame_problems(path) == ["not an image the gate can read"]
+    raw = bytes(range(256)) * 8
+    assert _frame_problems(raw) == ["not an image the gate can read"]
 
 
 def test_every_fixture_but_a_text_file_is_gated():
@@ -278,7 +308,7 @@ def test_every_committed_frame_is_small_and_exif_free():
         _git("ls-files", "-z", "--", FIXTURES_DIR).stdout.split("\0")
     )
     assert COMMITTED_FRAME in frames, "the smoke test's frame is not tracked"
-    refused = {p: _frame_problems(REPO / p) for p in frames}
+    refused = {p: _frame_problems(_index_bytes(p)) for p in frames}
     refused = {p: problems for p, problems in refused.items() if problems}
     assert not refused, (
         "a committed frame is not small and stripped like the first one: "
