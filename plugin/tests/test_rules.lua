@@ -432,6 +432,28 @@ t.test('the link is the install page the verdict carries, never an address its r
 		'a table of which engines are installable is a second copy of what the executable already says')
 end)
 
+t.test('the link is an install page the browser can open, never another scheme the OS would launch', function()
+	-- The link is the one thing the plugin hands the operating system's URL
+	-- opener (MelampusSettings: LrHttp.openUrlInBrowser on the dialog's one
+	-- clickable line), and it comes from JSON read back off disk. Until card
+	-- #423 the address was scraped out of the reason with 'https?://[^%s]+',
+	-- so its scheme was constrained by construction; moving it to the
+	-- verdict's `install` field dropped that constraint with the scrape
+	-- (Claude security review round 11). The producer is melampus's own
+	-- constants, so this is defence in depth — but a file: address, a
+	-- registered custom handler, or a bare host is not something to open in
+	-- a browser, and what the picker will not link still belongs in the note
+	-- as text, with the engine greyed exactly as before.
+	for _, address in ipairs({ 'file:///Applications/Something.app', 'x-install://melampus', 'ollama.com/download' }) do
+		local reason = 'no Ollama server at http://127.0.0.1:11434; install it from ' .. address
+		local items, note = Rules.engineItems(verdicts({ ollama = { install = address, reason = reason } }))
+		local byValue = itemsByValue(items)
+		t.isNil(byValue.ollama.link, address .. ' must not become the line the dialog opens in the browser')
+		t.isFalse(byValue.ollama.enabled, 'refusing ' .. address .. ' must not change what is greyed')
+		t.isNotNil(string.find(note, reason, 1, true), 'the note does not carry the reason in full:\n' .. note)
+	end
+end)
+
 t.test('without verdicts nothing is greyed and the note says why', function()
 	local problem = 'Melampus could not find its analysis program.'
 	local items, note = Rules.engineItems(nil, problem)
