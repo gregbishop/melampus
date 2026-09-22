@@ -24,6 +24,9 @@ local CLAUDE_CODE_NOT_INSTALLED = mock.canned['claude-code'].reason
 local CODEX_NOT_SIGNED_IN = mock.canned.codex.reason
 local CLAUDE_CODE_SIGNED_IN = mock.signedIn['claude-code'].reason
 local CODEX_SIGNED_IN = mock.signedIn.codex.reason
+-- The picker's items indexed by value, so a test can name one (byValue.codex):
+-- lrmock's, the one helper both suites index with.
+local itemsByValue = mock.itemsByValue
 
 local REPO = 'mlx-community/Qwen3-VL-30B-A3B-Instruct-4bit'
 local OLLAMA_MODEL = 'qwen3-vl:8b-instruct'
@@ -305,8 +308,7 @@ end
 
 t.test('a CLI that is not installed, and one not signed in, are greyed with the reason detection gave', function()
 	local contents = openSettings({ detection = mock.detectionText() })
-	local byValue = {}
-	for _, item in ipairs(enginePicker(contents).items) do byValue[item.value] = item end
+	local byValue = itemsByValue(enginePicker(contents).items)
 	t.isFalse(byValue['claude-code'].enabled, 'claude-code should be greyed when not installed')
 	t.equals(byValue['claude-code'].title, TITLES['claude-code'] .. ' (not available)')
 	t.isFalse(byValue.codex.enabled, 'codex should be greyed when not signed in')
@@ -324,8 +326,7 @@ end)
 
 t.test('a CLI that is signed in is offered, and picked, says what every frame bills to', function()
 	local contents = openSettings({ detection = mock.detectionText(mock.signedIn) })
-	local byValue = {}
-	for _, item in ipairs(enginePicker(contents).items) do byValue[item.value] = item end
+	local byValue = itemsByValue(enginePicker(contents).items)
 	t.isTrue(byValue['claude-code'].enabled, 'a signed-in claude-code should be offered')
 	t.equals(byValue['claude-code'].title, TITLES['claude-code'])
 	t.isTrue(byValue.codex.enabled, 'a signed-in codex should be offered')
