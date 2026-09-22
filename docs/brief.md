@@ -11,9 +11,10 @@ Named for the Greek seer who could understand the speech of animals — birds
 especially. *meh-LAM-pus*.
 
 Local first: MLX on Apple Silicon, or Ollama on macOS or Windows, and on
-either no image leaves the machine. Or OpenAI, Claude, Claude Code or Codex
-CLI, picked in the plugin's Settings dialog. macOS and Windows. The plugin is
-a folder with the one-file executable inside it; a user installs no Python.
+either no image leaves the machine — Ollama so long as `ollama_url` is not
+pointed at another host. Or OpenAI, Claude, Claude Code or Codex CLI, picked
+in the plugin's Settings dialog. macOS and Windows. The plugin is a folder
+with the one-file executable inside it; a user installs no Python.
 `readme.md`'s opening lists the six engines and what each bills, and a test
 holds that list to `providers.py`.
 

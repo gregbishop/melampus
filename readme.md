@@ -20,9 +20,12 @@ reason.
 | `claude-code` | Claude Code, installed and signed in | the Claude subscription it is signed in to |
 | `codex` | Codex CLI, installed and signed in | the ChatGPT subscription it is signed in to |
 
-On the two local engines no image leaves the machine. The model is not
-bundled: the Settings dialog downloads it, into the HuggingFace cache for
-`mlx`, or has Ollama pull it for `ollama`. The other four bring their own.
+On the two local engines no image leaves the machine: `mlx` runs inside the
+executable, and `ollama` talks to the Ollama server on this machine — unless
+`ollama_url` is pointed at another host, which sends every frame there
+([docs/config.md](docs/config.md) § `[model]`). The model is not bundled: the
+Settings dialog downloads it, into the HuggingFace cache for `mlx`, or has
+Ollama pull it for `ollama`. The other four bring their own.
 
 The plugin is a folder with the executable inside it, `melampus` on macOS or
 `melampus.exe` on Windows, from a release zip; a user installs no Python.
