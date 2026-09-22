@@ -20,7 +20,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
-from PIL import Image
+from PIL import Image, UnidentifiedImageError
 
 REPO = Path(__file__).resolve().parents[2]
 # POSIX ERE, for git grep.
@@ -138,8 +138,11 @@ def test_the_committed_frame_is_not_ignored(tmp_path):
 # on the same terms: under the ceiling and carrying no camera metadata, which
 # the secret scanner does not read. And no tracked file may sit under any other
 # fixtures folder, so a corpus cannot slip in even if the ignore rule is edited.
+# Every tracked fixture that is not a text file is gated as a frame, whatever
+# its suffix: an allowlist of image suffixes would let a raw (CR3, DNG), HEIC
+# or BMP in unopened, and a raw carries the whole camera record.
 FRAME_CEILING = 400 * 1024
-FRAME_SUFFIXES = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".webp"}
+TEXT_SUFFIXES = {".txt"}
 FIXTURES_DIR = "service/tests/fixtures"
 CORPUS_DIRS = {"fixtures", "fixtures_full"}
 
@@ -149,9 +152,12 @@ def _frame_problems(path: Path) -> list[str]:
     size = path.stat().st_size
     if size > FRAME_CEILING:
         problems.append(f"{size} bytes, over the {FRAME_CEILING} byte ceiling")
-    with Image.open(path) as image:
-        if image.getexif() or "exif" in image.info:
-            problems.append("carries EXIF")
+    try:
+        with Image.open(path) as image:
+            if image.getexif() or "exif" in image.info:
+                problems.append("carries EXIF")
+    except UnidentifiedImageError:
+        problems.append("not an image the gate can read")
     return problems
 
 
@@ -163,6 +169,15 @@ def _stray_fixture_paths(tracked):
         if path
         and not path.startswith(FIXTURES_DIR + "/")
         and CORPUS_DIRS.intersection(path.split("/")[:-1])
+    ]
+
+
+def _gated_fixtures(tracked):
+    """Tracked paths the frame gate opens: every fixture but a text file."""
+    return [
+        path
+        for path in tracked
+        if path and Path(path).suffix.lower() not in TEXT_SUFFIXES
     ]
 
 
@@ -195,6 +210,34 @@ def test_a_small_stripped_frame_passes(tmp_path):
     assert _frame_problems(_frame(tmp_path, "plain.jpg")) == []
 
 
+def test_a_frame_the_gate_cannot_read_is_refused(tmp_path):
+    # A raw file (CR3, DNG, HEIC) carries the full camera record and Pillow
+    # cannot read it, so the gate cannot prove it stripped: refused, by name.
+    path = tmp_path / "frame.cr3"
+    path.write_bytes(bytes(range(256)) * 8)
+    assert _frame_problems(path) == ["not an image the gate can read"]
+
+
+def test_every_fixture_but_a_text_file_is_gated():
+    # The gate selects by what a fixture is not (a text file), never by an
+    # allowlist of image suffixes: a frame under any other suffix is still a
+    # frame, and one the gate never opens is one it never refuses.
+    tracked = [
+        COMMITTED_FRAME,
+        "service/tests/fixtures/download-lines.txt",
+        "service/tests/fixtures/second.CR3",
+        "service/tests/fixtures/second.dng",
+        "service/tests/fixtures/second.bmp",
+        "",
+    ]
+    assert _gated_fixtures(tracked) == [
+        COMMITTED_FRAME,
+        "service/tests/fixtures/second.CR3",
+        "service/tests/fixtures/second.dng",
+        "service/tests/fixtures/second.bmp",
+    ]
+
+
 def test_stray_fixture_paths_are_named():
     tracked = [
         COMMITTED_FRAME,
@@ -220,8 +263,9 @@ def test_no_tracked_file_sits_under_another_fixtures_folder():
 
 
 def test_every_committed_frame_is_small_and_exif_free():
-    tracked = _git("ls-files", "-z", "--", FIXTURES_DIR).stdout.split("\0")
-    frames = [p for p in tracked if Path(p).suffix.lower() in FRAME_SUFFIXES]
+    frames = _gated_fixtures(
+        _git("ls-files", "-z", "--", FIXTURES_DIR).stdout.split("\0")
+    )
     assert COMMITTED_FRAME in frames, "the smoke test's frame is not tracked"
     refused = {p: _frame_problems(REPO / p) for p in frames}
     refused = {p: problems for p, problems in refused.items() if problems}
