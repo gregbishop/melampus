@@ -1078,6 +1078,25 @@ t.test('a message carrying line breaks is still one line in the log: control cha
 	t.isNotNil(string.find(text, ' WARN could not create or find keyword "x\\r\\n' .. forged .. '\\ny"\n', 1, true), text)
 end)
 
+t.test('the escape\'s inclusion side: NUL, 0x01, ESC, DEL and tab land as \\x00 \\x01 \\x1B \\x7F \\t, on one line, no raw byte of the set', function()
+	-- The escape's set is spelled out, 0x00-0x1F and 0x7F, and the test
+	-- above holds only \r and \n of it: the zero byte (%z, the one clause
+	-- spelled per Lua version), 0x7F and the \xHH branch for everything
+	-- else would otherwise run under no test. One message carries a byte
+	-- from each corner of the set between plain text, and the third entry
+	-- of ESCAPES with them.
+	local Log = loadLog()
+	Log.warn('could not create or find keyword "a\0b\1c\27d\127e\tf"')
+	local text = logText()
+	t.isNotNil(text, 'nothing landed at ' .. Log.path())
+	local _, lines = string.gsub(text, '\n', '')
+	t.equals(lines, 1, 'one line per message, whatever the message holds')
+	local body = string.sub(text, 1, -2)
+	local at = string.find(body, '[%z\1-\31\127]')
+	t.isNil(at, 'a raw control byte reached the log at byte ' .. tostring(at) .. ': ' .. text)
+	t.isNotNil(string.find(text, ' WARN could not create or find keyword "a\\x00b\\x01c\\x1Bd\\x7Fe\\tf"\n', 1, true), text)
+end)
+
 t.test('a UTF-8 keyword name whose continuation bytes fall in 0x80-0x9F reaches the log byte for byte, whatever the process\'s ctype locale', function()
 	-- Which bytes %c matches is the process's ctype locale's call, which
 	-- the plugin can neither read nor set: under a UTF-8 locale it takes
