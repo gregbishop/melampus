@@ -907,6 +907,41 @@ def test_config_doc_says_the_codex_profile_leaves_the_shared_temp_directories_wr
         "docs/config.md defers the decision to a card it does not name; name where the decision is recorded")
 
 
+def test_config_doc_says_the_staged_folder_sits_outside_the_shared_temp_directories():
+    """Security review round 12, S1: the profile's read boundary is the
+    staged folder, and it holds only because of where that folder is made.
+
+    `":minimal" = "read"` grants /tmp (with /private/tmp, /var/tmp and
+    /private/var/tmp) whole and writable, and `tempfile` falls back to /tmp
+    whenever $TMPDIR is unset — ordinary on Linux, in a container and under
+    a cleared environment. A staged folder placed by $TMPDIR alone would sit
+    inside the grant on exactly those machines, and the profile's central
+    property, that an injection in a photograph cannot read past the one
+    staged file, would be void there: measured on codex-cli 0.155.1 with
+    `codex sandbox -P` under this profile, workspace root in /tmp, a file in
+    another /tmp folder was read, `ls /tmp` listed the directory and the
+    staged image itself was overwritten and read back.
+
+    `images.staged_pixels` stages under melampus's own directory instead
+    (`images.STAGING_ROOT`, the one `config.cache_file` names), which the
+    same measurement refuses in a checkout and in the executable's layout
+    alike, and test_pipeline.py pins the code. The suite never runs the real
+    Codex, so what docs/config.md can be held to is the dependence it must
+    not leave unstated: the doc has to say where the staged folder is made
+    and why it is not $TMPDIR."""
+    prose = " ".join(CONFIG_DOC.read_text(encoding="utf-8").split())
+    # The sentence ends at a full stop followed by a space; the dots inside
+    # `images.staged_pixels` and `config.cache_file` are not sentence ends.
+    staging = re.search(r"That read boundary.*?\.(?=\s|$)", prose)
+    assert staging, "docs/config.md does not say where the staged folder is made"
+    for said in ("`images.staged_pixels`", "`config.cache_file`", "not under `$TMPDIR`"):
+        assert said in staging.group(0), (
+            f"docs/config.md does not say {said!r} where it says where the staged folder is made")
+    for said in ("`$TMPDIR` is unset", "overwritten and read back"):
+        assert said in prose, (
+            f"docs/config.md does not say {said!r} of a staged folder left to $TMPDIR")
+
+
 def test_the_docs_say_a_claude_code_key_comes_from_the_settings_not_the_environment():
     """Review round 8, C1 (review round 7, C2's defect in one more place):
     melampus's own environment never reaches Claude Code

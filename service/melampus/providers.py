@@ -326,12 +326,20 @@ CODEX_PROGRAM = "codex"
 #: "Don't combine with sandbox_mode"). A profile's commands have no
 #: network unless `network.enabled` says so, and writes are denied
 #: everywhere the profile governs except the shared temp directories
-#: `:minimal` grants. Measured on 0.155.1 with `codex sandbox -P`
-#: under this profile from a staged folder under $TMPDIR, no model call:
-#: the staged file read; a file in a sibling temp folder, and the home
-#: folder, "Operation not permitted"; a write in the staged folder, in a
-#: sibling temp folder and in the home folder denied; `curl` could not
-#: resolve a host. What `:minimal` grants is Codex's, not ours:
+#: `:minimal` grants. Measured on 0.155.1 with `codex sandbox -P` under
+#: this profile from a staged folder under melampus's own staging root
+#: (images.STAGING_ROOT), no model call: the staged file read; a file in
+#: a sibling staged folder, and the home folder, "Operation not
+#: permitted"; a write in the staged folder, in a sibling staged folder
+#: and in the home folder denied; `curl` could not resolve a host. The
+#: workspace root being the whole boundary is why images.staged_pixels
+#: pins where it stages instead of leaving it to $TMPDIR: `tempfile`
+#: falls back to /tmp when that variable is unset, /tmp is inside the
+#: grant below, and the same measurement with the workspace root in /tmp
+#: read a file in another /tmp folder, listed /tmp and overwrote the
+#: staged image (security review round 12; docs/config.md says the same
+#: and test_docs.py pins it, test_pipeline.py pins the code).
+#: What `:minimal` grants is Codex's, not ours:
 #: /etc/hosts and /tmp (with /private/tmp and /private/var/tmp) read
 #: as before, even under an explicit deny (measured); the user's home,
 #: other temp folders and everything else outside the staged folder do

@@ -7,6 +7,7 @@ and the no-leak guarantee are all verifiable in milliseconds and in CI.
 from __future__ import annotations
 
 import json
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -14,7 +15,7 @@ from PIL import Image
 
 from melampus.backend import ScriptedBackend
 from melampus.cache import ResultCache
-from melampus.config import load_config
+from melampus.config import cache_file, load_config
 from melampus.identify import Identifier, extract_json
 from melampus.images import NEUTRAL_NAME, content_hash, staged_pixels
 from melampus.prompts import PromptError, PromptLibrary
@@ -132,6 +133,51 @@ def test_staging_strips_every_metadata_channel(tmp_path: Path):
             assert "icc_profile" not in img.info
             assert "comment" not in img.info
             assert max(img.size) <= 800
+
+
+#: The shared temp directories Codex's `:minimal` permission grant covers,
+#: whole and writable, at codex-cli 0.155.1 (security review round 9 and
+#: round 12's S1, both measured with `codex sandbox -P` under the profile in
+#: providers.CODEX_COMMAND). The prose that records the measurement is the
+#: `#:` block above CODEX_COMMAND and docs/config.md § Codex CLI.
+MINIMAL_GRANTED_TEMP = ("/tmp", "/private/tmp", "/var/tmp", "/private/var/tmp")
+
+
+def test_staged_folder_is_outside_the_shared_temp_directories(tmp_path: Path, monkeypatch):
+    """Where the staged folder sits is the Codex profile's read boundary.
+
+    The run analysing a frame is launched with that folder as its cwd
+    (backend.CommandBackend.complete), and the Codex template's permission
+    profile denies reads everywhere but `:minimal` and the session's
+    workspace root, which is that cwd. So a staged folder inside one of the
+    directories `:minimal` grants whole is not a boundary at all: measured,
+    a sibling folder in /tmp was read and the staged image itself was
+    overwritten and read back by the run.
+
+    `tempfile` puts its directories under $TMPDIR, which on a Mac is a
+    per-user folder under /var/folders and outside the grant. With $TMPDIR
+    unset — ordinary on Linux, in a container, under a cleared environment
+    — the fallback is /tmp itself, so a boundary that depended on the
+    variable would be void exactly where nobody set it. This pins the root
+    instead: `tempfile.tempdir` set to the unset-$TMPDIR fallback, and the
+    staged folder must still land under melampus's own directory, the one
+    config.cache_file names.
+    """
+    monkeypatch.setattr(tempfile, "tempdir", "/tmp")
+    source = tmp_path / "SECRET_SPECIES_NAME.jpg"
+    Image.new("RGB", (1200, 800), (70, 100, 60)).save(source, format="JPEG")
+
+    with staged_pixels(source, max_edge=800) as staged:
+        folder = staged.resolve().parent
+        granted = [d for d in MINIMAL_GRANTED_TEMP if folder.is_relative_to(d)]
+        assert not granted, (
+            f"the staged folder {folder} sits in {granted}, which Codex's `:minimal` "
+            "grant covers whole: a sibling folder is readable and the staged image "
+            "is writable by the run analysing it"
+        )
+        assert folder.parent == cache_file("staging").resolve(), (
+            f"the staged folder {folder} is not under melampus's own staging root"
+        )
 
 
 def test_backend_never_receives_original_filename(photo: Path, config):

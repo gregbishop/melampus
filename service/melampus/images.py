@@ -17,8 +17,27 @@ from pathlib import Path
 
 from PIL import Image, ImageOps
 
+from .config import cache_file
+
 # Fixed name for every staged file: carries zero information about the original.
 NEUTRAL_NAME = "image.jpg"
+
+#: Where staged folders are made. Not $TMPDIR, and that is the point: the
+#: staged folder is also the working directory of a CLI engine's run
+#: (backend.CommandBackend.complete) and the one place the Codex template's
+#: permission profile leaves readable (providers.CODEX_COMMAND). What that
+#: profile's `:minimal` grant covers includes /tmp, /private/tmp, /var/tmp and
+#: /private/var/tmp, whole and writable, and `tempfile` falls back to /tmp
+#: whenever $TMPDIR is unset — ordinary on Linux, in a container and under a
+#: cleared environment — so a folder placed by $TMPDIR alone would be inside
+#: the grant on exactly the machines nobody set it on, with a sibling folder
+#: readable and the staged image writable by the run analysing it (measured
+#: with `codex sandbox -P`, security review round 12). This is melampus's own
+#: directory under what the user owns, the one config.cache_file names, so it
+#: is the same place in a checkout and inside the executable and it is outside
+#: the grant on both (measured the same way). Nothing else is stored here:
+#: each frame's folder is removed when its staging ends.
+STAGING_ROOT = "staging"
 
 
 def content_hash(path: Path) -> str:
@@ -51,7 +70,9 @@ def staged_pixels(path: Path, max_edge: int, quality: int = 92) -> Iterator[Path
         # Rebuild from raw bytes: carries pixels across and nothing else.
         clean = Image.frombytes("RGB", rgb.size, rgb.tobytes())
 
-    with tempfile.TemporaryDirectory(prefix="melampus-") as tmp:
+    root = cache_file(STAGING_ROOT)
+    root.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="melampus-", dir=root) as tmp:
         staged = Path(tmp) / NEUTRAL_NAME
         clean.save(staged, format="JPEG", quality=quality)
         yield staged

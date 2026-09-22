@@ -275,7 +275,19 @@ access limited to workspace" example, read-only. Measured on 0.155.1 with
 `codex sandbox` under this profile, no model call: the staged file is
 read; a file in a sibling temp folder, and the home folder, are "Operation
 not permitted"; a write in the staged folder, in a sibling temp folder and
-in the home folder is denied; `curl` cannot resolve a host. What `:minimal`
+in the home folder is denied; `curl` cannot resolve a host. That read
+boundary is worth the name only because of where the staged folder is:
+`images.staged_pixels` makes it under melampus's own directory, the one
+`config.cache_file` names, and not under `$TMPDIR`. `tempfile` falls back to
+`/tmp` whenever `$TMPDIR` is unset — ordinary on Linux, in a container and
+under a cleared environment — and `/tmp` is one of the directories
+`:minimal` grants whole, so a staged folder placed by the variable alone
+would sit inside the grant on exactly the machines nobody sets it on.
+Measured the same way (security review round 12): with the workspace root in
+`/tmp`, a file in another `/tmp` folder was read, `ls /tmp` listed the
+directory, and the staged image itself was overwritten and read back; under
+melampus's own directory all three are refused, in a checkout and in the
+executable's layout alike. What `:minimal`
 grants is Codex's choice, not this project's: `/etc/hosts` and `/tmp` stay
 readable (measured, even under an explicit deny); the home folder, other
 temp folders and everything else outside the staged folder do not. That
