@@ -155,7 +155,11 @@ your own is checked under whatever it carries of `--restricted`, `--bare`,
 refused as the run would bill it, below, and one with `--bare` is never
 signed in, since bare mode never reads the login, so its verdict says to
 remove `--bare` from the command rather than to sign in, which could not
-help it; every verdict quotes the check as it ran), as signed in but not to
+help it; and a command that runs Claude Code through a launcher, `node` and
+the script the shim wraps (the *command* row's own fix), is checked through
+that same launcher, `node <script> auth status --json` with whatever it
+carries of those flags between; every
+verdict quotes the check as it ran), as signed in but not to
 the subscription when that check passes
 on another credential (`authMethod` other than `claude.ai`: an API key, an
 OAuth or bearer token from the environment, a cloud provider; or the login
@@ -236,7 +240,10 @@ estimate, `max_images`, the cloud cache file) do not apply. Detection
 called `codex`, as refused when that resolves to a `.cmd`/`.bat` shim (the
 *command* row above: naming the file, and the status check is never run
 through it), as not signed in when `codex login status` exits non-zero
-(its documented, cheap check: no model call), as refused when that check says
+(its documented, cheap check: no model call; a command that runs Codex
+through a launcher, `node` and the script the shim wraps, the *command*
+row's own fix, is checked through that same launcher, `node <script> login
+status`), as refused when that check says
 the sign-in is an API key (`codex login --with-api-key`: that account
 bills per call, which none of the cloud guards would watch here, so the
 reason names the kind, never the key, and says to run `codex login` for the

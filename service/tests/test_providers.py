@@ -3899,6 +3899,69 @@ def test_the_cli_resolving_to_a_batch_shim_is_refused_before_its_status_check_ru
 
 @posix_only
 @pytest.mark.parametrize("cli", CLIS)
+def test_the_cli_run_through_a_launcher_is_checked_through_the_same_launcher(
+    monkeypatch, photos, tmp_path, capsys, no_ambient_keys, no_ambient_ollama, cli
+):
+    """Codex round 1 (C1): the batch-shim refusal's own fix, `node` and the
+    script the shim wraps in `[model] command`, must work. Given a template
+    whose program is an interpreter and whose next argument is the CLI's
+    script (the fake is a Python script: `python fake exec ...`, `python
+    fake -p ...`, exactly the launcher and the script), when detection
+    asks, then the status check runs through the same launcher, `python
+    fake login status` and `python fake --restricted auth status --json`,
+    never `python login status` (the interpreter, told to run a file
+    called `login`), so the verdict is available with the interpreter as
+    its executable and the fake's log shows the check reached the script
+    (its own argv after the launcher); a not-signed-in verdict quotes the
+    check as it ran, launcher and script included; the factory builds a
+    CommandBackend on that template; and `melampus-id FOLDER --backend
+    <engine> --json-out FILE` with the template in the config runs the
+    whole pipeline through it and writes the candidates."""
+    from melampus.cli import main
+
+    log = _fake_engine_cli(monkeypatch, tmp_path, cli)
+    script = shutil.which(cli.program)
+    command = [sys.executable, script, *cli.command[1:]]
+    own_check = cli.status_check(cli.command)
+
+    (verdict,) = [
+        v for v in providers.detect_engines(commands={cli.engine: command}) if v.engine == cli.engine
+    ]
+    assert verdict.available, verdict.reason
+    assert verdict.executable == shutil.which(sys.executable)
+    calls = [json.loads(line)["argv"] for line in log.read_text(encoding="utf-8").splitlines()]
+    assert calls == [own_check], "the check did not reach the script through the launcher"
+    assert cli.status_check(command) == [script, *own_check]
+
+    backend = providers.build_primary_backend(_cfg(model={"backend": cli.engine, "command": command}))
+    assert isinstance(backend, CommandBackend)
+    assert backend.command == command
+    assert backend.executable == verdict.executable
+
+    out = tmp_path / "results.json"
+    code = main([str(photos), "--config", str(_command_settings(tmp_path, command, cli.engine)),
+                 "--no-local-config", "--backend", cli.engine,
+                 "--cache", str(tmp_path / "cache.jsonl"), "--json-out", str(out)])
+    err = capsys.readouterr().err
+    assert code == 0, err
+    assert f"loading {shlex.join(command)}" in err, err
+    (result,) = json.loads(out.read_text(encoding="utf-8"))
+    assert result["status"] == "ok"
+    assert result["model"] == shlex.join(command)
+    assert [c["common_name"] for c in result["identification"]["candidates"]] == [
+        "Tricolored Heron", "Little Blue Heron"]
+
+    log.unlink()
+    _fake_engine_cli(monkeypatch, tmp_path, cli, mode="not-signed-in")
+    (verdict,) = [
+        v for v in providers.detect_engines(commands={cli.engine: command}) if v.engine == cli.engine
+    ]
+    assert not verdict.available
+    assert f"`{sys.executable} {script} {' '.join(own_check)}`" in verdict.reason, verdict.reason
+
+
+@posix_only
+@pytest.mark.parametrize("cli", CLIS)
 def test_the_cli_in_a_process_that_ignores_sigchld_is_refused_and_names_the_fix(
     monkeypatch, tmp_path, no_ambient_keys, no_ambient_ollama, cli
 ):
@@ -4655,7 +4718,10 @@ def test_the_status_check_argv_is_derived_from_the_template():
     --settings=helper.json auth status --json` reports apiKeySource
     apiKeyHelper exactly as the two-argument form does, and
     `--setting-sources=bogus` is refused as an invalid setting source, so
-    the `=` spelling is carried as given, one argument)."""
+    the `=` spelling is carried as given, one argument). A template that
+    runs the CLI through a launcher (`node` and the script an npm shim
+    wraps, the batch-shim refusal's own fix) is checked through the same
+    launcher, for either CLI (Codex round 1, C1)."""
     assert providers.claude_code_status(providers.CLAUDE_CODE_COMMAND) == [
         "--restricted", "auth", "status", "--json"]
     assert providers.claude_code_status([CLAUDE, "-p", "--output-format", "json", "{image} {prompt}"]) == [
@@ -4674,6 +4740,24 @@ def test_the_status_check_argv_is_derived_from_the_template():
         "auth", "status", "--json"]
     assert providers.claude_code_status([CLAUDE, "-p", "--settings=a=b", "--bare", "{image} {prompt}"]) == [
         "--settings=a=b", "--bare", "auth", "status", "--json"]
+    # Codex round 1 (C1): a launcher before the CLI's own arguments, the
+    # interpreter and the script an npm shim wraps, is carried as it is,
+    # then the settings flags as before; a global flag before `-p` is the
+    # CLI's own, not a launcher's, and ends the launcher.
+    claude_code, codex = providers.CLAUDE_CODE_CLI, providers.CODEX_CLI
+    assert claude_code.status_check(providers.CLAUDE_CODE_COMMAND) == [
+        "--restricted", "auth", "status", "--json"]
+    assert claude_code.status_check(["node", "/opt/claude/cli.js", *providers.CLAUDE_CODE_COMMAND[1:]]) == [
+        "/opt/claude/cli.js", "--restricted", "auth", "status", "--json"]
+    assert claude_code.status_check(["node", "cli.js", "--settings=a=b", "-p", "{image} {prompt}"]) == [
+        "cli.js", "--settings=a=b", "auth", "status", "--json"]
+    assert claude_code.status_check([CLAUDE, "--model", "sonnet", "-p", "{image} {prompt}"]) == [
+        "auth", "status", "--json"]
+    assert codex.status_check(providers.CODEX_COMMAND) == ["login", "status"]
+    assert codex.status_check(["node", "/opt/codex/codex.js", *providers.CODEX_COMMAND[1:]]) == [
+        "/opt/codex/codex.js", "login", "status"]
+    assert codex.status_check(["node", "codex.js", "-m", "gpt-5", "exec", "{image}", "{prompt}"]) == [
+        "codex.js", "login", "status"]
 
 
 @posix_only

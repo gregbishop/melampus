@@ -473,10 +473,11 @@ class CliEngine:
     status: tuple[str, ...]
     command: list[str]
     decode: Callable[[str], str]
-    #: The check's argv after the executable, for the template that will
-    #: run: `status` behind whatever of the template decides the credential
+    #: The check's argv for the CLI's own arguments (the template less its
+    #: launcher): `status` behind whatever of them decides the credential
     #: (claude_code_status carries Claude Code's settings flags).
-    status_check: Callable[[list[str]], list[str]]
+    #: `status_check` puts the template's launcher before it.
+    own_check: Callable[[list[str]], list[str]]
     #: Whether a failed check says not signed in, in the CLI's own words;
     #: a failure that does not is reported as what ran and what it said.
     signed_out: Callable[[subprocess.CompletedProcess], bool]
@@ -502,6 +503,33 @@ class CliEngine:
     #: check carries it.
     bare: str = ""
     bare_fix: str = ""
+
+    def launcher(self, command: list[str]) -> list[str]:
+        """The launcher `command` runs the CLI through: its arguments after
+        the program up to the CLI's own first argument (`self.command[1]`:
+        Claude Code's `-p`, Codex's `exec`) or the first flag, whichever
+        comes first. Empty for the common template, whose program is the
+        CLI itself; the script an npm shim wraps when the program is `node`
+        (_batch_shim's own fix; Codex round 1, C1), so the status check can
+        run the CLI the template runs. A flag ends it because Claude Code
+        takes its global flags before `-p`, and those are the CLI's own,
+        for `own_check` to decide about, not a launcher's. Launcher
+        elements are arguments to the program, which is the one thing
+        resolved and run, so they are not asked _batch_shim's question."""
+        launcher: list[str] = []
+        for argument in command[1:]:
+            if argument == self.command[1] or argument.startswith("-"):
+                break
+            launcher.append(argument)
+        return launcher
+
+    def status_check(self, command: list[str]) -> list[str]:
+        """The check's argv after the executable, for the template that
+        will run: its launcher, then `own_check` of the CLI's own
+        arguments, so the check runs the CLI the template runs, through
+        the same launcher and under the same settings flags."""
+        launcher = self.launcher(command)
+        return [*launcher, *self.own_check([command[0], *command[1 + len(launcher):]])]
 
 
 def _claude_code_status_object(status: subprocess.CompletedProcess) -> dict:
@@ -800,7 +828,7 @@ def _cli_refuse(cli: CliEngine, message: str, *, signed_out: bool) -> NoReturn:
 CLAUDE_CODE_CLI = CliEngine(
     CLAUDE_CODE, "Claude Code", CLAUDE_CODE_PROGRAM, CLAUDE_CODE_INSTALL, CLAUDE_CODE_SIGN_IN,
     CLAUDE_CODE_STATUS, CLAUDE_CODE_COMMAND, claude_code_reply,
-    status_check=claude_code_status, signed_out=_claude_code_signed_out,
+    own_check=claude_code_status, signed_out=_claude_code_signed_out,
     account=_claude_code_account, subscription="a Claude subscription",
     subscriptions=(CLAUDE_CODE_SUBSCRIPTION,), billing_docs=CLAUDE_CODE_AUTH_DOCS,
     bare=CLAUDE_CODE_BARE, bare_fix=CLAUDE_CODE_BARE_FIX,
@@ -875,7 +903,7 @@ def _codex_refuse(message: str) -> NoReturn:
 CODEX_CLI = CliEngine(
     CODEX, "Codex CLI", CODEX_PROGRAM, CODEX_INSTALL, CODEX_SIGN_IN,
     CODEX_STATUS, CODEX_COMMAND, codex_reply,
-    status_check=lambda command: list(CODEX_STATUS), signed_out=_codex_signed_out,
+    own_check=lambda command: list(CODEX_STATUS), signed_out=_codex_signed_out,
     account=_codex_account, subscription="the ChatGPT plan", bills_per_call=("an API key",),
     subscriptions=("ChatGPT",),
 )
