@@ -906,16 +906,28 @@ def test_the_test_count_gate_reads_every_doc(tmp_path, monkeypatch):
     than a re-listed subset of it. The folder is a stand-in read at call
     time.
 
-    Round 2, finding 2: it holds two docs, and the count is in the second,
-    because one doc cannot tell the two subsets apart. A gate re-listing
-    paths of its own reads the real docs, which are clean, and raises
-    nothing; a gate reading a proper prefix of `DOCS` — the shape round 1
-    had — never reaches `later.md` and raises nothing either. With one doc
-    the second kind read it anyway and this stayed green while the rest of
-    `DOCS` sat outside the gate."""
-    (tmp_path / "earlier.md").write_text("Run the tests with pytest.\n", encoding="utf-8")
-    (tmp_path / "later.md").write_text("The suite is 182 tests today.\n", encoding="utf-8")
+    Round 2, finding 2: it holds two docs, not one, because one doc cannot
+    tell the two subsets apart. A gate re-listing paths of its own reads the
+    real docs, which are clean, and raises nothing; a gate reading part of
+    `DOCS` — the shape round 1 had — reads only part of the stand-in folder.
+    With one doc, any gate that read it at all raised, and this stayed green
+    while the rest of `DOCS` sat outside the gate.
+
+    Round 3, finding 2: both docs state a count and the failure must name
+    both. With the count in the later doc alone, a gate reading `DOCS[1:]` —
+    readme.md outside it — still raised on `later.md` and this still passed,
+    so the test proved only that the last doc is read. Naming both means a
+    gate reading any proper subset of `DOCS` misses one of the two and fails
+    here."""
+    (tmp_path / "earlier.md").write_text("The suite is 182 tests today.\n", encoding="utf-8")
+    (tmp_path / "later.md").write_text("CI reports 410 passed.\n", encoding="utf-8")
     monkeypatch.setitem(globals(), "REPO", tmp_path)
     monkeypatch.setitem(globals(), "DOCS", [tmp_path / "earlier.md", tmp_path / "later.md"])
-    with pytest.raises(AssertionError, match=r"later\.md: The suite is 182 tests today\."):
+    with pytest.raises(AssertionError) as raised:
         test_docs_state_no_test_count()
+    for stated in ("earlier.md: The suite is 182 tests today.",
+                   "later.md: CI reports 410 passed."):
+        assert stated in str(raised.value), (
+            f"the gate read a subset of DOCS: its failure does not name {stated!r}: "
+            f"{raised.value}"
+        )
