@@ -389,12 +389,21 @@ def test_docs_name_the_build_and_its_smoke_test():
         "docs/brief.md has the smoke tests skipping on a missing option; they skip on a "
         f"missing build (service/tests/conftest.py's built_executable): {unconditional}"
     )
-    axis = re.search(r"The two runs differ only in ([\w-]+)", " ".join(brief.split()))
-    named = axis.group(0) if axis else None
-    assert named and axis.group(1) == "skips", (
+    about_the_two_runs = [
+        sentence for sentence in _sentences(brief) if "differ only in" in sentence
+    ]
+    assert about_the_two_runs, (
+        "docs/brief.md does not say what the two test runs differ only in"
+    )
+    axes = [
+        axis
+        for sentence in about_the_two_runs
+        for axis in re.findall(r"differ only in ([\w-]+)", sentence)
+    ]
+    assert "skips" in axes, (
         "docs/brief.md's sentence on the two runs names an axis the list it introduces is "
         "not: those differences are skips the runner's environment causes, not the build's "
-        f"doing: {named!r}"
+        f"doing: {axes or about_the_two_runs}"
     )
 
 
