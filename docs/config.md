@@ -287,7 +287,20 @@ Measured the same way (security review round 12): with the workspace root in
 `/tmp`, a file in another `/tmp` folder was read, `ls /tmp` listed the
 directory, and the staged image itself was overwritten and read back; under
 melampus's own directory all three are refused, in a checkout and in the
-executable's layout alike. What `:minimal`
+executable's layout alike. Where that directory lands is not melampus's to
+choose, though: it follows the checkout root in a checkout, and
+`$XDG_DATA_HOME/Melampus` or the platform's per-user data directory inside
+the executable. A checkout under `/tmp`, or a frozen run with
+`$XDG_DATA_HOME` pointed there, puts the staged folder back inside the grant
+— measured the same way (security review round 9), with a checkout in `/tmp`
+and the staging root at its `.melampus_cache/staging`: a sibling frame's
+staged file was read, the staging root was listed, and the staged image was
+overwritten and read back. So melampus resolves that root and
+checks it before it stages anything, and refuses to stage at all when it
+lands inside `/tmp`, `/private/tmp`, `/var/tmp` or `/private/var/tmp`, naming
+the root and what to move (`images.staging_root`; resolved, because `/tmp` is
+a symlink to `/private/tmp` on a Mac and a root reached through a link of its
+own is where the link leads). What `:minimal`
 grants is Codex's choice, not this project's: `/etc/hosts` and `/tmp` stay
 readable (measured, even under an explicit deny); the home folder, other
 temp folders and everything else outside the staged folder do not. That

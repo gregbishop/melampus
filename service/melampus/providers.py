@@ -338,7 +338,12 @@ CODEX_PROGRAM = "codex"
 #: grant below, and the same measurement with the workspace root in /tmp
 #: read a file in another /tmp folder, listed /tmp and overwrote the
 #: staged image (security review round 12; docs/config.md says the same
-#: and test_docs.py pins it, test_pipeline.py pins the code).
+#: and test_docs.py pins it, test_pipeline.py pins the code). Pinning the
+#: directory is not the whole of it either: where melampus's own directory
+#: lands follows the checkout root in a checkout and $XDG_DATA_HOME inside
+#: the executable, so a checkout under /tmp puts it back in the grant.
+#: images.staging_root resolves that root and refuses to stage when it is
+#: inside the grant, naming it (security review round 9).
 #: What `:minimal` grants is Codex's, not ours:
 #: /etc/hosts and /tmp (with /private/tmp and /private/var/tmp) read
 #: as before, even under an explicit deny (measured); the user's home,

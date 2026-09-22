@@ -940,6 +940,16 @@ def test_config_doc_says_the_staged_folder_sits_outside_the_shared_temp_director
     for said in ("`$TMPDIR` is unset", "overwritten and read back"):
         assert said in prose, (
             f"docs/config.md does not say {said!r} of a staged folder left to $TMPDIR")
+    # Security review round 9 (a later round, same line): melampus's own
+    # directory is not by itself outside the grant. It follows the checkout
+    # root in a checkout and $XDG_DATA_HOME/Melampus inside the executable,
+    # and a checkout under /tmp or a frozen run with that variable pointed
+    # there puts the staged folder back inside the grant, measured the same
+    # way. `images.staging_root` resolves that root and refuses it, so the
+    # doc must not leave the dependence on where the root lands unstated.
+    for said in ("`$XDG_DATA_HOME`", "`images.staging_root`", "refuses to stage"):
+        assert said in prose, (
+            f"docs/config.md does not say {said!r} of a staging root that lands in the grant")
 
 
 def test_the_docs_say_a_claude_code_key_comes_from_the_settings_not_the_environment():
