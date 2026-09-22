@@ -108,6 +108,21 @@ def run_as_lightroom_would(command: str, **kwargs) -> subprocess.CompletedProces
     return subprocess.run(command, shell=True, **kwargs)
 
 
+def _engines_the_plugin_knows(tmp_path: Path) -> list[str]:
+    """`Rules.ENGINES` as the plugin reads it, through lua, in its order: the
+    one list the #403 binding and the #423 executable check both hold their
+    side against, so the script that reads it is spelled once."""
+    script = tmp_path / "engines.lua"
+    script.write_text(
+        "local Rules = require('MelampusRules')\n"
+        "io.write(table.concat(Rules.ENGINES, '\\n'))\n",
+        encoding="utf-8",
+    )
+    proc = run_lua(script)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    return proc.stdout.split("\n")
+
+
 def test_write_rules():
     """CLAUDE.md §5.3 safety rules: no overwrites, dry run, idempotency."""
     run_lua_suite(TESTS / "test_rules.lua")
@@ -165,17 +180,8 @@ def test_the_plugin_names_the_engines_the_cli_accepts(tmp_path: Path):
     CLIs (card #423; the command seam is not a picker choice), in the same
     order. A rename on either side fails here rather than as a usage error
     the user never sees."""
-    script = tmp_path / "engines.lua"
-    script.write_text(
-        "local Rules = require('MelampusRules')\n"
-        "io.write(table.concat(Rules.ENGINES, '\\n'))\n",
-        encoding="utf-8",
-    )
-    proc = run_lua(script)
-    assert proc.returncode == 0, proc.stdout + proc.stderr
-
     engines = [b for b in providers.BACKEND_CHOICES if b != providers.SCRIPTED]
-    assert proc.stdout.split("\n") == [*engines, providers.CLAUDE_CODE, providers.CODEX]
+    assert _engines_the_plugin_knows(tmp_path) == [*engines, providers.CLAUDE_CODE, providers.CODEX]
 
 
 def test_the_plugin_offers_a_download_row_for_exactly_the_engines_the_cli_fetches_a_model_for(tmp_path: Path):
@@ -356,21 +362,12 @@ def test_the_engines_the_plugin_knows_are_the_executables_in_its_order(
     one order in two places. Held to each other here against dist/melampus
     with no python on the path: a name added to one without the other fails
     CI, and the picker can never offer an engine the run would refuse."""
-    script = tmp_path / "engines.lua"
-    script.write_text(
-        "local Rules = require('MelampusRules')\n"
-        "io.write(table.concat(Rules.ENGINES, '\\n'))\n",
-        encoding="utf-8",
-    )
-    known = run_lua(script)
-    assert known.returncode == 0, known.stdout + known.stderr
-
     proc = subprocess.run(
         [str(built_executable), "--detect-engines"],
         env=no_python_environment(tmp_path), capture_output=True, text=True, timeout=600,
     )
     assert proc.returncode == 0, proc.stderr[-3000:]
-    assert [v["engine"] for v in json.loads(proc.stdout)] == known.stdout.split("\n")
+    assert [v["engine"] for v in json.loads(proc.stdout)] == _engines_the_plugin_knows(tmp_path)
 
 
 @pytest.mark.parametrize("engine", ["claude-code", "codex"])
