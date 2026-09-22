@@ -49,7 +49,7 @@ LrTasks.startAsyncTask(function()
 			f:popup_menu { value = bind 'engine', items = engineItems },
 			f:static_text {
 				title = bind {
-					key = 'engine', object = prefs,
+					key = 'engine', bind_to_object = prefs,
 					transform = function(value) return Rules.pickedReason(engineItems, value) end,
 				},
 				width_in_chars = 60, height_in_lines = 2, text_color = grey,
