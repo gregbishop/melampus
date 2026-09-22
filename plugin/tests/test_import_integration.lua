@@ -44,14 +44,17 @@ end
 -- os.tmpname() creates the file; the suite writes it and removes it at the end.
 local RESULTS = os.tmpname()
 
-local loadPluginFile, loadUnderMock = mock.loadPluginFile, mock.loadUnderMock
+local loadPluginFile, loadUnderMock, logText = mock.loadPluginFile, mock.loadUnderMock, mock.logText
 
 --- Run the real import file end to end and hand back the resulting state.
 -- `records` is what the results file holds, or nil for no results file
 -- configured at all, as on a fresh install. `photos` is a list of
 -- { fileName, rawMetadata, pluginProperties }; `options` goes through to
 -- mock.reset (confirmAnswer, existing, dropWrites), with the offer accepted
--- unless it says otherwise. Raises if the import does.
+-- unless it says otherwise; `options.keywords` is a list of keyword chains
+-- the catalog already holds before the import runs, each a list of names
+-- created one under the previous ({ 'Birds', 'Tricolored Heron' }). Raises
+-- if the import does.
 local function runImport(records, photos, prefs, options)
 	options = options or {}
 	options.prefs = prefs or {}
@@ -64,6 +67,14 @@ local function runImport(records, photos, prefs, options)
 	for _, spec in ipairs(photos) do
 		local photo = mock.addPhoto(spec[1], spec[2] or {})
 		for k, v in pairs(spec[3] or {}) do photo._plugin[k] = v end
+	end
+	for _, names in ipairs(options.keywords or {}) do
+		mock.catalog:withWriteAccessDo('seed keywords', function()
+			local parent = nil
+			for _, name in ipairs(names) do
+				parent = mock.catalog:createKeyword(name, {}, false, parent, true)
+			end
+		end)
 	end
 	mock.install(PLUGIN)
 	mock.unloadPlugin()
@@ -281,7 +292,7 @@ local function runWithDroppedWrites(fileName, drops, records, photos)
 end
 
 local function logMatching(needle)
-	for _, line in ipairs(mock.state.logLines) do
+	for line in string.gmatch(logText() or '', '[^\n]+') do
 		if string.find(line, needle, 1, true) then return line end
 	end
 	return nil
@@ -343,6 +354,21 @@ t.test('one failing photo does not stop the others', function()
 		'a neighbouring failure took down a healthy write')
 	t.isTrue(dialogMatching('Changed 1 photos') ~= nil,
 		'the count did not exclude the photo that failed')
+end)
+
+t.test('a keyword whose name the catalog already holds elsewhere is skipped and warned about, with no SDK file call inside the gate', function()
+	-- The warning is written from inside withWriteAccessDo (keywordFromPath),
+	-- and the log module makes its folder through LrFileUtils, which yields.
+	-- The run's first line is outside any gate, so the folder is known to
+	-- exist by the time the gate opens and the line inside reaches only
+	-- io.open (card #442).
+	runImport(
+		{ { file = 'c1.jpg', candidates = { { 'Tricolored Heron', 'Egretta tricolor', 0.95 } } } },
+		{ { 'c1.CR3' } }, defaultPrefs({ keywordStyle = 'hierarchical' }),
+		{ keywords = { { 'Birds', 'Tricolored Heron' } } })
+	t.isNotNil(logMatching('could not create or find keyword "Tricolored Heron"'),
+		'the skipped keyword was not warned about')
+	t.isFalse(mock.state.yieldInsideWrite, 'logging inside the write gate reached an SDK file call')
 end)
 
 -- ── analysing runs the executable beside the plugin (card #401) ────────────
@@ -640,10 +666,8 @@ end)
 
 t.test('the key is never logged', function()
 	commandWithKeys('openai', { MELAMPUS_OPENAI_KEY = KEY })
-	t.isTrue(#mock.state.logLines > 0, 'the run was not logged at all')
-	for _, line in ipairs(mock.state.logLines) do
-		t.isNil(string.find(line, KEY, 1, true), 'the key was logged: ' .. line)
-	end
+	t.isNotNil(logText(), 'the run was not logged at all')
+	t.isNil(string.find(logText(), KEY, 1, true), 'the key was logged: ' .. logText())
 end)
 
 t.test('a local engine, a subscription CLI, or no engine, carries no key even when keys are stored', function()
@@ -669,9 +693,7 @@ t.test('on Windows the key is set for cmd.exe before the executable, once', func
 	t.isTrue(ok, 'run failed: ' .. tostring(message))
 	t.equals(mock.state.executed[1], windowsCommand('claude', 'MELAMPUS_ANTHROPIC_KEY', KEY),
 		'not the command with the Claude key set for cmd.exe ahead of the executable')
-	for _, line in ipairs(mock.state.logLines) do
-		t.isNil(string.find(line, KEY, 1, true), 'the key was logged: ' .. line)
-	end
+	t.isNil(string.find(logText() or '', KEY, 1, true), 'the key was logged: ' .. tostring(logText()))
 end)
 
 t.test('on Windows a stored key holding a character cmd.exe rewrites is refused before anything runs', function()
@@ -695,9 +717,7 @@ t.test('on Windows a stored key holding a character cmd.exe rewrites is refused 
 		t.isNotNil(string.find(message, 'Settings', 1, true),
 			'the message does not say where to enter the key again:\n' .. tostring(message))
 		t.isNil(string.find(message, key, 1, true), 'the message shows the key:\n' .. message)
-		for _, line in ipairs(mock.state.logLines) do
-			t.isNil(string.find(line, key, 1, true), 'the key was logged: ' .. line)
-		end
+		t.isNil(string.find(logText() or '', key, 1, true), 'the key was logged: ' .. tostring(logText()))
 	end
 end)
 

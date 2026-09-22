@@ -15,6 +15,10 @@ local M = {}
 
 M.state = {}
 
+-- The host this mock runs on, as distinct from the Lightroom it fakes: Lua
+-- spells the directory separator first in package.config.
+local HOST_IS_WINDOWS = package.config:sub(1, 1) == '\\'
+
 --- Single-quote a path for sh. Every path the mock hands to a shell goes
 -- through here: the temp directory comes from TMPDIR, and a space, a quote,
 -- a "$" or a backtick in it must arrive as the name it is, not be split,
@@ -125,7 +129,6 @@ function M.reset(options)
 		privateTransactions = {},
 		dialogs = {},
 		confirmAnswer = options.confirmAnswer or 'ok',
-		logLines = {},
 		prefs = options.prefs or {},
 		cancelled = false,
 		yieldInsideWrite = false,
@@ -152,6 +155,12 @@ function M.reset(options)
 		-- The Windows temp folder a fake Windows Lightroom reports, when a
 		-- test names one; otherwise windowsTemp() decides.
 		windowsTemp = options.windowsTemp,
+		-- The paths LrShell was asked to reveal.
+		revealed = {},
+		-- The home folder of the Lightroom the mock fakes, when a test names
+		-- one (the boundary test hands it the executable's HOME); else one
+		-- of this run's own, see home().
+		home = options.home,
 		-- How many previews the plugin asked for in this run.
 		previewsRequested = 0,
 		-- The async tasks started and not yet finished, as coroutines: a
@@ -469,6 +478,9 @@ namespaces.LrBinding = {
 
 namespaces.LrFileUtils = {
 	exists = function(path)
+		-- Asking the disk yields in the real SDK, as readFile does; mark it
+		-- when it happens inside a gate.
+		if M.state.inWriteGate then M.state.yieldInsideWrite = true end
 		if M.state.existing[path] ~= nil then
 			return M.state.existing[path] and 'file' or false
 		end
@@ -476,7 +488,19 @@ namespaces.LrFileUtils = {
 		if handle then handle:close(); return 'file' end
 		return false
 	end,
-	createAllDirectories = function(path) os.execute('mkdir -p ' .. sh(path)) return true end,
+	createAllDirectories = function(path)
+		if M.state.inWriteGate then M.state.yieldInsideWrite = true end
+		-- A fake Windows Lightroom's folders exist nowhere on another host
+		-- (see windowsTemp): nothing is made there, as nothing is run. On a
+		-- Windows host cmd.exe's mkdir makes the whole path itself.
+		if WIN_ENV and not HOST_IS_WINDOWS then return false end
+		-- Either shell's mkdir is silenced: when the path cannot be made
+		-- (its parent is a file) the outcome is the caller's to read from
+		-- exists afterwards, and a green suite prints only its summary.
+		if HOST_IS_WINDOWS then os.execute('mkdir "' .. path .. '" 2>nul') return true end
+		os.execute('mkdir -p ' .. sh(path) .. ' 2>/dev/null')
+		return true
+	end,
 	files = function(folder)
 		local handle = io.popen('ls -1 ' .. sh(folder) .. ' 2>/dev/null')
 		local names = {}
@@ -530,10 +554,6 @@ local function tempDir()
 	return M.state.tempDir
 end
 
--- The host this mock runs on, as distinct from the Lightroom it fakes: Lua
--- spells the directory separator first in package.config.
-local HOST_IS_WINDOWS = package.config:sub(1, 1) == '\\'
-
 --- The Windows temp folder of a fake Windows Lightroom: the one the test
 -- named in reset's options, if it did. Otherwise, on a Windows host, the
 -- real one, TEMP, which is what Lightroom reports there, so a command
@@ -547,6 +567,20 @@ local function windowsTemp()
 	return 'C:\\Users\\photographer\\AppData\\Local\\Temp'
 end
 
+--- The home folder of the fake Lightroom: what a test named in reset, else
+-- a `home` folder of this run's own inside the temp directory, so whatever
+-- the plugin keeps under home (its log) never lands in the developer's. On
+-- a fake Windows Lightroom, as with temp: the real profile's stand-in under
+-- TEMP on a Windows host, elsewhere a Windows path that exists nowhere.
+local function home()
+	if M.state.home then return M.state.home end
+	if WIN_ENV then
+		if HOST_IS_WINDOWS then return windowsTemp() .. '\\lrmock-home' end
+		return 'C:\\Users\\photographer'
+	end
+	return tempDir() .. '/home'
+end
+
 -- Lightroom joins paths with the platform's separator; WIN_ENV picks it.
 namespaces.LrPathUtils = {
 	child = function(dir, name) return dir .. (WIN_ENV and '\\' or '/') .. name end,
@@ -556,7 +590,8 @@ namespaces.LrPathUtils = {
 			if WIN_ENV then return windowsTemp() end
 			return tempDir()
 		end
-		return os.getenv('HOME') or '/tmp'
+		if which == 'home' then return home() end
+		error('mock: getStandardFilePath(' .. tostring(which) .. ') is not modelled', 2)
 	end,
 }
 
@@ -590,21 +625,14 @@ namespaces.LrTasks = {
 	end,
 }
 
-namespaces.LrLogger = function(name)
-	return {
-		enable = function() end,
-		info = function(_, msg) M.state.logLines[#M.state.logLines + 1] = 'INFO ' .. tostring(msg) end,
-		warn = function(_, msg) M.state.logLines[#M.state.logLines + 1] = 'WARN ' .. tostring(msg) end,
-		error = function(_, msg) M.state.logLines[#M.state.logLines + 1] = 'ERROR ' .. tostring(msg) end,
-	}
-end
-
 namespaces.LrFunctionContext = {
 	callWithContext = function(name, func) return func({}) end,
 }
 
 namespaces.LrColor = function() return {} end
-namespaces.LrShell = { revealInShell = function() end }
+namespaces.LrShell = {
+	revealInShell = function(path) M.state.revealed[#M.state.revealed + 1] = path end,
+}
 --- The view factory hands back each spec as given, tagged with the kind of
 -- view asked for (static_text, group_box, ...), so a dialog's text can be
 -- read from the tree the plugin built: children are the array part,
@@ -677,6 +705,17 @@ function M.loadUnderMock(name, resetOptions, folder, installOptions)
 	M.reset(resetOptions)
 	M.install(folder or M.PLUGIN, installOptions)
 	return M.loadPluginFile(name)
+end
+
+--- What the plugin's log holds: the file the module writes at Log.path(),
+--- under the mock's home; nil while nothing has landed. Shared by the suites
+--- that assert on what was logged, and on what was not.
+function M.logText()
+	local handle = io.open(require('MelampusLog').path(), 'r')
+	if not handle then return nil end
+	local text = handle:read('*a')
+	handle:close()
+	return text
 end
 
 --- The plugin's default settings, from MelampusRules.lua loaded fresh, with

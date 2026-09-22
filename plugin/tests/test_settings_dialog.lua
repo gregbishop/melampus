@@ -14,6 +14,7 @@ local t = require('harness')
 local mock = require('lrmock')
 
 local PLUGIN = mock.PLUGIN
+local logText = mock.logText
 local ENGINES = mock.loadPluginFile('MelampusRules').ENGINES
 local OLLAMA_DOWNLOAD = 'https://ollama.com/download'
 local CLAUDE_CODE_INSTALL = 'https://code.claude.com/docs/en/setup'
@@ -118,7 +119,7 @@ end
 --- `code`, after `startup` ticks with the file empty; `options.detectionCode` and `options.statusCode` are the exit
 --- codes of --detect-engines and --model-status (0); `options.removeCode` is
 --- --remove-model's exit code; `options.onDialog` plays the user while the
---- dialog is up.
+--- dialog is up; `options.windows` opens it on a fake Windows Lightroom.
 local function openSettings(options)
 	options = options or {}
 	mock.loadUnderMock('MelampusSettings', {
@@ -143,7 +144,7 @@ local function openSettings(options)
 			return 0
 		end,
 		onModalDialog = options.onDialog,
-	})
+	}, PLUGIN, { windows = options.windows })
 	local modal = dialogsShown(true)
 	t.equals(#modal, 1, 'expected exactly one dialog')
 	return modal[1].contents
@@ -487,9 +488,7 @@ t.test('a typed key is stored through LrPasswords and lands nowhere else', funct
 	for name, text in pairs(pluginFiles()) do
 		t.isNil(string.find(text, TYPED, 1, true), 'the key was written into the plugin folder: ' .. name)
 	end
-	for _, line in ipairs(mock.state.logLines) do
-		t.isNil(string.find(line, TYPED, 1, true), 'the key was logged: ' .. line)
-	end
+	t.isNil(string.find(logText() or '', TYPED, 1, true), 'the key was logged: ' .. tostring(logText()))
 end)
 
 t.test('a stored key is shown back in its field, and an emptied one is forgotten', function()
@@ -832,11 +831,17 @@ end)
 -- The mock steps the two tasks: each tick the fake executable writes one
 -- more line and the poller reads what is there.
 
---- MelampusAnalyze.lua fresh under the mock, through its loader: `existing`
---- tells the mock which files are there; the rest are install options.
-local function loadAnalyze(options)
+--- One plugin file fresh under the mock, through its loader: `existing`
+--- tells the mock which files are there and `home` names the fake
+--- Lightroom's home folder; the rest are install options (`options.windows`
+--- fakes a Windows Lightroom).
+local function loadFresh(name, options)
 	options = options or {}
-	return mock.loadUnderMock('MelampusAnalyze', { existing = options.existing }, PLUGIN, options)
+	return mock.loadUnderMock(name, { existing = options.existing, home = options.home }, PLUGIN, options)
+end
+
+local function loadAnalyze(options)
+	return loadFresh('MelampusAnalyze', options)
 end
 
 t.test('the download command runs the executable for the engine with stdout to the progress file and stderr to the log, on both shells', function()
@@ -1001,6 +1006,207 @@ t.test('a failed download hands back exit 3 and the tail of the log', function()
 	mock.settle()
 	t.equals(finished().code, 3)
 	t.isNotNil(string.find(finished().tail, 'could not reach the hub', 1, true), 'no log tail: ' .. tostring(finished().tail))
+end)
+
+-- ── the log (card #442) ────────────────────────────────────────────────────
+-- The log lives under the per-user Melampus data directory, the root the
+-- executable keeps its config and caches under (config._data_root): one
+-- rule on both platforms, exact on both, and the same folder the user is
+-- sent to for everything else of Melampus's.
+
+local function loadLog(options)
+	return loadFresh('MelampusLog', options)
+end
+
+local function homeOfTheFakeLightroom()
+	return import('LrPathUtils').getStandardFilePath('home')
+end
+
+t.test('on macOS the log is <home>/Library/Application Support/Melampus/logs/Melampus.log, the executable\'s root', function()
+	local Log = loadLog()
+	local home = homeOfTheFakeLightroom()
+	t.equals(Log.dataRoot(), home .. '/Library/Application Support/Melampus')
+	t.equals(Log.folder(), home .. '/Library/Application Support/Melampus/logs')
+	t.equals(Log.path(), home .. '/Library/Application Support/Melampus/logs/Melampus.log')
+end)
+
+t.test('on Windows the log is <home>\\AppData\\Local\\Melampus\\logs\\Melampus.log, %LOCALAPPDATA%\\Melampus by default', function()
+	local Log = loadLog({ windows = true })
+	t.equals(homeOfTheFakeLightroom(), 'C:\\Users\\photographer')
+	t.equals(Log.dataRoot(), 'C:\\Users\\photographer\\AppData\\Local\\Melampus')
+	t.equals(Log.folder(), 'C:\\Users\\photographer\\AppData\\Local\\Melampus\\logs')
+	t.equals(Log.path(), 'C:\\Users\\photographer\\AppData\\Local\\Melampus\\logs\\Melampus.log')
+end)
+
+t.test('the mock\'s home is a folder of this run\'s own under its temp directory, never the developer\'s, unless a test names one', function()
+	loadLog()
+	local home = homeOfTheFakeLightroom()
+	t.equals(home, mock.state.tempDir .. '/home')
+	t.isFalse(home == os.getenv('HOME'), 'the fake Lightroom\'s home is the developer\'s')
+	local Log = loadLog({ home = '/Volumes/Elsewhere' })
+	t.equals(Log.path(), '/Volumes/Elsewhere/Library/Application Support/Melampus/logs/Melampus.log')
+end)
+
+t.test('a line written through the module lands in the log at Log.path(), its folder made on the way', function()
+	local Log = loadLog()
+	t.isNil(logText(), 'a log exists before anything was logged')
+	Log.info('running: melampus --detect-engines')
+	Log.warn('careful')
+	Log.error('broken')
+	local text = logText()
+	t.isNotNil(text, 'nothing landed at ' .. Log.path())
+	t.isNotNil(string.find(text, ' INFO running: melampus --detect-engines\n', 1, true), text)
+	t.isNotNil(string.find(text, ' WARN careful\n', 1, true), text)
+	t.isNotNil(string.find(text, ' ERROR broken\n', 1, true), text)
+	local _, lines = string.gsub(text, '\n', '')
+	t.equals(lines, 3, 'one line per message')
+end)
+
+t.test('a message carrying line breaks is still one line in the log: control characters are escaped, never written raw', function()
+	-- A keyword name from the results file or a file name is the user's, or
+	-- an attacker's, text; one shaped like a timestamped entry must not be
+	-- able to start a line of its own.
+	local Log = loadLog()
+	local forged = '2026-01-01 00:00:00 INFO forged'
+	Log.warn('could not create or find keyword "x\r\n' .. forged .. '\ny"')
+	local text = logText()
+	t.isNotNil(text, 'nothing landed at ' .. Log.path())
+	local _, lines = string.gsub(text, '\n', '')
+	t.equals(lines, 1, 'one line per message, whatever the message holds')
+	t.isNil(string.find(text, '\n' .. forged, 1, true), 'the forged fragment starts a line: ' .. text)
+	t.isNil(string.find(text, '\r', 1, true), 'a raw carriage return reached the log: ' .. text)
+	t.isNotNil(string.find(text, ' WARN could not create or find keyword "x\\r\\n' .. forged .. '\\ny"\n', 1, true), text)
+end)
+
+t.test('the escape\'s inclusion side: NUL, 0x01, ESC, DEL and tab land as \\x00 \\x01 \\x1B \\x7F \\t, on one line, no raw byte of the set', function()
+	-- The escape's set is spelled out, 0x00-0x1F and 0x7F, and the test
+	-- above holds only \r and \n of it: the zero byte (%z, the one clause
+	-- spelled per Lua version), 0x7F and the \xHH branch for everything
+	-- else would otherwise run under no test. One message carries a byte
+	-- from each corner of the set between plain text, and the third entry
+	-- of ESCAPES with them.
+	local Log = loadLog()
+	Log.warn('could not create or find keyword "a\0b\1c\27d\127e\tf"')
+	local text = logText()
+	t.isNotNil(text, 'nothing landed at ' .. Log.path())
+	local _, lines = string.gsub(text, '\n', '')
+	t.equals(lines, 1, 'one line per message, whatever the message holds')
+	local body = string.sub(text, 1, -2)
+	local at = string.find(body, '[%z\1-\31\127]')
+	t.isNil(at, 'a raw control byte reached the log at byte ' .. tostring(at) .. ': ' .. text)
+	t.isNotNil(string.find(text, ' WARN could not create or find keyword "a\\x00b\\x01c\\x1Bd\\x7Fe\\tf"\n', 1, true), text)
+end)
+
+t.test('a UTF-8 keyword name whose continuation bytes fall in 0x80-0x9F reaches the log byte for byte, whatever the process\'s ctype locale', function()
+	-- Which bytes %c matches is the process's ctype locale's call, which
+	-- the plugin can neither read nor set: under a UTF-8 locale it takes
+	-- 0x80-0x9F too, the continuation bytes of names like these, and the
+	-- escape then writes a lone lead byte followed by \xHH. The set is
+	-- spelled out instead, so the locale has no say. Set for this test
+	-- under the first name the host knows; the module load and the write
+	-- run together under one protected call, and the previous locale is
+	-- restored right after it, before any assertion, so a raise in either
+	-- cannot leave the UTF-8 locale set for the tests that follow.
+	-- A host that knows none fails the test rather than passing it: a pass
+	-- that measured nothing would count this case as covered when it is not.
+	local aerfugl, otsuki = '\195\134rfugl', '\197\140tsuki'
+	local aliases = { 'en_US.UTF-8', 'C.UTF-8', 'UTF-8' }
+	local previous = os.setlocale(nil, 'ctype')
+	local set
+	for _, name in ipairs(aliases) do
+		set = os.setlocale(name, 'ctype')
+		if set ~= nil then break end
+	end
+	local ok, result = pcall(function()
+		local Log = loadLog()
+		Log.warn('could not create or find keyword "' .. aerfugl .. '" or "' .. otsuki .. '"')
+		return Log
+	end)
+	os.setlocale(previous, 'ctype')
+	t.isNotNil(set, 'no UTF-8 ctype locale on this host: ' .. table.concat(aliases, ', ')
+		.. ' all refused; the test cannot measure what it exists to measure')
+	t.isTrue(ok, tostring(result))
+	local Log = result
+	local text = logText()
+	t.isNotNil(text, 'nothing landed at ' .. Log.path())
+	t.isNil(string.find(text, '\\x', 1, true), 'a byte of the name was escaped: ' .. text)
+	t.isNotNil(string.find(text, ' WARN could not create or find keyword "' .. aerfugl .. '" or "' .. otsuki .. '"\n', 1, true), text)
+end)
+
+t.test('the Unicode line separators NEL, U+2028 and U+2029 are escaped in the log as the control bytes are, never written raw', function()
+	-- A viewer that breaks lines on U+0085, U+2028 or U+2029 would show a
+	-- message holding one of them as two entries, the second forged; the
+	-- three are escaped at the code-point level, \u0085 \u2028 \u2029, and
+	-- every other non-ASCII byte still reaches the log as it came.
+	local Log = loadLog()
+	local nel, ls, ps = '\194\133', '\226\128\168', '\226\128\169'
+	local forged = '2026-01-01 00:00:00 INFO forged'
+	Log.warn('could not create or find keyword "x' .. nel .. forged .. ls .. forged .. ps .. 'y"')
+	local text = logText()
+	t.isNotNil(text, 'nothing landed at ' .. Log.path())
+	local _, lines = string.gsub(text, '\n', '')
+	t.equals(lines, 1, 'one line per message, whatever the message holds')
+	t.isNil(string.find(text, nel, 1, true), 'a raw NEL (U+0085) reached the log: ' .. text)
+	t.isNil(string.find(text, ls, 1, true), 'a raw U+2028 reached the log: ' .. text)
+	t.isNil(string.find(text, ps, 1, true), 'a raw U+2029 reached the log: ' .. text)
+	t.isNotNil(string.find(text, ' WARN could not create or find keyword "x\\u0085' .. forged .. '\\u2028' .. forged .. '\\u2029y"\n', 1, true), text)
+end)
+
+t.test('on a fake Windows Lightroom, whose folders exist nowhere on this host, logging raises nothing', function()
+	local Log = loadLog({ windows = true })
+	Log.info('running: melampus.exe --detect-engines')
+	t.equals(Log.path(), 'C:\\Users\\photographer\\AppData\\Local\\Melampus\\logs\\Melampus.log')
+end)
+
+t.test('a line logged inside a write gate reaches no SDK file call even when the run\'s first line could not be written', function()
+	-- A fake Windows Lightroom's folder exists nowhere on this host, so the
+	-- first line lands nowhere. The folder is consulted once per module load,
+	-- whatever the outcome; the line inside the gate reaches only io.open.
+	local Log = loadLog({ windows = true })
+	Log.info('running: melampus.exe --detect-engines')
+	mock.catalog:withWriteAccessDo('import', function()
+		Log.warn('could not create or find keyword "Tricolored Heron"')
+	end)
+	t.isFalse(mock.state.yieldInsideWrite, 'logging inside the write gate reached an SDK file call')
+end)
+
+t.test('a line logged inside a write gate reaches no SDK file call when the home is a file, so the folder cannot be made', function()
+	local Log = loadLog()
+	assert(io.open(homeOfTheFakeLightroom(), 'w')):close()
+	Log.info('running: melampus --detect-engines')
+	t.isNil(logText(), 'the log was made under a home that is a file')
+	mock.catalog:withWriteAccessDo('import', function()
+		Log.warn('could not create or find keyword "Tricolored Heron"')
+	end)
+	t.isFalse(mock.state.yieldInsideWrite, 'logging inside the write gate reached an SDK file call')
+end)
+
+t.test('Show log file makes the log again when its folder was removed mid-session', function()
+	local Log = loadLog()
+	Log.info('running: melampus --detect-engines')
+	t.isNotNil(logText(), 'nothing landed at ' .. Log.path())
+	os.execute('rm -rf ' .. mock.sh(Log.folder()))
+	t.isNil(logText(), 'the folder was not removed')
+	Log.reveal()
+	t.equals(mock.state.revealed[1], Log.path(), 'not the log that was revealed')
+	t.isNotNil(logText(), 'the log was not made again, so its folder had nothing to show')
+end)
+
+t.test('the dialog names the log at Log.path(), and Show log file reveals it in the folder that holds it, both made first', function()
+	local contents = openSettings({})
+	local Log = require('MelampusLog')
+	t.equals(#titlesMatching(contents, 'Log: ' .. Log.path()), 1, 'the dialog does not name the log at ' .. Log.path())
+	t.isNil(logText(), 'a log exists before anything was logged')
+	buttonsTitled(contents, 'Show log file')[1].action()
+	t.equals(mock.state.revealed[1], Log.path(), 'not the log that was revealed')
+	t.equals(import('LrPathUtils').parent(mock.state.revealed[1]), Log.folder())
+	t.isNotNil(logText(), 'the log was not made, so its folder had nothing to show')
+end)
+
+t.test('on Windows, Show log file reveals the log under %LOCALAPPDATA%\\Melampus', function()
+	local contents = openSettings({ windows = true })
+	buttonsTitled(contents, 'Show log file')[1].action()
+	t.equals(mock.state.revealed[1], 'C:\\Users\\photographer\\AppData\\Local\\Melampus\\logs\\Melampus.log')
 end)
 
 return t.summary()
