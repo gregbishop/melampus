@@ -3658,9 +3658,11 @@ first eight characters, `***`, last five (measured on 0.155.1 after
 `codex login --with-api-key`); "other-account" passes the status check
 with OTHER_STATUS, a line the test supplies that no version measured
 (what a future Codex might print); "not-signed-in" fails the status check
-and every run the measured way (401); "usage-limit" passes the status
-check and fails every run with the measured usage-limit reply; "hung"
-never answers the status check."""
+the measured way ("Not logged in", exit 1); "expired" passes the status
+check and fails every run with the measured 401, the way a session that
+lapses mid-batch would; "usage-limit" passes the status check and fails
+every run with the measured usage-limit reply; "hung" never answers the
+status check."""
 import json
 import os
 import sys
@@ -3740,7 +3742,7 @@ def fail(message):
     sys.exit(1)
 
 
-if MODE == "not-signed-in":
+if MODE == "expired":
     fail(UNAUTHORIZED)
 if MODE == "usage-limit":
     fail(USAGE_LIMIT)
@@ -5380,6 +5382,31 @@ def test_codex_at_its_usage_limit_stops_the_batch_at_the_first_reply(
     err = capsys.readouterr().err
     assert code == 3, err
     assert "usage limit" in err and "Sep 19th, 2026 7:46 AM" in err
+    assert not out.exists() and not (tmp_path / "cache.jsonl").exists()
+
+
+@posix_only
+def test_codex_that_lapses_mid_run_stops_the_batch_at_the_first_reply(
+    monkeypatch, photos, tmp_path, capsys
+):
+    """Done-when 2's other half, where detection cannot tell: the status
+    check passed, and the first run fails the turn with the measured 401
+    (exit 1, the stream on stdout), the way a session that lapses
+    mid-batch does. The run stops at exit 3 on a refusal naming the
+    sign-in command and Codex's own words, rather than recording it on
+    every frame; nothing is cached."""
+    from melampus.cli import main
+
+    _fake_engine_cli(monkeypatch, tmp_path, providers.CODEX_CLI, mode="expired")
+    out = tmp_path / "results.json"
+
+    code = main([str(photos), "--backend", "codex", "--cache", str(tmp_path / "cache.jsonl"),
+                 "--json-out", str(out)])
+
+    err = capsys.readouterr().err
+    assert code == 3, err
+    assert "not signed in" in err and providers.CODEX_SIGN_IN in err
+    assert "401 Unauthorized" in err, err
     assert not out.exists() and not (tmp_path / "cache.jsonl").exists()
 
 
