@@ -2990,6 +2990,47 @@ def test_command_backend_timeout_stops_the_worker_the_command_started(monkeypatc
 
 
 @posix_only
+def test_command_backend_closes_both_pipes_after_a_timeout_at_the_real_boundary(
+        monkeypatch, tmp_path, pid_file):
+    """At the real boundary, the promise of
+    test_command_backend_closes_both_pipes_after_a_completion on the path
+    that recurs in a batch (every frame of a program that hangs): a command
+    that does not answer within the timeout is stopped with its tree, its
+    two pipes end, the readers reach those ends, and both pipes are closed
+    by the backend, not left to the garbage collector (`python -X dev`
+    reports an unclosed file per pipe per timed-out frame). The Popen is
+    recorded by wrapping the backend's process factory, and the pipes are
+    looked at once the readers have reached the ends, within a short
+    bound: the readers end within milliseconds of the stop, and the close
+    is theirs to make whatever bound _wait gave them."""
+    backend = _real_command_backend(monkeypatch, tmp_path, _LAUNCHER_SCRIPT, timeout=0.5,
+                                    pid_file=str(pid_file), waits=True)
+    image = tmp_path / "image.jpg"
+    image.write_bytes(b"jpeg")
+    launch, processes = backend._run, []
+
+    def recording_launch(argv, **kwargs):
+        processes.append(launch(argv, **kwargs))
+        return processes[-1]
+    backend._run = recording_launch
+
+    try:
+        with pytest.raises(TimeoutError):
+            backend.complete(image, "prompt", 10)
+
+        (process,) = processes
+        ends = time.monotonic() + 2.0
+        while not (process.stdout.closed and process.stderr.closed) and time.monotonic() < ends:
+            time.sleep(0.05)
+        assert process.stdout.closed and process.stderr.closed, (
+            "the pipes of a timed-out command were left to the garbage collector")
+    finally:
+        for process in processes:
+            process.stdout.close()
+            process.stderr.close()
+
+
+@posix_only
 def test_command_backend_uses_the_reply_of_a_command_that_exits_leaving_a_worker(
         monkeypatch, tmp_path, pid_file):
     """At the real boundary: the command prints its reply, starts a worker

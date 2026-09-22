@@ -992,10 +992,16 @@ class CommandBackend(VLMBackend):
 
     def _drain(self, process, name: str, sink: bytearray, overflowed: list[str]) -> None:
         """Read the pipe `name` of `process` to its end into `sink`, keeping
-        at most MAX_OUTPUT_BYTES. Past that the program is a runaway: its
-        name goes on `overflowed`, which _wait watches for and stops the
-        tree on (every stop is made by the thread that reaps, before it
-        reaps), and the rest is read and dropped so the pipe still ends."""
+        at most MAX_OUTPUT_BYTES, and close it there. Past that the program
+        is a runaway: its name goes on `overflowed`, which _wait watches for
+        and stops the tree on (every stop is made by the thread that reaps,
+        before it reaps), and the rest is read and dropped so the pipe still
+        ends. The pipe is closed by the thread that read it to its end, not
+        by the garbage collector and not from another thread: closing a
+        BufferedReader from another thread blocks until the read1 in flight
+        returns, so a pipe still held past _wait's bound (by something the
+        tree stop could not reach) is left to its holder, and closed here
+        when that holder lets it go."""
         stream = getattr(process, name)
         while chunk := stream.read1(self.CHUNK_BYTES):
             if overflowed:
@@ -1004,6 +1010,7 @@ class CommandBackend(VLMBackend):
                 overflowed.append(name)
                 continue
             sink += chunk
+        stream.close()
 
     def _exited(self, process, within: float) -> bool:
         """Whether the command has exited, seen within `within` seconds and
@@ -1098,14 +1105,11 @@ class CommandBackend(VLMBackend):
             # something that left the group (a double-forked daemon) and is
             # left to it rather than waited on. The bound stops at the
             # deadline: past it the frame is an error whatever was read.
+            # Each pipe is closed by its reader at the end it reads to
+            # (_drain), whatever this bound gave it, so nothing is closed
+            # here: on the timeout path the bound is already spent, and the
+            # readers end within milliseconds of the stop, after it.
             reader.join(timeout=max(0.0, ends - time.monotonic()))
-        for reader, name in zip(readers, ("stdout", "stderr")):
-            # A pipe read to its end is closed here, not by the garbage
-            # collector; one whose reader is still in read1 is left to it,
-            # since closing a BufferedReader from another thread blocks
-            # until that read returns.
-            if not reader.is_alive():
-                getattr(process, name).close()
         process.wait()
         return in_time
 
