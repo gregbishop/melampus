@@ -423,10 +423,7 @@ t.test('without verdicts nothing is greyed and the note says why', function()
 end)
 
 t.test('when every engine is available the note is empty', function()
-	local _, note = Rules.engineItems(verdicts({
-		ollama = { available = true, reason = 'Ollama is answering' },
-		['claude-code'] = mock.signedIn['claude-code'], codex = mock.signedIn.codex,
-	}))
+	local _, note = Rules.engineItems(verdicts(mock.allAvailable()))
 	t.equals(note, '')
 end)
 
