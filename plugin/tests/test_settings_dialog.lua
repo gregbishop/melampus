@@ -1084,14 +1084,20 @@ t.test('a UTF-8 keyword name whose continuation bytes fall in 0x80-0x9F reaches 
 	-- 0x80-0x9F too, the continuation bytes of names like these, and the
 	-- escape then writes a lone lead byte followed by \xHH. The set is
 	-- spelled out instead, so the locale has no say. Set for this test
-	-- where the host has the locale, restored before any assertion.
+	-- under the first name the host knows, restored before any assertion.
+	-- A host that knows none fails the test rather than passing it: a pass
+	-- that measured nothing would count this case as covered when it is not.
 	local aerfugl, otsuki = '\195\134rfugl', '\197\140tsuki'
+	local aliases = { 'en_US.UTF-8', 'C.UTF-8', 'UTF-8' }
 	local previous = os.setlocale(nil, 'ctype')
-	local set = os.setlocale('en_US.UTF-8', 'ctype')
-	if set == nil then
-		os.setlocale(previous, 'ctype')
-		return  -- the host has no en_US.UTF-8 locale; nothing to measure here
+	local set
+	for _, name in ipairs(aliases) do
+		set = os.setlocale(name, 'ctype')
+		if set ~= nil then break end
 	end
+	if set == nil then os.setlocale(previous, 'ctype') end
+	t.isNotNil(set, 'no UTF-8 ctype locale on this host: ' .. table.concat(aliases, ', ')
+		.. ' all refused; the test cannot measure what it exists to measure')
 	local Log = loadLog()
 	local ok, err = pcall(Log.warn, 'could not create or find keyword "' .. aerfugl .. '" or "' .. otsuki .. '"')
 	os.setlocale(previous, 'ctype')
