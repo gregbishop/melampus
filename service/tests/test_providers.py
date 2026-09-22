@@ -4891,7 +4891,9 @@ def test_the_status_check_argv_is_derived_from_the_template():
     the `=` spelling is carried as given, one argument). A template that
     runs the CLI through a launcher (`node` and the script an npm shim
     wraps, the batch-shim refusal's own fix) is checked through the same
-    launcher, for either CLI (Codex round 1, C1)."""
+    launcher, for either CLI (Codex round 1, C1). Each engine's status
+    argv is stated once, in the module constant `own_check` ends with, and
+    nowhere else on the CliEngine (review round 9, C1)."""
     assert providers.claude_code_status(providers.CLAUDE_CODE_COMMAND) == [
         "--restricted", "auth", "status", "--json"]
     assert providers.claude_code_status([CLAUDE, "-p", "--output-format", "json", "{image} {prompt}"]) == [
@@ -4928,6 +4930,13 @@ def test_the_status_check_argv_is_derived_from_the_template():
         "/opt/codex/codex.js", "login", "status"]
     assert codex.status_check(["node", "codex.js", "-m", "gpt-5", "exec", "{image}", "{prompt}"]) == [
         "codex.js", "login", "status"]
+    # Review round 9 (C1): each engine's status argv is stated once, in the
+    # module constant its `own_check` ends with. A CliEngine field holding
+    # it as well would be a second statement, and the dead one.
+    for cli, stated in ((claude_code, providers.CLAUDE_CODE_STATUS), (codex, providers.CODEX_STATUS)):
+        assert cli.status_check(cli.command)[-len(stated):] == list(stated)
+        assert not hasattr(cli, "status"), (
+            f"{cli.title} states its status argv twice: CliEngine.status as well as the constant")
 
 
 @posix_only

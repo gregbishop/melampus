@@ -591,24 +591,24 @@ CLI_ENVIRONMENT: tuple[str, ...] = (
 class CliEngine:
     """A subscription CLI behind the command seam, in the owner's words: the
     engine's name, the program shutil.which looks for, where to get it, how
-    to sign in, the documented cheap status check, the built-in template,
-    the decoder that turns its stdout into the reply, and how its status
-    check is derived from a template and read: which of its words are "not
-    signed in", and what credential a passed check reports. What differs
-    between Claude Code and Codex is data here; the verdict and the
-    factory are one function each."""
+    to sign in, the built-in template, the decoder that turns its stdout
+    into the reply, and how its status check is derived from a template and
+    read: which of its words are "not signed in", and what credential a
+    passed check reports. What differs between Claude Code and Codex is
+    data here; the verdict and the factory are one function each."""
 
     engine: str
     title: str
     program: str
     install: str
     sign_in: str
-    status: tuple[str, ...]
     command: list[str]
     decode: Callable[[str], str]
     #: The check's argv for the CLI's own arguments (the template less its
-    #: launcher): `status` behind whatever of them decides the credential
-    #: (claude_code_status carries Claude Code's settings flags).
+    #: launcher): the documented cheap status check the engine's own
+    #: constant states once — CLAUDE_CODE_STATUS behind whatever of the
+    #: template's flags decide the credential (claude_code_status carries
+    #: Claude Code's settings flags), CODEX_STATUS alone.
     #: `status_check` puts the template's launcher before it.
     own_check: Callable[[list[str]], list[str]]
     #: Whether a failed check says not signed in, in the CLI's own words;
@@ -989,7 +989,7 @@ def _cli_refuse(cli: CliEngine, message: str, *, signed_out: bool) -> NoReturn:
 #: Claude Code, as the one verdict and the one factory branch see it.
 CLAUDE_CODE_CLI = CliEngine(
     CLAUDE_CODE, "Claude Code", CLAUDE_CODE_PROGRAM, CLAUDE_CODE_INSTALL, CLAUDE_CODE_SIGN_IN,
-    CLAUDE_CODE_STATUS, CLAUDE_CODE_COMMAND, claude_code_reply,
+    CLAUDE_CODE_COMMAND, claude_code_reply,
     own_check=claude_code_status, signed_out=_claude_code_signed_out,
     account=_claude_code_account, subscription="a Claude subscription",
     subscriptions=(CLAUDE_CODE_SUBSCRIPTION,), billing_docs=CLAUDE_CODE_AUTH_DOCS,
@@ -1067,7 +1067,7 @@ def _codex_refuse(message: str) -> NoReturn:
 #: about money.
 CODEX_CLI = CliEngine(
     CODEX, "Codex CLI", CODEX_PROGRAM, CODEX_INSTALL, CODEX_SIGN_IN,
-    CODEX_STATUS, CODEX_COMMAND, codex_reply,
+    CODEX_COMMAND, codex_reply,
     own_check=lambda command: list(CODEX_STATUS), signed_out=_codex_signed_out,
     account=_codex_account, subscription="the ChatGPT plan", bills_per_call=("an API key",),
     subscriptions=("ChatGPT",), settings_variable="CODEX_HOME",
