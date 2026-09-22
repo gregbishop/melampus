@@ -375,6 +375,16 @@ def test_readme_build_blocks_sync_the_sdk_extras():
     )
 
 
+def test_readme_build_section_says_where_pyinstallers_cache_goes():
+    """Card #440: the build keeps PyInstaller's cache inside the checkout, and
+    readme.md's build section says so: it names the directory, the switch a
+    caller sets to choose another, and that a corrupt cache is deleted."""
+    section = _section(README.read_text(encoding="utf-8"), "Building the executable")
+    assert section is not None, "readme.md has no ## Building the executable section"
+    for phrase in ("PYINSTALLER_CONFIG_DIR", "build/pyinstaller-config", "delete"):
+        assert phrase in section, f"readme.md's build section does not mention {phrase!r}"
+
+
 def _jobs() -> dict[str, str]:
     """ci.yml's jobs, by name, each as its text."""
     text = CI_WORKFLOW.read_text(encoding="utf-8").split("\njobs:\n", 1)[1]
