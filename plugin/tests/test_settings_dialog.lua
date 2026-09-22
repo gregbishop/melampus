@@ -1062,6 +1062,22 @@ t.test('a line written through the module lands in the log at Log.path(), its fo
 	t.equals(lines, 3, 'one line per message')
 end)
 
+t.test('a message carrying line breaks is still one line in the log: control characters are escaped, never written raw', function()
+	-- A keyword name from the results file or a file name is the user's, or
+	-- an attacker's, text; one shaped like a timestamped entry must not be
+	-- able to start a line of its own.
+	local Log = loadLog()
+	local forged = '2026-01-01 00:00:00 INFO forged'
+	Log.warn('could not create or find keyword "x\r\n' .. forged .. '\ny"')
+	local text = logText()
+	t.isNotNil(text, 'nothing landed at ' .. Log.path())
+	local _, lines = string.gsub(text, '\n', '')
+	t.equals(lines, 1, 'one line per message, whatever the message holds')
+	t.isNil(string.find(text, '\n' .. forged, 1, true), 'the forged fragment starts a line: ' .. text)
+	t.isNil(string.find(text, '\r', 1, true), 'a raw carriage return reached the log: ' .. text)
+	t.isNotNil(string.find(text, ' WARN could not create or find keyword "x\\r\\n' .. forged .. '\\ny"\n', 1, true), text)
+end)
+
 t.test('on a fake Windows Lightroom, whose folders exist nowhere on this host, logging raises nothing', function()
 	local Log = loadLog({ windows = true })
 	Log.info('running: melampus.exe --detect-engines')

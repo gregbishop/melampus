@@ -49,10 +49,24 @@ local function open()
 	return io.open(Log.path(), 'a')
 end
 
+--- One message is one line, whatever it holds. Messages carry text that is
+-- not the plugin's (keyword names from the results file, file names), and
+-- a line break in it would let that text start a timestamped line of its
+-- own. Control characters are written as their escapes, \n \r \t and \xHH
+-- for the rest, so the evidence stays readable in the log and never leaves
+-- the entry it belongs to.
+local ESCAPES = { ['\n'] = '\\n', ['\r'] = '\\r', ['\t'] = '\\t' }
+
+local function escape(text)
+	return (string.gsub(text, '%c', function(c)
+		return ESCAPES[c] or string.format('\\x%02X', string.byte(c))
+	end))
+end
+
 local function write(level, message)
 	local handle = open()
 	if not handle then return end
-	handle:write(os.date('%Y-%m-%d %H:%M:%S'), ' ', level, ' ', tostring(message), '\n')
+	handle:write(os.date('%Y-%m-%d %H:%M:%S'), ' ', level, ' ', escape(tostring(message)), '\n')
 	handle:close()
 end
 
