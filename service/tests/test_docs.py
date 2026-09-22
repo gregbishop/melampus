@@ -566,6 +566,26 @@ def test_the_action_pinning_gate_reads_a_uses_key_wherever_yaml_puts_one(tmp_pat
     assert 'quoted-key.yaml: - "uses": actions/checkout@v4' in reported, reported
 
 
+def test_the_action_pinning_gate_reads_the_pin_in_the_code_not_in_a_comment(tmp_path, monkeypatch):
+    """Round 4, finding 2: the pin check searched the whole line, comment
+    and all, for a SHA with a version after it, so a step that still names a
+    moving tag passed by mentioning a SHA in its comment. What a workflow
+    runs is the reference in the line's code; the version is what the
+    comment is for. The folder is a stand-in read at call time; ci.yml in it
+    is pinned, so the only thing wrong is the .yaml file's tag."""
+    (tmp_path / "ci.yml").write_text(
+        "      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0\n", encoding="utf-8"
+    )
+    (tmp_path / "x.yaml").write_text(
+        "      - uses: actions/checkout@v4 # formerly uses: "
+        "actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setitem(globals(), "WORKFLOWS", tmp_path)
+    with pytest.raises(AssertionError, match=r"x\.yaml: - uses: actions/checkout@v4 # formerly"):
+        test_every_workflow_pins_every_action_to_a_commit_sha_with_its_version()
+
+
 RELEASE_ZIPS = ("Melampus-macOS.zip", "Melampus-Windows.zip")
 
 
@@ -605,8 +625,16 @@ def _uses_lines(text: str) -> list[str]:
 
 def _unpinned_actions(text: str) -> list[str]:
     """The `uses:` lines in that text not pinned to a commit SHA with the
-    version in a trailing comment."""
-    return [line for line in _uses_lines(text) if not re.search(r"uses: \S+@[0-9a-f]{40}\s+# v\d", line)]
+    version in a trailing comment. What the workflow runs is the reference
+    in the line's code and the version is what the comment says, so each is
+    read where it belongs: a SHA quoted in a comment pins nothing."""
+    unpinned = []
+    for line in _uses_lines(text):
+        code = _code(line)
+        pinned = re.search(USES_KEY + r"\s*\S+@[0-9a-f]{40}\b", code) and re.search(r"#\s*v\d", line[len(code):])
+        if not pinned:
+            unpinned.append(line)
+    return unpinned
 
 
 def test_ci_packages_a_zip_per_platform_and_a_tag_releases_both():
