@@ -619,6 +619,37 @@ def test_the_action_pinning_gate_reads_the_pin_of_every_uses_on_the_line(tmp_pat
     assert "ci.yml" not in reported, reported
 
 
+def test_the_action_pinning_gate_opens_a_quoted_scalar_only_where_one_can_begin(tmp_path, monkeypatch):
+    """Round 5, finding 2: a `'` or `"` was taken as opening a quoted scalar
+    wherever it appeared, so the apostrophe in the plain scalar `don't`
+    inverted the line's quote parity. In YAML a quote is an indicator only
+    where a scalar can begin, and a quoted scalar ends at its closing quote,
+    `''` inside it being one apostrophe, not that end. Both spellings cost
+    the gate a real step: the comment was cut inside a quoted `name:`, so
+    the step's `uses:` key was thrown away with it and a moving tag was
+    never even looked at. ci.yml here is a pinned step whose name holds an
+    apostrophe: reading it as an open quote swallowed its `# v4.4.0` and
+    raised a false alarm on a step that is pinned, so ci.yml must not be
+    reported while both .yaml files must be."""
+    sha = "11d5960a326750d5838078e36cf38b85af677262"
+    (tmp_path / "ci.yml").write_text(
+        "      - {name: Don't touch, uses: actions/checkout@" + sha + "} # v4.4.0\n", encoding="utf-8"
+    )
+    (tmp_path / "plain-apostrophe.yaml").write_text(
+        "      - {a: don't, name: 'Checkout # source', uses: actions/checkout@v4}\n", encoding="utf-8"
+    )
+    (tmp_path / "escaped-quote.yaml").write_text(
+        "      - {name: 'Checkout '' # '' source', uses: actions/checkout@v4}\n", encoding="utf-8"
+    )
+    monkeypatch.setitem(globals(), "WORKFLOWS", tmp_path)
+    with pytest.raises(AssertionError) as unpinned:
+        test_every_workflow_pins_every_action_to_a_commit_sha_with_its_version()
+    reported = str(unpinned.value)
+    for name in ("plain-apostrophe.yaml", "escaped-quote.yaml"):
+        assert name in reported, reported
+    assert "ci.yml" not in reported, reported
+
+
 RELEASE_ZIPS = ("Melampus-macOS.zip", "Melampus-Windows.zip")
 
 
@@ -629,7 +660,11 @@ def _code(line: str) -> str:
     """That line without its comment. A `#` starts a comment where YAML says
     it does: at the start of the line or after a space, and outside a quoted
     scalar, so the `#` in `name: 'Checkout # source'` is part of the name and
-    the rest of the line is still code."""
+    the rest of the line is still code. A quote opens a quoted scalar only
+    where a scalar can begin -- the start of the line, or after `:`, `-`,
+    `{`, `,` or `[` -- so the apostrophe in the plain scalar `don't` is part
+    of the word; and inside a single-quoted scalar `''` is one apostrophe,
+    not the end of the scalar."""
     quote = ""
     index = 0
     while index < len(line):
@@ -637,10 +672,13 @@ def _code(line: str) -> str:
         if quote == '"' and character == "\\":
             index += 2
             continue
+        if quote == "'" and character == "'" and line[index + 1:index + 2] == "'":
+            index += 2
+            continue
         if quote:
             if character == quote:
                 quote = ""
-        elif character in "\"'":
+        elif character in "\"'" and line[:index].rstrip()[-1:] in ("", ":", "-", "{", ",", "["):
             quote = character
         elif character == "#" and (index == 0 or line[index - 1] in " \t"):
             return line[:index]
