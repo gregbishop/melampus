@@ -462,6 +462,9 @@ bills to:
 
 ![The Melampus settings dialog, with the engine picker](docs/settings-dialog.png)
 
+`docs/settings-dialog.png` predates the two CLI engines and the line under
+the picker: it shows the four-engine picker of card #405.
+
 CI (`.github/workflows/ci.yml`) builds and packages both zips through
 `tools/package_plugin.py` on every run; on a pushed `v*` tag its `release` job
 attaches them to the release. The executable is not yet signed or notarized

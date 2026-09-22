@@ -669,10 +669,12 @@ def test_docs_describe_the_cli_engines_in_the_picker():
     subscription, and where their titles come from (the verdict); readme.md's
     Lightroom section lists them among what the picker offers; docs/config.md's
     backend row, readme.md and the engine section no longer defer the picker
-    to a card yet to come. The section also sends a reader to
+    to a card yet to come. Both places that send a reader to
     docs/settings-dialog.png, which the owner takes and this card's picker has
-    outgrown, so it carries the note the Download row already has, in the same
-    words (review round 9, finding 3)."""
+    outgrown, carry the note the Download row already has, in the same words:
+    docs/plugin.md's engine section, which links it (review round 9, finding
+    3), and readme.md's Lightroom section, which embeds it (review round 10,
+    finding 1)."""
     plugin_doc = PLUGIN_DOC.read_text(encoding="utf-8")
     engine = _section(plugin_doc, "The engine")
     assert engine is not None, "docs/plugin.md has no ## The engine section"
@@ -692,6 +694,11 @@ def test_docs_describe_the_cli_engines_in_the_picker():
     assert section is not None, "readme.md has no ## Reviewing in Lightroom section"
     for named in ("claude-code", "codex"):
         assert named in section, f"readme.md's Lightroom section does not offer {named}"
+    # readme.md embeds that same picture, directly under the paragraph this
+    # card edited, so a reader meets the old four-engine dialog there too.
+    assert "`docs/settings-dialog.png` predates" in section, (
+        "readme.md's Lightroom section embeds a picture of the old dialog without "
+        "saying the screenshot predates the CLI engines")
     config_doc = CONFIG_DOC.read_text(encoding="utf-8")
     backend_row = _row(config_doc, "backend")
     for text in (backend_row, readme, prose):
