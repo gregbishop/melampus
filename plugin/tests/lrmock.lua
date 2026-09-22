@@ -46,13 +46,17 @@ function M.runThroughTheShell(command)
 	return code
 end
 
+--- Where Claude Code is installed from, as the not-installed reason says.
+M.CLAUDE_CODE_INSTALL = 'https://code.claude.com/docs/en/setup'
+
 --- What `melampus --detect-engines` says on a Mac with no Ollama running,
 -- no Claude Code installed and a Codex CLI that is not signed in, decoded:
 -- one verdict per engine, in the order the executable prints them, each
 -- with the title the picker shows (card #423). `overrides[engine]` replaces
 -- fields of that engine's verdict. The one canned answer every suite starts
 -- from, so a title and a reason are spelled once; `M.canned[engine]` is the
--- same answer by engine.
+-- same answer by engine, `M.titles[engine]` its title, and `M.signedIn` the
+-- other answer the subscription CLIs give, as an overrides table.
 function M.detectionVerdicts(overrides)
 	local list = {
 		{ engine = 'mlx', title = 'MLX — local, Apple Silicon', available = true,
@@ -65,7 +69,7 @@ function M.detectionVerdicts(overrides)
 			reason = 'API key required: set MELAMPUS_ANTHROPIC_KEY (or ANTHROPIC_API_KEY)' },
 		{ engine = 'claude-code', title = 'Claude Code — subscription, no API key', available = false,
 			reason = "Claude Code is not installed: nothing on PATH is called 'claude'; "
-				.. 'install it from https://code.claude.com/docs/en/setup, then sign in with `claude auth login`' },
+				.. 'install it from ' .. M.CLAUDE_CODE_INSTALL .. ', then sign in with `claude auth login`' },
 		{ engine = 'codex', title = 'Codex CLI — subscription, no API key', available = false,
 			reason = 'Codex CLI is installed but not signed in; run `codex login`' },
 	}
@@ -77,7 +81,20 @@ function M.detectionVerdicts(overrides)
 end
 
 M.canned = {}
-for _, v in ipairs(M.detectionVerdicts()) do M.canned[v.engine] = v end
+M.titles = {}
+for _, v in ipairs(M.detectionVerdicts()) do
+	M.canned[v.engine] = v
+	M.titles[v.engine] = v.title
+end
+
+--- The subscription CLIs signed in (card #423): each available, with the
+-- billing sentence providers._cli_verdict prints, the account in brackets.
+M.signedIn = {
+	['claude-code'] = { available = true,
+		reason = 'Claude Code is signed in (claude.ai, max); every frame bills to that subscription, not to an API key' },
+	codex = { available = true,
+		reason = 'Codex CLI is signed in (ChatGPT); every frame bills to that subscription, not to an API key' },
+}
 
 --- The same answer as the JSON text the executable prints.
 function M.detectionText(overrides)
