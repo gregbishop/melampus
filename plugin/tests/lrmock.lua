@@ -87,6 +87,14 @@ for _, v in ipairs(M.detectionVerdicts()) do
 	M.titles[v.engine] = v.title
 end
 
+--- The picker's items (Rules.engineItems, or a popup_menu's) indexed by
+-- value, so a test can name one: M.itemsByValue(items).codex.
+function M.itemsByValue(items)
+	local byValue = {}
+	for _, item in ipairs(items) do byValue[item.value] = item end
+	return byValue
+end
+
 --- The subscription CLIs signed in (card #423): each available, with the
 -- billing sentence providers._cli_verdict prints, the account in brackets.
 M.signedIn = {
