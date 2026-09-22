@@ -10,6 +10,7 @@
      Settings dialog showed was a guess, and wrong on Windows. ]]
 local LrFileUtils = import 'LrFileUtils'
 local LrPathUtils = import 'LrPathUtils'
+local LrShell = import 'LrShell'
 
 local Log = {}
 
@@ -98,7 +99,7 @@ end
 function Log.reveal()
 	local handle = open()
 	if handle then handle:close() end
-	import('LrShell').revealInShell(Log.path())
+	LrShell.revealInShell(Log.path())
 end
 
 return Log
