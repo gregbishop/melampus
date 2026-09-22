@@ -31,9 +31,10 @@ local itemsByValue = mock.itemsByValue
 local REPO = 'mlx-community/Qwen3-VL-30B-A3B-Instruct-4bit'
 local OLLAMA_MODEL = 'qwen3-vl:8b-instruct'
 local CANCEL_PATH = (os.getenv('TMPDIR') or '/tmp') .. '/melampus-data/cache/download-cancel'
-local OLLAMA_UP = { available = true, reason = 'Ollama is answering at http://127.0.0.1:11434' }
---- Every engine available: Ollama answering and both CLIs signed in.
-local ALL_AVAILABLE = { ollama = OLLAMA_UP, ['claude-code'] = mock.signedIn['claude-code'], codex = mock.signedIn.codex }
+--- Every engine available (Ollama answering, both CLIs signed in): lrmock's
+--- one answer for it, which the rules suite reads too; OLLAMA_UP its entry.
+local ALL_AVAILABLE = mock.allAvailable()
+local OLLAMA_UP = ALL_AVAILABLE.ollama
 
 --- The engines with a model to fetch (card #409), each with the name the
 --- status reports, what the button says while it is absent (Ollama gives no
