@@ -334,7 +334,7 @@ t.test('a CLI that is signed in is offered, and picked, says what every frame bi
 	t.equals(pickedReasonShown(contents, 'claude-code'), CLAUDE_CODE_SIGNED_IN)
 	t.equals(pickedReasonShown(contents, 'codex'), CODEX_SIGNED_IN)
 	t.equals(pickedReasonShown(contents, ''), '', 'letting Melampus choose has nothing to explain')
-	t.equals(pickedReasonShown(contents, 'openai'), 'API key required: set MELAMPUS_OPENAI_KEY (or OPENAI_API_KEY)',
+	t.equals(pickedReasonShown(contents, 'openai'), mock.canned.openai.reason,
 		'the picked engine\'s reason is what the line shows, whichever engine')
 end)
 
