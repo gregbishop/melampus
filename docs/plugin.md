@@ -69,6 +69,9 @@ Where inference runs is the user's choice (card #403): a preference named
 since card #405 a picker in Settings under **Where identification runs**
 (readme.md § Reviewing in Lightroom shows it, `docs/settings-dialog.png`).
 
+`docs/settings-dialog.png` predates the two CLI engines and the line under
+the picker: it shows the four-engine picker of card #405.
+
 When the dialog opens it runs the executable beside the plugin once with
 `--detect-engines` (card #404) and shows what it said: the six engines in
 the executable's order after *Let Melampus choose* (the owner's four, then
