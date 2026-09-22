@@ -24,7 +24,8 @@ from pathlib import Path
 import pytest
 from PIL import Image, UnidentifiedImageError
 
-REPO = Path(__file__).resolve().parents[2]
+from conftest import FIXTURE, REPO
+
 # POSIX ERE, for git grep.
 HOME_PATH = "/(Users|home)/[^/[:space:]`'\"]+/"
 
@@ -116,7 +117,8 @@ CORPUS_PATHS = [
     "service/tests/quality/fixtures/x.jpg",
     "fixtures_full/nested/x.jpg",
 ]
-COMMITTED_FRAME = "service/tests/fixtures/0A1A2829.jpg"
+# conftest.FIXTURE names the frame; git paths are POSIX strings from the root.
+COMMITTED_FRAME = FIXTURE.relative_to(REPO).as_posix()
 
 
 def _check_ignore(tmp_path: Path, path: str) -> subprocess.CompletedProcess[str]:
@@ -155,7 +157,7 @@ def test_the_committed_frame_is_not_ignored(tmp_path):
 # or BMP in unopened, and a raw carries the whole camera record.
 FRAME_CEILING = 400 * 1024
 TEXT_SUFFIXES = {".txt"}
-FIXTURES_DIR = "service/tests/fixtures"
+FIXTURES_DIR = FIXTURE.parent.relative_to(REPO).as_posix()
 CORPUS_DIRS = {"fixtures", "fixtures_full"}
 
 
