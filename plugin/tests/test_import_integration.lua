@@ -748,7 +748,7 @@ t.test('detection runs the executable once with --detect-engines and returns the
 	t.equals(#verdicts, #ENGINES, 'one verdict per engine the plugin knows')
 	t.equals(verdicts[2].engine, 'ollama')
 	t.isFalse(verdicts[2].available)
-	t.isNotNil(string.find(verdicts[2].reason, 'https://ollama.com/download', 1, true))
+	t.isNotNil(string.find(verdicts[2].reason, mock.OLLAMA_INSTALL, 1, true))
 end)
 
 t.test('a missing executable makes detection say so, with the plugin folder and the file', function()

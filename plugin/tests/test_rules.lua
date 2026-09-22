@@ -382,7 +382,7 @@ t.test('the link is an installable engine\'s alone, from the install page its ve
 	-- note, address and all.
 	local items = Rules.engineItems(verdicts())
 	local byValue = itemsByValue(items)
-	t.equals(byValue.ollama.link, 'https://ollama.com/download')
+	t.equals(byValue.ollama.link, mock.OLLAMA_INSTALL)
 	t.isNil(byValue.mlx.link, 'mlx is not something to install, so it gets no link')
 	t.isNil(byValue.openai.link, 'openai is not something to install, so it gets no link')
 	local MLX_ADDRESS = 'https://example.com/apple-silicon'
@@ -444,7 +444,10 @@ t.test('the link is an install page the browser can open, never another scheme t
 	-- registered custom handler, or a bare host is not something to open in
 	-- a browser, and what the picker will not link still belongs in the note
 	-- as text, with the engine greyed exactly as before.
-	for _, address in ipairs({ 'file:///Applications/Something.app', 'x-install://melampus', 'ollama.com/download' }) do
+	-- The real install page with its scheme taken off, so the bare-host case
+	-- is that address and not a fourth spelling of it.
+	local BARE_HOST = string.gsub(mock.OLLAMA_INSTALL, '^https://', '')
+	for _, address in ipairs({ 'file:///Applications/Something.app', 'x-install://melampus', BARE_HOST }) do
 		local reason = 'no Ollama server at http://127.0.0.1:11434; install it from ' .. address
 		local items, note = Rules.engineItems(verdicts({ ollama = { install = address, reason = reason } }))
 		local byValue = itemsByValue(items)
