@@ -281,12 +281,9 @@ local verdicts = mock.detectionVerdicts
 local TITLES, NOT_INSTALLED, NOT_SIGNED_IN = mock.titles, mock.canned['claude-code'].reason, mock.canned.codex.reason
 local SIGNED_IN = mock.signedIn['claude-code'].reason
 
---- The picker's items indexed by value, so a test can name one: byValue.ollama.
-local function itemsByValue(items)
-	local byValue = {}
-	for _, item in ipairs(items) do byValue[item.value] = item end
-	return byValue
-end
+-- The picker's items indexed by value, so a test can name one (byValue.ollama):
+-- lrmock's, the one helper both suites index with.
+local itemsByValue = mock.itemsByValue
 
 t.test('the picker lists the six engines in the executable\'s order, after letting Melampus choose', function()
 	local items = Rules.engineItems(verdicts())
@@ -311,8 +308,7 @@ end)
 
 t.test('a subscription CLI is greyed with its reason when not installed or not signed in, offered when signed in', function()
 	local items, note = Rules.engineItems(verdicts())
-	local byValue = {}
-	for _, item in ipairs(items) do byValue[item.value] = item end
+	local byValue = itemsByValue(items)
 	t.isFalse(byValue['claude-code'].enabled, 'claude-code should be greyed when not installed')
 	t.equals(byValue['claude-code'].reason, NOT_INSTALLED)
 	t.equals(byValue['claude-code'].link, mock.CLAUDE_CODE_INSTALL, 'the install page is the link')
@@ -323,7 +319,7 @@ t.test('a subscription CLI is greyed with its reason when not installed or not s
 	t.isNotNil(string.find(note, NOT_SIGNED_IN, 1, true), 'the note does not carry the codex reason:\n' .. note)
 
 	items, note = Rules.engineItems(verdicts(mock.signedIn))
-	for _, item in ipairs(items) do byValue[item.value] = item end
+	byValue = itemsByValue(items)
 	t.isTrue(byValue['claude-code'].enabled, 'a signed-in claude-code should be offered')
 	t.equals(byValue['claude-code'].title, TITLES['claude-code'])
 	t.equals(byValue['claude-code'].reason, SIGNED_IN, 'the billing sentence travels with the item')
