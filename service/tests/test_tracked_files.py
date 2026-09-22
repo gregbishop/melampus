@@ -45,7 +45,7 @@ def _index_bytes(path: str, repo: Path = REPO) -> bytes:
 def _throwaway_repo(tmp_path: Path) -> Path:
     repo = tmp_path / "repo"
     repo.mkdir(exist_ok=True)
-    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    _git("init", "-q", repo=repo)
     return repo
 
 
@@ -143,12 +143,7 @@ def _check_ignore(tmp_path: Path, path: str) -> subprocess.CompletedProcess[str]
     repo = _throwaway_repo(tmp_path)
     (repo / ".gitignore").write_bytes((REPO / ".gitignore").read_bytes())
     # 0: ignored (stdout names the source rule); 1: not ignored; other: error.
-    return subprocess.run(
-        ["git", "check-ignore", "-v", "--", path],
-        cwd=repo,
-        capture_output=True,
-        text=True,
-    )
+    return _git("check-ignore", "-v", "--", path, check=False, repo=repo)
 
 
 @pytest.mark.parametrize("path", CORPUS_PATHS)
