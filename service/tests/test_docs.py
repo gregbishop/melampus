@@ -213,6 +213,12 @@ def _section(text: str, heading: str) -> str | None:
     return match.group(1) if match else None
 
 
+def _backend_row(config_doc: str) -> str:
+    """docs/config.md's `backend` row of the settings table, the one line that
+    describes the engine setting: its default, the refusal, and the picker."""
+    return next(line for line in config_doc.splitlines() if line.startswith("| `backend` |"))
+
+
 def test_the_section_reader_takes_the_heading_literally():
     """Round 7, finding 1: `_section` promises the body under a literal
     `## heading`, and readme.md has `## Windows (cloud inference)` today, so a
@@ -603,7 +609,7 @@ def test_docs_name_engine_detection_where_the_default_and_the_refusal_are_descri
     and neither may still promise that detection is yet to come."""
     config_doc = CONFIG_DOC.read_text(encoding="utf-8")
     readme = README.read_text(encoding="utf-8")
-    backend_row = next(line for line in config_doc.splitlines() if line.startswith("| `backend` |"))
+    backend_row = _backend_row(config_doc)
     assert "`--detect-engines`" in backend_row, "docs/config.md's backend row does not name --detect-engines"
     assert "turns that into" not in backend_row, "docs/config.md still says detection is yet to come"
     assert "`--detect-engines`" in readme, "readme.md does not name --detect-engines"
@@ -653,19 +659,19 @@ def test_docs_describe_the_cli_engines_in_the_picker():
     Lightroom section lists them among what the picker offers; docs/config.md's
     backend row, readme.md and the engine section no longer defer the picker
     to a card yet to come."""
-    plugin_doc = (REPO / "docs" / "plugin.md").read_text(encoding="utf-8")
-    engine = re.search(r"^## The engine\n(.*?)^---", plugin_doc, re.MULTILINE | re.DOTALL)
-    assert engine, "docs/plugin.md has no ## The engine section"
-    prose = " ".join(engine.group(1).split())
+    plugin_doc = PLUGIN_DOC.read_text(encoding="utf-8")
+    engine = _section(plugin_doc, "The engine")
+    assert engine is not None, "docs/plugin.md has no ## The engine section"
+    prose = " ".join(engine.split())
     for named in ("`claude-code`", "`codex`", "subscription", "no API key", "`title`"):
         assert named in prose, f"docs/plugin.md's engine section does not say {named}"
     readme = README.read_text(encoding="utf-8")
-    section = re.search(r"^## Reviewing in Lightroom\n(.*?)^## ", readme, re.MULTILINE | re.DOTALL)
-    assert section, "readme.md has no ## Reviewing in Lightroom section"
+    section = _section(readme, "Reviewing in Lightroom")
+    assert section is not None, "readme.md has no ## Reviewing in Lightroom section"
     for named in ("claude-code", "codex"):
-        assert named in section.group(1), f"readme.md's Lightroom section does not offer {named}"
+        assert named in section, f"readme.md's Lightroom section does not offer {named}"
     config_doc = CONFIG_DOC.read_text(encoding="utf-8")
-    backend_row = next(line for line in config_doc.splitlines() if line.startswith("| `backend` |"))
+    backend_row = _backend_row(config_doc)
     for text in (backend_row, readme, prose):
         assert "learns" not in text or "#423" not in text, "still defers the picker to card #423"
 
