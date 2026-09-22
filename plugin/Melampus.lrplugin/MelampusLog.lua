@@ -52,13 +52,17 @@ end
 --- One message is one line, whatever it holds. Messages carry text that is
 -- not the plugin's (keyword names from the results file, file names), and
 -- a line break in it would let that text start a timestamped line of its
--- own. Control characters are written as their escapes, \n \r \t and \xHH
--- for the rest, so the evidence stays readable in the log and never leaves
--- the entry it belongs to.
+-- own. Control characters, 0x00-0x1F and 0x7F, are written as their
+-- escapes, \n \r \t and \xHH for the rest, so the evidence stays readable
+-- in the log and never leaves the entry it belongs to. The set is spelled
+-- out rather than written %c, whose bytes are the process's ctype locale's
+-- call (under a UTF-8 locale it takes 0x80-0x9F too, the continuation
+-- bytes of names like "\195\134rfugl"), and the plugin can neither read nor
+-- set that locale. %z is Lua 5.1's spelling of the zero byte.
 local ESCAPES = { ['\n'] = '\\n', ['\r'] = '\\r', ['\t'] = '\\t' }
 
 local function escape(text)
-	return (string.gsub(text, '%c', function(c)
+	return (string.gsub(text, '[%z\1-\31\127]', function(c)
 		return ESCAPES[c] or string.format('\\x%02X', string.byte(c))
 	end))
 end

@@ -1078,6 +1078,30 @@ t.test('a message carrying line breaks is still one line in the log: control cha
 	t.isNotNil(string.find(text, ' WARN could not create or find keyword "x\\r\\n' .. forged .. '\\ny"\n', 1, true), text)
 end)
 
+t.test('a UTF-8 keyword name whose continuation bytes fall in 0x80-0x9F reaches the log byte for byte, whatever the process\'s ctype locale', function()
+	-- Which bytes %c matches is the process's ctype locale's call, which
+	-- the plugin can neither read nor set: under a UTF-8 locale it takes
+	-- 0x80-0x9F too, the continuation bytes of names like these, and the
+	-- escape then writes a lone lead byte followed by \xHH. The set is
+	-- spelled out instead, so the locale has no say. Set for this test
+	-- where the host has the locale, restored before any assertion.
+	local aerfugl, otsuki = '\195\134rfugl', '\197\140tsuki'
+	local previous = os.setlocale(nil, 'ctype')
+	local set = os.setlocale('en_US.UTF-8', 'ctype')
+	if set == nil then
+		os.setlocale(previous, 'ctype')
+		return  -- the host has no en_US.UTF-8 locale; nothing to measure here
+	end
+	local Log = loadLog()
+	local ok, err = pcall(Log.warn, 'could not create or find keyword "' .. aerfugl .. '" or "' .. otsuki .. '"')
+	os.setlocale(previous, 'ctype')
+	t.isTrue(ok, tostring(err))
+	local text = logText()
+	t.isNotNil(text, 'nothing landed at ' .. Log.path())
+	t.isNil(string.find(text, '\\x', 1, true), 'a byte of the name was escaped: ' .. text)
+	t.isNotNil(string.find(text, ' WARN could not create or find keyword "' .. aerfugl .. '" or "' .. otsuki .. '"\n', 1, true), text)
+end)
+
 t.test('on a fake Windows Lightroom, whose folders exist nowhere on this host, logging raises nothing', function()
 	local Log = loadLog({ windows = true })
 	Log.info('running: melampus.exe --detect-engines')
