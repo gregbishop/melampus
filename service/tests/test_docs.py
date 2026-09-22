@@ -850,18 +850,19 @@ def test_config_doc_says_what_environment_the_cli_is_launched_with(engine):
     cannot have an agent that runs commands read the shell's exports into
     its cloud conversation. Each CLI's section of docs/config.md says so,
     names the settings variable that does reach it, and names the one
-    source of the list; the `command` row says the user's own program
+    source of the list (the section's heading is the CliEngine's `title`,
+    the word the refusals print, so a third CLI needs no entry here:
+    review round 7, C4); the `command` row says the user's own program
     still gets melampus's environment as it is, since that seam is the
     user's; the architecture doc names the mechanism."""
     from melampus import providers
 
     (cli,) = [c for c in providers.CLI_ENGINES if c.engine == engine]
     text = CONFIG_DOC.read_text(encoding="utf-8")
-    heading = {"claude-code": "Claude Code", "codex": "Codex CLI"}[engine]
-    section = re.search(rf"^### {re.escape(heading)}\n(.*?)(?=^### |^## |\Z)", text, re.MULTILINE | re.DOTALL)
-    assert section, f"docs/config.md has no ### {heading} section"
+    section = re.search(rf"^### {re.escape(cli.title)}\n(.*?)(?=^### |^## |\Z)", text, re.MULTILINE | re.DOTALL)
+    assert section, f"docs/config.md has no ### {cli.title} section"
     for said in ("environment", f"`{cli.settings_variable}`", "`providers.CLI_ENVIRONMENT`"):
-        assert said in section.group(1), f"docs/config.md § {heading} does not say {said!r}"
+        assert said in section.group(1), f"docs/config.md § {cli.title} does not say {said!r}"
     command_row = _row(text, "command")
     assert "environment" in command_row, "docs/config.md's command row does not say what environment the program gets"
     architecture = (REPO / "docs" / "architecture.md").read_text(encoding="utf-8")
