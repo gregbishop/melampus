@@ -704,8 +704,13 @@ def test_executable_detects_engines_as_json_with_no_python_on_the_path(
     this process over loopback (Done-when 4: a developer's running Ollama
     decides nothing the test did not measure too), with the install pointer
     when none does; the cloud engines are available and name their key
-    variable; with no `claude` or `codex` on the PATH, both CLIs are not
-    installed, with where to get them."""
+    variable; with no CLI program on the PATH, every CliEngine is not
+    installed, with where to get it. The order above stays literal — the
+    owner's order is the contract it pins — but the per-CLI assertions
+    come from `providers.CLI_ENGINES`, as
+    test_executable_refuses_a_cli_engine_that_is_not_installed's cases do,
+    so a third CLI is not silently unchecked here (review round 9, C2;
+    rounds 4 and 8, C2)."""
     proc = subprocess.run(
         [str(built_executable), "--detect-engines"],
         env=no_python_environment(tmp_path), capture_output=True, text=True, timeout=600,
@@ -715,12 +720,11 @@ def test_executable_detects_engines_as_json_with_no_python_on_the_path(
     assert [v["engine"] for v in verdicts] == [
         "mlx", "ollama", "openai", "claude", "claude-code", "codex"]
     by_engine = {v["engine"]: v for v in verdicts}
-    assert by_engine["claude-code"]["available"] is False, "a claude on the empty PATH?"
-    assert "not installed" in by_engine["claude-code"]["reason"]
-    assert providers.CLAUDE_CODE_INSTALL in by_engine["claude-code"]["reason"]
-    assert by_engine["codex"]["available"] is False, "a codex on the empty PATH?"
-    assert "not installed" in by_engine["codex"]["reason"]
-    assert providers.CODEX_INSTALL in by_engine["codex"]["reason"]
+    for cli in providers.CLI_ENGINES:
+        verdict = by_engine[cli.engine]
+        assert verdict["available"] is False, f"a {cli.program} on the empty PATH?"
+        assert "not installed" in verdict["reason"], verdict["reason"]
+        assert cli.install in verdict["reason"], verdict["reason"]
     assert by_engine["mlx"]["available"] is on_apple_silicon()
     if not on_apple_silicon():
         assert by_engine["mlx"]["reason"] == "needs Apple Silicon"
