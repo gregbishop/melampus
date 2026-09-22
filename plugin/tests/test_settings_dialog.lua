@@ -1084,7 +1084,10 @@ t.test('a UTF-8 keyword name whose continuation bytes fall in 0x80-0x9F reaches 
 	-- 0x80-0x9F too, the continuation bytes of names like these, and the
 	-- escape then writes a lone lead byte followed by \xHH. The set is
 	-- spelled out instead, so the locale has no say. Set for this test
-	-- under the first name the host knows, restored before any assertion.
+	-- under the first name the host knows; the module load and the write
+	-- run together under one protected call, and the previous locale is
+	-- restored right after it, before any assertion, so a raise in either
+	-- cannot leave the UTF-8 locale set for the tests that follow.
 	-- A host that knows none fails the test rather than passing it: a pass
 	-- that measured nothing would count this case as covered when it is not.
 	local aerfugl, otsuki = '\195\134rfugl', '\197\140tsuki'
@@ -1095,13 +1098,16 @@ t.test('a UTF-8 keyword name whose continuation bytes fall in 0x80-0x9F reaches 
 		set = os.setlocale(name, 'ctype')
 		if set ~= nil then break end
 	end
-	if set == nil then os.setlocale(previous, 'ctype') end
+	local ok, result = pcall(function()
+		local Log = loadLog()
+		Log.warn('could not create or find keyword "' .. aerfugl .. '" or "' .. otsuki .. '"')
+		return Log
+	end)
+	os.setlocale(previous, 'ctype')
 	t.isNotNil(set, 'no UTF-8 ctype locale on this host: ' .. table.concat(aliases, ', ')
 		.. ' all refused; the test cannot measure what it exists to measure')
-	local Log = loadLog()
-	local ok, err = pcall(Log.warn, 'could not create or find keyword "' .. aerfugl .. '" or "' .. otsuki .. '"')
-	os.setlocale(previous, 'ctype')
-	t.isTrue(ok, tostring(err))
+	t.isTrue(ok, tostring(result))
+	local Log = result
 	local text = logText()
 	t.isNotNil(text, 'nothing landed at ' .. Log.path())
 	t.isNil(string.find(text, '\\x', 1, true), 'a byte of the name was escaped: ' .. text)
