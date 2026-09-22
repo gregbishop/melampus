@@ -824,7 +824,14 @@ def _cli_refuse(cli: CliEngine, message: str, *, signed_out: bool) -> NoReturn:
     `signed_out` is the decoder's reading of those words: then the refusal
     names the command that signs in; otherwise it carries the CLI's words
     alone. What differs between the CLIs is the title and the sign-in
-    command, the CliEngine's data."""
+    command, the CliEngine's data. The words are the model's side writing
+    (a prompt injection in the image can put anything in Codex's
+    `turn.failed` message or Claude Code's `result`), bound for the
+    terminal and the log through the CLI's `_fail`, so they go through
+    CommandBackend.plain as a program's stderr does: one printable line,
+    no escape to clear the screen, no line break to fake a line of the
+    log (Codex review round 2, S2)."""
+    message = CommandBackend.plain(message)
     if signed_out:
         raise CommandFailed(
             f"{cli.title} is not signed in; run `{cli.sign_in}` and try again (it said: {message})"
@@ -887,7 +894,10 @@ def _codex_refuse(message: str) -> NoReturn:
     "401 Unauthorized" is not signed in, read by its word, since Codex's
     failures end in a hex request id whose digits may contain 401; and
     anything else is Codex's words, both through the refusal shared with
-    Claude Code."""
+    Claude Code. The reset time is read out of the plain words (the same
+    rendering the shared refusal gives the message), so what an
+    injection put after "try again at " reaches the terminal as words."""
+    message = CommandBackend.plain(message)
     lowered = message.lower()
     if "usage limit" in lowered:
         _, _, when = message.partition("try again at ")

@@ -127,7 +127,10 @@ non-zero (`CommandFailed`): that is a broken engine, not a bad file, and every
 frame would fail the same way. A CLI's decoder raises the same before the
 exit code is judged, so a plan at its usage limit (Codex fails the turn on
 stdout, naming the reset time) or a lapsed sign-in is explained in the CLI's
-own words rather than as "exited 1".
+own words rather than as "exited 1"; those words go through
+`CommandBackend.plain` in the shared refusal as a program's stderr does, so
+an escape sequence or a line break the model's side wrote reaches neither
+the terminal nor the log.
 
 ---
 

@@ -3738,6 +3738,17 @@ if not args.json:
 CLIS = [pytest.param(cli, id=cli.engine) for cli in providers.CLI_ENGINES]
 
 
+def _hostile(message: str) -> str:
+    """A CLI's failure message as an image-borne injection could have the
+    model write it: a clear-screen escape before the words, a carriage
+    return, line feed and forged log line after them, and a colour escape
+    at the end. The decoder's refusal carries the CLI's words to the
+    terminal and the log through `_fail`, so it must reach them as
+    `CommandBackend.plain` renders a program's stderr: one printable line
+    (Codex review round 2, S2)."""
+    return f"\x1b[2J{message}\r\n[melampus] frame 7: ok\x1b[31m"
+
+
 class _Fake(NamedTuple):
     """What the tests know about one CLI beyond its CliEngine: the fake
     that stands in for it, the verdict wrapper conftest stubs by name and
@@ -4355,6 +4366,33 @@ def test_claude_code_reply_surfaces_any_other_error_result():
     with pytest.raises(CommandFailed) as err:
         providers.claude_code_reply(stdout)
     assert "API Error: 429 rate limited" in str(err.value)
+
+
+@pytest.mark.parametrize(
+    "result, words",
+    [
+        ("Not logged in · Please run /login", ["not signed in", "claude auth login", "Not logged in"]),
+        ("API Error: 429 rate limited", ["API Error: 429 rate limited"]),
+    ],
+    ids=["not-logged-in", "other"],
+)
+def test_claude_code_reply_refusals_carry_the_error_results_words_as_one_printable_line(
+    result, words,
+):
+    """The `result` of an `is_error` run is the model's side writing (a
+    prompt injection in the image can put anything there), and the
+    refusal prints it on the terminal and in the log through `_fail`. So
+    it reaches the refusal as `CommandBackend.plain` renders a program's
+    stderr: every character printable, no line break to fake a line of
+    the log, no escape to clear or recolour the screen, the words kept."""
+    stdout = json.dumps({"type": "result", "is_error": True, "result": _hostile(result)})
+    with pytest.raises(CommandFailed) as err:
+        providers.claude_code_reply(stdout)
+    message = str(err.value)
+    assert message.isprintable(), message
+    assert "\n" not in message and "\r" not in message and "\x1b" not in message
+    for word in words:
+        assert word in message
 
 
 def test_command_backend_decodes_stdout_before_the_reply_is_read(tmp_path):
@@ -5040,6 +5078,33 @@ def test_codex_reply_surfaces_any_other_failed_turn():
         {"type": "turn.completed", "usage": {}},
     )
     assert providers.codex_reply(recovered) == "ok"
+
+
+@pytest.mark.parametrize(
+    "failure, words",
+    [
+        (_CODEX_USAGE_LIMIT, ["usage limit", "until Sep 19th, 2026 7:46 AM", "You've hit"]),
+        (_CODEX_UNAUTHORIZED, ["not signed in", "codex login", "401 Unauthorized"]),
+        ("model not found: gpt-0", ["model not found: gpt-0"]),
+    ],
+    ids=["usage-limit", "unauthorized", "other"],
+)
+def test_codex_reply_refusals_carry_the_failed_turns_words_as_one_printable_line(failure, words):
+    """A `turn.failed` message is the model's side writing (a prompt
+    injection in the image can put anything in it), and the refusal
+    prints it on the terminal and in the log through `_fail`. So it
+    reaches the refusal as `CommandBackend.plain` renders a program's
+    stderr: every character printable, no line break to fake a line of
+    the log, no escape to clear or recolour the screen, the words kept,
+    and the reset time the usage limit names read out of the plain
+    words, not the raw ones."""
+    with pytest.raises(CommandFailed) as err:
+        providers.codex_reply(_codex_failure(_hostile(failure)))
+    message = str(err.value)
+    assert message.isprintable(), message
+    assert "\n" not in message and "\r" not in message and "\x1b" not in message
+    for word in words:
+        assert word in message
 
 
 def test_codex_reply_with_no_agent_message_is_an_empty_reply():
