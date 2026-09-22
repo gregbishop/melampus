@@ -16,20 +16,21 @@ local mock = require('lrmock')
 local PLUGIN = mock.PLUGIN
 local ENGINES = mock.loadPluginFile('MelampusRules').ENGINES
 local OLLAMA_DOWNLOAD = 'https://ollama.com/download'
-local CLAUDE_CODE_INSTALL = 'https://code.claude.com/docs/en/setup'
--- The canned answer, its titles and its reasons come from lrmock, spelled
--- once for every suite; the signed-in reasons are this suite's overrides.
-local TITLES = {}
-for engine, verdict in pairs(mock.canned) do TITLES[engine] = verdict.title end
+local CLAUDE_CODE_INSTALL = mock.CLAUDE_CODE_INSTALL
+-- The canned answer, its titles, its reasons and the signed-in verdicts come
+-- from lrmock, spelled once for every suite.
+local TITLES = mock.titles
 local CLAUDE_CODE_NOT_INSTALLED = mock.canned['claude-code'].reason
 local CODEX_NOT_SIGNED_IN = mock.canned.codex.reason
-local CLAUDE_CODE_SIGNED_IN = 'Claude Code is signed in (claude.ai, max); every frame bills to that subscription, not to an API key'
-local CODEX_SIGNED_IN = 'Codex CLI is signed in (ChatGPT); every frame bills to that subscription, not to an API key'
+local CLAUDE_CODE_SIGNED_IN = mock.signedIn['claude-code'].reason
+local CODEX_SIGNED_IN = mock.signedIn.codex.reason
 
 local REPO = 'mlx-community/Qwen3-VL-30B-A3B-Instruct-4bit'
 local OLLAMA_MODEL = 'qwen3-vl:8b-instruct'
 local CANCEL_PATH = (os.getenv('TMPDIR') or '/tmp') .. '/melampus-data/cache/download-cancel'
 local OLLAMA_UP = { available = true, reason = 'Ollama is answering at http://127.0.0.1:11434' }
+--- Every engine available: Ollama answering and both CLIs signed in.
+local ALL_AVAILABLE = { ollama = OLLAMA_UP, ['claude-code'] = mock.signedIn['claude-code'], codex = mock.signedIn.codex }
 
 --- The engines with a model to fetch (card #409), each with the name the
 --- status reports, what the button says while it is absent (Ollama gives no
@@ -275,10 +276,7 @@ t.test('engines that cannot run here are greyed and their reasons shown', functi
 end)
 
 t.test('with every engine available nothing is greyed', function()
-	local contents = openSettings({ detection = mock.detectionText({
-		ollama = { available = true, reason = 'Ollama is answering at http://127.0.0.1:11434' },
-		['claude-code'] = { available = true, reason = CLAUDE_CODE_SIGNED_IN }, codex = { available = true, reason = CODEX_SIGNED_IN },
-	}) })
+	local contents = openSettings({ detection = mock.detectionText(ALL_AVAILABLE) })
 	for _, item in ipairs(enginePicker(contents).items) do
 		t.isTrue(item.enabled, item.value .. ' was greyed')
 	end
@@ -325,9 +323,7 @@ t.test('a CLI that is not installed, and one not signed in, are greyed with the 
 end)
 
 t.test('a CLI that is signed in is offered, and picked, says what every frame bills to', function()
-	local contents = openSettings({ detection = mock.detectionText({
-		['claude-code'] = { available = true, reason = CLAUDE_CODE_SIGNED_IN }, codex = { available = true, reason = CODEX_SIGNED_IN },
-	}) })
+	local contents = openSettings({ detection = mock.detectionText(mock.signedIn) })
 	local byValue = {}
 	for _, item in ipairs(enginePicker(contents).items) do byValue[item.value] = item end
 	t.isTrue(byValue['claude-code'].enabled, 'a signed-in claude-code should be offered')
@@ -357,10 +353,7 @@ t.test('when ollama is unavailable a link opens the Ollama download page', funct
 end)
 
 t.test('when ollama is available there is no link', function()
-	local contents = openSettings({ detection = mock.detectionText({
-		ollama = { available = true, reason = 'Ollama is answering at http://127.0.0.1:11434' },
-		['claude-code'] = { available = true, reason = CLAUDE_CODE_SIGNED_IN }, codex = { available = true, reason = CODEX_SIGNED_IN },
-	}) })
+	local contents = openSettings({ detection = mock.detectionText(ALL_AVAILABLE) })
 	for _, entry in ipairs(viewsOfKind(contents, 'static_text')) do
 		t.isNil(entry.view.mouse_down, 'a clickable link is shown with nothing to install: ' .. tostring(entry.view.title))
 	end
@@ -431,9 +424,7 @@ t.test('a password field takes the key for openai and for claude, shown only whe
 end)
 
 t.test('no password field shows for a subscription CLI; the fields for openai and claude stay', function()
-	local contents = openSettings({ detection = mock.detectionText({
-		['claude-code'] = { available = true, reason = CLAUDE_CODE_SIGNED_IN }, codex = { available = true, reason = CODEX_SIGNED_IN },
-	}) })
+	local contents = openSettings({ detection = mock.detectionText(mock.signedIn) })
 	local fields, count = {}, 0
 	for variable, entry in pairs(keyFields(contents)) do fields[variable], count = entry, count + 1 end
 	t.equals(count, 2, 'expected exactly two password fields, for the two cloud engines')

@@ -275,12 +275,11 @@ end)
 -- only shows it. Rules.engineItems turns the decoded verdict list into the
 -- picker's items, in the owner's order, with the unavailable ones disabled, and
 -- a note to show under the picker that carries their reasons.
--- The canned answer, its titles and its reasons come from lrmock, spelled
--- once for every suite; the signed-in reason is this suite's override.
+-- The canned answer, its titles, its reasons and the signed-in verdicts come
+-- from lrmock, spelled once for every suite.
 local verdicts = mock.detectionVerdicts
-local TITLES, NOT_INSTALLED, NOT_SIGNED_IN = {}, mock.canned['claude-code'].reason, mock.canned.codex.reason
-for engine, verdict in pairs(mock.canned) do TITLES[engine] = verdict.title end
-local SIGNED_IN = 'Claude Code is signed in (claude.ai, max); every frame bills to that subscription, not to an API key'
+local TITLES, NOT_INSTALLED, NOT_SIGNED_IN = mock.titles, mock.canned['claude-code'].reason, mock.canned.codex.reason
+local SIGNED_IN = mock.signedIn['claude-code'].reason
 
 --- The picker's items indexed by value, so a test can name one: byValue.ollama.
 local function itemsByValue(items)
@@ -316,17 +315,14 @@ t.test('a subscription CLI is greyed with its reason when not installed or not s
 	for _, item in ipairs(items) do byValue[item.value] = item end
 	t.isFalse(byValue['claude-code'].enabled, 'claude-code should be greyed when not installed')
 	t.equals(byValue['claude-code'].reason, NOT_INSTALLED)
-	t.equals(byValue['claude-code'].link, 'https://code.claude.com/docs/en/setup', 'the install page is the link')
+	t.equals(byValue['claude-code'].link, mock.CLAUDE_CODE_INSTALL, 'the install page is the link')
 	t.isFalse(byValue.codex.enabled, 'codex should be greyed when not signed in')
 	t.equals(byValue.codex.reason, NOT_SIGNED_IN)
 	t.isNil(byValue.codex.link, 'no address in the not-signed-in reason')
 	t.isNotNil(string.find(note, NOT_INSTALLED, 1, true), 'the note does not carry the claude-code reason:\n' .. note)
 	t.isNotNil(string.find(note, NOT_SIGNED_IN, 1, true), 'the note does not carry the codex reason:\n' .. note)
 
-	items, note = Rules.engineItems(verdicts({
-		['claude-code'] = { available = true, reason = SIGNED_IN },
-		codex = { available = true, reason = 'Codex CLI is signed in (ChatGPT); every frame bills to that subscription, not to an API key' },
-	}))
+	items, note = Rules.engineItems(verdicts(mock.signedIn))
 	for _, item in ipairs(items) do byValue[item.value] = item end
 	t.isTrue(byValue['claude-code'].enabled, 'a signed-in claude-code should be offered')
 	t.equals(byValue['claude-code'].title, TITLES['claude-code'])
@@ -336,7 +332,7 @@ t.test('a subscription CLI is greyed with its reason when not installed or not s
 end)
 
 t.test('the note for the picked engine is its reason, so a subscription CLI says what it bills to before a run', function()
-	local items = Rules.engineItems(verdicts({ ['claude-code'] = { available = true, reason = SIGNED_IN } }))
+	local items = Rules.engineItems(verdicts({ ['claude-code'] = mock.signedIn['claude-code'] }))
 	t.equals(Rules.pickedReason(items, 'claude-code'), SIGNED_IN)
 	t.equals(Rules.pickedReason(items, 'openai'), 'API key required: set MELAMPUS_OPENAI_KEY (or OPENAI_API_KEY)')
 	t.equals(Rules.pickedReason(items, ''), '', 'letting Melampus choose has nothing to explain')
@@ -433,8 +429,7 @@ end)
 t.test('when every engine is available the note is empty', function()
 	local _, note = Rules.engineItems(verdicts({
 		ollama = { available = true, reason = 'Ollama is answering' },
-		['claude-code'] = { available = true, reason = SIGNED_IN },
-		codex = { available = true, reason = 'Codex CLI is signed in (ChatGPT); every frame bills to that subscription, not to an API key' },
+		['claude-code'] = mock.signedIn['claude-code'], codex = mock.signedIn.codex,
 	}))
 	t.equals(note, '')
 end)
