@@ -75,7 +75,7 @@ PACKAGE_SCRIPT = TOOLS / "package_plugin.py"
 # The frame test_quality.py leans on, downscaled to 1200 px and stripped of
 # metadata so it can be committed: the corpus is gitignored and CI has none,
 # and the smoke test must analyze the same image on every platform (card #400).
-FIXTURE = Path(__file__).with_name("fixtures") / "0A1A2829.jpg"
+FIXTURE = Path(__file__).resolve().with_name("fixtures") / "0A1A2829.jpg"
 PHOTO = FIXTURE.name
 
 

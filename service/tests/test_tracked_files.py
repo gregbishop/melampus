@@ -17,6 +17,7 @@ in service/tests/fixtures/ is small and EXIF-free like the first one. The frame
 gate reads each blob from the index, so it judges the bytes a push would carry.
 """
 
+import importlib.util
 import io
 import subprocess
 from pathlib import Path
@@ -119,6 +120,22 @@ CORPUS_PATHS = [
 ]
 # conftest.FIXTURE names the frame; git paths are POSIX strings from the root.
 COMMITTED_FRAME = FIXTURE.relative_to(REPO).as_posix()
+
+
+def test_the_frame_sits_under_the_repository_through_a_symlink(tmp_path):
+    """pytest keeps symlinks in collected paths, so conftest.py can be reached
+    through one. REPO is resolved; FIXTURE must be built the same way, or the
+    two disagree and COMMITTED_FRAME raises at import, collecting nothing."""
+    link = tmp_path / "link"
+    link.symlink_to(REPO)
+    spec = importlib.util.spec_from_file_location(
+        "conftest_through_a_symlink", link / "service" / "tests" / "conftest.py"
+    )
+    conftest = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(conftest)
+    assert conftest.FIXTURE.is_relative_to(conftest.REPO), (
+        f"{conftest.FIXTURE} is not under {conftest.REPO}"
+    )
 
 
 def _check_ignore(tmp_path: Path, path: str) -> subprocess.CompletedProcess[str]:
