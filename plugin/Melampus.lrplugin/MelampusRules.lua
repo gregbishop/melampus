@@ -117,13 +117,6 @@ end
 -- passed as --backend; the others have no model to fetch.
 Rules.MODEL_ENGINES = { 'mlx', 'ollama' }
 
---- The engines that are something to go and install (Ollama, card #405;
--- the two subscription CLIs, card #423): when one is unavailable and its
--- reason names a web address, the picker offers the last one it names as a
--- link. Another engine's address (mlx's, a cloud engine's) stays text in
--- the note under the picker.
-Rules.INSTALLABLE_ENGINES = { ollama = true, ['claude-code'] = true, codex = true }
-
 --- The variable a cloud engine's API key travels in to the executable
 -- (providers.KEY_VARIABLES on the Python side), which is also the name the
 -- key is stored under. nil for an engine that needs no key.
@@ -142,9 +135,10 @@ end
 -- the executable (the unset preference); then Rules.ENGINES in order, each
 -- titled as its verdict says (the executable is the one place that names
 -- an engine; card #423), disabled when detection said it cannot run here.
--- An item for one of Rules.INSTALLABLE_ENGINES, when disabled and its
--- reason names a web address, carries the last one it names as `link`:
--- where to install it. Another engine's address stays text in the note.
+-- A disabled item whose verdict carries an install page (`install`: where
+-- to go and get the engine, when going and getting it is the fix) carries
+-- that address as `link`. An address a reason merely names stays text in
+-- the note.
 -- Without verdicts (no executable, or output that is not the list) nothing
 -- is greyed, the names stand in for the titles, and `problem` is the note.
 -- Returns the items and the note to show under the picker: one line per
@@ -175,15 +169,15 @@ function Rules.engineItems(verdicts, problem)
 			value = engine, enabled = available, reason = reason,
 		}
 		if not available then
-			-- Only something to go and install gets a link. The address to go
-			-- to is the last one the reason names (the first may be where a
-			-- local server was looked for), without a trailing full stop or
-			-- semicolon from the sentence around it.
-			if Rules.INSTALLABLE_ENGINES[engine] then
-				for address in string.gmatch(reason, 'https?://[^%s]+') do
-					item.link = string.match(address, '^(.-)[.,;:)]*$')
-				end
-			end
+			-- Only something to go and install gets a link, and where to go is
+			-- the address the verdict carries (Ollama, card #405; the two
+			-- subscription CLIs, card #423), never one scraped out of the
+			-- reason: a CLI's reason is the CLI's own words, and can name the
+			-- billing docs or a line the program printed on stderr, neither of
+			-- them an install page (review round 9, finding 1). Whatever a
+			-- reason names stays text in the note, address and all.
+			local install = verdict.install
+			if type(install) == 'string' and install ~= '' then item.link = install end
 			lines[#lines + 1] = title .. ': ' .. reason
 		end
 		items[#items + 1] = item

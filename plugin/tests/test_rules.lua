@@ -376,9 +376,10 @@ t.test('unavailable engines are disabled and carry the reason detection gave, an
 end)
 
 t.test('the link is an installable engine\'s alone, from the address its reason names', function()
-	-- Only something to go and install (Rules.INSTALLABLE_ENGINES: Ollama,
-	-- card #405 Done-when 3; the subscription CLIs, card #423) gets a link:
-	-- another engine's reason stays text in the note, address and all.
+	-- Only something to go and install (Ollama, card #405 Done-when 3; the
+	-- subscription CLIs, card #423) gets a link, and only from the install
+	-- page its verdict carries: another engine's reason stays text in the
+	-- note, address and all.
 	local items = Rules.engineItems(verdicts())
 	local byValue = itemsByValue(items)
 	t.equals(byValue.ollama.link, 'https://ollama.com/download')
@@ -395,6 +396,40 @@ t.test('the link is an installable engine\'s alone, from the address its reason 
 	byValue = itemsByValue(items)
 	t.isTrue(byValue.ollama.enabled)
 	t.isNil(byValue.ollama.link, 'an available engine needs no link')
+end)
+
+t.test('the link is the install page the verdict carries, never an address its reason happens to name', function()
+	-- Card #405 made the link Ollama's alone, whose unavailable reason is
+	-- melampus's own sentence: the last address in it was always the
+	-- download page. A subscription CLI's reason is the CLI's own words, and
+	-- two of them carry an address that is not an install page: the
+	-- authentication-precedence docs, in the verdict for a sign-in that would
+	-- bill something other than the subscription, and whatever the program
+	-- printed on stderr, in the verdict for a status check that failed some
+	-- other way. Scraping prose would make either one the blue line the
+	-- settings dialog opens in the browser, so where to install an engine is
+	-- the verdict's own field (the executable is the one place that names an
+	-- engine, as the titles are), and the address in the reason stays text in
+	-- the note under the picker.
+	local AUTH_DOCS = 'https://code.claude.com/docs/en/authentication#authentication-precedence'
+	local STDERR_ADDRESS = 'https://not-the-install-page.example/help'
+	local items, note = Rules.engineItems(verdicts({
+		['claude-code'] = { available = false, install = mock.CLAUDE_CODE_INSTALL,
+			reason = 'Claude Code is signed in, but not to claude.ai: `claude auth status --json` says '
+				.. 'nothing about the account this engine can place, and every frame would bill that '
+				.. 'credential instead (' .. AUTH_DOCS .. '); sign in with `claude auth login`' },
+		codex = { available = false, install = '',
+			reason = '`codex login status` exited 2: see ' .. STDERR_ADDRESS },
+	}))
+	local byValue = itemsByValue(items)
+	t.equals(byValue['claude-code'].link, mock.CLAUDE_CODE_INSTALL,
+		'the link must be the install page the verdict carries, not the billing docs its reason names')
+	t.isNil(byValue.codex.link,
+		'an address the program printed on stderr must not become the link: the verdict carries no install page')
+	t.isNotNil(string.find(note, AUTH_DOCS, 1, true), 'the note does not show the billing docs as text:\n' .. note)
+	t.isNotNil(string.find(note, STDERR_ADDRESS, 1, true), 'the note does not show the stderr address as text:\n' .. note)
+	t.isNil(Rules.INSTALLABLE_ENGINES,
+		'a table of which engines are installable is a second copy of what the executable already says')
 end)
 
 t.test('without verdicts nothing is greyed and the note says why', function()

@@ -1304,8 +1304,10 @@ def test_cli_detect_engines_prints_the_verdicts_as_json_in_order(
 ):
     """Acceptance for Done-when 1 to 3: `melampus-id --detect-engines` needs no
     folder, prints one JSON list to stdout, in the owner's order, each item
-    {engine, available, reason}, and exits 0. Faked off Apple Silicon with no
-    Ollama: mlx and ollama say why not, the cloud engines say which key."""
+    {engine, title, available, reason, install}, and exits 0. Faked off Apple
+    Silicon with no Ollama: mlx and ollama say why not, the cloud engines say
+    which key, and only the engine there is something to go and install
+    carries an install page (review round 9, finding 1)."""
     from melampus.cli import main
 
     fake_platform(monkeypatch, "win32", "AMD64")
@@ -1316,17 +1318,20 @@ def test_cli_detect_engines_prints_the_verdicts_as_json_in_order(
     assert code == 0, err
     verdicts = json.loads(out)
     assert [v["engine"] for v in verdicts] == [*ENGINES, providers.CLAUDE_CODE, providers.CODEX]
-    assert all(set(v) == {"engine", "title", "available", "reason"} for v in verdicts)
+    assert all(set(v) == {"engine", "title", "available", "reason", "install"} for v in verdicts)
     assert all(v["title"] for v in verdicts), "a verdict with no title for the picker"
     by_engine = {v["engine"]: v for v in verdicts}
     assert by_engine["mlx"] == {
-        "engine": "mlx", "title": providers.ENGINE_TITLES["mlx"], "available": False, "reason": "needs Apple Silicon"}
+        "engine": "mlx", "title": providers.ENGINE_TITLES["mlx"], "available": False,
+        "reason": "needs Apple Silicon", "install": ""}
     assert by_engine["ollama"]["available"] is False
     assert providers.OLLAMA_INSTALL in by_engine["ollama"]["reason"]
+    assert by_engine["ollama"]["install"] == providers.OLLAMA_INSTALL
     for engine in ("openai", "claude"):
         assert by_engine[engine]["available"] is True
         assert "API key required" in by_engine[engine]["reason"]
         assert providers.KEY_VARIABLES[engine][0] in by_engine[engine]["reason"]
+        assert by_engine[engine]["install"] == "", "a cloud engine is nothing to go and install"
 
 
 def test_cli_detect_engines_reports_ollama_when_it_answers(monkeypatch, capsys):
@@ -3965,6 +3970,42 @@ def test_detection_the_cli_not_installed_points_to_the_install(monkeypatch, tmp_
     assert not verdict.available
     assert "not installed" in verdict.reason and cli.install in verdict.reason
     assert f"then sign in with `{cli.sign_in}`" in verdict.reason
+
+
+@posix_only
+@pytest.mark.parametrize("cli", CLIS)
+def test_the_install_page_the_picker_links_to_is_a_field_of_the_verdict(
+    monkeypatch, tmp_path, capsys, no_ambient_keys, no_ambient_ollama, cli
+):
+    """Claude review round 9, finding 1: the picker turns an unavailable
+    engine's install page into the one clickable line in the settings
+    dialog, so the verdict says where that is rather than leaving the
+    plugin to scrape the last address out of the reason. A CLI's reason
+    carries the CLI's own words, and two of them name an address that is
+    not an install page: the authentication-precedence docs, and whatever
+    the program printed on stderr. The field is set only where going and
+    installing is the fix (no Ollama server, a CLI that is not installed);
+    everything else carries none, an installed CLI that is not signed in
+    included. `--detect-engines` prints it, since the picker is its only
+    reader."""
+    from melampus.cli import main
+
+    _no_engine_cli(monkeypatch, tmp_path, cli)
+    assert _verdict(cli.engine).install == cli.install
+    assert _verdict(providers.OLLAMA).install == providers.OLLAMA_INSTALL
+    for engine in ("mlx", "openai", "claude"):
+        assert _verdict(engine).install == "", f"{engine} is nothing to go and install"
+
+    assert main(["--detect-engines"]) == 0
+    printed = {v["engine"]: v for v in json.loads(capsys.readouterr().out)}
+    assert printed[cli.engine]["install"] == cli.install
+    assert printed[providers.OLLAMA]["install"] == providers.OLLAMA_INSTALL
+    assert printed["mlx"]["install"] == ""
+
+    _fake_engine_cli(monkeypatch, tmp_path, cli, mode="not-signed-in")
+    installed = _verdict(cli.engine)
+    assert not installed.available
+    assert installed.install == "", "an installed CLI is not something to go and install"
 
 
 @posix_only

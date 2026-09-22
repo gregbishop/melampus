@@ -420,6 +420,17 @@ class EngineVerdict:
     #: runs what detection checked and never resolves it again. None for
     #: the engines no program decides.
     executable: str | None = None
+    #: Where to go and install this engine, when going and installing it is
+    #: what the reason says is missing (no Ollama server, a CLI that is not
+    #: installed): the address the picker offers as its one clickable line
+    #: (card #405, widened to the CLIs by card #423). Here rather than
+    #: scraped out of `reason` by the plugin, because a CLI's reason is the
+    #: CLI's own words and can name an address that is not an install page
+    #: — the authentication-precedence docs, or a line the program printed
+    #: on stderr (review round 9, finding 1). "" for every other verdict,
+    #: an installed CLI that is not signed in included: there is nothing to
+    #: go and get.
+    install: str = ""
 
 
 def _key_required(engine: str) -> str:
@@ -579,6 +590,7 @@ def _cli_verdict(cli: CliEngine, command: list[str] | None, probe_seconds: float
             cli.engine, title, False,
             f"{cli.title} is not installed: nothing on PATH is called '{program}'; "
             f"install it from {cli.install}, then {next_step}",
+            install=cli.install,
         )
     try:
         status = subprocess.run(
@@ -717,6 +729,7 @@ def detect_engines(
             OLLAMA, ENGINE_TITLES[OLLAMA], ollama,
             f"Ollama is answering at {url}" if ollama
             else f"no Ollama server at {url}; install it from {OLLAMA_INSTALL}",
+            install="" if ollama else OLLAMA_INSTALL,
         ),
         EngineVerdict("openai", ENGINE_TITLES["openai"], True, _key_required("openai")),
         EngineVerdict("claude", ENGINE_TITLES["claude"], True, _key_required("claude")),

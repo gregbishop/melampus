@@ -76,10 +76,12 @@ the two subscription CLIs), each titled as its verdict's `title` says (the
 executable is the one place that names an engine; the plugin keeps no title
 table), the ones that cannot run here greyed with their reason under the
 picker, and one line for an engine that is something to install (Ollama,
-Claude Code, Codex CLI; `Rules.INSTALLABLE_ENGINES`): where to install it,
-taken from the executable's reason when it is unavailable (Ollama's download
-page, a CLI's install page), and opened in the browser. Another engine's
-reason stays text under the picker, address and all. Under the picker a
+Claude Code, Codex CLI): where to install it, the address that engine's
+verdict carries as `install` (Ollama's download page, a CLI's install page),
+opened in the browser. Nothing is scraped out of the prose: a CLI's reason is
+the CLI's own words and can name an address that is not an install page (the
+billing docs, a line the program printed), so every reason stays text under
+the picker, address and all. Under the picker a
 line follows the picked engine with what detection said about it.
 `Rules.engineItems` turns the executable's JSON into those items, so the
 dialog holds no engine knowledge of its own and the rules tests cover it

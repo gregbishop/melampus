@@ -43,8 +43,8 @@ LrTasks.startAsyncTask(function()
 		-- bills to that subscription, before a run; a cloud engine's names
 		-- its key), then the reasons for whatever is greyed, and a link for
 		-- each greyed engine that is something to install (Ollama, a
-		-- subscription CLI; Rules.INSTALLABLE_ENGINES), taken from the
-		-- executable's reason: where to get it.
+		-- subscription CLI): the install page its verdict carries, which is
+		-- where to go and get it and nothing else its reason names.
 		local engineViews = {
 			f:popup_menu { value = bind 'engine', items = engineItems },
 			f:static_text {
