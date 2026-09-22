@@ -1061,16 +1061,17 @@ class CommandBackend(VLMBackend):
         answer: the moment it is seen (_exited, without reaping) the tree
         it heads is stopped, so a worker it left holding stdout or stderr
         dies and the pipe ends, the readers are given a short bound to
-        reach those ends, and what they read is the reply. Past the
-        timeout, at the ceiling (`overflowed`, which the readers raise and
-        this loop sees within a step), or on any other interruption
-        (Ctrl+C), the tree and the command are stopped the same way, as
-        subprocess.run kills its child: the command does not outlive the
-        run that started it, and neither does anything it started. Every
-        stop is made before the command is reaped, which is the last thing
-        done here, so the pid the tree is stopped by is still the
-        command's own; on the interruption path it is stopped, not reaped,
-        and the interrupt propagates."""
+        reach those ends (five seconds, and never past the timeout, which
+        is the ceiling on the call as a whole), and what they read is the
+        reply. Past the timeout, at the ceiling (`overflowed`, which the
+        readers raise and this loop sees within a step), or on any other
+        interruption (Ctrl+C), the tree and the command are stopped the
+        same way, as subprocess.run kills its child: the command does not
+        outlive the run that started it, and neither does anything it
+        started. Every stop is made before the command is reaped, which is
+        the last thing done here, so the pid the tree is stopped by is
+        still the command's own; on the interruption path it is stopped,
+        not reaped, and the interrupt propagates."""
         deadline = time.monotonic() + self.timeout
         step = 0.0005
         try:
@@ -1086,11 +1087,12 @@ class CommandBackend(VLMBackend):
             self._stop_tree(process.pid)
         else:
             self._stop(process)
-        ends = time.monotonic() + 5.0
+        ends = min(time.monotonic() + 5.0, deadline)
         for reader in readers:
             # The pipes end when the tree is gone; one still open is held by
             # something that left the group (a double-forked daemon) and is
-            # left to it rather than waited on.
+            # left to it rather than waited on. The bound stops at the
+            # deadline: past it the frame is an error whatever was read.
             reader.join(timeout=max(0.0, ends - time.monotonic()))
         for reader, name in zip(readers, ("stdout", "stderr")):
             # A pipe read to its end is closed here, not by the garbage
