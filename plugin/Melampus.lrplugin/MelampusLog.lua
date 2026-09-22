@@ -14,30 +14,39 @@ local LrShell = import 'LrShell'
 
 local Log = {}
 
---- Whether the folder is known to exist: set once a line has landed, so
--- every later open reaches only io.open. The LrFileUtils calls that check
--- and make the folder yield, and a line logged inside a catalog write gate
--- (keywordFromPath in MelampusImport.lua warns from one) must not yield;
--- every run's first line is outside any gate, so the folder is known by
--- the time a gate opens.
+--- Whether the folder has been consulted this module load, and whether it
+-- was there (made if it had to be) when it was. The LrFileUtils calls that
+-- check and make the folder yield, and a line logged inside a catalog write
+-- gate (keywordFromPath in MelampusImport.lua warns from one) must not
+-- yield; every run's first line is outside any gate, so the folder is
+-- consulted at most once, by that line, whatever the outcome: a folder that
+-- could not be made stays not made for the run rather than being asked for
+-- again from inside a gate. Log.reveal(), which only the dialog calls and
+-- never a gate, consults it again.
+local folderChecked = false
 local folderMade = false
 
---- The log, open for appending, its folder made on first use; nil when the
--- folder cannot be made or the file cannot be opened. A log that cannot be
--- written is not an error worth raising over in the middle of a run. The
--- folder is checked, not the call's result, because io.open of a path whose
--- folder is missing does not fail the same way everywhere.
-local function open()
-	if not folderMade then
-		local folder = Log.folder()
-		if not LrFileUtils.exists(folder) then
-			LrFileUtils.createAllDirectories(folder)
-			if not LrFileUtils.exists(folder) then return nil end
-		end
+--- Check the folder, making it when it is missing; folderMade says whether
+-- it is there afterwards. The folder is checked, not io.open's result,
+-- because io.open of a path whose folder is missing does not fail the same
+-- way everywhere.
+local function checkFolder()
+	local folder = Log.folder()
+	if not LrFileUtils.exists(folder) then
+		LrFileUtils.createAllDirectories(folder)
 	end
-	local handle = io.open(Log.path(), 'a')
-	folderMade = handle ~= nil
-	return handle
+	folderMade = LrFileUtils.exists(folder) and true or false
+	folderChecked = true
+end
+
+--- The log, open for appending, its folder made on first use; nil when the
+-- folder could not be made or the file cannot be opened. A log that cannot
+-- be written is not an error worth raising over in the middle of a run.
+-- After the first line, io.open is the only call this makes.
+local function open()
+	if not folderChecked then checkFolder() end
+	if not folderMade then return nil end
+	return io.open(Log.path(), 'a')
 end
 
 local function write(level, message)
@@ -95,8 +104,10 @@ end
 -- (LrShell reveals a file in its folder on both platforms). Made first,
 -- with its folder, when nothing has been logged yet, so there is always
 -- something to reveal; a folder that does not exist was what the old
--- button opened on Windows.
+-- button opened on Windows. The folder is consulted again here, never from
+-- a gate, so one removed mid-session comes back from the button.
 function Log.reveal()
+	checkFolder()
 	local handle = open()
 	if handle then handle:close() end
 	LrShell.revealInShell(Log.path())

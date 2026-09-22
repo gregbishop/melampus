@@ -1076,6 +1076,40 @@ t.test('on a fake Windows Lightroom, whose folders exist nowhere on this host, l
 	t.equals(Log.path(), 'C:\\Users\\photographer\\AppData\\Local\\Melampus\\logs\\Melampus.log')
 end)
 
+t.test('a line logged inside a write gate reaches no SDK file call even when the run\'s first line could not be written', function()
+	-- A fake Windows Lightroom's folder exists nowhere on this host, so the
+	-- first line lands nowhere. The folder is consulted once per module load,
+	-- whatever the outcome; the line inside the gate reaches only io.open.
+	local Log = loadLog({ windows = true })
+	Log.info('running: melampus.exe --detect-engines')
+	mock.catalog:withWriteAccessDo('import', function()
+		Log.warn('could not create or find keyword "Tricolored Heron"')
+	end)
+	t.isFalse(mock.state.yieldInsideWrite, 'logging inside the write gate reached an SDK file call')
+end)
+
+t.test('a line logged inside a write gate reaches no SDK file call when the home is a file, so the folder cannot be made', function()
+	local Log = loadLog()
+	assert(io.open(homeOfTheFakeLightroom(), 'w')):close()
+	Log.info('running: melampus --detect-engines')
+	t.isNil(logText(), 'the log was made under a home that is a file')
+	mock.catalog:withWriteAccessDo('import', function()
+		Log.warn('could not create or find keyword "Tricolored Heron"')
+	end)
+	t.isFalse(mock.state.yieldInsideWrite, 'logging inside the write gate reached an SDK file call')
+end)
+
+t.test('Show log file makes the log again when its folder was removed mid-session', function()
+	local Log = loadLog()
+	Log.info('running: melampus --detect-engines')
+	t.isNotNil(logText(), 'nothing landed at ' .. Log.path())
+	os.execute('rm -rf ' .. mock.sh(Log.folder()))
+	t.isNil(logText(), 'the folder was not removed')
+	Log.reveal()
+	t.equals(mock.state.revealed[1], Log.path(), 'not the log that was revealed')
+	t.isNotNil(logText(), 'the log was not made again, so its folder had nothing to show')
+end)
+
 t.test('the dialog names the log at Log.path(), and Show log file reveals it in the folder that holds it, both made first', function()
 	local contents = openSettings({})
 	local Log = require('MelampusLog')

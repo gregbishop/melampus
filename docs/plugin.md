@@ -236,10 +236,14 @@ writes happen in a second. File I/O yields, and yielding inside
 `withWriteAccessDo` is what produces "yielding is not allowed" errors. The
 plugin's own log is the one thing written from inside a gate (a keyword that
 cannot be made is warned about there), so `MelampusLog.lua` checks and makes
-its folder through `LrFileUtils` only until a line has landed, which every
-run's first line does outside any gate; a line logged inside a gate reaches
-only `io.open`. The mock marks `LrFileUtils.exists`, `createAllDirectories`
-and `readFile` inside a gate, and the import suite holds that mark false.
+its folder through `LrFileUtils` at most once per module load, whatever the
+outcome, and every run's first line, outside any gate, is what consults it;
+a line logged inside a gate, written or not, reaches only `io.open`. Only
+`Log.reveal()`, which the Settings dialog's button calls and no gate does,
+consults the folder again, so one removed mid-session comes back from the
+button. The mock marks `LrFileUtils.exists`, `createAllDirectories` and
+`readFile` inside a gate, and both Lua suites hold that mark false, the
+settings suite on the paths where the first line could not be written.
 
 **Writes are chunked at 100 photos**, each chunk its own transaction, so a crash
 or a cancel keeps completed work.
