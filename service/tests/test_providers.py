@@ -1334,6 +1334,19 @@ def test_cli_detect_engines_prints_the_verdicts_as_json_in_order(
         assert by_engine[engine]["install"] == "", "a cloud engine is nothing to go and install"
 
 
+def test_every_install_address_a_verdict_carries_is_an_https_address():
+    """Claude security review round 11: a verdict's `install` is the picker's
+    one clickable line, and the plugin hands it to the operating system's URL
+    opener, so MelampusRules now links only an https address. These constants
+    are the only producers of that field, so the rule is pinned at the source
+    too: an install page written here as http, as a bare host, or as a local
+    path would silently lose its link in the dialog."""
+    addresses = [providers.OLLAMA_INSTALL, *(cli.install for cli in providers.CLI_ENGINES)]
+    assert len(addresses) == 3, addresses
+    for address in addresses:
+        assert address.startswith("https://"), address
+
+
 def test_cli_detect_engines_reports_ollama_when_it_answers(monkeypatch, capsys):
     """The fake at the default address is what `--detect-engines` finds;
     `--no-local-config` keeps a developer's own `[model] ollama_url` in

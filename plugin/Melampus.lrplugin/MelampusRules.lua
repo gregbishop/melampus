@@ -177,8 +177,15 @@ function Rules.engineItems(verdicts, problem)
 			-- billing docs or a line the program printed on stderr, neither of
 			-- them an install page (review round 9, finding 1). Whatever a
 			-- reason names stays text in the note, address and all.
+			-- An https address at that: the link is the one value the plugin
+			-- hands the operating system's URL opener (MelampusSettings:
+			-- LrHttp.openUrlInBrowser), and it arrives as JSON read back off
+			-- disk, so a file: address or a registered custom handler would
+			-- be launched without question (security review round 11). The
+			-- scrape this field replaced matched 'https?://' and constrained
+			-- the scheme by construction; the predicate is what replaces it.
 			local install = verdict.install
-			if type(install) == 'string' and install ~= '' then item.link = install end
+			if type(install) == 'string' and string.match(install, '^https://') then item.link = install end
 			lines[#lines + 1] = title .. ': ' .. reason
 		end
 		items[#items + 1] = item
