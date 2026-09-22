@@ -49,9 +49,12 @@ end
 --- Where the engines that are something to go and install are installed
 -- from: what a verdict that says to go and install one carries as its
 -- `install`, and what its reason names. Spelled once for every suite.
+-- One per verdict here that says to go and install something: the canned
+-- Codex is installed but not signed in, so it carries no install page and
+-- has no address here. Where the executable prints Codex's is pinned on
+-- the Python side, against the real thing (service/tests/test_binary.py).
 M.OLLAMA_INSTALL = 'https://ollama.com/download'
 M.CLAUDE_CODE_INSTALL = 'https://code.claude.com/docs/en/setup'
-M.CODEX_INSTALL = 'https://developers.openai.com/codex/cli'
 
 --- What `melampus --detect-engines` says on a Mac with no Ollama running,
 -- no Claude Code installed and a Codex CLI that is not signed in, decoded:
