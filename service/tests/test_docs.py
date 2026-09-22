@@ -504,22 +504,222 @@ def test_the_pip_pinning_gate_reads_yaml_workflows_too(tmp_path, monkeypatch):
         test_every_workflow_pins_every_pip_install_to_an_exact_version()
 
 
+def test_every_workflow_pins_every_action_to_a_commit_sha_with_its_version():
+    """Card #439, Done-when 1 and 2: given every `uses:` line in
+    .github/workflows, when read, then it names a full commit SHA with the
+    version as a trailing comment, and a line that names a moving tag instead
+    fails this test. A tag can be moved to different code; a SHA cannot, and
+    the comment is what a reader (and a future bump) sees the SHA as."""
+    texts = {workflow.name: workflow.read_text(encoding="utf-8") for workflow in _workflows()}
+    using = {name for name, text in texts.items() if _uses_lines(text)}
+    assert CI_WORKFLOW.name in using, f"a workflow uses no action: {sorted(texts)}"
+    unpinned = [f"{name}: {line}" for name, text in texts.items() for line in _unpinned_actions(text)]
+    assert not unpinned, f"a workflow names an action by tag, not a commit SHA with its version: {unpinned}"
+
+
+def test_the_action_pinning_gate_reads_flow_style_steps_too(tmp_path, monkeypatch):
+    """Security review of card #439: a step written as a YAML flow mapping,
+    `- {uses: actions/checkout@v4}`, is a `uses:` line naming a tag, and
+    Done-when 2 promises the gate fails on it; a detection that only knows
+    `- uses:` at the start of a line let it through. The folder is a stand-in
+    read at call time; ci.yml in it is pinned, so the only thing wrong is the
+    flow-style step in the .yaml file."""
+    (tmp_path / "ci.yml").write_text(
+        "      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0\n", encoding="utf-8"
+    )
+    (tmp_path / "x.yaml").write_text("      - {uses: actions/checkout@v4}\n", encoding="utf-8")
+    monkeypatch.setitem(globals(), "WORKFLOWS", tmp_path)
+    with pytest.raises(AssertionError, match=r"x\.yaml: - \{uses: actions/checkout@v4\}"):
+        test_every_workflow_pins_every_action_to_a_commit_sha_with_its_version()
+
+
+def test_the_action_pinning_gate_counts_a_flow_style_step_as_using_an_action(tmp_path, monkeypatch):
+    """Round 1, finding 2: the gate asks "does this workflow use an action"
+    before it asks "is every use pinned", and both questions are about the
+    same lines, so they must be answered by one definition. A ci.yml whose
+    only step is a flow mapping, pinned, with the version as a comment inside
+    the mapping's continuation, uses an action and is pinned: the gate passes
+    on it rather than reporting that the workflow uses no action."""
+    (tmp_path / "ci.yml").write_text(
+        "      - { uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0\n        }\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setitem(globals(), "WORKFLOWS", tmp_path)
+    test_every_workflow_pins_every_action_to_a_commit_sha_with_its_version()
+
+
+def test_the_action_pinning_gate_reads_a_uses_key_wherever_yaml_puts_one(tmp_path, monkeypatch):
+    """Round 4, finding 1: the gate is only as good as its idea of a `uses:`
+    key, and two YAML spellings slipped past it, each letting a moving tag
+    through. A `#` inside a quoted scalar is part of that scalar, not the
+    start of a comment, so cutting the line at it threw the step's real
+    `uses:` key away; and a key may be quoted, `"uses":`, which a pattern
+    demanding `uses:` right after a space, `{` or `,` never saw. Both files
+    name actions/checkout by tag, so both must be reported. The folder is a
+    stand-in read at call time; ci.yml in it is pinned."""
+    (tmp_path / "ci.yml").write_text(
+        "      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0\n", encoding="utf-8"
+    )
+    (tmp_path / "quoted-scalar.yaml").write_text(
+        "      - {name: 'Checkout # source', uses: actions/checkout@v4}\n", encoding="utf-8"
+    )
+    (tmp_path / "quoted-key.yaml").write_text('      - "uses": actions/checkout@v4\n', encoding="utf-8")
+    monkeypatch.setitem(globals(), "WORKFLOWS", tmp_path)
+    with pytest.raises(AssertionError) as unpinned:
+        test_every_workflow_pins_every_action_to_a_commit_sha_with_its_version()
+    reported = str(unpinned.value)
+    assert "quoted-scalar.yaml: - {name: 'Checkout # source', uses: actions/checkout@v4}" in reported, reported
+    assert 'quoted-key.yaml: - "uses": actions/checkout@v4' in reported, reported
+
+
+def test_the_action_pinning_gate_reads_the_pin_in_the_code_not_in_a_comment(tmp_path, monkeypatch):
+    """Round 4, finding 2: the pin check searched the whole line, comment
+    and all, for a SHA with a version after it, so a step that still names a
+    moving tag passed by mentioning a SHA in its comment. What a workflow
+    runs is the reference in the line's code; the version is what the
+    comment is for. The folder is a stand-in read at call time; ci.yml in it
+    is pinned, so the only thing wrong is the .yaml file's tag."""
+    (tmp_path / "ci.yml").write_text(
+        "      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0\n", encoding="utf-8"
+    )
+    (tmp_path / "x.yaml").write_text(
+        "      - uses: actions/checkout@v4 # formerly uses: "
+        "actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setitem(globals(), "WORKFLOWS", tmp_path)
+    with pytest.raises(AssertionError, match=r"x\.yaml: - uses: actions/checkout@v4 # formerly"):
+        test_every_workflow_pins_every_action_to_a_commit_sha_with_its_version()
+
+
+def test_the_action_pinning_gate_reads_the_pin_of_every_uses_on_the_line(tmp_path, monkeypatch):
+    """Round 5, finding 1: one line may hold more than one `uses:` key -- a
+    whole `steps:` sequence written as a flow list is valid YAML that Actions
+    runs -- and the pin was judged once per line, so a SHA anywhere in the
+    code, with a `# v4` anywhere in the comment, vouched for every other
+    `uses:` on that line unexamined. Every key's own reference must name a
+    SHA; and one trailing comment cannot honestly name two actions'
+    versions, so a line that uses two actions is reported whether or not
+    both are pinned. The folder is a stand-in read at call time; ci.yml in it
+    is pinned, so the only things wrong are the .yaml files."""
+    sha = "11d5960a326750d5838078e36cf38b85af677262"
+    (tmp_path / "ci.yml").write_text(f"      - uses: actions/checkout@{sha} # v4.4.0\n", encoding="utf-8")
+    (tmp_path / "first-pinned.yaml").write_text(
+        "      steps: [{uses: actions/checkout@" + sha + "}, {uses: actions/checkout@v4}] # v4.4.0\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "last-pinned.yaml").write_text(
+        "      steps: [{uses: actions/checkout@v4}, {uses: actions/checkout@" + sha + "}] # v4.4.0\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "two-pinned.yaml").write_text(
+        "      steps: [{uses: actions/checkout@" + sha + "}, {uses: actions/setup-python@" + sha + "}] # v4.4.0\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setitem(globals(), "WORKFLOWS", tmp_path)
+    with pytest.raises(AssertionError) as unpinned:
+        test_every_workflow_pins_every_action_to_a_commit_sha_with_its_version()
+    reported = str(unpinned.value)
+    for name in ("first-pinned.yaml", "last-pinned.yaml", "two-pinned.yaml"):
+        assert name in reported, reported
+    assert "ci.yml" not in reported, reported
+
+
+def test_the_action_pinning_gate_opens_a_quoted_scalar_only_where_one_can_begin(tmp_path, monkeypatch):
+    """Round 5, finding 2: a `'` or `"` was taken as opening a quoted scalar
+    wherever it appeared, so the apostrophe in the plain scalar `don't`
+    inverted the line's quote parity. In YAML a quote is an indicator only
+    where a scalar can begin, and a quoted scalar ends at its closing quote,
+    `''` inside it being one apostrophe, not that end. Both spellings cost
+    the gate a real step: the comment was cut inside a quoted `name:`, so
+    the step's `uses:` key was thrown away with it and a moving tag was
+    never even looked at. ci.yml here is a pinned step whose name holds an
+    apostrophe: reading it as an open quote swallowed its `# v4.4.0` and
+    raised a false alarm on a step that is pinned, so ci.yml must not be
+    reported while both .yaml files must be."""
+    sha = "11d5960a326750d5838078e36cf38b85af677262"
+    (tmp_path / "ci.yml").write_text(
+        "      - {name: Don't touch, uses: actions/checkout@" + sha + "} # v4.4.0\n", encoding="utf-8"
+    )
+    (tmp_path / "plain-apostrophe.yaml").write_text(
+        "      - {a: don't, name: 'Checkout # source', uses: actions/checkout@v4}\n", encoding="utf-8"
+    )
+    (tmp_path / "escaped-quote.yaml").write_text(
+        "      - {name: 'Checkout '' # '' source', uses: actions/checkout@v4}\n", encoding="utf-8"
+    )
+    monkeypatch.setitem(globals(), "WORKFLOWS", tmp_path)
+    with pytest.raises(AssertionError) as unpinned:
+        test_every_workflow_pins_every_action_to_a_commit_sha_with_its_version()
+    reported = str(unpinned.value)
+    for name in ("plain-apostrophe.yaml", "escaped-quote.yaml"):
+        assert name in reported, reported
+    assert "ci.yml" not in reported, reported
+
+
 RELEASE_ZIPS = ("Melampus-macOS.zip", "Melampus-Windows.zip")
 
 
-def _steps(job: str) -> list[str]:
-    """That job's steps, each as its text."""
-    return re.split(r"^      - ", job, flags=re.MULTILINE)[1:]
+USES_KEY = r"""(?:^|[\s{,])(?:uses|"uses"|'uses')\s*:"""
+
+
+def _code(line: str) -> str:
+    """That line without its comment. A `#` starts a comment where YAML says
+    it does: at the start of the line or after a space, and outside a quoted
+    scalar, so the `#` in `name: 'Checkout # source'` is part of the name and
+    the rest of the line is still code. A quote opens a quoted scalar only
+    where a scalar can begin -- the start of the line, or after `:`, `-`,
+    `{`, `,` or `[` -- so the apostrophe in the plain scalar `don't` is part
+    of the word; and inside a single-quoted scalar `''` is one apostrophe,
+    not the end of the scalar."""
+    quote = ""
+    index = 0
+    while index < len(line):
+        character = line[index]
+        if quote == '"' and character == "\\":
+            index += 2
+            continue
+        if quote == "'" and character == "'" and line[index + 1:index + 2] == "'":
+            index += 2
+            continue
+        if quote:
+            if character == quote:
+                quote = ""
+        elif character in "\"'" and line[:index].rstrip()[-1:] in ("", ":", "-", "{", ",", "["):
+            quote = character
+        elif character == "#" and (index == 0 or line[index - 1] in " \t"):
+            return line[:index]
+        index += 1
+    return line
+
+
+def _uses_lines(text: str) -> list[str]:
+    """The lines of that text with a `uses:` key, stripped. A `uses:` key
+    counts wherever YAML puts it in the line's code (block style, or inside
+    a flow mapping after `{` or `,`), quoted or not; a comment is not code,
+    so a line that only mentions `uses:` after `#` does not."""
+    return [line.strip() for line in text.splitlines() if re.search(USES_KEY, _code(line))]
 
 
 def _unpinned_actions(text: str) -> list[str]:
     """The `uses:` lines in that text not pinned to a commit SHA with the
-    version in a trailing comment."""
-    return [
-        line.strip()
-        for line in text.splitlines()
-        if re.search(r"^\s*-?\s*uses:", line) and not re.search(r"uses: \S+@[0-9a-f]{40}\s+# v\d", line)
-    ]
+    version in a trailing comment. What the workflow runs is the reference
+    after each `uses:` key and the version is what the comment says, so each
+    is read where it belongs: a SHA quoted in a comment pins nothing, and a
+    SHA after one key on the line vouches for no other. One trailing comment
+    cannot name two actions' versions, so a line holding a second `uses:`
+    key is reported whether or not both name a SHA."""
+    unpinned = []
+    for line in _uses_lines(text):
+        code = _code(line)
+        references = [code[key.end():] for key in re.finditer(USES_KEY, code)]
+        pinned = (
+            len(references) == 1
+            and re.match(r"\s*\S+@[0-9a-f]{40}\b", references[0])
+            and re.search(r"#\s*v\d", line[len(code):])
+        )
+        if not pinned:
+            unpinned.append(line)
+    return unpinned
 
 
 def test_ci_packages_a_zip_per_platform_and_a_tag_releases_both():
@@ -537,9 +737,8 @@ def test_ci_packages_a_zip_per_platform_and_a_tag_releases_both():
     Windows zip ships from a script tested on Windows; both zip names are in
     it; a `release` job needs every packaging job, runs only on a tag, and
     alone holds `contents: write`, with no scope beyond contents anywhere in
-    the file; and every action this card adds (the zip uploads and the
-    release job's) is pinned to a commit SHA with the version in a trailing
-    comment. ci.yml's earlier `uses:` lines are card #439's."""
+    the file. That every `uses:` line is pinned is card #439's gate, over
+    every workflow, so it is not asserted again here."""
     ci = CI_WORKFLOW.read_text(encoding="utf-8")
     copies = [w.name for w in _workflows() if w != CI_WORKFLOW and "pytest" in w.read_text(encoding="utf-8")]
     assert not copies, f"a second workflow copies ci.yml's build steps; extend ci.yml instead: {copies}"
@@ -576,13 +775,6 @@ def test_ci_packages_a_zip_per_platform_and_a_tag_releases_both():
     assert not other, f"ci.yml grants more than contents: {other}"
     writes = [line for line in ci.splitlines() if re.search(r"^\s+contents: write$", line)]
     assert len(writes) == 1 and "contents: write" in release, "contents: write must be granted once, on the release job"
-
-    zip_steps = [
-        step for name in packaging for step in _steps(jobs[name]) if any(z in step for z in RELEASE_ZIPS)
-    ]
-    assert zip_steps, "no step uploads a zip"
-    unpinned = _unpinned_actions(release) + [u for step in zip_steps for u in _unpinned_actions(step)]
-    assert not unpinned, f"actions added for the release are not pinned to a SHA with a version comment: {unpinned}"
 
 
 def test_install_docs_name_the_release_zips_and_keep_the_from_source_path():
