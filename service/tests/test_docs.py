@@ -16,8 +16,10 @@ Done-when 3); every `uv sync` that builds the executable, in CI and in
 readme.md's build section, installs the extras the executable carries (card
 #434, Done-when 1 and 3); CI packages one plugin zip per platform through the
 script on every run and, on a pushed v* tag, its release job attaches both to
-the GitHub release, which the install docs name (card #402); and no doc names
-a workflow file that does not exist.
+the GitHub release, which the install docs name (card #402); no doc names a
+workflow file that does not exist; and no doc states a test count, because
+the suite grows with every card and CI checks no such number (card #437,
+Done-when 1).
 
 The checks are deliberately dumb — substring presence of the backticked name — so
 they never argue with prose style, only with absence. The one exception runs the
@@ -342,7 +344,15 @@ def test_agents_md_points_at_the_standard_and_names_the_tracker():
 def test_docs_name_the_build_and_its_smoke_test():
     """Card #399: the executable is built by tools/build_binary.py and the test
     command builds and smoke-tests it with --build-binary. The stack contract's
-    `build:` line and readme.md must name both, or nobody finds them."""
+    `build:` line and readme.md must name both, or nobody finds them.
+
+    Round 2, finding 1: the option is what builds, not what runs the smoke
+    tests. `built_executable` (conftest.py) builds only when the option is
+    given and then skips only when no executable is there, so without the
+    option the smoke tests run against an existing build and skip only when
+    there is none — which is what conftest.py's own docstring says and what
+    readme.md tells the reader. The brief's sentence on them says the same,
+    or it states a skip the suite does not have."""
     brief = BRIEF.read_text(encoding="utf-8")
     build = re.search(r"^- build: (`[^`]+`)", brief, re.MULTILINE)
     assert build and build.group(1) == "`.venv/bin/python tools/build_binary.py`", (
@@ -356,6 +366,48 @@ def test_docs_name_the_build_and_its_smoke_test():
         if command not in readme
     ]
     assert not missing, f"readme.md does not name: {missing}"
+    about_the_smoke_tests = [
+        sentence for sentence in _sentences(brief)
+        if "--build-binary" in sentence and "smoke test" in sentence
+    ]
+    assert about_the_smoke_tests, (
+        "docs/brief.md does not say what --build-binary does to the smoke tests"
+    )
+    unconditional = [
+        sentence for sentence in about_the_smoke_tests
+        if not re.search(r"existing build|dist/melampus|no build|when (?:one|it) exists",
+                         sentence)
+    ]
+    assert not unconditional, (
+        "docs/brief.md has the smoke tests skipping on a missing option; they skip on a "
+        f"missing build (service/tests/conftest.py's built_executable): {unconditional}"
+    )
+
+
+def test_the_brief_names_skips_as_what_the_two_runs_differ_in():
+    """Round 3, finding 1: the correction in the test above moved the
+    sentence's axis from skips to the build, and the differences it introduces
+    are not the build's: `test_escalation.py`, `test_quality.py`'s corpus
+    tests and the installed-checkout test all skip on what the runner has,
+    whichever way the option is passed. The axis is skips, or the sentence
+    promises a list it does not deliver."""
+    brief = BRIEF.read_text(encoding="utf-8")
+    about_the_two_runs = [
+        sentence for sentence in _sentences(brief) if "differ only in" in sentence
+    ]
+    assert about_the_two_runs, (
+        "docs/brief.md does not say what the two test runs differ only in"
+    )
+    axes = [
+        axis
+        for sentence in about_the_two_runs
+        for axis in re.findall(r"differ only in ([\w-]+)", sentence)
+    ]
+    assert "skips" in axes, (
+        "docs/brief.md's sentence on the two runs names an axis the list it introduces is "
+        "not: those differences are skips the runner's environment causes, not the build's "
+        f"doing: {axes or about_the_two_runs}"
+    )
 
 
 def test_readme_build_blocks_sync_the_sdk_extras():
@@ -795,3 +847,99 @@ def test_config_doc_quotes_the_codex_template_from_its_one_source():
     assert "`codex`" in readme and "--backend codex" in readme
     architecture = (REPO / "docs" / "architecture.md").read_text(encoding="utf-8")
     assert "`codex`" in architecture and "CODEX_COMMAND" in architecture
+
+
+# "182 tests", "46 rules tests", "11 corpus-backed tests", "410 passed",
+# "26 skipped", "skips 2": a number and a test noun, with at most one word between.
+TEST_COUNT = re.compile(
+    r"\b\d+\s+(?:[\w-]+\s+)?(?:tests?|passed|skipped|skips?)\b|\b(?:skips?|skipped)\s+\d+\b",
+    re.IGNORECASE,
+)
+# "126 Python, 56 Lua": a language count, stale only in a sentence about tests.
+LANGUAGE_COUNT = re.compile(r"\b\d+\s+(?:Python|Lua)\b")
+
+
+def _sentences(text: str) -> list[str]:
+    """Each sentence of the doc's prose, with hard-wrapped lines joined so a
+    count and its noun are seen together whichever line each falls on."""
+    return [
+        sentence
+        for paragraph in re.split(r"\n\s*\n", text)
+        for sentence in re.split(r"(?<=[.!?])\s+", " ".join(paragraph.split()))
+        if sentence
+    ]
+
+
+def _states_a_test_count(sentence: str) -> bool:
+    """Whether `sentence` states how many tests there are: a number and a test
+    noun, or a count of a language in a sentence that is about tests."""
+    return bool(TEST_COUNT.search(sentence) or (
+        "test" in sentence.lower() and LANGUAGE_COUNT.search(sentence)
+    ))
+
+
+def test_docs_state_no_test_count():
+    """Card #437, Done-when 1: the suite grows with every card, so a count
+    written into a doc is wrong the day after, and CI checks no such number.
+    The docs say what the tests need and how to run them, never how many
+    there are, in any of the forms a count has taken: "182 tests", "46 rules
+    tests", "410 passed", "26 skipped", "skips 2", and "126 Python, 56 Lua"
+    in a sentence about tests."""
+    stated = []
+    for doc in DOCS:
+        for sentence in _sentences(doc.read_text(encoding="utf-8")):
+            if _states_a_test_count(sentence):
+                stated.append(f"{doc.relative_to(REPO)}: {sentence}")
+    assert not stated, f"docs state a test count that CI does not check: {stated}"
+
+
+def test_the_test_count_gate_reads_every_form_of_a_count():
+    """Round 1, finding 1: the gate above is green today only because no doc
+    states a count, so on its own it would stay green if a narrowing edit to
+    either pattern, or a `_sentences` that stopped joining hard-wrapped lines,
+    took the promise away. Each form the gate names must be caught in the
+    hard-wrapped prose the docs are written in, and a count-free sentence
+    must not be."""
+    wrapped = "The suite is 182\ntests today.\n\nRun them with pytest.\n"
+    assert _sentences(wrapped) == ["The suite is 182 tests today.", "Run them with pytest."]
+    for counted in ("The suite is 182 tests today.", "The 47 rules tests cover every rule.",
+                    "CI reports 410 passed.", "CI reports 26 skipped.", "The run skips 2 on Linux.",
+                    "The tests are 126 Python, 56 Lua.", "The tests are 126 Python.",
+                    "The tests are 56 Lua."):
+        assert _states_a_test_count(counted), f"the gate misses a stated count: {counted!r}"
+    for uncounted in ("Run the tests with pytest before you push.", "The plugin is 126 Python."):
+        assert not _states_a_test_count(uncounted), f"the gate calls this a test count: {uncounted!r}"
+
+
+def test_the_test_count_gate_reads_every_doc(tmp_path, monkeypatch):
+    """Round 1, finding 2: `DOCS` (:54) is the list every doc-wide gate in
+    this file iterates, and a doc written later must be inside this gate by
+    default rather than outside it, so the gate reads `DOCS` itself rather
+    than a re-listed subset of it. The folder is a stand-in read at call
+    time.
+
+    Round 2, finding 2: it holds two docs, not one, because one doc cannot
+    tell the two subsets apart. A gate re-listing paths of its own reads the
+    real docs, which are clean, and raises nothing; a gate reading part of
+    `DOCS` — the shape round 1 had — reads only part of the stand-in folder.
+    With one doc, any gate that read it at all raised, and this stayed green
+    while the rest of `DOCS` sat outside the gate.
+
+    Round 3, finding 2: both docs state a count and the failure must name
+    both. With the count in the later doc alone, a gate reading `DOCS[1:]` —
+    readme.md outside it — still raised on `later.md` and this still passed,
+    so the test proved only that the last doc is read. Naming both means a
+    gate reading any proper subset of `DOCS` misses one of the two and fails
+    here."""
+    (tmp_path / "earlier.md").write_text("The suite is 182 tests today.\n", encoding="utf-8")
+    (tmp_path / "later.md").write_text("CI reports 410 passed.\n", encoding="utf-8")
+    monkeypatch.setitem(globals(), "REPO", tmp_path)
+    monkeypatch.setitem(globals(), "DOCS", [tmp_path / "earlier.md", tmp_path / "later.md"])
+    with pytest.raises(AssertionError) as raised:
+        test_docs_state_no_test_count()
+    for stated in ("earlier.md: The suite is 182 tests today.",
+                   "later.md: CI reports 410 passed."):
+        assert stated in str(raised.value), (
+            f"the gate read a subset of DOCS: its failure does not name {stated!r}: "
+            f"{raised.value}"
+        )

@@ -270,9 +270,18 @@ class DownloadError(Exception):
         super().__init__(_without_query(message))
 
 
-class DownloadCancelled(Exception):
+class DownloadCancelled(BaseException):
     """A signal, or the cancel marker, asked the download to stop; partial
-    files are kept for resume."""
+    files are kept for resume. Not an Exception, for the reason
+    KeyboardInterrupt is not one (card #502): `cancel_on_signals` raises this
+    from a signal handler, so it lands on whatever bytecode was running, and a
+    library's `except Exception` cleanup — threading.Thread.start()'s among
+    them, which the Ollama pull runs for every line of the stream — would take
+    it for what its own block did wrong. Thread.start() then forgets a thread
+    that is in fact running, the thread raises KeyError in threading's
+    bookkeeping, and the interpreter writes "Exception ignored in thread
+    started by ..." to stderr, where the cancel path promises the plugin
+    nothing but `cancelled`. Every handler for it names it."""
 
 
 @contextmanager
