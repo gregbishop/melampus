@@ -231,6 +231,23 @@ def test_the_section_reader_reads_a_docs_last_section():
     assert _section("## A\na\n## B\nb\n", "B") == "b\n"
 
 
+def _row(text: str, key: str) -> str | None:
+    """The line of a doc's config table whose first cell is `key` (the
+    `| `key` |` row, the whole key); None when the text has no such row."""
+    return next((line for line in text.splitlines() if line.startswith(f"| `{key}` |")), None)
+
+
+def test_the_row_reader_takes_the_key_whole():
+    """Round 8, finding 1: `_row` promises the row whose first cell is the
+    key, whole: docs/config.md's keys share prefixes (`max_edge`,
+    `max_tokens`; `ollama_model`, `ollama_url`), so a key must find its own
+    row and not the first whose key starts the same way, and None only when
+    the text has no such row."""
+    text = "| `timeout_seconds` | `180` | seconds |\n| `timeout` | `3` | plain |\n"
+    assert _row(text, "timeout") == "| `timeout` | `3` | plain |"
+    assert _row(text, "timeouts") is None
+
+
 def test_install_blocks_install_from_the_lockfile():
     """Card #425, Done-when 3: given a fresh clone, when the README setup runs,
     then the resolved versions match the lockfile. Only `uv sync --locked` (or
@@ -603,7 +620,7 @@ def test_docs_name_engine_detection_where_the_default_and_the_refusal_are_descri
     and neither may still promise that detection is yet to come."""
     config_doc = CONFIG_DOC.read_text(encoding="utf-8")
     readme = README.read_text(encoding="utf-8")
-    backend_row = next(line for line in config_doc.splitlines() if line.startswith("| `backend` |"))
+    backend_row = _row(config_doc, "backend")
     assert "`--detect-engines`" in backend_row, "docs/config.md's backend row does not name --detect-engines"
     assert "turns that into" not in backend_row, "docs/config.md still says detection is yet to come"
     assert "`--detect-engines`" in readme, "readme.md does not name --detect-engines"
@@ -700,3 +717,85 @@ def test_docs_say_the_same_button_and_flags_pull_ollamas_model():
     readme = README.read_text(encoding="utf-8")
     windows = re.search(r"^## Windows.*?\n(.*?)^## ", readme, re.MULTILINE | re.DOTALL).group(1)
     assert "Settings" in windows and "pull" in windows, "readme.md § Windows does not say the model can be pulled from Settings"
+
+
+def test_config_doc_names_the_command_output_ceiling():
+    """Card #420: the `command` backend reads stdout and stderr with a
+    ceiling (`CommandBackend.MAX_OUTPUT_BYTES`), past which the program is
+    stopped and the frame recorded as an error naming the number of bytes.
+    docs/config.md's `command` row names the other per-frame outcomes, so it
+    must name this one with the number the error message carries, and must
+    change when the number does."""
+    from melampus.backend import CommandBackend
+    config_doc = CONFIG_DOC.read_text(encoding="utf-8")
+    command_row = _row(config_doc, "command")
+    assert str(CommandBackend.MAX_OUTPUT_BYTES) in command_row, (
+        "docs/config.md's command row does not name the output ceiling in bytes")
+    assert "4 MiB" in command_row, "docs/config.md's command row does not name the output ceiling"
+
+
+def test_config_doc_says_the_commands_exit_ends_its_answer_and_stops_what_it_started():
+    """Card #420: the command's exit ends its answer, and everything it
+    started is stopped the moment it exits, so a helper it leaves holding
+    stdout or stderr is stopped rather than waited on; past the timeout the
+    program and everything it started are stopped too. An operator whose
+    CLI starts a helper meant to outlive the call (a server it keeps warm)
+    finds it stopped after every completion, so docs/config.md's `command`
+    row must say so, and its `timeout_seconds` row must say the stop
+    reaches everything the program started, not the program alone."""
+    model = _section(CONFIG_DOC.read_text(encoding="utf-8"), "`[model]`")  # [escalation] has a timeout_seconds row of its own
+    command_row, timeout_row = _row(model, "command"), _row(model, "timeout_seconds")
+    assert "exit ends its answer" in command_row, (
+        "docs/config.md's command row does not say the command's exit ends its answer")
+    assert "everything it started is stopped" in command_row, (
+        "docs/config.md's command row does not say everything the command started is stopped at its exit")
+    assert "not waited" in command_row, (
+        "docs/config.md's command row does not say a helper left holding a stream is stopped, not waited on")
+    assert "and everything it started" in timeout_row, (
+        "docs/config.md's timeout_seconds row does not say the stop reaches everything the program started")
+    assert "counted from before the program is started" in timeout_row, (
+        "docs/config.md's timeout_seconds row does not say starting the program counts against the ceiling")
+
+
+def test_docs_name_the_sigchld_refusal_beside_the_commands_other_refusals():
+    """Card #420: docs/config.md's `command` row, docs/architecture.md,
+    readme.md and `CommandBackend`'s docstring each enumerate what the
+    factory refuses up front (a program not on PATH, a `.cmd`/`.bat`
+    shim), so each must also name the launcher that ignores SIGCHLD,
+    refused the same way because the kernel would reap the program at its
+    exit and the pid its tree is stopped by could be someone else's by
+    then; the row must say the fix (a shell, or the default), and the
+    docstring must say that refusal is what `_stop_tree` rests on."""
+    from melampus.backend import CommandBackend
+    command_row = _row(CONFIG_DOC.read_text(encoding="utf-8"), "command")
+    for doc, prose in (
+        ("docs/architecture.md", (REPO / "docs" / "architecture.md").read_text(encoding="utf-8")),
+        ("docs/config.md", command_row),
+        ("readme.md", README.read_text(encoding="utf-8")),
+        ("CommandBackend's docstring", CommandBackend.__doc__),
+    ):
+        prose = " ".join(prose.split())  # the prose wraps; the phrase must not hide across a line break
+        assert "ignores SIGCHLD" in prose, f"{doc} does not name the SIGCHLD refusal beside the command's other refusals"
+    assert "shell" in command_row and "default" in command_row, (
+        "docs/config.md's command row does not say how to fix a launcher that ignores SIGCHLD")
+    assert "_stop_tree" in CommandBackend.__doc__, (
+        "CommandBackend's docstring does not say the SIGCHLD refusal is what _stop_tree rests on")
+
+
+def test_docs_say_the_command_runs_once_per_completion():
+    """Card #420: the `command` backend runs its program once per
+    completion, not once per frame: a frame is at least two completions
+    (the routing prompt, then the group's identification prompt), and a
+    corrective retry or a step down the fallback ladder is another. Each
+    of docs/architecture.md, docs/config.md's `backend` row and readme.md
+    must say so where it describes the engine, and name the two stages."""
+    for doc, prose in (
+        ("docs/architecture.md", (REPO / "docs" / "architecture.md").read_text(encoding="utf-8")),
+        ("docs/config.md", _row(CONFIG_DOC.read_text(encoding="utf-8"), "backend")),
+        ("readme.md", README.read_text(encoding="utf-8")),
+    ):
+        prose = " ".join(prose.split())  # the prose wraps; the phrase must not hide across a line break
+        assert "once per frame" not in prose, f"{doc} still says the command runs once per frame"
+        assert "once per completion" in prose, f"{doc} does not say the command runs once per completion"
+        assert "routing" in prose and "identification" in prose, (
+            f"{doc} does not name the two completions a frame is made of")

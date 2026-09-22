@@ -9,10 +9,18 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import errno
 import functools
 import http.client
+import itertools
 import json
+import os
+import select
+import shlex
+import signal
 import socket
+import subprocess
+import sys
 import threading
 import time
 import urllib.error
@@ -45,12 +53,33 @@ class VLMBackend(ABC):
     """Takes an image path and a prompt; returns text. Nothing else crosses this line."""
 
     name: str
+    #: The most of what the model's side wrote that an error message carries:
+    #: it lands in the frame's error record (identify.py), so in the cache
+    #: and --json-out. Ollama's own errors are one line; a proxy's error
+    #: page, or a line of a CLI's usage text, is cut here.
+    MAX_ERROR_BYTES = 1 << 10
 
     @abstractmethod
     def complete(self, image_path: Path, prompt: str, max_tokens: int) -> Completion: ...
 
     def warmup(self) -> None:  # pragma: no cover - optional
         return None
+
+    @classmethod
+    def plain(cls, text: str) -> str:
+        """Text the model's side wrote (a server, a program), as it may
+        reach the frame's error record, the log and the terminal: one line
+        of at most MAX_ERROR_BYTES printable characters. An escape
+        sequence in it would move the cursor, recolour the terminal or
+        erase a line, and a line break would fake a line of the log.
+        Whatever is not printable (str.isprintable: the C0 and C1
+        controls, line and paragraph breaks, the unassigned) becomes a
+        space, and runs of whitespace collapse to one, so what is left is
+        words. The one rule for every message that carries those words:
+        Ollama's error body, a status line http.client could not parse,
+        and a command's stderr."""
+        words = " ".join("".join(c if c.isprintable() else " " for c in text).split())
+        return words[: cls.MAX_ERROR_BYTES]
 
 
 class MLXBackend(VLMBackend):
@@ -598,10 +627,6 @@ class OllamaBackend(VLMBackend):
     #: `num_predict` tokens and a dozen counters, so a megabyte is not an
     #: answer, and a server that keeps sending does not fill memory.
     MAX_REPLY_BYTES = 1 << 20
-    #: The most of a non-200's body that is read: it lands in the frame's
-    #: error record (identify.py), so in the cache and --json-out. Ollama's
-    #: own errors are one line; a proxy's error page is cut here.
-    MAX_ERROR_BYTES = 1 << 10
 
     def __init__(
         self,
@@ -784,21 +809,6 @@ class OllamaBackend(VLMBackend):
         )
 
     @classmethod
-    def plain(cls, text: str) -> str:
-        """Text the server wrote, as it may reach the frame's error record,
-        the log and the terminal: one line of at most MAX_ERROR_BYTES
-        printable characters. An escape sequence in it would move the
-        cursor, recolour the terminal or erase a line, and a line break
-        would fake a line of the log. Whatever is not printable
-        (str.isprintable: the C0 and C1 controls, line and paragraph
-        breaks, the unassigned) becomes a space, and runs of whitespace
-        collapse to one, so what is left is words. The one rule for every
-        message that carries the server's words: an error body, and a
-        status line http.client could not parse."""
-        words = " ".join("".join(c if c.isprintable() else " " for c in text).split())
-        return words[: cls.MAX_ERROR_BYTES]
-
-    @classmethod
     def error_text(cls, exc: urllib.error.HTTPError) -> str:
         """Ollama's own words when the body is its {"error": ...} object,
         else the body as it came (a proxy's HTML, say), else the status
@@ -835,6 +845,323 @@ class OllamaBackend(VLMBackend):
             prompt_tokens=reply.get("prompt_eval_count"),
             generated_tokens=reply.get("eval_count"),
         )
+
+
+class CommandFailed(RuntimeError):
+    """The command exited non-zero: the engine is broken (not signed in, wrong
+    flags), not the frame. The CLI surfaces it at exit 3 like the other
+    backend failures instead of recording it on every frame in turn."""
+
+
+class CommandBackend(VLMBackend):
+    """An installed command-line program behind the same interface (card
+    #420): one run per completion, the reply on stdout. Claude Code and Codex
+    CLI bill to a subscription rather than per call, so a command that takes
+    an image and a prompt is vision with no API key; the templates for those
+    two are cards #421 and #422. This class knows no program: `command` is
+    the config's argv template, one element per argument, with `{image}` and
+    `{prompt}` placeholders replaced wherever they sit. An argv list, never a
+    shell: the prompt is one argument however many spaces, quotes or newlines
+    it holds, and nothing is quoted or escaped.
+
+    `executable` is what shutil.which resolved the template's first element
+    to (providers.build_primary_backend does that before any image is read,
+    so a missing program is refused up front, and so is one that resolves to
+    a `.cmd` or `.bat` file, which Windows would run through cmd.exe): it
+    replaces the bare name in the argv, so what was checked is what runs.
+    The same factory refuses the engine when the process that started
+    melampus ignores SIGCHLD (`SIG_IGN` is inherited across exec), because
+    the kernel would then reap the program the moment it exits; that
+    refusal is what `_stop_tree`'s precondition rests on: the command stays
+    unreaped until `_wait` reaps it, so the pid its tree is stopped by is
+    still its own and never a number given since to someone else's process.
+    The child gets the parent's environment as it is, so the
+    program finds its own sign-in; nothing is added to it and no secret
+    crosses the command line. As with every backend, the image is the staged,
+    metadata-free file and only its path travels. `max_tokens` has no
+    placeholder: the program's own limits apply.
+
+    stdout goes through the same JSON extraction and schema validation as
+    every other backend's text (identify.py); nothing here parses
+    candidates. stderr is kept for error messages only. Both are read as
+    they come, at most MAX_OUTPUT_BYTES each, and a program that streams
+    past that is stopped and the frame refused by name. `timeout` is the
+    one ceiling on a run's time; past it the command and every process it
+    started are stopped (OWN_GROUP) before the frame's TimeoutError is
+    raised. The command's exit ends its answer: whatever it started is
+    stopped then too, so a helper it leaves holding stdout or stderr is
+    stopped rather than waited on, and what was read is the reply.
+    """
+
+    #: How much of stderr an error message carries: enough to say what went
+    #: wrong, not a CLI's whole usage text.
+    STDERR_LINES = 3
+    #: The most of stdout, and of stderr, that is kept: a JSON reply of
+    #: candidates is kilobytes, and a CLI's progress chatter over a whole
+    #: run is far less than this, so a program that streams megabytes is
+    #: broken, not answering. It is stopped at the ceiling rather than read
+    #: into memory until the timeout (the reviewer's probe held gigabytes
+    #: within seconds), and the frame records the refusal by name.
+    MAX_OUTPUT_BYTES = 4 << 20
+    #: One read from a pipe.
+    CHUNK_BYTES = 1 << 16
+    @property
+    def OWN_GROUP(self) -> dict:
+        """The Popen arguments that give the command its own session (POSIX:
+        setsid, so its process group id is its pid and os.killpg reaches
+        every worker it forked) or its own process group (Windows, where
+        `taskkill /T` walks the tree), so a stop reaches everything it
+        started and not just the first process: a CLI that hands the work
+        to a worker would otherwise leave that worker running, one per
+        timed-out frame, while the batch goes on. Read at each start, so
+        the Windows shape can be asserted from any platform."""
+        if sys.platform == "win32":
+            return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+        return {"start_new_session": True}
+
+    def __init__(
+        self,
+        command: list[str],
+        *,
+        executable: str | None = None,
+        timeout: float = 180.0,
+        run: Callable | None = None,
+    ) -> None:
+        self.command = list(command)
+        # The template, so a changed flag is a changed run fingerprint and the
+        # cache cannot re-serve the old template's answers. shlex.join keeps
+        # the argument boundaries: `--label 'bird --mode precise'` (one
+        # argument) is not `--label bird --mode precise` (three), and they
+        # run the program differently, so they must not share a fingerprint.
+        self.name = shlex.join(self.command)
+        self.executable = executable or self.command[0]
+        self.timeout = timeout
+        # Shaped like subprocess.Popen(argv, **kwargs): the tests hand in a
+        # fake at this edge, the way the other backends take a client.
+        self._run = run or subprocess.Popen
+
+    @property
+    def program(self) -> str:
+        """The name the user knows the program by, for messages."""
+        return self.command[0]
+
+    def _argv(self, image_path: Path, prompt: str) -> list[str]:
+        expanded = [
+            argument.replace("{image}", str(image_path)).replace("{prompt}", prompt)
+            for argument in self.command
+        ]
+        return [self.executable, *expanded[1:]]
+
+    def _stderr_lines(self, stderr: str) -> str:
+        """The first STDERR_LINES lines the program wrote that are words
+        once read through `plain`, joined with " / ": they land in the
+        frame's error record, the log and the terminal, so an escape
+        sequence in them would clear the screen or recolour it, and a
+        control would fake a line of the log. A line that is only
+        controls is not a line, so it spends none of the STDERR_LINES;
+        `islice` stops the reading at the cap."""
+        words = (self.plain(line) for line in stderr.splitlines())
+        return " / ".join(itertools.islice(filter(None, words), self.STDERR_LINES))
+
+    def _stop_tree(self, pid: int) -> None:
+        """Stop the process tree the command with `pid` heads (OWN_GROUP):
+        every process in its group on POSIX, the tree under it on Windows.
+        Called only while the command is unreaped (_wait reaps it last), so
+        the pid is still the command's own and its group's, never a
+        number given since to a process of someone else's. A tree already
+        gone is nothing to do; so is one holding nothing but the command's
+        own exited process, which macOS answers with EPERM."""
+        if sys.platform == "win32":
+            # taskkill by its absolute path: run by bare name, CreateProcess
+            # would look in the current directory before System32, and a
+            # taskkill.exe planted there would run with this process's
+            # rights the first time a command timed out.
+            taskkill = os.environ.get("SystemRoot", r"C:\Windows") + r"\System32\taskkill.exe"
+            subprocess.run(
+                [taskkill, "/T", "/F", "/PID", str(pid)],
+                stdin=subprocess.DEVNULL, capture_output=True, check=False,
+            )
+        else:
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.killpg(pid, signal.SIGKILL)
+
+    def _stop(self, process) -> None:
+        """Stop the command and everything it started."""
+        self._stop_tree(process.pid)
+        process.kill()
+
+    def _drain(self, process, name: str, sink: bytearray, overflowed: list[str]) -> None:
+        """Read the pipe `name` of `process` to its end into `sink`, keeping
+        at most MAX_OUTPUT_BYTES, and close it there. Past that the program
+        is a runaway: its name goes on `overflowed`, which _wait watches for
+        and stops the tree on (every stop is made by the thread that reaps,
+        before it reaps), and the rest is read and dropped so the pipe still
+        ends. The pipe is closed by the thread that read it to its end, not
+        by the garbage collector and not from another thread: closing a
+        BufferedReader from another thread blocks until the read1 in flight
+        returns, so a pipe still held past _wait's bound (by something the
+        tree stop could not reach) is left to its holder, and closed here
+        when that holder lets it go."""
+        stream = getattr(process, name)
+        while chunk := stream.read1(self.CHUNK_BYTES):
+            if overflowed:
+                continue
+            if len(sink) + len(chunk) > self.MAX_OUTPUT_BYTES:
+                overflowed.append(name)
+                continue
+            sink += chunk
+        stream.close()
+
+    def _exited(self, process, within: float) -> bool:
+        """Whether the command has exited, seen within `within` seconds and
+        without reaping it: an exited process that is not reaped keeps its
+        pid, and so its group's id, until _wait reaps it last, so a tree
+        stopped by that pid is the command's and never a process given the
+        number since. macOS's Python has no waitid, and kqueue is how it
+        sees an exit: a NOTE_EXIT event is the exit, seen during the wait,
+        and a registration refused with ESRCH is the command already
+        exited before the look (XNU does not see an exited process; for
+        this process's own unreaped child that can only mean it has
+        exited); waitid with WNOWAIT elsewhere on POSIX, a look before the
+        step and one at its end, so an exit already there is seen at once
+        and one during the step at its end; on Windows the Popen handle
+        keeps the pid reserved, so wait itself is safe there and the order
+        does not matter."""
+        if sys.platform == "win32":
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                process.wait(timeout=within)
+                return True
+            return False
+        if hasattr(select, "kqueue"):
+            exit_event = select.kevent(
+                process.pid, select.KQ_FILTER_PROC,
+                select.KQ_EV_ADD | select.KQ_EV_ONESHOT, select.KQ_NOTE_EXIT,
+            )
+            queue = select.kqueue()
+            try:
+                events = queue.control([exit_event], 1, within)
+            finally:
+                queue.close()
+            if not events:
+                return False
+            (event,) = events
+            if event.flags & select.KQ_EV_ERROR:
+                # The registration was refused, and with one event asked
+                # for the refusal comes back as an event. ESRCH is the
+                # command already exited (before this look, or between two
+                # looks); any other error is the error it is, not an exit.
+                if event.data == errno.ESRCH:
+                    return True
+                raise OSError(event.data, os.strerror(event.data))
+            return True  # NOTE_EXIT: the exit, seen during the wait.
+        # Look first, so a command already exited is seen at once as the
+        # other two branches see it; sleep the step and look once more only
+        # when it has not, so an exit during the step is seen at its end.
+        look = os.WEXITED | os.WNOWAIT | os.WNOHANG
+        if os.waitid(os.P_PID, process.pid, look) is not None:
+            return True
+        time.sleep(within)
+        return os.waitid(os.P_PID, process.pid, look) is not None
+
+    def _wait(self, process, readers: list[threading.Thread], overflowed: list[str],
+              deadline: float) -> bool:
+        """Whether the command exited by `deadline` (time.monotonic, armed
+        by complete before the program was started, so starting it counts
+        against the timeout too). Its exit ends its answer: the moment it
+        is seen (_exited, without reaping) the tree it heads is stopped,
+        so a worker it left holding stdout or stderr dies and the pipe
+        ends, the readers are given a short bound to reach those ends
+        (five seconds, and never past the deadline, which is the ceiling
+        on the call as a whole), and what they read is the reply. Past
+        the deadline, at the ceiling (`overflowed`, which the
+        readers raise and this loop sees within a step), or on any other
+        interruption (Ctrl+C), the tree and the command are stopped the
+        same way, as subprocess.run kills its child: the command does not
+        outlive the run that started it, and neither does anything it
+        started. Every stop is made before the command is reaped, which is
+        the last thing done here, so the pid the tree is stopped by is
+        still the command's own; on the interruption path it is stopped,
+        not reaped, and the interrupt propagates."""
+        # The deadline is checked before every look, the first included: a
+        # launch that consumed it leaves nothing to look within, and the
+        # exit its process shows is past the ceiling, not within it.
+        step = 0.0005
+        in_time = False
+        try:
+            while (remaining := deadline - time.monotonic()) > 0 and not overflowed:
+                if in_time := self._exited(process, min(step, remaining)):
+                    break
+                step = min(step * 2, 0.05)
+        except BaseException:
+            self._stop(process)
+            raise
+        if in_time:
+            self._stop_tree(process.pid)
+        else:
+            self._stop(process)
+        ends = min(time.monotonic() + 5.0, deadline)
+        for reader in readers:
+            # The pipes end when the tree is gone; one still open is held by
+            # something that left the group (a double-forked daemon) and is
+            # left to it rather than waited on. The bound stops at the
+            # deadline: past it the frame is an error whatever was read.
+            # Each pipe is closed by its reader at the end it reads to
+            # (_drain), whatever this bound gave it, so nothing is closed
+            # here: on the timeout path the bound is already spent, and the
+            # readers end within milliseconds of the stop, after it.
+            reader.join(timeout=max(0.0, ends - time.monotonic()))
+        process.wait()
+        return in_time
+
+    def complete(self, image_path: Path, prompt: str, max_tokens: int) -> Completion:
+        argv = self._argv(image_path, prompt)
+        started = time.monotonic()
+        deadline = started + self.timeout
+        try:
+            process = self._run(
+                argv,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                stdin=subprocess.DEVNULL,
+                **self.OWN_GROUP,
+            )
+        except OSError as exc:
+            raise RuntimeError(f"{self.program} could not be run: {exc}") from exc
+        sinks = {"stdout": bytearray(), "stderr": bytearray()}
+        overflowed: list[str] = []
+        readers = [
+            threading.Thread(target=self._drain, args=(process, name, sink, overflowed), daemon=True)
+            for name, sink in sinks.items()
+        ]
+        for reader in readers:
+            reader.start()
+        in_time = self._wait(process, readers, overflowed, deadline)
+        elapsed = time.monotonic() - started
+        stdout, stderr = (sinks[name].decode("utf-8", "replace") for name in ("stdout", "stderr"))
+
+        if overflowed:
+            raise RuntimeError(
+                f"{self.program} wrote more than {self.MAX_OUTPUT_BYTES} bytes on "
+                f"{overflowed[0]} and was stopped: a reply is kilobytes"
+            )
+        if not in_time:
+            raise TimeoutError(
+                f"{self.program} did not answer within {self.timeout:g}s; "
+                "raise [model] timeout_seconds if it needs longer"
+            )
+        if process.returncode != 0:
+            said = self._stderr_lines(stderr)
+            raise CommandFailed(
+                f"{self.program} exited {process.returncode}"
+                + (f": {said}" if said else " with nothing on stderr")
+            )
+        if not stdout.strip():
+            said = self._stderr_lines(stderr)
+            raise RuntimeError(
+                f"{self.program} printed nothing on stdout"
+                + (f": {said}" if said else "")
+            )
+        return Completion(text=stdout, seconds=elapsed)
 
 
 class ScriptedBackend(VLMBackend):

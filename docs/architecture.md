@@ -73,22 +73,38 @@ class VLMBackend(ABC):
     def complete(self, image_path: Path, prompt: str, max_tokens: int) -> Completion: ...
 ```
 
-Five implementations exist, and `[model] backend` picks one (`providers.py`,
+Six implementations exist, and `[model] backend` picks one (`providers.py`,
 docs/config.md § `[model]`). `MLXBackend` runs Qwen3-VL locally on Apple Silicon.
 `OllamaBackend` runs whatever vision model a local Ollama server holds, over its
 documented chat endpoint with the standard library, which is the local path on
 Windows and Linux. `AnthropicBackend` and `OpenAIBackend` are the cloud path,
 built for the §6.6 escalation tail and reused as a primary on machines with no
-local runtime. `ScriptedBackend` returns canned responses, which is what lets the
-pipeline tests cover parsing, validation, retry, caching and the downscale ladder
-in under a second with no weights on disk. Each is a class here and no change
-anywhere else: the prompts, the JSON extraction, the schema validation and the
-corrective retry live above the seam and are the same whoever answers.
+local runtime. `CommandBackend` runs an installed command-line program once per
+completion, with the image path and the prompt in its arguments, and reads the
+reply from its stdout (a frame is two completions, the taxon routing prompt and
+then the group's identification prompt, and a corrective retry or a step down
+the downscale ladder is another): a subscription CLI such as Claude Code or
+Codex is vision with no API key (the templates for those two are cards #421 and
+#422; the seam knows no program). `ScriptedBackend` returns canned responses,
+which is what lets the pipeline tests cover parsing, validation, retry, caching
+and the downscale ladder in under a second with no weights on disk. Each is a
+class here and no change anywhere else: the prompts, the JSON extraction, the
+schema validation and the corrective retry live above the seam and are the same
+whoever answers.
 
 `MLXBackend` loads weights lazily, so `--help` does not pull 18 GB. Whether an
 engine can run on this machine at all is `providers.detect_engines`' question,
 answered before any image is read; an Ollama that is not running is refused
-there with the address tried and where to install it.
+there with the address tried and where to install it, and a command that
+`shutil.which` cannot find, or resolves to a `.cmd`/`.bat` file that Windows
+would hand to cmd.exe, is refused the same way, naming it; so is the command
+engine when the process that started melampus ignores SIGCHLD (`SIG_IGN` is
+inherited across exec), since the kernel would then reap the program the moment
+it exits and the pid its tree is stopped by could be someone else's: start
+melampus from a shell, or restore the signal's default in the launcher. The one
+failure that stops a batch rather than being recorded on the frame is a command
+exiting non-zero (`CommandFailed`): that is a broken engine, not a bad file, and
+every frame would fail the same way.
 
 ---
 

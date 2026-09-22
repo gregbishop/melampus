@@ -10,6 +10,8 @@ live here and both callers import them.
 from __future__ import annotations
 
 import platform
+import shutil
+import signal
 import sys
 from dataclasses import dataclass
 from urllib.parse import urlsplit
@@ -65,8 +67,21 @@ OLLAMA_PROBE_SECONDS = 1.0
 #: Where to get Ollama when nothing answers at OLLAMA_URL.
 OLLAMA_INSTALL = "https://ollama.com/download"
 
-#: The backends that run on this machine and bill nobody.
-LOCAL_BACKENDS = ("mlx", OLLAMA, SCRIPTED)
+#: An installed command-line program driven per frame (card #420): a
+#: subscription CLI is vision with no API key. Selected by `[model] backend`
+#: or --backend, not offered by the plugin's picker until card #423 teaches
+#: detection about it, so it is not in BACKEND_CHOICES.
+COMMAND = "command"
+
+#: What a `command` may not resolve to: Windows launches a batch file through
+#: cmd.exe regardless of what subprocess is told (Python's subprocess docs,
+#: Security Considerations), and cmd.exe would parse the prompt, newlines,
+#: quotes and braces included, instead of passing it as one argument. An
+#: npm-installed CLI is such a shim; its real entry is the fix.
+BATCH_SUFFIXES = (".cmd", ".bat")
+
+#: The backends that run on this machine and bill nobody per call.
+LOCAL_BACKENDS = ("mlx", OLLAMA, COMMAND, SCRIPTED)
 
 
 class BackendUnavailable(RuntimeError):
@@ -193,6 +208,14 @@ def _works_here(verdicts: list[EngineVerdict]) -> tuple[str, ...]:
     return (*(v.engine for v in verdicts if v.available), SCRIPTED)
 
 
+def _refuse_here(reason: str, ollama_url: str | None) -> BackendUnavailable:
+    """A refusal whose "what works" list comes from a fresh detection: for the
+    branches that refuse on their own grounds (no Apple Silicon, no program)
+    and have not probed the engines yet. Each refusal is terminal, so the
+    probe runs once."""
+    return _refusal(reason, works_here=_works_here(detect_engines(ollama_url)))
+
+
 def default_engine(ollama_at: str | None = None) -> str:
     """What runs when nothing names an engine: the first detection says is
     available, in the owner's order. There is always one, because the cloud
@@ -248,9 +271,8 @@ def build_primary_backend(config: MelampusConfig) -> VLMBackend:
 
     if kind == "mlx":
         if not on_apple_silicon():
-            raise _refusal(
-                "The local MLX backend only runs on Apple Silicon Macs.",
-                works_here=_works_here(detect_engines(settings.ollama_url)),
+            raise _refuse_here(
+                "The local MLX backend only runs on Apple Silicon Macs.", settings.ollama_url
             )
         from .backend import MLXBackend
 
@@ -274,6 +296,62 @@ def build_primary_backend(config: MelampusConfig) -> VLMBackend:
         return OllamaBackend(
             settings.ollama_model, ollama_url(settings.ollama_url),
             temperature=settings.temperature, timeout=settings.timeout_seconds,
+        )
+
+    if kind == COMMAND:
+        # Resolved here, before any image is read: a program that is not
+        # there fails once, up front, with the fix, rather than once per
+        # frame mid-run. The resolved path is what runs, so the check and
+        # the run agree on the program.
+        if not settings.command:
+            raise _refuse_here(
+                "The command backend needs [model] command: the program to run, as "
+                "a list of arguments with {image} and {prompt} placeholders "
+                "(docs/config.md § [model]).",
+                settings.ollama_url,
+            )
+        from .backend import CommandBackend
+
+        program = settings.command[0]
+        executable = shutil.which(program)
+        if executable is None:
+            raise _refuse_here(
+                f"The command '{program}' is not installed or not on PATH. Install "
+                "it, make sure the shell melampus runs from can find it, or name "
+                "its full path in [model] command.",
+                settings.ollama_url,
+            )
+        if executable.lower().endswith(BATCH_SUFFIXES):
+            # The path is the program (printable: the config refuses one
+            # that is not) under a PATH directory, and PATH came from
+            # whatever launched melampus, so it is shown through plain,
+            # the way a program's stderr is.
+            raise _refuse_here(
+                f"The command '{program}' resolves to "
+                f"{CommandBackend.plain(executable)}, a batch file "
+                "that Windows runs through cmd.exe whatever it is told, so the "
+                "prompt would be parsed as shell text rather than passed as one "
+                "argument. Name the program's real entry in [model] command "
+                "instead: its .exe, or node and the script the shim wraps.",
+                settings.ollama_url,
+            )
+        # The backend stops the tree the program heads by its pid while the
+        # program is exited but unreaped, so the pid is still its own. A
+        # launcher that ignores SIGCHLD (inherited across exec) has the
+        # kernel reap the program the moment it exits, so every such stop
+        # would signal a number that may be someone else's: refused here,
+        # once, rather than once per frame.
+        if hasattr(signal, "SIGCHLD") and signal.getsignal(signal.SIGCHLD) is signal.SIG_IGN:
+            raise _refuse_here(
+                "The process that started melampus ignores SIGCHLD, so the "
+                "command's exit cannot be seen without losing its pid: the kernel "
+                "reaps the program the moment it exits, and what it started could "
+                "not be stopped safely. Start melampus from a shell, or restore "
+                "SIGCHLD's default disposition in the launcher.",
+                settings.ollama_url,
+            )
+        return CommandBackend(
+            settings.command, executable=executable, timeout=settings.timeout_seconds
         )
 
     if kind == SCRIPTED:

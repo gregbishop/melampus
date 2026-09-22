@@ -10,9 +10,14 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import errno
 import http.client
 import io
 import json
+import os
+import select
+import shlex
+import shutil
 import signal
 import socket
 import socketserver
@@ -25,6 +30,7 @@ import types
 import urllib.error
 import urllib.request
 from http.server import ThreadingHTTPServer
+from pathlib import Path
 
 import pytest
 from conftest import (
@@ -48,6 +54,8 @@ from test_pipeline import ID_OK, ROUTING_OK
 from melampus import providers
 from melampus.backend import (
     AnthropicBackend,
+    CommandBackend,
+    CommandFailed,
     MLXBackend,
     OllamaBackend,
     OpenAIBackend,
@@ -158,11 +166,13 @@ def test_backend_choices_are_the_owners_engine_names_in_order():
     assert providers.BACKEND_CHOICES == (*ENGINES, providers.SCRIPTED)
 
 
-@pytest.mark.parametrize("engine", ENGINES)
+@pytest.mark.parametrize("engine", (*ENGINES, providers.COMMAND))
 def test_cli_accepts_each_engine_name(engine, photos, tmp_path, no_ambient_keys, capsys):
     """Card #403, Done-when 1: given an engine name, when the plugin passes it
     as --backend, then the CLI receives it. --report-only stops before any
-    engine is built, so this is the parse alone: the name is accepted."""
+    engine is built, so this is the parse alone: the name is accepted. Card
+    #420's `command` is accepted the same way (chosen by config or --backend
+    until the picker learns it in #423)."""
     from melampus.cli import main
 
     code = main([str(photos), "--backend", engine, "--report-only",
@@ -1851,3 +1861,1343 @@ def test_ollama_backend_bounds_what_it_reads_of_a_reply(tmp_path):
     with pytest.raises(RuntimeError) as err:
         backend.complete(image, "prompt", 10)
     assert str(OllamaBackend.MAX_REPLY_BYTES) in str(err.value), str(err.value)
+
+
+# ---------------------------------------------------------------------------
+# Card #420: a command backend behind the model seam, driving an installed CLI.
+
+
+COMMAND = ["fake-vlm", "--image", "{image}", "--prompt", "{prompt}", "--quiet"]
+
+
+def test_command_is_a_setting_in_the_model_section(tmp_path):
+    """`[model] command` is the program to run, as a list of arguments with
+    `{image}` and `{prompt}` placeholders: an argv list, never a shell string,
+    so a prompt with spaces, quotes or newlines is one argument and nothing is
+    quoted. Unset by default: no CLI is assumed installed. The reply is read
+    from stdout; the per-request ceiling is the existing `timeout_seconds`."""
+    assert _cfg().model.command == []
+
+    settings = tmp_path / "settings.toml"
+    settings.write_text(
+        '[model]\nbackend = "command"\n'
+        'command = ["fake-vlm", "--image", "{image}", "--prompt", "{prompt}", "--quiet"]\n'
+        "timeout_seconds = 30\n",
+        encoding="utf-8",
+    )
+    config = load_config(settings, use_local=False)
+    assert config.model.backend == "command"
+    assert config.model.command == COMMAND
+    assert config.model.timeout_seconds == 30.0
+
+
+@pytest.mark.parametrize(
+    ("command", "missing"),
+    [
+        (["fake-vlm", "--prompt", "{prompt}"], "{image}"),
+        (["fake-vlm", "--image", "{image}"], "{prompt}"),
+        (["fake-vlm"], "{image}"),
+        (["fake-vlm-{image}", "--prompt", "{prompt}"], "{image}"),
+        (["fake-vlm-{prompt}", "--image", "{image}"], "{prompt}"),
+    ],
+    ids=["no-image", "no-prompt", "neither", "image-only-in-program", "prompt-only-in-program"],
+)
+def test_command_template_without_a_placeholder_is_refused_at_config_load(command, missing):
+    """A template that never receives the image, or never asks the question,
+    cannot answer anything: refused when the config loads, naming the
+    placeholder it lacks, not per frame after the run has started. The first
+    element is the program, which `_argv` replaces with the resolved
+    executable, so a placeholder there never reaches the program: it counts
+    only in the arguments after it."""
+    with pytest.raises(ValueError) as err:
+        _cfg(model={"backend": "command", "command": command})
+    assert f"has no argument carrying {missing}" in str(err.value), str(err.value)
+
+
+@pytest.mark.parametrize(
+    ("command", "position", "codepoint"),
+    [
+        (["fake-vlm\x1b[2J", "--image", "{image}", "--prompt", "{prompt}"], 0, "U+001B"),
+        (["fake-vlm", "--image", "{image}", "--prompt\n", "{prompt}"], 3, "U+000A"),
+        (["fake-vlm", "--image", "{image}", "--prompt", "{prompt}", "--label\x07"], 5, "U+0007"),
+    ],
+    ids=["escape-in-program", "newline-in-argument", "bell-in-last-argument"],
+)
+def test_command_template_with_a_control_character_is_refused_at_config_load(
+    command, position, codepoint
+):
+    """Codex round 18 (config.py:130), security: the template is printed as
+    it is, in the CLI's `loading ...` line, in every error message the
+    backend raises (`program`, its first element) and in the refusals
+    naming the program, so an element carrying an escape sequence, a line
+    break or a bell would reach the terminal, the log and the frame's error
+    record through them. Given an element with any character that is not
+    printable (str.isprintable, the one rule `plain` applies to what a
+    program wrote), when the config loads, then it is refused there,
+    naming the element's position and the character, in the shape the
+    placeholder refusal uses, so nothing displayed later can carry one."""
+    with pytest.raises(ValueError) as err:
+        _cfg(model={"backend": "command", "command": command})
+    clause = next(line for line in str(err.value).splitlines() if "[model] command element" in line)
+    assert f"[model] command element {position} carries a character that is not printable ({codepoint})" in clause, clause
+    assert "escape sequence" in clause and "line break" in clause, clause
+    assert all(c.isprintable() for c in clause), clause
+
+
+class _FakeRun:
+    """Stands in for subprocess.Popen at the backend's process edge: records
+    every call, then returns a started process whose stdout and stderr
+    pipes carry `stdout` and `stderr` (text, or bytes as they came, or an
+    open binary pipe the test holds the other end of) and that exits
+    `returncode`, or raises `error` on starting. `hangs` is a process that
+    never finishes on its own: it has not exited, and `wait(timeout=...)`
+    raises TimeoutExpired, until it is killed. `stopped` records, for every
+    process tree the backend stopped (the OS edge, faked), the command's
+    pid and its returncode at that moment: None means it had not been
+    reaped, so the pid was still its own and its group's."""
+
+    def __init__(self, stdout: str | bytes | io.BufferedReader = "",
+                 stderr: str | bytes | io.BufferedReader = "", returncode: int = 0,
+                 error: Exception | None = None, hangs: bool = False):
+        self.stdout, self.stderr, self.returncode, self.error = stdout, stderr, returncode, error
+        self.hangs = hangs
+        self.calls: list[tuple[list[str], dict]] = []
+        self.processes: list[_FakeProcess] = []
+        self.stopped: list[tuple[int, int | None]] = []
+
+    def __call__(self, argv, **kwargs):
+        self.calls.append((argv, kwargs))
+        if self.error is not None:
+            raise self.error
+        self.processes.append(_FakeProcess(argv, self))
+        return self.processes[-1]
+
+    def stop_tree(self, pid: int) -> None:
+        """The OS edge faked: os.killpg or taskkill on the command's pid."""
+        (process,) = [process for process in self.processes if process.pid == pid]
+        self.stopped.append((pid, process.returncode))
+
+    def exited(self, process: _FakeProcess, within: float) -> bool:
+        """The OS edge faked: whether `process` has exited, seen without
+        reaping it (kqueue, waitid); a process that has not is given
+        `within` seconds to, the way the OS call waits."""
+        if process.exited:
+            return True
+        time.sleep(within)
+        return False
+
+
+class _FakeProcess:
+    """What _FakeRun starts: the Popen surface the backend uses."""
+
+    def __init__(self, argv, run: _FakeRun):
+        self.args, self._run = argv, run
+        self.pid = 4242
+        self.returncode: int | None = None
+        self.killed = False
+        self.waited: list[float | None] = []
+        self.stdout = self._pipe(run.stdout)
+        self.stderr = self._pipe(run.stderr)
+
+    @staticmethod
+    def _pipe(said: str | bytes | io.BufferedReader) -> io.BufferedIOBase:
+        if isinstance(said, io.BufferedReader):
+            return said
+        return io.BytesIO(said if isinstance(said, bytes) else said.encode("utf-8"))
+
+    @property
+    def exited(self) -> bool:
+        """Whether the process has ended, reaped or not: a process that hangs
+        has not until it is killed."""
+        return not self._run.hangs or self.killed
+
+    def wait(self, timeout: float | None = None):
+        self.waited.append(timeout)
+        if not self.exited:
+            raise subprocess.TimeoutExpired(self.args, timeout)
+        self.returncode = -9 if self.killed else self._run.returncode
+        return self.returncode
+
+    def kill(self):
+        self.killed = True
+
+
+def _command_backend(run: _FakeRun, command: list[str] = COMMAND, **kwargs) -> CommandBackend:
+    backend = CommandBackend(command, executable="/opt/fake/bin/fake-vlm", run=run, **kwargs)
+    # The process-tree stop (os.killpg, taskkill) and the sight of the exit
+    # without reaping (kqueue, waitid) are the OS edge: the fake records the
+    # pid it would have stopped, and answers for its own process, instead.
+    backend._stop_tree = run.stop_tree
+    backend._exited = run.exited
+    return backend
+
+
+def _given(monkeypatch, module, **constants) -> None:
+    """Give `module` each named constant where this platform has none, so a
+    branch written for another platform can run here; where the platform
+    has the constant, its real value is kept, so the test means the same
+    thing on every platform and asserts against the real names. The value
+    given is the other platform's own."""
+    for name, value in constants.items():
+        monkeypatch.setattr(module, name, getattr(module, name, value), raising=False)
+
+
+def test_command_backend_expands_the_template_into_one_argv(tmp_path):
+    """Template expansion: each argument with `{image}` gets the image path as
+    given (absolute, the staged file), each with `{prompt}` the prompt in
+    full as one argument, spaces, quotes and newlines included, and every
+    other argument is passed untouched. The resolved executable stands in
+    for the bare name (shutil.which found it, so what was checked is what
+    runs). subprocess.Popen is given the list, no
+    shell, stdout and stderr piped back as bytes (read here with a ceiling,
+    and decoded as UTF-8 with replacement, so a stray byte cannot fail the
+    frame), nothing on stdin, so a program that reads it cannot hang, and
+    its own session (POSIX) or process group (Windows), so a timeout can
+    stop every process it started and not just the first (that the
+    config's timeout is the wait's ceiling is proven by the timeout
+    tests, not here)."""
+    image = tmp_path / "image.jpg"
+    image.write_bytes(b"jpeg")
+    run = _FakeRun(stdout=ID_OK)
+    backend = _command_backend(run)
+    prompt = 'Identify the "bird".\n\nReply with JSON: {"taxon": ...}'
+
+    backend.complete(image, prompt, 900)
+
+    ((argv, kwargs),) = run.calls
+    assert argv == ["/opt/fake/bin/fake-vlm", "--image", str(image), "--prompt", prompt, "--quiet"]
+    assert "text" not in kwargs and "encoding" not in kwargs, "the pipes are read as bytes, with a ceiling"
+    assert kwargs["stdout"] is subprocess.PIPE and kwargs["stderr"] is subprocess.PIPE
+    assert kwargs["stdin"] is subprocess.DEVNULL
+    assert kwargs.get("shell", False) is False
+    assert "env" not in kwargs, "the child gets the parent's environment as it is; nothing is added"
+    if sys.platform == "win32":
+        assert kwargs["creationflags"] == subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        assert kwargs["start_new_session"] is True
+    (process,) = run.processes
+    assert run.stopped == [(process.pid, None)], (
+        "what the command started is stopped at its exit, by its pid while it is still the command's own")
+
+
+def test_command_backend_expands_a_placeholder_inside_a_longer_argument(tmp_path):
+    """`--image={image}` is one argument too: the placeholder is replaced
+    wherever it sits, so a CLI that takes `--flag=value` works."""
+    image = tmp_path / "image.jpg"
+    image.write_bytes(b"jpeg")
+    run = _FakeRun(stdout=ID_OK)
+    backend = _command_backend(run, ["fake-vlm", "--image={image}", "--prompt={prompt}"])
+
+    backend.complete(image, "what is this?", 10)
+
+    ((argv, _),) = run.calls
+    assert argv == ["/opt/fake/bin/fake-vlm", f"--image={image}", "--prompt=what is this?"]
+
+
+def test_command_backend_reads_stdout_into_a_completion(tmp_path):
+    """Reply parsing: stdout is the text, handed as it came to the same JSON
+    extraction and schema validation every backend's text goes through
+    (identify.py); nothing here parses candidates. No token counts: a
+    command reports none. The name is the template, so a changed flag is a
+    changed run fingerprint and the cache cannot re-serve the old template's
+    answers (architecture.md § Caching and resume)."""
+    image = tmp_path / "image.jpg"
+    image.write_bytes(b"jpeg")
+    backend = _command_backend(_FakeRun(stdout=f"Here you go:\n{ID_OK}\n", stderr="warning: slow"))
+
+    completion = backend.complete(image, "prompt", 900)
+
+    assert completion.text == f"Here you go:\n{ID_OK}\n"
+    assert completion.prompt_tokens is None and completion.generated_tokens is None
+    assert completion.refused is False
+    assert completion.seconds >= 0
+    assert backend.name == "fake-vlm --image '{image}' --prompt '{prompt}' --quiet"
+
+    stray = _command_backend(_FakeRun(stdout=b"\xff" + ID_OK.encode("utf-8"))).complete(image, "prompt", 900)
+    assert stray.text == "\ufffd" + ID_OK, "a byte that is not UTF-8 is replaced, not a failed frame"
+
+
+def test_command_backend_closes_both_pipes_after_a_completion(tmp_path):
+    """The two pipes Popen opens are closed by the backend once their readers
+    have read them to their ends, not left to the garbage collector (which
+    `python -X dev` reports as an unclosed file per pipe per frame): the
+    Ollama backend scopes its response the same way, and subprocess.run its
+    child's pipes."""
+    image = tmp_path / "image.jpg"
+    image.write_bytes(b"jpeg")
+    run = _FakeRun(stdout=ID_OK, stderr="warning: slow")
+    backend = _command_backend(run)
+
+    backend.complete(image, "prompt", 900)
+
+    (process,) = run.processes
+    assert process.stdout.closed and process.stderr.closed, "the pipes were left to the garbage collector"
+
+
+@pytest.mark.parametrize(
+    ("run", "expected", "said"),
+    [
+        (_FakeRun(returncode=2, stderr="not logged in\nrun `fake-vlm login` first\nmore\nand more"),
+         CommandFailed, "fake-vlm exited 2: not logged in / run `fake-vlm login` first / more"),
+        (_FakeRun(returncode=1), CommandFailed, "fake-vlm exited 1 with nothing on stderr"),
+        (_FakeRun(hangs=True), TimeoutError, "fake-vlm did not answer within 0.2s"),
+        (_FakeRun(stdout="  \n", stderr="usage: fake-vlm ..."),
+         RuntimeError, "fake-vlm printed nothing on stdout: usage: fake-vlm ..."),
+        (_FakeRun(error=PermissionError(13, "Permission denied")),
+         RuntimeError, "fake-vlm could not be run: [Errno 13] Permission denied"),
+    ],
+    ids=["non-zero", "non-zero-silent", "timeout", "empty-stdout", "not-runnable"],
+)
+def test_command_backend_maps_each_failure_to_a_plain_error(tmp_path, run, expected, said):
+    """Error mapping: a non-zero exit is CommandFailed naming the command,
+    the exit code and the first lines of stderr (the CLI surfaces it at
+    exit 3, the way the other backend failures are); a timeout is
+    TimeoutError naming the ceiling to raise; empty stdout and a program
+    that cannot be started are plain RuntimeErrors naming the command,
+    recorded on the frame while the batch goes on. Never a traceback into
+    subprocess."""
+    image = tmp_path / "image.jpg"
+    image.write_bytes(b"jpeg")
+    backend = _command_backend(run, timeout=0.2)
+    with pytest.raises(expected) as err:
+        backend.complete(image, "prompt", 10)
+    assert said in str(err.value), str(err.value)
+    assert not isinstance(err.value, subprocess.SubprocessError)
+
+
+@pytest.mark.parametrize(
+    ("run", "expected", "said"),
+    [
+        (_FakeRun(returncode=2, stderr="\x1b[2J\rnot logged in\x07\n\x9brun `fake-vlm login`\tfirst\x85"),
+         CommandFailed, "fake-vlm exited 2: [2J / not logged in / run `fake-vlm login` first"),
+        (_FakeRun(stdout="  \n", stderr="\x1b[31musage:\x1b[0m fake-vlm\x07 ...\x9b"),
+         RuntimeError, "fake-vlm printed nothing on stdout: [31musage: [0m fake-vlm ..."),
+        (_FakeRun(returncode=1, stderr="x" * 5000),
+         CommandFailed, "fake-vlm exited 1: " + "x" * CommandBackend.MAX_ERROR_BYTES),
+        (_FakeRun(returncode=2, stderr="\x07\n\x1b\n\x00\nnot logged in\n"),
+         CommandFailed, "fake-vlm exited 2: not logged in"),
+        (_FakeRun(returncode=2, stderr="\x1b[?25l\n\x07\n\x00\nnot logged in\nrun `fake-vlm login` first\n"),
+         CommandFailed, "fake-vlm exited 2: [?25l / not logged in / run `fake-vlm login` first"),
+    ],
+    ids=["non-zero", "empty-stdout", "bounded", "control-only-lines", "controls-among-words"],
+)
+def test_command_backend_keeps_only_the_printable_words_of_stderr(tmp_path, run, expected, said):
+    """The same, for the program's stderr: what it wrote lands in the frame's
+    error record, the log and the terminal, so an escape sequence in it
+    would clear the screen or recolour the terminal, a BEL would ring it,
+    and a C1 control or a disguised line break would fake a line of the
+    log. Only its printable characters reach the message, by the one rule
+    the Ollama backend's messages read through (`plain`): each kept line
+    is words, at most MAX_ERROR_BYTES of them, and the three-line cap and
+    the " / " joining stay as they are."""
+    image = tmp_path / "image.jpg"
+    image.write_bytes(b"jpeg")
+    backend = _command_backend(run)
+    with pytest.raises(expected) as err:
+        backend.complete(image, "prompt", 10)
+    message = str(err.value)
+    assert message == said, message
+    assert message.isprintable(), message
+    assert not any(control in message for control in "\x1b\x07\x9b\x85"), message
+
+
+def test_command_templates_that_differ_only_in_argument_boundaries_cannot_share_cached_answers():
+    """`["--label", "bird --mode precise"]` (one argument) and `["--label",
+    "bird", "--mode", "precise"]` (three) run the program differently, so
+    their answers are different answers. The backend's name is what the
+    run fingerprint carries for the engine (identify.py), so it has to keep
+    the argument boundaries: joined with plain spaces, both templates were
+    one name, one fingerprint, and a run under the second re-served the
+    first's cached answers. shlex.join keeps the boundaries (an argument
+    with a space is quoted, and `shlex.split` gives the list back) and
+    stays a readable command line for the `loading ...` line and
+    `result["model"]`."""
+    from melampus.identify import Identifier
+
+    one_argument = [*COMMAND, "--label", "bird --mode precise"]
+    three_arguments = [*COMMAND, "--label", "bird", "--mode", "precise"]
+    config = _cfg(model={"backend": "command", "command": one_argument})
+
+    fingerprints = {
+        Identifier(_command_backend(_FakeRun(), template), config).fingerprint
+        for template in (one_argument, three_arguments)
+    }
+
+    assert len(fingerprints) == 2, "the two templates share a run fingerprint"
+    assert _command_backend(_FakeRun(), one_argument).name == (
+        "fake-vlm --image '{image}' --prompt '{prompt}' --quiet --label 'bird --mode precise'")
+    assert shlex.split(_command_backend(_FakeRun(), three_arguments).name) == [
+        "fake-vlm", *three_arguments[1:]]
+
+
+@pytest.mark.parametrize("stream", ["stdout", "stderr"])
+def test_command_backend_stops_a_command_that_writes_past_the_ceiling(tmp_path, stream):
+    """A reply of candidates is kilobytes, so a program streaming megabytes
+    on either pipe is broken, not answering: it is stopped, with everything
+    it started, the moment the ceiling is passed, not read into memory
+    until the timeout, and the frame's error is a RuntimeError naming the
+    program, the stream and the ceiling, recorded on the frame while the
+    batch goes on. A stream that stops at the ceiling is read whole."""
+    image = tmp_path / "image.jpg"
+    image.write_bytes(b"jpeg")
+    ceiling = CommandBackend.MAX_OUTPUT_BYTES
+    run = _FakeRun(**{stream: "x" * (ceiling + 1)})
+    backend = _command_backend(run)
+
+    with pytest.raises(RuntimeError) as err:
+        backend.complete(image, "prompt", 10)
+
+    assert not isinstance(err.value, subprocess.SubprocessError)
+    for named in ("fake-vlm", stream, str(ceiling)):
+        assert named in str(err.value), str(err.value)
+    (process,) = run.processes
+    assert run.stopped == [(process.pid, None)], (
+        "the tree is stopped by the command's pid while it is still the command's own, before the reap")
+    assert process.returncode is not None, "the stopped command was not reaped"
+
+    within = (_FakeRun(stdout=ID_OK.ljust(ceiling)) if stream == "stdout"
+              else _FakeRun(stdout=ID_OK, stderr="x" * ceiling))
+    assert _command_backend(within).complete(image, "prompt", 10).text.strip() == ID_OK
+    assert within.stopped == [(within.processes[0].pid, None)], "stopped at its exit, not at the ceiling"
+
+
+def test_command_backend_stops_the_whole_process_tree_on_timeout(tmp_path):
+    """A timeout stops the command and everything it started, not just the
+    first process: the tree is stopped by the command's pid (its session or
+    process group), the command itself is killed, and it is reaped before
+    the TimeoutError is raised, so a CLI whose worker outlives it cannot
+    leave that worker running while the batch goes on."""
+    image = tmp_path / "image.jpg"
+    image.write_bytes(b"jpeg")
+    run = _FakeRun(hangs=True)
+    backend = _command_backend(run, timeout=0.5)
+
+    started = time.monotonic()
+    with pytest.raises(TimeoutError):
+        backend.complete(image, "prompt", 10)
+
+    assert 0.5 <= time.monotonic() - started < 5, "the config's timeout is the ceiling"
+    (process,) = run.processes
+    assert run.stopped == [(process.pid, None)], (
+        "the tree is stopped by the command's pid while it is still the command's own, before the reap")
+    assert process.killed
+    assert process.returncode is not None, "the killed command was not reaped"
+
+
+def test_command_backend_counts_starting_the_program_against_the_timeout(tmp_path):
+    """Codex round 21 (backend.py:999, :1002): the timeout is the ceiling on
+    the call as a whole, starting the program included. A launch that is
+    slow (a program that takes long to exec, a PATH on a slow volume)
+    counts against it, so a launch that consumed the whole timeout, 0.3s
+    here against a 0.6s launch, is reported as the timeout it is, not
+    answered as a success with a fresh full timeout after it. The fake's
+    process factory sleeps past the timeout before returning a process
+    that has already exited with a good reply."""
+    image = tmp_path / "image.jpg"
+    image.write_bytes(b"jpeg")
+    run = _FakeRun(stdout=ID_OK)
+    backend = _command_backend(run, timeout=0.3)
+
+    def slow_launch(argv, **kwargs):
+        time.sleep(0.6)
+        return run(argv, **kwargs)
+    backend._run = slow_launch
+
+    started = time.monotonic()
+    with pytest.raises(TimeoutError, match="did not answer within 0.3s"):
+        backend.complete(image, "prompt", 10)
+
+    assert time.monotonic() - started < 1.5, "the launch was given a fresh timeout on top of its own"
+    (process,) = run.processes
+    assert process.returncode is not None, "the command was not reaped"
+
+
+def test_command_backend_uses_the_reply_of_a_command_that_exited_leaving_its_pipe_held(tmp_path):
+    """The command's exit ends its answer. A command that printed its reply,
+    exited 0 and left a process it started holding its stdout is not a
+    timeout (the old outcome, after the whole timeout, advising a longer
+    one that could not help, the reply discarded): the tree it heads is
+    stopped the moment its exit is seen, which frees the pipe, and what
+    was read is the reply. The stop happens before the command is reaped
+    (its returncode still None at that moment), so the pid the tree is
+    stopped by is still the command's own and cannot have been given to
+    another process. The fake's stdout is a real pipe whose write end the
+    test holds, as the worker would, until the tree is stopped."""
+    image = tmp_path / "image.jpg"
+    image.write_bytes(b"jpeg")
+    read_end, write_end = os.pipe()
+    os.write(write_end, ID_OK.encode("utf-8"))
+    run = _FakeRun(stdout=os.fdopen(read_end, "rb"))
+    backend = _command_backend(run, timeout=5.0)
+
+    def stop_tree(pid: int) -> None:
+        run.stop_tree(pid)
+        os.close(write_end)  # the worker dies with the tree and the pipe ends
+    backend._stop_tree = stop_tree
+
+    started = time.monotonic()
+    completion = backend.complete(image, "prompt", 10)
+
+    assert completion.text == ID_OK
+    assert time.monotonic() - started < 2, "the reply was held to the timeout"
+    (process,) = run.processes
+    assert run.stopped == [(process.pid, None)], (
+        "the tree is stopped by the command's pid while it is still the command's own, before the reap")
+    assert process.returncode == 0, "the command was reaped last"
+
+
+@pytest.mark.parametrize(
+    ("timeout", "at_least", "under"),
+    [(5.0, 4.5, 7), (1.5, 1.5, 2.5)],
+    ids=["five-second-bound-wins", "timeout-wins"],
+)
+def test_command_backend_leaves_a_pipe_still_held_past_the_reader_bound_to_its_holder(
+        tmp_path, timeout, at_least, under):
+    """A pipe still held when the readers' bound runs out (by something the
+    tree stop could not reach: a daemon that left the session) is left to
+    its holder, not closed from here: closing a BufferedReader from another
+    thread waits for the read1 in flight to return, which is a wait on the
+    holder for as long as it lives, past the config's timeout. The reply
+    is used at the bound, the pipe that did end is closed, and the one
+    still held is not. The config's timeout is the ceiling on the call as
+    a whole, the readers' bound included: a command that exited in time
+    and left its stdout held by something the tree stop could not reach
+    gives the readers until the timeout or five seconds, whichever comes
+    first, not five seconds past a shorter timeout. The fake's stdout is
+    a real pipe whose write end the test holds for longer than either
+    bound, so a close that waits shows as elapsed time rather than a
+    hang; under a timeout longer than five seconds the reply is used at
+    the five seconds, and under one shorter, 1.5s here, at the timeout,
+    the call never nearing the five seconds a bound clamped to nothing
+    would take."""
+    image = tmp_path / "image.jpg"
+    image.write_bytes(b"jpeg")
+    read_end, write_end = os.pipe()
+    os.write(write_end, ID_OK.encode("utf-8"))
+    stdout = os.fdopen(read_end, "rb")
+    run = _FakeRun(stdout=stdout, stderr="warning: slow")
+    backend = _command_backend(run, timeout=timeout)
+    held = [write_end]
+
+    def let_go() -> None:
+        os.close(held.pop())  # the holder dies and the pipe ends
+    holder = threading.Timer(8.0, let_go)
+    holder.start()
+    try:
+        started = time.monotonic()
+        completion = backend.complete(image, "prompt", 10)
+        took = time.monotonic() - started
+
+        assert completion.text == ID_OK
+        assert at_least <= took < under, f"the call took {took:.2f}s: held past the reader bound"
+        (process,) = run.processes
+        assert process.stderr.closed, "the pipe read to its end is closed"
+        assert not process.stdout.closed, "the pipe still held was closed from under its reader"
+        assert process.returncode == 0, "the command was reaped last"
+    finally:
+        holder.cancel()
+        holder.join()
+        if held:
+            let_go()
+        stdout.close()
+
+
+@pytest.mark.parametrize("system_root", [r"D:\Win", None], ids=["SystemRoot", "default"])
+def test_command_backend_stops_a_tree_on_windows_with_the_system_taskkill(monkeypatch, system_root):
+    """`_stop_tree` on Windows runs taskkill by its absolute path under
+    System32 (SystemRoot's, or C:\\Windows's), never by bare name, which
+    CreateProcess would look for in the current directory before System32:
+    a taskkill.exe planted where melampus was started from would run with
+    its rights the first time a command timed out. `/T /F /PID <pid>`,
+    nothing on stdin, the exit code not checked (a tree already gone is
+    nothing to do). Runs on every platform: the platform and the run are
+    faked."""
+    monkeypatch.setattr(sys, "platform", "win32")
+    if system_root is None:
+        monkeypatch.delenv("SystemRoot", raising=False)
+    else:
+        monkeypatch.setenv("SystemRoot", system_root)
+    calls: list[tuple[list[str], dict]] = []
+
+    def run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return subprocess.CompletedProcess(argv, 128, b"", b"ERROR: The process \"4242\" not found.")
+    monkeypatch.setattr(subprocess, "run", run)
+
+    CommandBackend(["fake-vlm", "{image}", "{prompt}"])._stop_tree(4242)
+
+    ((argv, kwargs),) = calls
+    assert argv == [rf"{system_root or r'C:\Windows'}\System32\taskkill.exe", "/T", "/F", "/PID", "4242"]
+    assert kwargs["stdin"] is subprocess.DEVNULL
+    assert kwargs["check"] is False and kwargs["capture_output"] is True
+
+
+def test_command_backend_stops_a_tree_on_posix_by_the_group_the_command_heads(monkeypatch):
+    """`_stop_tree` on POSIX: SIGKILL through os.killpg to the group whose
+    id is the command's pid (OWN_GROUP started it in its own session). A
+    group already gone (ESRCH) and one holding nothing but the command's
+    own exited process (EPERM, macOS's answer) are nothing to do; any
+    other failure is raised. Runs on every platform: os.killpg is faked,
+    and SIGKILL is given where there is none."""
+    monkeypatch.setattr(sys, "platform", "linux")
+    _given(monkeypatch, signal, SIGKILL=9)
+    calls: list[tuple[int, int]] = []
+    answer: list[BaseException | None] = [None]
+
+    def killpg(pgid, sig):
+        calls.append((pgid, sig))
+        if answer[0] is not None:
+            raise answer[0]
+    monkeypatch.setattr(os, "killpg", killpg, raising=False)
+    backend = CommandBackend(["fake-vlm", "{image}", "{prompt}"])
+
+    backend._stop_tree(4242)
+    assert calls == [(4242, signal.SIGKILL)]
+    for answer[0] in (ProcessLookupError(3, "No such process"), PermissionError(1, "Operation not permitted")):
+        backend._stop_tree(4242)
+    assert calls == [(4242, signal.SIGKILL)] * 3
+    answer[0] = OSError(22, "Invalid argument")
+    with pytest.raises(OSError):
+        backend._stop_tree(4242)
+
+
+def test_command_backend_starts_the_command_in_its_own_process_group_on_windows(monkeypatch, tmp_path):
+    """OWN_GROUP on Windows: the command is started with
+    CREATE_NEW_PROCESS_GROUP, the flag `taskkill /T` walks from, and not
+    with start_new_session, which Windows has no idea of. Runs on every
+    platform: the platform and the flag are faked."""
+    monkeypatch.setattr(sys, "platform", "win32")
+    _given(monkeypatch, subprocess, CREATE_NEW_PROCESS_GROUP=0x200)
+    image = tmp_path / "image.jpg"
+    image.write_bytes(b"jpeg")
+    run = _FakeRun(stdout=ID_OK)
+
+    _command_backend(run).complete(image, "prompt", 10)
+
+    ((_, kwargs),) = run.calls
+    assert kwargs["creationflags"] == subprocess.CREATE_NEW_PROCESS_GROUP
+    assert "start_new_session" not in kwargs
+
+
+def test_command_backend_sees_the_exit_through_wait_on_windows(monkeypatch):
+    """`_exited` on Windows is Popen.wait with the step as its timeout: the
+    Popen handle keeps the pid reserved, so reaping there is safe and the
+    order does not matter. Runs on every platform: the platform is faked
+    and the process is the fake."""
+    monkeypatch.setattr(sys, "platform", "win32")
+    backend = CommandBackend(["fake-vlm", "{image}", "{prompt}"])
+    ended = _FakeProcess([], _FakeRun())
+    hung = _FakeProcess([], _FakeRun(hangs=True))
+
+    assert backend._exited(ended, 0.01) is True
+    assert backend._exited(hung, 0.01) is False
+    assert ended.waited == [0.01] and hung.waited == [0.01]
+
+
+def test_command_backend_sees_the_exit_through_kqueue_and_names_what_each_event_is(monkeypatch):
+    """`_exited` where there is kqueue (macOS) registers a one-shot
+    NOTE_EXIT on the command's pid and waits the step for one event, on a
+    queue of its own closed after the look. Three answers can come back
+    and each is named: no event is not yet; a NOTE_EXIT event is the exit,
+    seen during the wait; an EV_ERROR event carrying ESRCH is the command
+    already exited before the look (XNU's proc_find does not see an exited
+    process, so the registration is refused, and for this process's own
+    unreaped child that can only mean it has exited), and is the exit too.
+    An EV_ERROR event carrying any other errno is that error, raised as
+    the OSError it is, never counted as the exit. Runs on every platform:
+    kqueue and kevent are faked, with the constants where there are none."""
+    monkeypatch.setattr(sys, "platform", "darwin")
+    _given(monkeypatch, select, KQ_FILTER_PROC=-5, KQ_EV_ADD=1, KQ_EV_ONESHOT=0x10, KQ_EV_CLEAR=0x20,
+           KQ_EV_EOF=0x8000, KQ_EV_ERROR=0x4000, KQ_NOTE_EXIT=0x80000000)
+    monkeypatch.setattr(select, "kevent", lambda *fields: types.SimpleNamespace(fields=fields), raising=False)
+    controls: list[tuple[list, int, float]] = []
+    answer: list[list] = [[]]
+    closed: list[bool] = []
+
+    class kqueue:
+        def control(self, changes, max_events, timeout):
+            controls.append((changes, max_events, timeout))
+            return answer[0]
+
+        def close(self):
+            closed.append(True)
+    monkeypatch.setattr(select, "kqueue", kqueue, raising=False)
+    backend = CommandBackend(["fake-vlm", "{image}", "{prompt}"])
+    process = _FakeProcess([], _FakeRun())
+
+    assert backend._exited(process, 0.05) is False, "no event is not yet"
+    # The flags a real NOTE_EXIT event carries (0x8031 on macOS): the registration's own ADD and
+    # ONESHOT, CLEAR and EOF set by the kernel, and no EV_ERROR, which is all the branch reads of them.
+    answer[0] = [types.SimpleNamespace(flags=select.KQ_EV_ADD | select.KQ_EV_ONESHOT | select.KQ_EV_CLEAR
+                                       | select.KQ_EV_EOF, fflags=select.KQ_NOTE_EXIT, data=0)]
+    assert backend._exited(process, 0.05) is True, "NOTE_EXIT is the exit, seen during the wait"
+    answer[0] = [types.SimpleNamespace(flags=select.KQ_EV_ERROR | select.KQ_EV_ONESHOT, fflags=0,
+                                       data=errno.ESRCH)]
+    assert backend._exited(process, 0.05) is True, "EV_ERROR with ESRCH is the command already exited"
+    answer[0] = [types.SimpleNamespace(flags=select.KQ_EV_ERROR | select.KQ_EV_ONESHOT, fflags=0,
+                                       data=errno.ENOMEM)]
+    with pytest.raises(OSError) as err:
+        backend._exited(process, 0.05)
+    assert err.value.errno == errno.ENOMEM, "any other EV_ERROR is the error it is, not the exit"
+    assert len(controls) == 4 and len(closed) == 4, "one queue per look, closed after it"
+    for changes, max_events, timeout in controls:
+        (registered,) = changes
+        assert registered.fields == (4242, select.KQ_FILTER_PROC, select.KQ_EV_ADD | select.KQ_EV_ONESHOT,
+                                     select.KQ_NOTE_EXIT), "one-shot NOTE_EXIT on the command's pid"
+        assert (max_events, timeout) == (1, 0.05), "one event, within the step"
+    assert process.waited == [], "kqueue, never Popen.wait, which reaps"
+
+
+def test_command_backend_sees_the_exit_through_waitid_where_there_is_no_kqueue(monkeypatch):
+    """`_exited` on a POSIX without kqueue (Linux) asks waitid for the
+    command by pid with WEXITED, WNOWAIT (seen, not reaped) and WNOHANG:
+    None is not yet, anything else is exited. It looks first, so a command
+    already exited is seen at once (as the kqueue and Windows looks see
+    it), and only when the command has not exited sleeps the step and
+    looks once more, so an exit during the step is seen at its end.
+    Runs on every platform: kqueue is taken away, waitid is faked, and its
+    constants are given where there are none."""
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.delattr(select, "kqueue", raising=False)
+    _given(monkeypatch, os, P_PID=1, WEXITED=4, WNOWAIT=0x1000000, WNOHANG=1)
+    calls: list[tuple[int, int, int]] = []
+    answer: list[object] = [None]
+
+    def waitid(idtype, pid, options):
+        calls.append((idtype, pid, options))
+        return answer[0]
+    monkeypatch.setattr(os, "waitid", waitid, raising=False)
+    backend = CommandBackend(["fake-vlm", "{image}", "{prompt}"])
+    process = _FakeProcess([], _FakeRun())
+
+    started = time.monotonic()
+    assert backend._exited(process, 0.05) is False
+    assert time.monotonic() - started >= 0.05, "a not-yet look waits the step"
+    answer[0] = object()  # a siginfo: the process has exited
+    started = time.monotonic()
+    assert backend._exited(process, 0.05) is True
+    assert time.monotonic() - started < 0.05, "an exited command is seen before the step has passed"
+    assert calls == [(os.P_PID, 4242, os.WEXITED | os.WNOWAIT | os.WNOHANG)] * 3, (
+        "a not-yet look looks, sleeps the step, and looks once more; an exited look looks once")
+    assert process.waited == [], "waitid, never Popen.wait, which reaps"
+
+
+def test_command_is_selectable_by_config_and_flag_but_not_a_picker_choice():
+    """`[model] backend = "command"` and `--backend command` select the seam;
+    the plugin's picker learns it in card #423, so BACKEND_CHOICES, the
+    engines the picker offers in the owner's order, is unchanged. It is
+    local: no cloud retuning, no cost prompt, no cloud cache file."""
+    assert providers.COMMAND == "command"
+    assert providers.BACKEND_CHOICES == (*ENGINES, providers.SCRIPTED)
+    assert providers.COMMAND in providers.LOCAL_BACKENDS
+    assert not providers.is_cloud_primary(_cfg(model={"backend": "command", "command": COMMAND}))
+
+
+def test_command_not_configured_is_refused_with_the_shape(no_ambient_ollama):
+    """Engine command with no `[model] command`: refused through the same
+    BackendUnavailable path every refusal takes, saying what to set."""
+    with pytest.raises(providers.BackendUnavailable) as err:
+        providers.build_primary_backend(_cfg(model={"backend": "command"}))
+    message = str(err.value)
+    assert "[model] command" in message and "{image}" in message and "{prompt}" in message
+    assert "--backend" in message
+
+
+def test_command_not_installed_is_refused_before_any_image_is_read_and_names_the_fix(
+    monkeypatch, no_ambient_keys, no_ambient_ollama
+):
+    """Card #420, Done-when 2: given the command is missing, when the backend
+    is asked for, then the refusal names the command, says it is not
+    installed or not on PATH and how to fix that in general words (the
+    specific CLI's install pointer is #421/#422), and names the backends
+    that do work here, through BackendUnavailable (exit 3 from the CLI).
+    shutil.which runs in the factory: no image is read first."""
+    asked: list[str] = []
+
+    def which(name):
+        asked.append(name)
+        return None
+
+    monkeypatch.setattr(providers.shutil, "which", which)
+    with pytest.raises(providers.BackendUnavailable) as err:
+        providers.build_primary_backend(_cfg(model={"backend": "command", "command": COMMAND}))
+    message = str(err.value)
+    assert asked == ["fake-vlm"]
+    assert "'fake-vlm' is not installed or not on PATH" in message
+    assert "install" in message.lower() and "PATH" in message
+    for works_here in ("claude", "openai", "scripted"):
+        assert works_here in message, f"{works_here!r} is not named as working here:\n{message}"
+    assert "--backend" in message
+
+
+@pytest.mark.parametrize("shim", [r"C:\Users\me\AppData\Roaming\npm\fake-vlm.cmd",
+                                  r"C:\Tools\fake-vlm.BAT"], ids=["cmd", "bat"])
+def test_command_resolving_to_a_batch_shim_is_refused_and_names_the_real_entry(
+    monkeypatch, no_ambient_keys, no_ambient_ollama, shim
+):
+    """Given the template's first element resolves to a `.cmd` or `.bat`
+    file (an npm-installed shim; any case), when the backend is asked for,
+    then it is refused up front through the same shape, naming the file
+    found and the fix: name the program's real entry in `[model] command`,
+    its `.exe` or `node` and the script the shim wraps. Windows launches a
+    batch file through cmd.exe whatever subprocess is told (Python's own
+    subprocess docs, Security Considerations), so the prompt, with its
+    newlines, quotes and braces, would be parsed by a shell rather than
+    delivered as one argument, which is the promise the argv list makes."""
+    monkeypatch.setattr(providers.shutil, "which", lambda name: shim)
+    with pytest.raises(providers.BackendUnavailable) as err:
+        providers.build_primary_backend(_cfg(model={"backend": "command", "command": COMMAND}))
+    message = str(err.value)
+    assert shim in message, message
+    assert "cmd.exe" in message, message
+    assert "[model] command" in message and ".exe" in message and "node" in message, message
+    assert "--backend" in message
+
+
+def test_command_resolved_through_a_path_entry_with_a_control_character_is_named_in_printable_words(
+    monkeypatch, no_ambient_keys, no_ambient_ollama
+):
+    """Codex round 18 (providers.py:324), security: the resolved path the
+    batch-shim refusal names is the template's first element joined to a
+    PATH directory, and PATH is inherited from whatever launched melampus
+    (a supervisor, the plugin's host), so a directory carrying an escape
+    sequence would reach the terminal through the message even though the
+    config's element is printable. Given shutil.which resolves the program
+    under such a directory to a `.cmd`, when the backend is asked for,
+    then the refusal names the path in printable words only, through
+    `plain`, the one rule for text the program's side wrote."""
+    shim = "C:\\Tools\x1b[2J\\fake-vlm.cmd"
+    monkeypatch.setattr(providers.shutil, "which", lambda name: shim)
+    with pytest.raises(providers.BackendUnavailable) as err:
+        providers.build_primary_backend(_cfg(model={"backend": "command", "command": COMMAND}))
+    clause = next(line for line in str(err.value).splitlines() if "resolves to" in line)
+    assert "C:\\Tools [2J\\fake-vlm.cmd, a batch file" in clause, clause
+    assert all(c.isprintable() for c in clause), clause
+
+
+def test_command_in_a_process_that_ignores_sigchld_is_refused_and_names_the_fix(
+    monkeypatch, no_ambient_keys, no_ambient_ollama
+):
+    """Given the process melampus runs in ignores SIGCHLD (SIG_IGN, inherited
+    across exec from whatever launched it: a supervisor, a Python parent
+    that set it to avoid zombies), when the command backend is asked for,
+    then it is refused up front through the same shape, naming SIGCHLD and
+    the fix (start melampus from a shell, or restore the default), because
+    the kernel reaps such a process's children the moment they exit: the
+    command's exit could only be seen after its pid was freed, and the tree
+    it started would be stopped by a number that may be someone else's by
+    then. Refused once at exit 3 as a missing program is, not once per
+    frame. Runs on every platform: the disposition is faked, and the
+    signal's name is given where there is none."""
+    monkeypatch.setattr(providers.shutil, "which", lambda name: f"/opt/fake/bin/{name}")
+    _given(monkeypatch, signal, SIGCHLD=20)
+    asked: list[int] = []
+
+    def getsignal(signalnum):
+        asked.append(signalnum)
+        return signal.SIG_IGN
+    monkeypatch.setattr(signal, "getsignal", getsignal)
+    with pytest.raises(providers.BackendUnavailable) as err:
+        providers.build_primary_backend(_cfg(model={"backend": "command", "command": COMMAND}))
+    message = str(err.value)
+    assert asked == [signal.SIGCHLD]
+    assert "ignores SIGCHLD" in message, message
+    assert "shell" in message and "default" in message, message
+    for works_here in ("claude", "openai", "scripted"):
+        assert works_here in message, f"{works_here!r} is not named as working here:\n{message}"
+    assert "--backend" in message
+
+
+def test_command_primary_builds_the_backend_from_the_model_settings(monkeypatch):
+    """Given engine command and a template, the factory builds a
+    CommandBackend on the template, the path shutil.which resolved its
+    first element to, and timeout_seconds."""
+    monkeypatch.setattr(providers.shutil, "which", lambda name: f"/opt/fake/bin/{name}")
+    backend = providers.build_primary_backend(
+        _cfg(model={"backend": "command", "command": COMMAND, "timeout_seconds": 30}))
+    assert isinstance(backend, CommandBackend)
+    assert backend.command == COMMAND
+    assert backend.executable == "/opt/fake/bin/fake-vlm"
+    assert backend.timeout == 30.0
+    assert backend.name == shlex.join(COMMAND)
+
+
+FAKE_CLI = "fake-vlm"
+
+_FAKE_CLI_SCRIPT = '''#!{python}
+"""A stand-in for a subscription CLI: takes an image and a prompt, prints a
+reply on stdout in the shape the real models produce. Checks what it was
+given the way a real program would notice: the image must exist, the prompt
+must not be empty."""
+import argparse
+import os
+import sys
+
+ROUTING = {routing!r}
+IDENTIFICATION = {identification!r}
+
+ap = argparse.ArgumentParser()
+ap.add_argument("--image", required=True)
+ap.add_argument("--prompt", required=True)
+ap.add_argument("--quiet", action="store_true")
+args = ap.parse_args()
+if not os.path.isfile(args.image):
+    sys.exit(f"no such image: {{args.image}}")
+if not args.prompt.strip():
+    sys.exit("empty prompt")
+if not os.path.isabs(args.image):
+    sys.exit(f"image path is not absolute: {{args.image}}")
+if {exit_code} != 0:
+    print({stderr!r}, file=sys.stderr)
+    sys.exit({exit_code})
+print("Sure, here is the identification:")
+print(ROUTING if "router" in args.prompt else IDENTIFICATION)
+'''
+
+
+_RUNAWAY_SCRIPT = '''#!{python}
+"""A CLI that never stops writing to one stream: a broken program, not an
+answer, however long the timeout. Its pid goes to a file so the test can
+look for it afterwards."""
+import os
+import sys
+
+with open({pid_file!r}, "w") as handle:
+    handle.write(str(os.getpid()))
+stream = getattr(sys, {stream!r})
+while True:
+    stream.write("x" * 65536)
+    stream.flush()
+'''
+
+_LAUNCHER_SCRIPT = '''#!{python}
+"""A CLI that hands the work to a worker, the way one wrapping a language
+server or a daemon does: it waits for the worker (`waits`), or prints its
+reply and exits at once, leaving the worker running with the CLI's own
+stdout and stderr. The worker's pid goes to a file so the test can look
+for the worker after the CLI is stopped or has exited."""
+import subprocess
+import sys
+
+worker = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+with open({pid_file!r}, "w") as handle:
+    handle.write(str(worker.pid))
+if {waits}:
+    worker.wait()
+else:
+    print({identification!r})
+'''
+
+
+def _fake_cli(monkeypatch, tmp_path, *, exit_code: int = 0, stderr: str = "",
+              script: str = _FAKE_CLI_SCRIPT, **fields) -> list[str]:
+    """Write FAKE_CLI, an executable Python script, into a folder put first
+    on PATH, and return the config template that runs it by its bare name:
+    the real shutil.which, the real subprocess, no shell. `exit_code`
+    non-zero makes it fail after reading its arguments, saying `stderr`.
+    `script` is another body in place of the answering CLI's, with `fields`
+    filled in."""
+    folder = tmp_path / "bin"
+    folder.mkdir(exist_ok=True)
+    path = folder / FAKE_CLI
+    path.write_text(script.format(
+        python=sys.executable, routing=ROUTING_OK, identification=ID_OK,
+        exit_code=exit_code, stderr=stderr, **fields,
+    ), encoding="utf-8")
+    path.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{folder}{os.pathsep}{os.environ.get('PATH', '')}")
+    assert shutil.which(FAKE_CLI) == str(path)
+    return [FAKE_CLI, "--image", "{image}", "--prompt", "{prompt}", "--quiet"]
+
+
+def _command_settings(tmp_path, command: list[str]) -> Path:
+    settings = tmp_path / "settings.toml"
+    settings.write_text(
+        f'[model]\nbackend = "command"\ncommand = {json.dumps(command)}\n', encoding="utf-8")
+    return settings
+
+
+posix_only = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="the fake CLI is a shebang script, and _gone's look is signal 0, which on Windows "
+           "is CTRL_C_EVENT then TerminateProcess, not a probe, and never a ProcessLookupError",
+)
+
+
+@posix_only
+def test_command_backend_returns_candidates_in_the_same_shape_as_mlx_on_the_fixture(
+    monkeypatch, photos, tmp_path
+):
+    """Card #420, Done-when 1 and 3, at the real boundary: an executable
+    script on PATH stands in for the CLI, resolved by the real shutil.which
+    and run by the real subprocess, no shell; nothing real is installed or
+    called. It reads its arguments, checks the image exists and the prompt
+    is non-empty, and answers the routing prompt then the bird prompt in
+    the shape the real models produce. The factory builds the backend, the
+    Identifier stages the committed fixture, and the result carries
+    candidates in exactly the shape the same replies take through the
+    mlx-shaped pipeline: same fields, ordered by confidence."""
+    from melampus.identify import Identifier
+
+    command = _fake_cli(monkeypatch, tmp_path)
+    config = _cfg(model={"backend": "command", "command": command})
+    backend = providers.build_primary_backend(config)
+    result = Identifier(backend, config).identify(photos / PHOTO)
+    expected = Identifier(
+        ScriptedBackend([ROUTING_OK, ID_OK], name=shlex.join(command)), config
+    ).identify(photos / PHOTO)
+
+    assert result.status == "ok", result.error
+    assert result.model == shlex.join(command)
+    assert result.identification == expected.identification
+    assert result.taxon_routing == expected.taxon_routing
+    assert [c.common_name for c in result.identification.ranked()] == [
+        "Tricolored Heron", "Little Blue Heron"]
+    assert result.identification.top().scientific_name == "Egretta tricolor"
+
+
+#: The pids `_gone` has proven gone during the current test (the `pid_file`
+#: fixture empties it at setup), so its teardown never signals one of them.
+_PROVEN_GONE: set[int] = set()
+
+
+def _gone(pid: int, within: float) -> bool:
+    """Whether the pid `pid` is gone within `within` seconds: no process
+    holds it, so a signal 0 finds nothing. Looked for at least once. A
+    zombie is not gone: it holds its pid until its parent reaps it, and
+    signal 0 reaches it (macOS answers it with success, as POSIX asks). A
+    pid proven gone is recorded in `_PROVEN_GONE`, so the fixture's
+    teardown never signals it: it may be another process's by then."""
+    deadline = time.monotonic() + within
+    while True:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            _PROVEN_GONE.add(pid)
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.05)
+
+
+@pytest.fixture
+def pid_file(tmp_path):
+    """The file a fake CLI's script writes a pid into (its worker's, or its
+    own) so the test can look for that process afterwards. On teardown,
+    the process it names is killed if it is still there, which is the
+    failing case. A pid the test proved gone with `_gone` is never
+    signalled, whatever a look at teardown would answer: between the
+    proof and the teardown it may have been given to a process of
+    someone else's, and a fresh look by number could not tell."""
+    _PROVEN_GONE.clear()
+    path = tmp_path / "worker.pid"
+    yield path
+    if path.exists():
+        pid = int(path.read_text(encoding="utf-8"))
+        if pid not in _PROVEN_GONE and not _gone(pid, within=0.0):
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(pid, 9)
+
+
+@posix_only
+def test_pid_file_teardown_never_signals_a_pid_the_test_proved_gone(monkeypatch, tmp_path):
+    """The `pid_file` fixture's teardown stops a process a failing test left
+    behind, and never a pid the test proved gone with `_gone`, however a
+    look at teardown answers: between the assertion and the teardown that
+    pid can be given to a process of someone else's, and a fresh look by
+    number cannot tell the two apart. Driven here with the fixture's own
+    generator, a real child proven gone, and os.kill faked to answer
+    "alive" for its pid, as a recycled pid would; and, the other way, a
+    pid never proven gone that answers alive is signalled, which is the
+    failing case the teardown exists for."""
+    signals: list[tuple[int, int]] = []
+
+    def kill(pid, sig):
+        signals.append((pid, sig))
+    teardown = pid_file.__wrapped__(tmp_path)
+    path = next(teardown)
+    ended = subprocess.Popen([sys.executable, "-c", "pass"])
+    ended.wait()
+    path.write_text(str(ended.pid), encoding="utf-8")
+    assert _gone(ended.pid, within=10.0)
+    monkeypatch.setattr(os, "kill", kill)
+    with pytest.raises(StopIteration):
+        next(teardown)
+    assert signals == [], f"the teardown signalled a pid the test proved gone: {signals}"
+
+    teardown = pid_file.__wrapped__(tmp_path)
+    path = next(teardown)
+    path.write_text(str(ended.pid + 1), encoding="utf-8")
+    with pytest.raises(StopIteration):
+        next(teardown)
+    assert signals == [(ended.pid + 1, 0), (ended.pid + 1, 9)], "a leftover never proven gone is stopped"
+
+
+def _real_command_backend(monkeypatch, tmp_path, script: str, timeout: float, **fields) -> CommandBackend:
+    """The backend the factory builds for the fake CLI `script` (a body for
+    _fake_cli, `fields` filled in) under a `timeout` of that many seconds:
+    the real shutil.which, the real subprocess, no shell."""
+    command = _fake_cli(monkeypatch, tmp_path, script=script, **fields)
+    return providers.build_primary_backend(
+        _cfg(model={"backend": "command", "command": command, "timeout_seconds": timeout}))
+
+
+@posix_only
+def test_command_backend_timeout_stops_the_worker_the_command_started(monkeypatch, tmp_path, pid_file):
+    """At the real boundary: the command starts a worker and waits for it,
+    the way a CLI wrapping a daemon does, and neither answers within the
+    timeout. Then the run is a TimeoutError as before, and the worker is
+    gone too: stopping only the command would leave a worker per timed-out
+    frame running while the batch goes on."""
+    backend = _real_command_backend(monkeypatch, tmp_path, _LAUNCHER_SCRIPT, timeout=1,
+                                    pid_file=str(pid_file), waits=True)
+    image = tmp_path / "image.jpg"
+    image.write_bytes(b"jpeg")
+
+    with pytest.raises(TimeoutError) as err:
+        backend.complete(image, "prompt", 10)
+
+    assert "fake-vlm did not answer within 1s" in str(err.value)
+    worker = int(pid_file.read_text(encoding="utf-8"))
+    assert _gone(worker, within=10.0), f"worker {worker} is still running after the timeout"
+
+
+@posix_only
+def test_command_backend_closes_both_pipes_after_a_timeout_at_the_real_boundary(
+        monkeypatch, tmp_path, pid_file):
+    """At the real boundary, the promise of
+    test_command_backend_closes_both_pipes_after_a_completion on the path
+    that recurs in a batch (every frame of a program that hangs): a command
+    that does not answer within the timeout is stopped with its tree, its
+    two pipes end, the readers reach those ends, and both pipes are closed
+    by the backend, not left to the garbage collector (`python -X dev`
+    reports an unclosed file per pipe per timed-out frame). The Popen is
+    recorded by wrapping the backend's process factory, and the pipes are
+    looked at once the readers have reached the ends, within a short
+    bound: the readers end within milliseconds of the stop, and the close
+    is theirs to make whatever bound _wait gave them."""
+    backend = _real_command_backend(monkeypatch, tmp_path, _LAUNCHER_SCRIPT, timeout=0.5,
+                                    pid_file=str(pid_file), waits=True)
+    image = tmp_path / "image.jpg"
+    image.write_bytes(b"jpeg")
+    launch, processes = backend._run, []
+
+    def recording_launch(argv, **kwargs):
+        processes.append(launch(argv, **kwargs))
+        return processes[-1]
+    backend._run = recording_launch
+
+    try:
+        with pytest.raises(TimeoutError):
+            backend.complete(image, "prompt", 10)
+
+        (process,) = processes
+        ends = time.monotonic() + 2.0
+        while not (process.stdout.closed and process.stderr.closed) and time.monotonic() < ends:
+            time.sleep(0.05)
+        assert process.stdout.closed and process.stderr.closed, (
+            "the pipes of a timed-out command were left to the garbage collector")
+    finally:
+        for process in processes:
+            process.stdout.close()
+            process.stderr.close()
+
+
+@posix_only
+def test_command_backend_uses_the_reply_of_a_command_that_exits_leaving_a_worker(
+        monkeypatch, tmp_path, pid_file):
+    """At the real boundary: the command prints its reply, starts a worker
+    that inherits its stdout and stderr, and exits 0 at once, the way a
+    CLI that leaves a helper behind does. Its exit ends its answer: the
+    reply is used and the call returns well inside the timeout (the old
+    outcome was a TimeoutError at the whole timeout, advising a longer one
+    that could not help, the reply discarded), the worker is gone, and
+    the group was stopped by a pid that was still the command's own, its
+    exited process unreaped (a signal 0 still reaches it)."""
+    backend = _real_command_backend(monkeypatch, tmp_path, _LAUNCHER_SCRIPT, timeout=4,
+                                    pid_file=str(pid_file), waits=False)
+    image = tmp_path / "image.jpg"
+    image.write_bytes(b"jpeg")
+    killpg, leader_unreaped = os.killpg, []
+
+    def spy(pgid, sig):
+        try:
+            os.kill(pgid, 0)
+            leader_unreaped.append(True)
+        except ProcessLookupError:
+            leader_unreaped.append(False)
+        return killpg(pgid, sig)
+    monkeypatch.setattr(os, "killpg", spy)
+
+    started = time.monotonic()
+    completion = backend.complete(image, "prompt", 10)
+
+    assert time.monotonic() - started < 2, "the reply was held to the timeout"
+    assert completion.text.strip() == ID_OK
+    worker = int(pid_file.read_text(encoding="utf-8"))
+    assert _gone(worker, within=10.0), f"worker {worker} outlived the command's exit"
+    assert leader_unreaped == [True], "the tree was stopped by a pid the command no longer held"
+
+
+def test_command_backend_sees_the_exit_without_reaping_the_command():
+    """At the real boundary, the sight of the exit: a real child that has
+    ended is seen as exited at once, and one still running is not, within
+    the time given; on POSIX the child is not reaped by the look (its
+    returncode is still None afterwards, so its pid is still its own and
+    its group's until the backend reaps it last); on Windows the Popen
+    handle keeps the pid reserved and the look may reap. A second look at
+    the same ended child (an unreaped zombie by then, which kqueue on
+    macOS refuses to register on: the first look may have seen the exit
+    the same way, depending on whether it landed before or during that
+    look) is the same at-once yes, and still no reap."""
+    backend = CommandBackend(["fake-vlm", "{image}", "{prompt}"])
+    ended = subprocess.Popen([sys.executable, "-c", "pass"], **backend.OWN_GROUP)
+    running = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"],
+                               **backend.OWN_GROUP)
+    try:
+        assert backend._exited(ended, 10.0) is True
+        started = time.monotonic()
+        assert backend._exited(ended, 10.0) is True, "a second look at an exited command"
+        assert time.monotonic() - started < 1, "the second look waited on a command already exited"
+        if sys.platform != "win32":
+            assert ended.returncode is None, "the look reaped the command"
+        started = time.monotonic()
+        assert backend._exited(running, 0.2) is False
+        assert 0.2 <= time.monotonic() - started < 2
+    finally:
+        running.kill()
+        running.wait()
+        ended.wait()
+
+
+@posix_only
+@pytest.mark.parametrize("stream", ["stdout", "stderr"])
+def test_command_backend_stops_a_runaway_command_before_the_timeout(
+        monkeypatch, tmp_path, pid_file, stream):
+    """At the real boundary: the command writes without end to one stream,
+    under a timeout of a minute. It is stopped as soon as it passes the
+    ceiling, seconds in, not read into memory until the timeout: the frame's
+    error names the program, the stream and the ceiling, and the process is
+    gone."""
+    backend = _real_command_backend(monkeypatch, tmp_path, _RUNAWAY_SCRIPT, timeout=60,
+                                    pid_file=str(pid_file), stream=stream)
+    image = tmp_path / "image.jpg"
+    image.write_bytes(b"jpeg")
+
+    started = time.monotonic()
+    with pytest.raises(RuntimeError) as err:
+        backend.complete(image, "prompt", 10)
+
+    assert time.monotonic() - started < 20, "the runaway was read until the timeout"
+    for named in ("fake-vlm", stream, str(CommandBackend.MAX_OUTPUT_BYTES)):
+        assert named in str(err.value), str(err.value)
+    pid = int(pid_file.read_text(encoding="utf-8"))
+    assert _gone(pid, within=10.0), f"the runaway {pid} is still running"
+
+
+@posix_only
+def test_command_is_refused_at_the_real_boundary_when_sigchld_is_ignored(
+    monkeypatch, tmp_path, no_ambient_keys, no_ambient_ollama
+):
+    """At the real boundary: SIGCHLD really set to SIG_IGN in this process
+    (restored afterwards), a real fake CLI on PATH found by the real
+    shutil.which, and the factory refuses through BackendUnavailable naming
+    SIGCHLD before anything is started, since with children reaped by the
+    kernel the backend's every stop would signal a pid the command no
+    longer holds."""
+    command = _fake_cli(monkeypatch, tmp_path)
+    before = signal.signal(signal.SIGCHLD, signal.SIG_IGN)
+    try:
+        with pytest.raises(providers.BackendUnavailable) as err:
+            providers.build_primary_backend(
+                _cfg(model={"backend": "command", "command": command, "timeout_seconds": 30}))
+    finally:
+        signal.signal(signal.SIGCHLD, before)
+    message = str(err.value)
+    assert "ignores SIGCHLD" in message, message
+    assert "shell" in message and "default" in message, message
+    assert "--backend" in message
+
+
+def test_command_not_installed_fires_before_any_image_is_read(tmp_path, capsys, no_ambient_ollama):
+    """Card #420, Done-when 2, at the real boundary: a command nothing on
+    this machine is called, and the folder's one image is a link to
+    nowhere, so opening it would fail loudly. The CLI exits 3 on the
+    not-installed message, naming the command, and never mentions the file:
+    the check ran before any image was read. `--no-local-config` keeps a
+    developer's own melampus.local.toml keys out of the run (Done-when 3)."""
+    from melampus.cli import main
+
+    folder = tmp_path / "photos"
+    folder.mkdir()
+    (folder / "nowhere.jpg").symlink_to(tmp_path / "does-not-exist.jpg")
+    settings = _command_settings(tmp_path, ["melampus-no-such-command-420", "{image}", "{prompt}"])
+
+    code = main([str(folder), "--config", str(settings), "--no-local-config",
+                 "--cache", str(tmp_path / "cache.jsonl")])
+
+    err = capsys.readouterr().err
+    assert code == 3, err
+    assert "'melampus-no-such-command-420' is not installed or not on PATH" in err
+    for about_the_file in ("nowhere", "does-not-exist", "No such file", "unreadable"):
+        assert about_the_file not in err, f"the image was touched before the command check:\n{err}"
+
+
+@posix_only
+def test_cli_backend_command_exits_3_when_the_command_exits_non_zero(
+    monkeypatch, photos, tmp_path, capsys
+):
+    """Card #420, Done-when 2: given the command exits non-zero, when the
+    service analyzes, then the run stops at exit 3 on a message naming the
+    command, its exit code and what it said on stderr, like the other
+    backend failures, rather than recording the same failure on every
+    frame in turn. Nothing is cached for the frame in flight.
+    `--no-local-config` keeps a developer's own melampus.local.toml keys
+    (a `[run] profile`, a `[model] timeout_seconds`) out of the fake's run
+    (Done-when 3)."""
+    from melampus.cli import main
+
+    command = _fake_cli(monkeypatch, tmp_path, exit_code=2, stderr="not signed in\nrun fake-vlm login")
+    out = tmp_path / "results.json"
+
+    code = main([str(photos), "--backend", "command", "--config", str(_command_settings(tmp_path, command)),
+                 "--no-local-config",
+                 "--cache", str(tmp_path / "cache.jsonl"), "--json-out", str(out)])
+
+    err = capsys.readouterr().err
+    assert code == 3, err
+    assert "fake-vlm exited 2: not signed in / run fake-vlm login" in err
+    assert not out.exists()
+    assert not (tmp_path / "cache.jsonl").exists(), "the failed frame was cached"
+
+
+@posix_only
+def test_cli_backend_command_writes_a_json_result_from_the_configured_template(
+    monkeypatch, photos, tmp_path, capsys
+):
+    """Acceptance for Done-when 1: `melampus-id FOLDER --config FILE` with
+    `[model] backend = "command"` and the fake CLI's template in the file,
+    on the committed fixture, runs the whole pipeline and writes a JSON
+    result with the candidates, attributed to the template.
+    `--no-local-config` keeps a developer's own melampus.local.toml keys out
+    of the run: a `[run] profile` there would swap the routing prompt for one
+    the fake does not recognise (Done-when 3)."""
+    from melampus.cli import main
+
+    command = _fake_cli(monkeypatch, tmp_path)
+    out = tmp_path / "results.json"
+
+    code = main([str(photos), "--config", str(_command_settings(tmp_path, command)),
+                 "--no-local-config",
+                 "--cache", str(tmp_path / "cache.jsonl"), "--json-out", str(out)])
+
+    err = capsys.readouterr().err
+    assert code == 0, err
+    assert f"loading {shlex.join(command)}" in err, err
+    assert "cloud default" not in err, f"command is local; nothing was retuned for a cloud:\n{err}"
+    (result,) = json.loads(out.read_text(encoding="utf-8"))
+    assert result["file"] == PHOTO
+    assert result["status"] == "ok"
+    assert result["model"] == shlex.join(command)
+    assert [c["common_name"] for c in result["identification"]["candidates"]] == [
+        "Tricolored Heron", "Little Blue Heron"]
