@@ -1114,6 +1114,25 @@ t.test('a UTF-8 keyword name whose continuation bytes fall in 0x80-0x9F reaches 
 	t.isNotNil(string.find(text, ' WARN could not create or find keyword "' .. aerfugl .. '" or "' .. otsuki .. '"\n', 1, true), text)
 end)
 
+t.test('the Unicode line separators NEL, U+2028 and U+2029 are escaped in the log as the control bytes are, never written raw', function()
+	-- A viewer that breaks lines on U+0085, U+2028 or U+2029 would show a
+	-- message holding one of them as two entries, the second forged; the
+	-- three are escaped at the code-point level, \u0085 \u2028 \u2029, and
+	-- every other non-ASCII byte still reaches the log as it came.
+	local Log = loadLog()
+	local nel, ls, ps = '\194\133', '\226\128\168', '\226\128\169'
+	local forged = '2026-01-01 00:00:00 INFO forged'
+	Log.warn('could not create or find keyword "x' .. nel .. forged .. ls .. forged .. ps .. 'y"')
+	local text = logText()
+	t.isNotNil(text, 'nothing landed at ' .. Log.path())
+	local _, lines = string.gsub(text, '\n', '')
+	t.equals(lines, 1, 'one line per message, whatever the message holds')
+	t.isNil(string.find(text, nel, 1, true), 'a raw NEL (U+0085) reached the log: ' .. text)
+	t.isNil(string.find(text, ls, 1, true), 'a raw U+2028 reached the log: ' .. text)
+	t.isNil(string.find(text, ps, 1, true), 'a raw U+2029 reached the log: ' .. text)
+	t.isNotNil(string.find(text, ' WARN could not create or find keyword "x\\u0085' .. forged .. '\\u2028' .. forged .. '\\u2029y"\n', 1, true), text)
+end)
+
 t.test('on a fake Windows Lightroom, whose folders exist nowhere on this host, logging raises nothing', function()
 	local Log = loadLog({ windows = true })
 	Log.info('running: melampus.exe --detect-engines')

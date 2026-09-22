@@ -59,12 +59,25 @@ end
 -- call (under a UTF-8 locale it takes 0x80-0x9F too, the continuation
 -- bytes of names like "\195\134rfugl"), and the plugin can neither read nor
 -- set that locale. %z is Lua 5.1's spelling of the zero byte.
+-- The three Unicode line separators, NEL (U+0085), U+2028 and U+2029, are
+-- escaped too, as \u0085 \u2028 \u2029: a viewer that breaks lines on them
+-- would show a message holding one as two entries, the second forged. They
+-- are matched as their exact UTF-8 byte sequences, so no other non-ASCII
+-- byte is touched; the bytes either pass writes are ASCII, so neither pass
+-- can make a match for the other.
 local ESCAPES = { ['\n'] = '\\n', ['\r'] = '\\r', ['\t'] = '\\t' }
+local LINE_SEPARATORS = {
+	['\194\133'] = '\\u0085', ['\226\128\168'] = '\\u2028', ['\226\128\169'] = '\\u2029',
+}
 
 local function escape(text)
-	return (string.gsub(text, '[%z\1-\31\127]', function(c)
+	text = string.gsub(text, '[%z\1-\31\127]', function(c)
 		return ESCAPES[c] or string.format('\\x%02X', string.byte(c))
-	end))
+	end)
+	for raw, escaped in pairs(LINE_SEPARATORS) do
+		text = string.gsub(text, raw, escaped)
+	end
+	return text
 end
 
 local function write(level, message)
