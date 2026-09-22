@@ -1139,8 +1139,6 @@ def resolve_provider_key(provider: str, explicit: SecretStr | None = None) -> st
     Order: explicit config (from the git-ignored local file or an override), then
     the provider's own environment variables.
     """
-    import os
-
     if explicit:
         # SecretStr keeps it out of reprs and tracebacks; unwrap only here.
         return explicit.get_secret_value()
