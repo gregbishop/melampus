@@ -280,7 +280,10 @@ def test_build_names_the_corrupt_cache_and_says_to_delete_it(
 ):
     """Card #440, done-when 3: given a corrupt cache, when the build fails on
     it, then the error names the cache directory in effect and says to delete
-    it and re-run."""
+    it and re-run. The cause it names is the only reachable one: the script
+    passes --clean, and PyInstaller empties the cache before anything reads
+    index.dat, so an earlier interrupted build cannot be why this one failed;
+    another build using the same directory at the same time can."""
     monkeypatch.setattr(build, "REPO", tmp_path)
     _fake_pyinstaller(monkeypatch, _pyinstaller_with_a_half_written_cache_index)
     assert build.main() == 2
@@ -288,6 +291,8 @@ def test_build_names_the_corrupt_cache_and_says_to_delete_it(
     assert str(build.config_dir(tmp_path)) in message
     assert "index.dat" in message and "'(' was never closed" in message
     assert "delete" in message and "re-run" in message
+    assert "another build" in message and "same cache directory at the same time" in message, message
+    assert "interrupted" not in message, message
 
 
 def test_build_names_the_cache_the_caller_chose_when_it_is_corrupt(
