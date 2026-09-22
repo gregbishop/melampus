@@ -51,7 +51,8 @@ local loadPluginFile, loadUnderMock = mock.loadPluginFile, mock.loadUnderMock
 -- configured at all, as on a fresh install. `photos` is a list of
 -- { fileName, rawMetadata, pluginProperties }; `options` goes through to
 -- mock.reset (confirmAnswer, existing, dropWrites), with the offer accepted
--- unless it says otherwise. Raises if the import does.
+-- unless it says otherwise; `options.keywords` is a list of "A > B" paths the
+-- catalog already holds before the import runs. Raises if the import does.
 local function runImport(records, photos, prefs, options)
 	options = options or {}
 	options.prefs = prefs or {}
@@ -64,6 +65,15 @@ local function runImport(records, photos, prefs, options)
 	for _, spec in ipairs(photos) do
 		local photo = mock.addPhoto(spec[1], spec[2] or {})
 		for k, v in pairs(spec[3] or {}) do photo._plugin[k] = v end
+	end
+	for _, path in ipairs(options.keywords or {}) do
+		mock.catalog:withWriteAccessDo('seed keywords', function()
+			local parent = nil
+			for segment in string.gmatch(path, '[^>]+') do
+				local name = string.gsub(segment, '^%s*(.-)%s*$', '%1')
+				parent = mock.catalog:createKeyword(name, {}, false, parent, true)
+			end
+		end)
 	end
 	mock.install(PLUGIN)
 	mock.unloadPlugin()
@@ -353,6 +363,21 @@ t.test('one failing photo does not stop the others', function()
 		'a neighbouring failure took down a healthy write')
 	t.isTrue(dialogMatching('Changed 1 photos') ~= nil,
 		'the count did not exclude the photo that failed')
+end)
+
+t.test('a keyword whose name the catalog already holds elsewhere is skipped and warned about, with no SDK file call inside the gate', function()
+	-- The warning is written from inside withWriteAccessDo (keywordFromPath),
+	-- and the log module makes its folder through LrFileUtils, which yields.
+	-- The run's first line is outside any gate, so the folder is known to
+	-- exist by the time the gate opens and the line inside reaches only
+	-- io.open (card #442).
+	runImport(
+		{ { file = 'c1.jpg', candidates = { { 'Tricolored Heron', 'Egretta tricolor', 0.95 } } } },
+		{ { 'c1.CR3' } }, defaultPrefs({ keywordStyle = 'hierarchical' }),
+		{ keywords = { 'Birds > Tricolored Heron' } })
+	t.isNotNil(logMatching('could not create or find keyword "Tricolored Heron"'),
+		'the skipped keyword was not warned about')
+	t.isFalse(mock.state.yieldInsideWrite, 'logging inside the write gate reached an SDK file call')
 end)
 
 -- ── analysing runs the executable beside the plugin (card #401) ────────────
