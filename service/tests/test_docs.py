@@ -586,6 +586,39 @@ def test_the_action_pinning_gate_reads_the_pin_in_the_code_not_in_a_comment(tmp_
         test_every_workflow_pins_every_action_to_a_commit_sha_with_its_version()
 
 
+def test_the_action_pinning_gate_reads_the_pin_of_every_uses_on_the_line(tmp_path, monkeypatch):
+    """Round 5, finding 1: one line may hold more than one `uses:` key -- a
+    whole `steps:` sequence written as a flow list is valid YAML that Actions
+    runs -- and the pin was judged once per line, so a SHA anywhere in the
+    code, with a `# v4` anywhere in the comment, vouched for every other
+    `uses:` on that line unexamined. Every key's own reference must name a
+    SHA; and one trailing comment cannot honestly name two actions'
+    versions, so a line that uses two actions is reported whether or not
+    both are pinned. The folder is a stand-in read at call time; ci.yml in it
+    is pinned, so the only things wrong are the .yaml files."""
+    sha = "11d5960a326750d5838078e36cf38b85af677262"
+    (tmp_path / "ci.yml").write_text(f"      - uses: actions/checkout@{sha} # v4.4.0\n", encoding="utf-8")
+    (tmp_path / "first-pinned.yaml").write_text(
+        "      steps: [{uses: actions/checkout@" + sha + "}, {uses: actions/checkout@v4}] # v4.4.0\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "last-pinned.yaml").write_text(
+        "      steps: [{uses: actions/checkout@v4}, {uses: actions/checkout@" + sha + "}] # v4.4.0\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "two-pinned.yaml").write_text(
+        "      steps: [{uses: actions/checkout@" + sha + "}, {uses: actions/setup-python@" + sha + "}] # v4.4.0\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setitem(globals(), "WORKFLOWS", tmp_path)
+    with pytest.raises(AssertionError) as unpinned:
+        test_every_workflow_pins_every_action_to_a_commit_sha_with_its_version()
+    reported = str(unpinned.value)
+    for name in ("first-pinned.yaml", "last-pinned.yaml", "two-pinned.yaml"):
+        assert name in reported, reported
+    assert "ci.yml" not in reported, reported
+
+
 RELEASE_ZIPS = ("Melampus-macOS.zip", "Melampus-Windows.zip")
 
 
@@ -626,12 +659,20 @@ def _uses_lines(text: str) -> list[str]:
 def _unpinned_actions(text: str) -> list[str]:
     """The `uses:` lines in that text not pinned to a commit SHA with the
     version in a trailing comment. What the workflow runs is the reference
-    in the line's code and the version is what the comment says, so each is
-    read where it belongs: a SHA quoted in a comment pins nothing."""
+    after each `uses:` key and the version is what the comment says, so each
+    is read where it belongs: a SHA quoted in a comment pins nothing, and a
+    SHA after one key on the line vouches for no other. One trailing comment
+    cannot name two actions' versions, so a line holding a second `uses:`
+    key is reported whether or not both name a SHA."""
     unpinned = []
     for line in _uses_lines(text):
         code = _code(line)
-        pinned = re.search(USES_KEY + r"\s*\S+@[0-9a-f]{40}\b", code) and re.search(r"#\s*v\d", line[len(code):])
+        references = [code[key.end():] for key in re.finditer(USES_KEY, code)]
+        pinned = (
+            len(references) == 1
+            and re.match(r"\s*\S+@[0-9a-f]{40}\b", references[0])
+            and re.search(r"#\s*v\d", line[len(code):])
+        )
         if not pinned:
             unpinned.append(line)
     return unpinned
