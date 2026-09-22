@@ -73,7 +73,7 @@ import subprocess
 import sys
 import tomllib
 import types
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -173,7 +173,7 @@ def _pyinstaller_that_writes_the_executable(
 
 
 @pytest.fixture()
-def build(build_script: types.ModuleType, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> types.ModuleType:
+def build(build_script: types.ModuleType, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[types.ModuleType]:
     """The build script (conftest loads it once), writing under tmp_path
     instead of the checkout's dist/ and build/, on a machine that counts as
     Apple Silicon."""
