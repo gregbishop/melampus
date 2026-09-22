@@ -14,6 +14,7 @@ import os
 import shutil
 import subprocess
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
@@ -23,8 +24,6 @@ from conftest import (
     FAKE_REPO,
     FAKE_TOTAL,
     PHOTO,
-    REAL_CLAUDE_CODE_VERDICT,
-    REAL_CODEX_VERDICT,
     FakeHub,
     closed_port,
     fake_bytes,
@@ -40,7 +39,11 @@ REPO = Path(__file__).resolve().parents[2]
 PLUGIN = REPO / "plugin" / "Melampus.lrplugin"
 TESTS = REPO / "plugin" / "tests"
 
-pytestmark = pytest.mark.skipif(shutil.which("lua") is None, reason="lua not installed")
+#: The interpreter, resolved once on this process's PATH: the one the skip
+#: check found runs every script, whatever PATH a test hands the run.
+LUA = shutil.which("lua")
+
+pytestmark = pytest.mark.skipif(LUA is None, reason="lua not installed")
 
 # The mock keeps its temp directory through sh (mktemp -d, mkdir -p, ls,
 # rm -rf), which cmd.exe does not speak; the suites that fake a macOS
@@ -54,7 +57,7 @@ def run_lua(script: Path, env: dict[str, str] | None = None) -> subprocess.Compl
     # Forward slashes: the paths land in a Lua string literal, where a
     # backslash starts an escape, and Windows opens either kind.
     return subprocess.run(
-        ["lua", "-e", f'package.path="{TESTS.as_posix()}/?.lua;{PLUGIN.as_posix()}/?.lua;"..package.path',
+        [str(LUA), "-e", f'package.path="{TESTS.as_posix()}/?.lua;{PLUGIN.as_posix()}/?.lua;"..package.path',
          str(script)],
         capture_output=True, text=True, cwd=TESTS, env=env,
     )
@@ -270,13 +273,17 @@ def _plugin_folder_holding(executable: Path, tmp_path: Path) -> Path:
     return plugin_dir
 
 
-def _plugin_under_the_mock(plugin_dir: Path, tmp_path: Path, body: str, **env: str) -> str:
+def _plugin_under_the_mock(
+    plugin_dir: Path, tmp_path: Path, body: str, environment: Mapping[str, str] = os.environ,
+    **env: str,
+) -> str:
     """Run `body`, Lua, with the mock SDK installed for `plugin_dir` (so
     `_PLUGIN.path` is there) on the platform Lightroom reports for this host
     (a fake Windows Lightroom on a Windows host), and MelampusAnalyze.lua
     loaded fresh under it through the mock's own loader as `Analyze`, with
-    the MelampusRules.lua instance it uses as `Rules`. `env` is what the body
-    reads through os.getenv. Hands back what it wrote.
+    the MelampusRules.lua instance it uses as `Rules`. `environment` is what
+    the run inherits (this process's, unless a test hands it one of its own),
+    `env` what the body reads through os.getenv. Hands back what it wrote.
 
     The mock's temp directory: under TMPDIR on a fake macOS Lightroom, the
     Windows temp folder (TEMP, as Lightroom reports it) on a fake Windows
@@ -291,7 +298,7 @@ def _plugin_under_the_mock(plugin_dir: Path, tmp_path: Path, body: str, **env: s
         + body,
         encoding="utf-8",
     )
-    ran = run_lua(script, env=os.environ | {
+    ran = run_lua(script, env=dict(environment) | {
         "MELAMPUS_PLUGIN_DIR": str(plugin_dir),
         "MELAMPUS_WINDOWS": "1" if WINDOWS else "0",
         "TMPDIR": str(tmp_path),
@@ -475,13 +482,31 @@ def test_the_detection_the_plugin_runs_reaches_the_executable_and_fills_the_pick
     decoder and `Rules.engineItems`: seven items in the executable's order
     (card #423: the owner's four, then the two subscription CLIs), ollama
     greyed with the download address from the executable's reason as its
-    link, mlx and the CLIs as this machine decides (the CLIs' real verdicts
-    are asked from this process too, the way test_binary.py asks Ollama's,
-    so a developer's signed-in CLI decides nothing the test did not
-    measure). No Ollama answers on a runner and
-    nothing is sent anywhere; the executable's output on its own, with no
-    python on the path, is test_binary.py's."""
+    link, mlx as this machine decides, and the two CLIs greyed with their
+    install page as the link: the run inherits an environment of the test's
+    own, whose PATH holds the system shell's folders and no `claude` or
+    `codex`, so a developer's installed CLI is never run and decides nothing
+    (conftest's rule; a signed-in verdict reaches the picker through the Lua
+    suites' canned answers). No Ollama answers on a runner and nothing is
+    sent anywhere; the executable's output on its own, with no python on the
+    path, is test_binary.py's."""
     plugin_dir = _plugin_folder_holding(built_executable, tmp_path)
+    # The run's environment: the home of its own (and, on Windows, the
+    # system root and temp folder) no_python_environment gives, its empty
+    # PATH replaced by what the mock's shell needs and nothing more: the
+    # system's own folders (sh, mktemp, mkdir, ls and rm on a Mac; cmd.exe,
+    # named by COMSPEC as the C runtime's system() finds it, on Windows).
+    # Nowhere on it is a claude or codex a developer installed; that the
+    # executable needs no python on it is test_binary.py's to show.
+    env = no_python_environment(tmp_path)
+    if WINDOWS:
+        env["COMSPEC"] = os.environ["COMSPEC"]
+        env["PATH"] = str(Path(env["COMSPEC"]).parent)
+    else:
+        env["PATH"] = os.defpath
+    for cli in (providers.CLAUDE_CODE_CLI, providers.CODEX_CLI):
+        assert shutil.which(cli.program, path=env["PATH"]) is None, (
+            f"a real {cli.program} is on the PATH the executable would run it from")
 
     listing = _plugin_under_the_mock(
         plugin_dir, tmp_path,
@@ -491,7 +516,8 @@ def test_the_detection_the_plugin_runs_reaches_the_executable_and_fills_the_pick
         "assert(#mock.state.executed == 1, 'detection ran ' .. #mock.state.executed .. ' commands')\n"
         "for _, item in ipairs(Rules.engineItems(verdicts, problem)) do\n"
         "  io.write(item.value, '\\t', tostring(item.enabled), '\\t', tostring(item.link), '\\n')\n"
-        "end\n")
+        "end\n",
+        environment=env)
 
     items = [line.split("\t") for line in listing.splitlines()]
     assert [value for value, _, _ in items] == ["", *PICKER_ENGINES], listing
@@ -502,13 +528,9 @@ def test_the_detection_the_plugin_runs_reaches_the_executable_and_fills_the_pick
     assert not enabled["ollama"], f"ollama greyed by nothing; an Ollama server answered?\n{listing}"
     assert links["ollama"] == providers.OLLAMA_INSTALL, listing
     assert all(links[value] == "nil" for value in ("", "mlx", "openai", "claude")), listing
-    for cli, verdict in ((providers.CLAUDE_CODE_CLI, REAL_CLAUDE_CODE_VERDICT()),
-                         (providers.CODEX_CLI, REAL_CODEX_VERDICT())):
-        assert enabled[cli.engine] is verdict.available, listing
-        # Not installed, the install page is the link; signed in, or installed
-        # and not signed in, the reason names no address.
-        expected_link = cli.install if cli.install in verdict.reason else "nil"
-        assert links[cli.engine] == expected_link, listing
+    for cli in (providers.CLAUDE_CODE_CLI, providers.CODEX_CLI):
+        assert not enabled[cli.engine], f"{cli.program} found on the isolated PATH?\n{listing}"
+        assert links[cli.engine] == cli.install, listing
 
 
 def test_the_command_the_plugin_builds_runs_the_executable_beside_it(
