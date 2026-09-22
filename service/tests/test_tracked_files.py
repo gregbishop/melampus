@@ -161,15 +161,21 @@ def _frame_problems(path: Path) -> list[str]:
     return problems
 
 
+def _is_stray_fixture(path: str) -> bool:
+    """A corpus-named directory component anywhere in the path, except the
+    one that is exactly service/tests/fixtures: a corpus folder nested under
+    the exempt folder is still another corpus folder."""
+    exempt = FIXTURES_DIR.split("/")
+    parts = path.split("/")[:-1]
+    return any(
+        part in CORPUS_DIRS and parts[: i + 1] != exempt
+        for i, part in enumerate(parts)
+    )
+
+
 def _stray_fixture_paths(tracked):
     """Tracked paths under a fixtures folder other than service/tests/fixtures."""
-    return [
-        path
-        for path in tracked
-        if path
-        and not path.startswith(FIXTURES_DIR + "/")
-        and CORPUS_DIRS.intersection(path.split("/")[:-1])
-    ]
+    return [path for path in tracked if path and _is_stray_fixture(path)]
 
 
 def _gated_fixtures(tracked):
@@ -247,6 +253,9 @@ def test_stray_fixture_paths_are_named():
         "plugin/fixtures/x.jpg",
         "fixtures_full/nested/x.jpg",
         "fixtures/x.jpg",
+        # Under the exempt folder, but inside another corpus folder nested there.
+        "service/tests/fixtures/fixtures_full/x.jpg",
+        "service/tests/fixtures/fixtures/x.jpg",
         "",
     ]
     assert _stray_fixture_paths(tracked) == [
@@ -254,6 +263,8 @@ def test_stray_fixture_paths_are_named():
         "plugin/fixtures/x.jpg",
         "fixtures_full/nested/x.jpg",
         "fixtures/x.jpg",
+        "service/tests/fixtures/fixtures_full/x.jpg",
+        "service/tests/fixtures/fixtures/x.jpg",
     ]
 
 
