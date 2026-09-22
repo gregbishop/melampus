@@ -542,19 +542,65 @@ def test_the_action_pinning_gate_counts_a_flow_style_step_as_using_an_action(tmp
     test_every_workflow_pins_every_action_to_a_commit_sha_with_its_version()
 
 
+def test_the_action_pinning_gate_reads_a_uses_key_wherever_yaml_puts_one(tmp_path, monkeypatch):
+    """Round 4, finding 1: the gate is only as good as its idea of a `uses:`
+    key, and two YAML spellings slipped past it, each letting a moving tag
+    through. A `#` inside a quoted scalar is part of that scalar, not the
+    start of a comment, so cutting the line at it threw the step's real
+    `uses:` key away; and a key may be quoted, `"uses":`, which a pattern
+    demanding `uses:` right after a space, `{` or `,` never saw. Both files
+    name actions/checkout by tag, so both must be reported. The folder is a
+    stand-in read at call time; ci.yml in it is pinned."""
+    (tmp_path / "ci.yml").write_text(
+        "      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0\n", encoding="utf-8"
+    )
+    (tmp_path / "quoted-scalar.yaml").write_text(
+        "      - {name: 'Checkout # source', uses: actions/checkout@v4}\n", encoding="utf-8"
+    )
+    (tmp_path / "quoted-key.yaml").write_text('      - "uses": actions/checkout@v4\n', encoding="utf-8")
+    monkeypatch.setitem(globals(), "WORKFLOWS", tmp_path)
+    with pytest.raises(AssertionError) as unpinned:
+        test_every_workflow_pins_every_action_to_a_commit_sha_with_its_version()
+    reported = str(unpinned.value)
+    assert "quoted-scalar.yaml: - {name: 'Checkout # source', uses: actions/checkout@v4}" in reported, reported
+    assert 'quoted-key.yaml: - "uses": actions/checkout@v4' in reported, reported
+
+
 RELEASE_ZIPS = ("Melampus-macOS.zip", "Melampus-Windows.zip")
+
+
+USES_KEY = r"""(?:^|[\s{,])(?:uses|"uses"|'uses')\s*:"""
+
+
+def _code(line: str) -> str:
+    """That line without its comment. A `#` starts a comment where YAML says
+    it does: at the start of the line or after a space, and outside a quoted
+    scalar, so the `#` in `name: 'Checkout # source'` is part of the name and
+    the rest of the line is still code."""
+    quote = ""
+    index = 0
+    while index < len(line):
+        character = line[index]
+        if quote == '"' and character == "\\":
+            index += 2
+            continue
+        if quote:
+            if character == quote:
+                quote = ""
+        elif character in "\"'":
+            quote = character
+        elif character == "#" and (index == 0 or line[index - 1] in " \t"):
+            return line[:index]
+        index += 1
+    return line
 
 
 def _uses_lines(text: str) -> list[str]:
     """The lines of that text with a `uses:` key, stripped. A `uses:` key
     counts wherever YAML puts it in the line's code (block style, or inside
-    a flow mapping after `{` or `,`); a comment is not code, so a line that
-    only mentions `uses:` after `#` does not."""
-    return [
-        line.strip()
-        for line in text.splitlines()
-        if re.search(r"(?:^|[\s{,])uses:", re.split(r"(?:^|\s)#", line, maxsplit=1)[0])
-    ]
+    a flow mapping after `{` or `,`), quoted or not; a comment is not code,
+    so a line that only mentions `uses:` after `#` does not."""
+    return [line.strip() for line in text.splitlines() if re.search(USES_KEY, _code(line))]
 
 
 def _unpinned_actions(text: str) -> list[str]:
