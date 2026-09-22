@@ -51,8 +51,10 @@ local loadPluginFile, loadUnderMock, logText = mock.loadPluginFile, mock.loadUnd
 -- configured at all, as on a fresh install. `photos` is a list of
 -- { fileName, rawMetadata, pluginProperties }; `options` goes through to
 -- mock.reset (confirmAnswer, existing, dropWrites), with the offer accepted
--- unless it says otherwise; `options.keywords` is a list of "A > B" paths the
--- catalog already holds before the import runs. Raises if the import does.
+-- unless it says otherwise; `options.keywords` is a list of keyword chains
+-- the catalog already holds before the import runs, each a list of names
+-- created one under the previous ({ 'Birds', 'Tricolored Heron' }). Raises
+-- if the import does.
 local function runImport(records, photos, prefs, options)
 	options = options or {}
 	options.prefs = prefs or {}
@@ -66,11 +68,10 @@ local function runImport(records, photos, prefs, options)
 		local photo = mock.addPhoto(spec[1], spec[2] or {})
 		for k, v in pairs(spec[3] or {}) do photo._plugin[k] = v end
 	end
-	for _, path in ipairs(options.keywords or {}) do
+	for _, names in ipairs(options.keywords or {}) do
 		mock.catalog:withWriteAccessDo('seed keywords', function()
 			local parent = nil
-			for segment in string.gmatch(path, '[^>]+') do
-				local name = string.gsub(segment, '^%s*(.-)%s*$', '%1')
+			for _, name in ipairs(names) do
 				parent = mock.catalog:createKeyword(name, {}, false, parent, true)
 			end
 		end)
@@ -364,7 +365,7 @@ t.test('a keyword whose name the catalog already holds elsewhere is skipped and 
 	runImport(
 		{ { file = 'c1.jpg', candidates = { { 'Tricolored Heron', 'Egretta tricolor', 0.95 } } } },
 		{ { 'c1.CR3' } }, defaultPrefs({ keywordStyle = 'hierarchical' }),
-		{ keywords = { 'Birds > Tricolored Heron' } })
+		{ keywords = { { 'Birds', 'Tricolored Heron' } } })
 	t.isNotNil(logMatching('could not create or find keyword "Tricolored Heron"'),
 		'the skipped keyword was not warned about')
 	t.isFalse(mock.state.yieldInsideWrite, 'logging inside the write gate reached an SDK file call')
