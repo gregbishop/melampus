@@ -511,6 +511,22 @@ def test_every_workflow_pins_every_action_to_a_commit_sha_with_its_version():
     assert not unpinned, f"a workflow names an action by tag, not a commit SHA with its version: {unpinned}"
 
 
+def test_the_action_pinning_gate_reads_flow_style_steps_too(tmp_path, monkeypatch):
+    """Security review of card #439: a step written as a YAML flow mapping,
+    `- {uses: actions/checkout@v4}`, is a `uses:` line naming a tag, and
+    Done-when 2 promises the gate fails on it; a detection that only knows
+    `- uses:` at the start of a line let it through. The folder is a stand-in
+    read at call time; ci.yml in it is pinned, so the only thing wrong is the
+    flow-style step in the .yaml file."""
+    (tmp_path / "ci.yml").write_text(
+        "      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0\n", encoding="utf-8"
+    )
+    (tmp_path / "x.yaml").write_text("      - {uses: actions/checkout@v4}\n", encoding="utf-8")
+    monkeypatch.setitem(globals(), "WORKFLOWS", tmp_path)
+    with pytest.raises(AssertionError, match=r"x\.yaml: - \{uses: actions/checkout@v4\}"):
+        test_every_workflow_pins_every_action_to_a_commit_sha_with_its_version()
+
+
 RELEASE_ZIPS = ("Melampus-macOS.zip", "Melampus-Windows.zip")
 
 
@@ -521,11 +537,15 @@ def _steps(job: str) -> list[str]:
 
 def _unpinned_actions(text: str) -> list[str]:
     """The `uses:` lines in that text not pinned to a commit SHA with the
-    version in a trailing comment."""
+    version in a trailing comment. A `uses:` key counts wherever YAML puts
+    it in the line's code (block style, or inside a flow mapping after `{`
+    or `,`); a comment is not code, so a line that only mentions `uses:`
+    after `#` does not."""
     return [
         line.strip()
         for line in text.splitlines()
-        if re.search(r"^\s*-?\s*uses:", line) and not re.search(r"uses: \S+@[0-9a-f]{40}\s+# v\d", line)
+        if re.search(r"(?:^|[\s{,])uses:", re.split(r"(?:^|\s)#", line, maxsplit=1)[0])
+        and not re.search(r"uses: \S+@[0-9a-f]{40}\s+# v\d", line)
     ]
 
 
