@@ -375,7 +375,7 @@ t.test('unavailable engines are disabled and carry the reason detection gave, an
 	t.isNil(string.find(note, 'API key required', 1, true), 'the note explains available engines:\n' .. note)
 end)
 
-t.test('the link is an installable engine\'s alone, from the address its reason names', function()
+t.test('the link is an installable engine\'s alone, from the install page its verdict carries', function()
 	-- Only something to go and install (Ollama, card #405 Done-when 3; the
 	-- subscription CLIs, card #423) gets a link, and only from the install
 	-- page its verdict carries: another engine's reason stays text in the
