@@ -1320,7 +1320,7 @@ def test_cli_detect_engines_prints_the_verdicts_as_json_in_order(
     assert all(v["title"] for v in verdicts), "a verdict with no title for the picker"
     by_engine = {v["engine"]: v for v in verdicts}
     assert by_engine["mlx"] == {
-        "engine": "mlx", "title": "MLX — local, Apple Silicon", "available": False, "reason": "needs Apple Silicon"}
+        "engine": "mlx", "title": providers.ENGINE_TITLES["mlx"], "available": False, "reason": "needs Apple Silicon"}
     assert by_engine["ollama"]["available"] is False
     assert providers.OLLAMA_INSTALL in by_engine["ollama"]["reason"]
     for engine in ("openai", "claude"):
