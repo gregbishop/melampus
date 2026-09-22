@@ -141,7 +141,9 @@ would run, read from the same config: the built-in one above, or
 `[model] command` when one is set under `backend = "claude-code"`, so the
 verdict the dialog shows is the verdict the run gets. It reports
 `claude-code` as not installed when that template's program is not found (for
-the built-in, nothing on PATH is called `claude`), as not signed in when
+the built-in, nothing on PATH is called `claude`), as refused when that program
+resolves to a `.cmd`/`.bat` shim (the *command* row above: naming the file,
+and the status check is never run through it), as not signed in when
 `claude --restricted auth status --json` says so (`loggedIn` false, or its
 documented exit 1 with nothing on stderr: a cheap check, no model call, under
 the template's own settings flags, `--restricted` for the built-in, so it
@@ -162,7 +164,9 @@ set aside for a key, which the check reports as `apiKeySource` with
 failed in the CLI's own words when that check exits some other way (an older
 `claude` with no `auth` subcommand), and otherwise as available, naming the
 account kind (`claude.ai`, and the subscription); a run asked for
-`claude-code` is refused the same way before any image is read, exit 3. A
+`claude-code` is refused the same way before any image is read, exit 3, and,
+as a `command` is, when the process that started melampus ignores SIGCHLD
+(the *command* row above). A
 session that lapses mid-batch is caught at the first reply (Claude Code prints
 `Not logged in` as its result, exit 1) and stops the batch at exit 3 with the
 same sign-in pointer. On winpc Claude Code is not installed yet; the real run
@@ -229,7 +233,9 @@ bills to that ChatGPT plan**, its usage limits included, and no API key is
 read or needed here; nothing is charged per call, so the cloud guards (the
 estimate, `max_images`, the cloud cache file) do not apply. Detection
 (`--detect-engines`) reports `codex` as not installed when nothing on PATH is
-called `codex`, as not signed in when `codex login status` exits non-zero
+called `codex`, as refused when that resolves to a `.cmd`/`.bat` shim (the
+*command* row above: naming the file, and the status check is never run
+through it), as not signed in when `codex login status` exits non-zero
 (its documented, cheap check: no model call), as refused when that check says
 the sign-in is an API key (`codex login --with-api-key`: that account
 bills per call, which none of the cloud guards would watch here, so the
@@ -239,7 +245,8 @@ plan), as refused when it says anything else than "Logged in using ChatGPT"
 melampus cannot place may bill per call, so the reason says the check did
 not name the plan and does not quote it), and otherwise as available,
 naming the account kind; a run asked for `codex` is refused the same way
-before any image is read, exit 3. The plan's
+before any image is read, exit 3, and, as a `command` is, when the process
+that started melampus ignores SIGCHLD (the *command* row above). The plan's
 usage limit is not knowable
 without a model call (the status check does not report it, nor does
 `codex doctor`), so detection does not try: a plan at its limit is caught

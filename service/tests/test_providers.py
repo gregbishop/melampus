@@ -3776,17 +3776,19 @@ _FAKES = {
 
 def _fake_engine_cli(
     monkeypatch, tmp_path, cli: providers.CliEngine, *, mode: str = "signed-in",
-    other_status: str = "",
+    other_status: str = "", program: str = "",
 ) -> Path:
     """Put a `cli.program` that imitates the real CLI's documented interface
     on PATH, ahead of any real one, with a settings folder of the test's
     own (empty until a test writes into it) so no test reads a developer's
     real one, and the real detection restored against it. `other_status`
-    is the status line the fake codex's "other-account" mode prints.
+    is the status line the fake codex's "other-account" mode prints;
+    `program` names the fake something else (`codex.cmd`, the npm shim's
+    name) for a template of the test's own to name.
     Returns the log it appends each invocation's argv and cwd to."""
     fake = _FAKES[cli.engine]
     log = tmp_path / f"{cli.program}-calls.jsonl"
-    _script_on_path(monkeypatch, tmp_path, cli.program, fake.script.format(
+    _script_on_path(monkeypatch, tmp_path, program or cli.program, fake.script.format(
         python=sys.executable, mode=mode, routing=ROUTING_OK, identification=ID_OK, log=str(log),
         usage_limit=_CODEX_USAGE_LIMIT, unauthorized=_CODEX_UNAUTHORIZED,
         api_key_fragment=_CODEX_API_KEY_FRAGMENT, other_status=other_status,
@@ -3860,6 +3862,96 @@ def test_the_cli_primary_builds_the_command_backend_on_the_built_in_template(
     backend = providers.build_primary_backend(_cfg(model={"backend": cli.engine, "command": own}))
     assert backend.command == own
     assert backend.executable == shutil.which(cli.program)
+
+
+@posix_only
+@pytest.mark.parametrize("cli", CLIS)
+def test_the_cli_resolving_to_a_batch_shim_is_refused_before_its_status_check_runs(
+    monkeypatch, tmp_path, no_ambient_keys, no_ambient_ollama, cli
+):
+    """Review round 4 (C1, S3): the CLI engines build the seam `command`
+    builds, so what it refuses they refuse, by the same words. Given
+    `[model] command` under the CLI's engine names a program that
+    resolves to a `.cmd` (a fake `claude.cmd` or `codex.cmd` on PATH that
+    would answer its status check: the npm shim Windows resolves the bare
+    name to), when the backend is asked for, then it is refused up front
+    through the same shape as `command`, naming the file found and the fix
+    (the real entry in `[model] command`), and the status check never ran:
+    nothing goes through cmd.exe, the check included. The verdict is the
+    refusal's sentence, so --detect-engines and the settings dialog say it
+    too, with no executable to run."""
+    shim = f"{cli.program}.cmd"
+    log = _fake_engine_cli(monkeypatch, tmp_path, cli, program=shim)
+    command = [shim, *cli.command[1:]]
+    with pytest.raises(providers.BackendUnavailable) as err:
+        providers.build_primary_backend(_cfg(model={"backend": cli.engine, "command": command}))
+    message = str(err.value)
+    assert f"The command '{shim}' resolves to {shutil.which(shim)}, a batch file" in message, message
+    assert "cmd.exe" in message, message
+    assert "[model] command" in message and ".exe" in message and "node" in message, message
+    assert "--backend" in message
+    assert not log.exists(), f"the status check ran through the shim:\n{log.read_text(encoding='utf-8')}"
+    (verdict,) = [
+        v for v in providers.detect_engines(commands={cli.engine: command}) if v.engine == cli.engine
+    ]
+    assert not verdict.available and verdict.executable is None
+    assert f"{verdict.reason}." in message, (verdict.reason, message)
+
+
+@posix_only
+@pytest.mark.parametrize("cli", CLIS)
+def test_the_cli_in_a_process_that_ignores_sigchld_is_refused_and_names_the_fix(
+    monkeypatch, tmp_path, no_ambient_keys, no_ambient_ollama, cli
+):
+    """Review round 4 (C1, S3): given the CLI installed and signed in, and
+    the process melampus runs in ignoring SIGCHLD (the disposition faked,
+    as the `command` test fakes it), when the backend is asked for, then
+    it is refused after the verdict, through the same shape and words as
+    `command`: SIGCHLD named, the fix (start melampus from a shell, or
+    restore the default), and the backends that do work here from the
+    verdicts already taken. The disposition is asked once, not once per
+    verdict or per frame."""
+    _fake_engine_cli(monkeypatch, tmp_path, cli)
+    asked: list[int] = []
+
+    def getsignal(signalnum):
+        asked.append(signalnum)
+        return signal.SIG_IGN
+    monkeypatch.setattr(signal, "getsignal", getsignal)
+    with pytest.raises(providers.BackendUnavailable) as err:
+        providers.build_primary_backend(_cfg(model={"backend": cli.engine}))
+    message = str(err.value)
+    assert asked == [signal.SIGCHLD]
+    assert "ignores SIGCHLD" in message, message
+    assert "shell" in message and "default" in message, message
+    for works_here in ("claude", "openai", "scripted"):
+        assert works_here in message, f"{works_here!r} is not named as working here:\n{message}"
+    assert "--backend" in message
+
+
+@posix_only
+@pytest.mark.parametrize("cli", CLIS)
+def test_the_cli_is_refused_at_the_real_boundary_when_sigchld_is_ignored(
+    monkeypatch, tmp_path, no_ambient_keys, no_ambient_ollama, cli
+):
+    """Review round 4 (C1, S3), at the real boundary: SIGCHLD really set to
+    SIG_IGN in this process (restored afterwards), the fake CLI on PATH
+    found by the real shutil.which and asked its status by the real
+    detection, and the factory refuses through BackendUnavailable naming
+    SIGCHLD before any frame is run, since with children reaped by the
+    kernel the backend's every stop would signal a pid the CLI no longer
+    holds."""
+    _fake_engine_cli(monkeypatch, tmp_path, cli)
+    before = signal.signal(signal.SIGCHLD, signal.SIG_IGN)
+    try:
+        with pytest.raises(providers.BackendUnavailable) as err:
+            providers.build_primary_backend(_cfg(model={"backend": cli.engine, "timeout_seconds": 30}))
+    finally:
+        signal.signal(signal.SIGCHLD, before)
+    message = str(err.value)
+    assert "ignores SIGCHLD" in message, message
+    assert "shell" in message and "default" in message, message
+    assert "--backend" in message
 
 
 @posix_only

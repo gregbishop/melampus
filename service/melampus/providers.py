@@ -22,7 +22,9 @@ from urllib.parse import urlsplit
 
 from pydantic import SecretStr
 
-from .backend import CommandFailed, VLMBackend, _Deadline, _NotedHTTP, _NotedHTTPS, stderr_lines
+from .backend import (
+    CommandBackend, CommandFailed, VLMBackend, _Deadline, _NotedHTTP, _NotedHTTPS, stderr_lines,
+)
 from .config import MelampusConfig, ModelConfig
 
 #: Where each provider's key is looked for, in order, when the config has none.
@@ -77,11 +79,12 @@ OLLAMA_INSTALL = "https://ollama.com/download"
 #: detection about it, so it is not in BACKEND_CHOICES.
 COMMAND = "command"
 
-#: What a `command` may not resolve to: Windows launches a batch file through
-#: cmd.exe regardless of what subprocess is told (Python's subprocess docs,
-#: Security Considerations), and cmd.exe would parse the prompt, newlines,
-#: quotes and braces included, instead of passing it as one argument. An
-#: npm-installed CLI is such a shim; its real entry is the fix.
+#: What a `command`, or a CLI engine's template, may not resolve to: Windows
+#: launches a batch file through cmd.exe regardless of what subprocess is
+#: told (Python's subprocess docs, Security Considerations), and cmd.exe
+#: would parse the prompt, newlines, quotes and braces included, instead of
+#: passing it as one argument. An npm-installed CLI is such a shim; its
+#: real entry is the fix (_batch_shim, asked wherever a program is resolved).
 BATCH_SUFFIXES = (".cmd", ".bat")
 
 #: Claude Code as an engine (card #421): the command seam configured for
@@ -538,6 +541,48 @@ def _claude_code_account(status: subprocess.CompletedProcess) -> Credential:
     )
 
 
+def _batch_shim(program: str, executable: str) -> str | None:
+    """Why `program`, resolved to `executable`, may not be run, when the
+    executable is a batch file (BATCH_SUFFIXES, any case): the sentence
+    for the refusal and the verdict, else None. Asked wherever a template's
+    program is resolved for the command seam (the `command` branch and
+    _cli_verdict), before anything is run through it, so the CLI engines'
+    status checks never go through cmd.exe either (review round 4, C1/S3).
+    The path is the program (printable: the config refuses one that is
+    not) under a PATH directory, and PATH came from whatever launched
+    melampus, so it is shown through plain, the way a program's stderr
+    is."""
+    if not executable.lower().endswith(BATCH_SUFFIXES):
+        return None
+    return (
+        f"The command '{program}' resolves to {CommandBackend.plain(executable)}, a batch "
+        "file that Windows runs through cmd.exe whatever it is told, so the prompt "
+        "would be parsed as shell text rather than passed as one argument. Name the "
+        "program's real entry in [model] command instead: its .exe, or node and the "
+        "script the shim wraps"
+    )
+
+
+def _sigchld_ignored() -> str | None:
+    """Why no command seam may be built in this process, when it ignores
+    SIGCHLD: the sentence for the refusal, else None. The backend stops the
+    tree the program heads by its pid while the program is exited but
+    unreaped, so the pid is still its own. A launcher that ignores SIGCHLD
+    (inherited across exec) has the kernel reap the program the moment it
+    exits, so every such stop would signal a number that may be someone
+    else's: refused once, by every branch that builds a CommandBackend,
+    rather than once per frame (CommandBackend's contract)."""
+    if hasattr(signal, "SIGCHLD") and signal.getsignal(signal.SIGCHLD) is signal.SIG_IGN:
+        return (
+            "The process that started melampus ignores SIGCHLD, so the command's exit "
+            "cannot be seen without losing its pid: the kernel reaps the program the "
+            "moment it exits, and what it started could not be stopped safely. Start "
+            "melampus from a shell, or restore SIGCHLD's default disposition in the "
+            "launcher"
+        )
+    return None
+
+
 def _cli_verdict(cli: CliEngine, command: list[str] | None, probe_seconds: float) -> EngineVerdict:
     """Whether a subscription CLI can be the engine here: the program
     `command` (`cli.command` unless the user set a template) names must be
@@ -545,7 +590,9 @@ def _cli_verdict(cli: CliEngine, command: list[str] | None, probe_seconds: float
     (`cli.status_check`), must say signed in within `probe_seconds`, to an
     account that bills to the subscription (`cli.subscriptions`). Never
     raises; a verdict reports. The reasons are the words the user sees:
-    not installed with where to get it, not signed in with the check as
+    not installed with where to get it, resolving to a batch shim with
+    the file found and the fix (_batch_shim, before the check is run
+    through it), not signed in with the check as
     run and the command that signs in, signed in but not to the
     subscription with the check as run, what to remove and the sign-in, a
     check that did not answer or failed some other way (in the CLI's own
@@ -564,6 +611,8 @@ def _cli_verdict(cli: CliEngine, command: list[str] | None, probe_seconds: float
             f"{cli.title} is not installed: nothing on PATH is called '{program}'; "
             f"install it from {cli.install}, then {next_step}",
         )
+    if shim := _batch_shim(program, executable):
+        return EngineVerdict(cli.engine, False, shim)
     try:
         status = subprocess.run(
             [executable, *check],
@@ -852,8 +901,8 @@ def _cli_backend(cli: CliEngine, settings: ModelConfig) -> VLMBackend:
     verdict = next(v for v in verdicts if v.engine == cli.engine)
     if not verdict.available:
         raise _refusal(f"{verdict.reason}.", works_here=_works_here(verdicts))
-    from .backend import CommandBackend
-
+    if ignored := _sigchld_ignored():
+        raise _refusal(f"{ignored}.", works_here=_works_here(verdicts))
     return CommandBackend(
         command, executable=verdict.executable, timeout=settings.timeout_seconds,
         decode=cli.decode,
@@ -967,8 +1016,6 @@ def build_primary_backend(config: MelampusConfig) -> VLMBackend:
                 "(docs/config.md § [model]).",
                 settings.ollama_url,
             )
-        from .backend import CommandBackend
-
         program = settings.command[0]
         executable = shutil.which(program)
         if executable is None:
@@ -978,35 +1025,13 @@ def build_primary_backend(config: MelampusConfig) -> VLMBackend:
                 "its full path in [model] command.",
                 settings.ollama_url,
             )
-        if executable.lower().endswith(BATCH_SUFFIXES):
-            # The path is the program (printable: the config refuses one
-            # that is not) under a PATH directory, and PATH came from
-            # whatever launched melampus, so it is shown through plain,
-            # the way a program's stderr is.
-            raise _refuse_here(
-                f"The command '{program}' resolves to "
-                f"{CommandBackend.plain(executable)}, a batch file "
-                "that Windows runs through cmd.exe whatever it is told, so the "
-                "prompt would be parsed as shell text rather than passed as one "
-                "argument. Name the program's real entry in [model] command "
-                "instead: its .exe, or node and the script the shim wraps.",
-                settings.ollama_url,
-            )
-        # The backend stops the tree the program heads by its pid while the
-        # program is exited but unreaped, so the pid is still its own. A
-        # launcher that ignores SIGCHLD (inherited across exec) has the
-        # kernel reap the program the moment it exits, so every such stop
-        # would signal a number that may be someone else's: refused here,
-        # once, rather than once per frame.
-        if hasattr(signal, "SIGCHLD") and signal.getsignal(signal.SIGCHLD) is signal.SIG_IGN:
-            raise _refuse_here(
-                "The process that started melampus ignores SIGCHLD, so the "
-                "command's exit cannot be seen without losing its pid: the kernel "
-                "reaps the program the moment it exits, and what it started could "
-                "not be stopped safely. Start melampus from a shell, or restore "
-                "SIGCHLD's default disposition in the launcher.",
-                settings.ollama_url,
-            )
+        # The same two refusals the CLI engines make, from the same helpers
+        # (review round 4, C1/S3): a batch shim where the program is
+        # resolved, SIGCHLD ignored before the seam is built.
+        if shim := _batch_shim(program, executable):
+            raise _refuse_here(f"{shim}.", settings.ollama_url)
+        if ignored := _sigchld_ignored():
+            raise _refuse_here(f"{ignored}.", settings.ollama_url)
         return CommandBackend(
             settings.command, executable=executable, timeout=settings.timeout_seconds
         )

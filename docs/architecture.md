@@ -103,11 +103,15 @@ engine can run on this machine at all is `providers.detect_engines`' question,
 answered before any image is read; an Ollama that is not running is refused
 there with the address tried and where to install it, and a command that
 `shutil.which` cannot find, or resolves to a `.cmd`/`.bat` file that Windows
-would hand to cmd.exe, is refused the same way, naming it; so is the command
-engine when the process that started melampus ignores SIGCHLD (`SIG_IGN` is
-inherited across exec), since the kernel would then reap the program the moment
-it exits and the pid its tree is stopped by could be someone else's: start
-melampus from a shell, or restore the signal's default in the launcher; and
+would hand to cmd.exe, is refused the same way, naming it (a CLI engine's
+template too, in its verdict, before its status check would run through the
+shim: `_batch_shim`, one helper wherever a program is resolved for the seam);
+so is the command engine, and either CLI engine, when the process that started
+melampus ignores SIGCHLD (`SIG_IGN` is inherited across exec;
+`_sigchld_ignored`, one helper asked by every branch before it builds the
+seam), since the kernel would then reap the program the moment it exits and
+the pid its tree is stopped by could be someone else's: start melampus from a
+shell, or restore the signal's default in the launcher; and
 Claude Code and Codex CLI are refused as not installed or, by their own `claude
 auth status` and `codex login status`, as not signed in, or as signed in but not
 to the subscription (Claude Code's login set aside for a key; an account that
