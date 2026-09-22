@@ -352,14 +352,7 @@ def test_docs_name_the_build_and_its_smoke_test():
     option the smoke tests run against an existing build and skip only when
     there is none — which is what conftest.py's own docstring says and what
     readme.md tells the reader. The brief's sentence on them says the same,
-    or it states a skip the suite does not have.
-
-    Round 3, finding 1: that correction moved the sentence's axis from skips
-    to the build, and the differences it introduces are not the build's:
-    `test_escalation.py`, `test_quality.py`'s corpus tests and the
-    installed-checkout test all skip on what the runner has, whichever way
-    the option is passed. The axis is skips, or the sentence promises a list
-    it does not deliver."""
+    or it states a skip the suite does not have."""
     brief = BRIEF.read_text(encoding="utf-8")
     build = re.search(r"^- build: (`[^`]+`)", brief, re.MULTILINE)
     assert build and build.group(1) == "`.venv/bin/python tools/build_binary.py`", (
@@ -389,6 +382,16 @@ def test_docs_name_the_build_and_its_smoke_test():
         "docs/brief.md has the smoke tests skipping on a missing option; they skip on a "
         f"missing build (service/tests/conftest.py's built_executable): {unconditional}"
     )
+
+
+def test_the_brief_names_skips_as_what_the_two_runs_differ_in():
+    """Round 3, finding 1: the correction in the test above moved the
+    sentence's axis from skips to the build, and the differences it introduces
+    are not the build's: `test_escalation.py`, `test_quality.py`'s corpus
+    tests and the installed-checkout test all skip on what the runner has,
+    whichever way the option is passed. The axis is skips, or the sentence
+    promises a list it does not deliver."""
+    brief = BRIEF.read_text(encoding="utf-8")
     about_the_two_runs = [
         sentence for sentence in _sentences(brief) if "differ only in" in sentence
     ]
