@@ -9,22 +9,51 @@ running the installer again.
 
 Checks against the git index rather than the working tree: no tracked symlink
 resolves outside the repository, no tracked file names an absolute home-directory
-path, and service/uv.lock is tracked. One check against the working tree: that
-lockfile is current with service/pyproject.toml.
+path, and service/uv.lock is tracked. Card #441 adds the corpus gates: .gitignore
+ignores a photo corpus folder wherever it lands in the checkout, no tracked file
+sits under any other fixtures folder, and every frame in service/tests/fixtures/
+is small and EXIF-free like the first one. The frame gate reads each blob from
+the index, so it judges the bytes a push would carry, and decides from those
+bytes -- never from the file's name -- which of them it has to judge.
+
+Two checks read the working tree instead, because each judges what the next
+commit would do rather than what the last one carried: that the lockfile is
+current with service/pyproject.toml, and the ignore rules, which are checked
+from the working-tree .gitignore because that is the file `git add -A` consults
+when a corpus is about to be staged. The ignore verdict is the rule git matched
+rather than its exit status, which reads the same whether a rule ignores a path
+or re-includes it.
 """
 
+import io
 import subprocess
 from pathlib import Path
 
-REPO = Path(__file__).resolve().parents[2]
+import pytest
+from PIL import Image, UnidentifiedImageError
+
+from conftest import FIXTURE, REPO, _load_tool, metadata_laden
+
 # POSIX ERE, for git grep.
 HOME_PATH = "/(Users|home)/[^/[:space:]`'\"]+/"
 
 
-def _git(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+def _git(*args: str, check: bool = True, text: bool = True, repo: Path = REPO):
     return subprocess.run(
-        ["git", "-C", str(REPO), *args], check=check, capture_output=True, text=True
+        ["git", "-C", str(repo), *args], check=check, capture_output=True, text=text
     )
+
+
+def _index_bytes(path: str, repo: Path = REPO) -> bytes:
+    """The blob staged for `path`: what a push carries, whatever is on disk."""
+    return _git("cat-file", "-p", f":{path}", text=False, repo=repo).stdout
+
+
+def _throwaway_repo(tmp_path: Path) -> Path:
+    repo = tmp_path / "repo"
+    repo.mkdir(exist_ok=True)
+    _git("init", "-q", repo=repo)
+    return repo
 
 
 def _tracked_symlinks():
@@ -78,3 +107,331 @@ def test_the_lockfile_is_current_with_pyproject():
         timeout=60,
     )
     assert check.returncode == 0, check.stderr
+
+
+# Card #441. Ignored: a corpus folder anywhere in the checkout. Not ignored: the
+# one committed frame's folder. The rules are checked against a copy of
+# .gitignore in a throwaway repository: `git check-ignore` on `fixtures/x.jpg`
+# refuses a checkout where `fixtures` is a symlink to the corpus, and the
+# verdict must not depend on what a given checkout has under that name.
+CORPUS_PATHS = [
+    # A symlink to the corpus, the way a checkout borrows one; it is not a
+    # directory, so a directory-only rule (`fixtures/`) would let it through.
+    "fixtures",
+    "fixtures/x.jpg",
+    "fixtures_full/x.jpg",
+    "service/fixtures/x.jpg",
+    "plugin/fixtures/x.jpg",
+    "service/tests/quality/fixtures/x.jpg",
+    "fixtures_full/nested/x.jpg",
+    # A corpus folder nested under the re-included one. This is where
+    # `!/service/tests/fixtures` could over-reach: the negation exempts the
+    # committed frame's folder, and a corpus dropped inside it is still a
+    # corpus. The root-only rules it replaces let both of these through.
+    "service/tests/fixtures/fixtures/x.jpg",
+    "service/tests/fixtures/fixtures_full/x.jpg",
+]
+# conftest.FIXTURE names the frame; git paths are POSIX strings from the root.
+COMMITTED_FRAME = FIXTURE.relative_to(REPO).as_posix()
+# The one folder .gitignore re-includes: neither it nor the frame it holds is
+# ignored, and no other fixtures folder may hold a tracked file.
+FIXTURES_DIR = FIXTURE.parent.relative_to(REPO).as_posix()
+
+
+def test_the_frame_sits_under_the_repository_through_a_symlink(tmp_path):
+    """pytest keeps symlinks in collected paths, so conftest.py can be reached
+    through one. REPO is resolved; FIXTURE must be built the same way, or the
+    two disagree and COMMITTED_FRAME raises at import, collecting nothing."""
+    link = tmp_path / "link"
+    link.symlink_to(REPO)
+    conftest = _load_tool(link / "service" / "tests" / "conftest.py")
+    assert conftest.FIXTURE.is_relative_to(conftest.REPO), (
+        f"{conftest.FIXTURE} is not under {conftest.REPO}"
+    )
+
+
+def _check_ignore(tmp_path: Path, path: str, extra: str = "") -> tuple[bool, str]:
+    """Whether the checkout's .gitignore ignores `path`, and the rule that says
+    so (`source:line:pattern`, or why no rule matched).
+
+    The verdict is the matched pattern, not the exit status: `git check-ignore
+    -v` exits 0 for a negated rule too, printing the `!`-prefixed pattern that
+    re-includes the path -- a path git would happily commit. `extra` appends
+    rules to the copy, which is how that case is proven.
+    """
+    repo = _throwaway_repo(tmp_path)
+    rules = (REPO / ".gitignore").read_bytes() + extra.encode()
+    (repo / ".gitignore").write_bytes(rules)
+    # 0: a rule matched, stdout "source:line:pattern\tpath"; 1: none did.
+    verdict = _git("check-ignore", "-v", "--", path, check=False, repo=repo)
+    if verdict.returncode != 0:
+        return False, f"no rule matches {path}: {verdict.stderr.strip()}"
+    rule = verdict.stdout.split("\t", 1)[0]
+    return not rule.split(":", 2)[2].startswith("!"), rule
+
+
+@pytest.mark.parametrize("path", CORPUS_PATHS)
+def test_a_corpus_folder_is_ignored_anywhere_in_the_checkout(tmp_path, path):
+    ignored, rule = _check_ignore(tmp_path, path)
+    assert ignored, f"{path} is committable: {rule}"
+    # The rule is the checkout's own, not a global excludes file git also reads.
+    assert rule.startswith(".gitignore:"), rule
+
+
+def test_a_negation_is_not_an_ignore(tmp_path):
+    """The check that makes the corpus gate above mean anything. A negated rule
+    re-includes the path, and `git check-ignore -v` still exits 0 on it: read
+    that status alone and `!/fixtures` in .gitignore would leave the corpus
+    symlink committable with every case above still passing."""
+    ignored, rule = _check_ignore(tmp_path, "fixtures", extra="\n!/fixtures\n")
+    assert not ignored, f"a negated rule was read as an ignore: {rule}"
+    assert rule.endswith(":!/fixtures"), rule
+
+
+@pytest.mark.parametrize("path", [COMMITTED_FRAME, FIXTURES_DIR])
+def test_the_committed_frame_is_not_ignored(tmp_path, path):
+    ignored, rule = _check_ignore(tmp_path, path)
+    assert not ignored, f"{path} is ignored: {rule}"
+
+
+# Card #441, Done-when 2. service/tests/fixtures/ holds one frame, downscaled
+# and stripped (157 KB, no EXIF; 9351e64). A second frame is committable only
+# on the same terms: under the ceiling and carrying no camera metadata, which
+# the secret scanner does not read. And no tracked file may sit under any other
+# fixtures folder, so a corpus cannot slip in even if the ignore rule is edited.
+# Every tracked fixture is gated as a frame unless its blob is text and Pillow
+# reads no image in it, whatever the fixture is called: an allowlist of image
+# suffixes would let a raw (CR3, DNG), HEIC or BMP in unopened, and a raw
+# carries the whole camera record, while an exemption by suffix would let the
+# same bytes in under a .txt name. Text alone does not exempt either: the ASCII
+# Netpbm formats (P1/P2/P3) and XPM are images whose bytes decode as text.
+FRAME_CEILING = 400 * 1024
+CORPUS_DIRS = {"fixtures", "fixtures_full"}
+
+
+def _opened(blob: bytes) -> Image.Image | None:
+    """The image Pillow reads from `blob`, or None when it reads none. The
+    gate's one reading of what a blob is; its callers close what they open."""
+    try:
+        return Image.open(io.BytesIO(blob))
+    except UnidentifiedImageError:
+        return None
+
+
+def _is_image(blob: bytes) -> bool:
+    """Whether Pillow identifies `blob` as an image, whatever it decodes as."""
+    image = _opened(blob)
+    if image is None:
+        return False
+    image.close()
+    return True
+
+
+def _frame_problems(data: bytes) -> list[str]:
+    """Why `data` (a blob from the index) is not a committable frame."""
+    problems = []
+    size = len(data)
+    if size > FRAME_CEILING:
+        problems.append(f"{size} bytes, over the {FRAME_CEILING} byte ceiling")
+    image = _opened(data)
+    if image is None:
+        problems.append("not an image the gate can read")
+    else:
+        with image:
+            if image.getexif() or "exif" in image.info:
+                problems.append("carries EXIF")
+    return problems
+
+
+def _is_stray_fixture(path: str) -> bool:
+    """A corpus-named directory component anywhere in the path, except the
+    one that is exactly service/tests/fixtures: a corpus folder nested under
+    the exempt folder is still another corpus folder."""
+    exempt = FIXTURES_DIR.split("/")
+    parts = path.split("/")[:-1]
+    return any(
+        part in CORPUS_DIRS and parts[: i + 1] != exempt
+        for i, part in enumerate(parts)
+    )
+
+
+def _stray_fixture_paths(tracked):
+    """Tracked paths under a fixtures folder other than service/tests/fixtures."""
+    return [path for path in tracked if path and _is_stray_fixture(path)]
+
+
+def _is_text(blob: bytes) -> bool:
+    """Whether a blob decodes as text. Read from the bytes, because a name is
+    not evidence of what was committed -- and not exempting on its own, because
+    an image can be text too."""
+    try:
+        blob.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+    return b"\0" not in blob
+
+
+def _gated_fixtures(blobs: dict[str, bytes]) -> list[str]:
+    """Tracked fixtures the frame gate opens: every one whose indexed blob is
+    an image's, or is not a text file's. An image can be text -- Pillow reads
+    the ASCII Netpbm formats and XPM -- so only a blob that is text and no
+    image Pillow knows is exempt."""
+    return [
+        path
+        for path, blob in blobs.items()
+        if _is_image(blob) or not _is_text(blob)
+    ]
+
+
+def _frame(image: Image.Image | None = None, **save) -> bytes:
+    """A JPEG's bytes, the way the gate sees a blob."""
+    buffer = io.BytesIO()
+    (image or Image.new("RGB", (8, 8))).save(buffer, format="JPEG", **save)
+    return buffer.getvalue()
+
+
+def _ascii_frame(size: tuple[int, int] = (300, 300)) -> bytes:
+    """An ASCII Netpbm frame's bytes: an image Pillow reads whose bytes are
+    also UTF-8 with no NUL, and over the ceiling at this size."""
+    values = ((i * 7) % 256 for i in range(size[0] * size[1] * 3))
+    body = " ".join(f"{value:3d}" for value in values)
+    return f"P3\n{size[0]} {size[1]}\n255\n{body}\n".encode()
+
+
+def test_a_frame_over_the_ceiling_is_refused():
+    # Noise does not compress: 1200 x 800 at quality 100 is well over 1 MB.
+    big = _frame(Image.effect_noise((1200, 800), 64), quality=100)
+    assert any("over the" in problem for problem in _frame_problems(big))
+
+
+def _tagged_frame(tmp_path: Path) -> bytes:
+    """The camera-record-laden frame the staging test is proven against."""
+    path = tmp_path / "tagged.jpg"
+    metadata_laden(path)
+    return path.read_bytes()
+
+
+def test_a_frame_with_exif_is_refused(tmp_path):
+    assert _frame_problems(_tagged_frame(tmp_path)) == ["carries EXIF"]
+
+
+def test_a_small_stripped_frame_passes():
+    assert _frame_problems(_frame()) == []
+
+
+def test_the_gate_judges_the_index_not_the_working_tree(tmp_path):
+    """What a push carries is the staged blob. A clean frame staged and then
+    overwritten on disk by a tagged one still passes; the reverse is refused."""
+    repo = _throwaway_repo(tmp_path)
+    plain, tagged = _frame(), _tagged_frame(tmp_path)
+
+    (repo / "frame.jpg").write_bytes(plain)
+    _git("add", "frame.jpg", repo=repo)
+    (repo / "frame.jpg").write_bytes(tagged)
+    assert _frame_problems(_index_bytes("frame.jpg", repo=repo)) == []
+
+    _git("add", "frame.jpg", repo=repo)
+    (repo / "frame.jpg").write_bytes(plain)
+    assert _frame_problems(_index_bytes("frame.jpg", repo=repo)) == [
+        "carries EXIF"
+    ]
+
+
+def test_a_frame_the_gate_cannot_read_is_refused():
+    # A raw file (CR3, DNG, HEIC) carries the full camera record and Pillow
+    # cannot read it, so the gate cannot prove it stripped: refused, by name.
+    raw = bytes(range(256)) * 8
+    assert _frame_problems(raw) == ["not an image the gate can read"]
+
+
+def test_every_fixture_but_a_text_file_is_gated():
+    # The gate selects by what a fixture's blob is not (a text file), never by
+    # an allowlist of image suffixes: a frame under any other suffix is still a
+    # frame, and one the gate never opens is one it never refuses.
+    frame, raw = _frame(), bytes(range(256)) * 8
+    blobs = {
+        COMMITTED_FRAME: frame,
+        "service/tests/fixtures/download-lines.txt": b"one\ntwo\n",
+        "service/tests/fixtures/second.CR3": raw,
+        "service/tests/fixtures/second.dng": raw,
+        "service/tests/fixtures/second.bmp": frame,
+    }
+    assert _gated_fixtures(blobs) == [
+        COMMITTED_FRAME,
+        "service/tests/fixtures/second.CR3",
+        "service/tests/fixtures/second.dng",
+        "service/tests/fixtures/second.bmp",
+    ]
+
+
+def test_camera_bytes_under_a_text_name_are_still_gated(tmp_path):
+    """A fixture is exempt for what its indexed blob is, never for what it is
+    called. Exempting `.txt` by name let an oversized or EXIF-bearing frame be
+    committed as second.txt and skip both checks."""
+    renamed = "service/tests/fixtures/second.txt"
+    tagged = _tagged_frame(tmp_path)
+    blobs = {
+        "service/tests/fixtures/download-lines.txt": b"one\ntwo\n",
+        renamed: tagged,
+    }
+    assert _gated_fixtures(blobs) == [renamed]
+    assert _frame_problems(tagged) == ["carries EXIF"]
+
+
+def test_an_ascii_frame_is_gated_whatever_it_decodes_as():
+    """Text is not evidence either. Pillow reads the ASCII Netpbm formats
+    (P1/P2/P3) and XPM, whose bytes decode as UTF-8 with no NUL, so exempting
+    every text blob let an oversized frame in under .ppm and under .txt alike."""
+    ascii_frame = _ascii_frame()
+    named = "service/tests/fixtures/second.ppm"
+    renamed = "service/tests/fixtures/second.txt"
+    blobs = {
+        "service/tests/fixtures/download-lines.txt": b"one\ntwo\n",
+        named: ascii_frame,
+        renamed: ascii_frame,
+    }
+    assert _gated_fixtures(blobs) == [named, renamed]
+    assert any("over the" in problem for problem in _frame_problems(ascii_frame))
+
+
+def test_stray_fixture_paths_are_named():
+    tracked = [
+        COMMITTED_FRAME,
+        "service/tests/fixtures/download-lines.txt",
+        "fixtures_dev_labels.json",
+        "service/fixtures/x.jpg",
+        "plugin/fixtures/x.jpg",
+        "fixtures_full/nested/x.jpg",
+        "fixtures/x.jpg",
+        # Under the exempt folder, but inside another corpus folder nested there.
+        "service/tests/fixtures/fixtures_full/x.jpg",
+        "service/tests/fixtures/fixtures/x.jpg",
+        "",
+    ]
+    assert _stray_fixture_paths(tracked) == [
+        "service/fixtures/x.jpg",
+        "plugin/fixtures/x.jpg",
+        "fixtures_full/nested/x.jpg",
+        "fixtures/x.jpg",
+        "service/tests/fixtures/fixtures_full/x.jpg",
+        "service/tests/fixtures/fixtures/x.jpg",
+    ]
+
+
+def test_no_tracked_file_sits_under_another_fixtures_folder():
+    stray = _stray_fixture_paths(_git("ls-files", "-z").stdout.split("\0"))
+    assert not stray, f"a corpus is tracked outside {FIXTURES_DIR}: {stray}"
+
+
+def test_every_committed_frame_is_small_and_exif_free():
+    # ls-files -z terminates each path, so the split leaves a trailing empty.
+    tracked = _git("ls-files", "-z", "--", FIXTURES_DIR).stdout.split("\0")
+    blobs = {path: _index_bytes(path) for path in tracked if path}
+    frames = _gated_fixtures(blobs)
+    assert COMMITTED_FRAME in frames, "the smoke test's frame is not tracked"
+    refused = {p: _frame_problems(blobs[p]) for p in frames}
+    refused = {p: problems for p, problems in refused.items() if problems}
+    assert not refused, (
+        "a committed frame is not small and stripped like the first one: "
+        f"{refused}"
+    )

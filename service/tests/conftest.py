@@ -29,6 +29,10 @@ a providers test or the build plan.
 `fake_hub` is the model host the download command (card #407) is proven
 against, from the executable and from the CLI alike, and `hub_env` points a
 child process at it.
+
+`metadata_laden` is the one adversarial frame, carrying every metadata channel
+a camera file would, that both the staging test and the committed-frame gate
+(card #441) are proven against.
 """
 
 from __future__ import annotations
@@ -54,6 +58,7 @@ from types import ModuleType
 from typing import NamedTuple
 
 import pytest
+from PIL import Image
 from huggingface_hub.constants import DOWNLOAD_CHUNK_SIZE
 from huggingface_hub.file_download import REGEX_COMMIT_HASH, repo_folder_name
 
@@ -70,12 +75,42 @@ PACKAGE_SCRIPT = TOOLS / "package_plugin.py"
 # The frame test_quality.py leans on, downscaled to 1200 px and stripped of
 # metadata so it can be committed: the corpus is gitignored and CI has none,
 # and the smoke test must analyze the same image on every platform (card #400).
-FIXTURE = Path(__file__).with_name("fixtures") / "0A1A2829.jpg"
+FIXTURE = Path(__file__).resolve().with_name("fixtures") / "0A1A2829.jpg"
 PHOTO = FIXTURE.name
 
 
+def metadata_laden(path: Path) -> dict[str, bytes | str]:
+    """An image carrying every metadata channel a real camera file would.
+
+    The previous version of the stripping test used a freshly-constructed image
+    with no metadata at all, so it asserted the absence of something that was
+    never there. It would have passed unchanged if staging had been rewritten to
+    copy EXIF straight through. This builds the adversarial case instead, for
+    the staging test (test_pipeline.py) and the committed-frame gate
+    (test_tracked_files.py) alike.
+    """
+    exif = Image.Exif()
+    exif[0x010F] = "Canon"                       # Make
+    exif[0x0110] = "Canon EOS R3"                # Model
+    exif[0x013B] = "SECRET_PHOTOGRAPHER_NAME"    # Artist
+    exif[0x010E] = "SECRET_CAPTION_TEXT"         # ImageDescription
+    exif[0x0132] = "2026:06:14 05:23:37"         # DateTime
+    exif[0x8825] = {1: "N", 2: (28.0, 39.0, 0.0), 3: "W", 4: (80.0, 43.0, 0.0)}  # GPS IFD
+
+    markers: dict[str, bytes | str] = {
+        "exif": exif.tobytes(),
+        "xmp": b'<?xpacket?><x:xmpmeta xmlns:x="adobe:ns:meta/">'
+               b"<dc:subject>SECRET_KEYWORD</dc:subject></x:xmpmeta>",
+        "comment": b"SECRET_JFIF_COMMENT",
+        "icc_profile": b"\x00\x00\x02\x0cSECRET_ICC_PROFILE" + b"\x00" * 500,
+    }
+    Image.new("RGB", (1200, 800), (70, 100, 60)).save(path, format="JPEG", **markers)
+    return markers
+
+
 def _load_tool(script: Path) -> ModuleType:
-    """tools/ is not a package; import the script by path, without running it."""
+    """Import a script by path, without adding it to sys.modules: tools/ is not
+    a package, and a second copy of conftest.py must not displace this one."""
     spec = importlib.util.spec_from_file_location(script.stem, script)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
