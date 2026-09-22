@@ -669,13 +669,24 @@ def test_docs_describe_the_cli_engines_in_the_picker():
     subscription, and where their titles come from (the verdict); readme.md's
     Lightroom section lists them among what the picker offers; docs/config.md's
     backend row, readme.md and the engine section no longer defer the picker
-    to a card yet to come."""
+    to a card yet to come. The section also sends a reader to
+    docs/settings-dialog.png, which the owner takes and this card's picker has
+    outgrown, so it carries the note the Download row already has, in the same
+    words (review round 9, finding 3)."""
     plugin_doc = PLUGIN_DOC.read_text(encoding="utf-8")
     engine = _section(plugin_doc, "The engine")
     assert engine is not None, "docs/plugin.md has no ## The engine section"
     prose = " ".join(engine.split())
     for named in ("`claude-code`", "`codex`", "subscription", "no API key", "`title`"):
         assert named in prose, f"docs/plugin.md's engine section does not say {named}"
+    # The picture the section sends a reader to is card #405's four-engine
+    # dialog. Its Download row already carries the note for exactly this
+    # (### The Download row); the picker's own prose had none, so a reader
+    # went from updated words to a picture of the old dialog.
+    picker = " ".join(engine.split("### The Download row")[0].split())
+    assert "`docs/settings-dialog.png` predates" in picker, (
+        "docs/plugin.md's engine section sends a reader to a picture of the old dialog "
+        "without saying the screenshot predates the CLI engines")
     readme = README.read_text(encoding="utf-8")
     section = _section(readme, "Reviewing in Lightroom")
     assert section is not None, "readme.md has no ## Reviewing in Lightroom section"
