@@ -160,14 +160,6 @@ local function viewsOfKind(root, kind)
 	return found
 end
 
---- The one push_button titled `title` in the tree, or nil.
-local function buttonTitled(contents, title)
-	for _, entry in ipairs(viewsOfKind(contents, 'push_button')) do
-		if entry.view.title == title then return entry.view end
-	end
-	return nil
-end
-
 local function bindingKey(binding)
 	if type(binding) == 'table' then return binding.key end
 	return binding
@@ -1115,7 +1107,7 @@ t.test('the dialog names the log at Log.path(), and Show log file reveals it in 
 	local Log = require('MelampusLog')
 	t.equals(#titlesMatching(contents, 'Log: ' .. Log.path()), 1, 'the dialog does not name the log at ' .. Log.path())
 	t.isNil(logText(), 'a log exists before anything was logged')
-	buttonTitled(contents, 'Show log file').action()
+	buttonsTitled(contents, 'Show log file')[1].action()
 	t.equals(mock.state.revealed[1], Log.path(), 'not the log that was revealed')
 	t.equals(import('LrPathUtils').parent(mock.state.revealed[1]), Log.folder())
 	t.isNotNil(logText(), 'the log was not made, so its folder had nothing to show')
@@ -1123,7 +1115,7 @@ end)
 
 t.test('on Windows, Show log file reveals the log under %LOCALAPPDATA%\\Melampus', function()
 	local contents = openSettings({ windows = true })
-	buttonTitled(contents, 'Show log file').action()
+	buttonsTitled(contents, 'Show log file')[1].action()
 	t.equals(mock.state.revealed[1], 'C:\\Users\\photographer\\AppData\\Local\\Melampus\\logs\\Melampus.log')
 end)
 
