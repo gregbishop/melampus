@@ -13,7 +13,8 @@ path, and service/uv.lock is tracked. Card #441 adds the corpus gates: .gitignor
 ignores a photo corpus folder wherever it lands in the checkout, no tracked file
 sits under any other fixtures folder, and every frame in service/tests/fixtures/
 is small and EXIF-free like the first one. The frame gate reads each blob from
-the index, so it judges the bytes a push would carry.
+the index, so it judges the bytes a push would carry, and decides from those
+bytes -- never from the file's name -- which of them it has to judge.
 
 Two checks read the working tree instead, because each judges what the next
 commit would do rather than what the last one carried: that the lockfile is
@@ -170,11 +171,11 @@ def test_the_committed_frame_is_not_ignored(tmp_path):
 # on the same terms: under the ceiling and carrying no camera metadata, which
 # the secret scanner does not read. And no tracked file may sit under any other
 # fixtures folder, so a corpus cannot slip in even if the ignore rule is edited.
-# Every tracked fixture that is not a text file is gated as a frame, whatever
-# its suffix: an allowlist of image suffixes would let a raw (CR3, DNG), HEIC
-# or BMP in unopened, and a raw carries the whole camera record.
+# Every tracked fixture whose blob is not text is gated as a frame, whatever it
+# is called: an allowlist of image suffixes would let a raw (CR3, DNG), HEIC or
+# BMP in unopened, and a raw carries the whole camera record, while an exemption
+# by suffix would let the same bytes in under a .txt name.
 FRAME_CEILING = 400 * 1024
-TEXT_SUFFIXES = {".txt"}
 FIXTURES_DIR = FIXTURE.parent.relative_to(REPO).as_posix()
 CORPUS_DIRS = {"fixtures", "fixtures_full"}
 
@@ -211,13 +212,20 @@ def _stray_fixture_paths(tracked):
     return [path for path in tracked if path and _is_stray_fixture(path)]
 
 
-def _gated_fixtures(tracked):
-    """Tracked paths the frame gate opens: every fixture but a text file."""
-    return [
-        path
-        for path in tracked
-        if path and Path(path).suffix.lower() not in TEXT_SUFFIXES
-    ]
+def _is_text(blob: bytes) -> bool:
+    """Whether a blob is a text file: what the frame gate exempts. Read from
+    the bytes, because a name is not evidence of what was committed."""
+    try:
+        blob.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+    return b"\0" not in blob
+
+
+def _gated_fixtures(blobs: dict[str, bytes]) -> list[str]:
+    """Tracked fixtures the frame gate opens: every one whose indexed blob is
+    not a text file's."""
+    return [path for path, blob in blobs.items() if not _is_text(blob)]
 
 
 def _frame(image: Image.Image | None = None, **save) -> bytes:
@@ -274,23 +282,37 @@ def test_a_frame_the_gate_cannot_read_is_refused():
 
 
 def test_every_fixture_but_a_text_file_is_gated():
-    # The gate selects by what a fixture is not (a text file), never by an
-    # allowlist of image suffixes: a frame under any other suffix is still a
+    # The gate selects by what a fixture's blob is not (a text file), never by
+    # an allowlist of image suffixes: a frame under any other suffix is still a
     # frame, and one the gate never opens is one it never refuses.
-    tracked = [
+    frame, raw = _frame(), bytes(range(256)) * 8
+    blobs = {
+        COMMITTED_FRAME: frame,
+        "service/tests/fixtures/download-lines.txt": b"one\ntwo\n",
+        "service/tests/fixtures/second.CR3": raw,
+        "service/tests/fixtures/second.dng": raw,
+        "service/tests/fixtures/second.bmp": frame,
+    }
+    assert _gated_fixtures(blobs) == [
         COMMITTED_FRAME,
-        "service/tests/fixtures/download-lines.txt",
         "service/tests/fixtures/second.CR3",
         "service/tests/fixtures/second.dng",
         "service/tests/fixtures/second.bmp",
-        "",
     ]
-    assert _gated_fixtures(tracked) == [
-        COMMITTED_FRAME,
-        "service/tests/fixtures/second.CR3",
-        "service/tests/fixtures/second.dng",
-        "service/tests/fixtures/second.bmp",
-    ]
+
+
+def test_camera_bytes_under_a_text_name_are_still_gated(tmp_path):
+    """A fixture is exempt for what its indexed blob is, never for what it is
+    called. Exempting `.txt` by name let an oversized or EXIF-bearing frame be
+    committed as second.txt and skip both checks."""
+    renamed = "service/tests/fixtures/second.txt"
+    tagged = _tagged_frame(tmp_path)
+    blobs = {
+        "service/tests/fixtures/download-lines.txt": b"one\ntwo\n",
+        renamed: tagged,
+    }
+    assert _gated_fixtures(blobs) == [renamed]
+    assert _frame_problems(tagged) == ["carries EXIF"]
 
 
 def test_stray_fixture_paths_are_named():
@@ -323,11 +345,12 @@ def test_no_tracked_file_sits_under_another_fixtures_folder():
 
 
 def test_every_committed_frame_is_small_and_exif_free():
-    frames = _gated_fixtures(
-        _git("ls-files", "-z", "--", FIXTURES_DIR).stdout.split("\0")
-    )
+    # ls-files -z terminates each path, so the split leaves a trailing empty.
+    tracked = _git("ls-files", "-z", "--", FIXTURES_DIR).stdout.split("\0")
+    blobs = {path: _index_bytes(path) for path in tracked if path}
+    frames = _gated_fixtures(blobs)
     assert COMMITTED_FRAME in frames, "the smoke test's frame is not tracked"
-    refused = {p: _frame_problems(_index_bytes(p)) for p in frames}
+    refused = {p: _frame_problems(blobs[p]) for p in frames}
     refused = {p: problems for p, problems in refused.items() if problems}
     assert not refused, (
         "a committed frame is not small and stripped like the first one: "
