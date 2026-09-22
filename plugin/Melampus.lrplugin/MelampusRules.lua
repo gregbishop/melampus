@@ -164,7 +164,11 @@ function Rules.engineItems(verdicts, problem)
 		local verdict = byEngine[engine]
 		local available = verdict == nil or verdict.available ~= false
 		local reason = verdict and tostring(verdict.reason or '') or ''
-		local title = verdict and type(verdict.title) == 'string' and verdict.title or engine
+		-- A blank title is no title: only nil and false are falsy in Lua, so a
+		-- title of '' would pass a type check and leave the row blank instead of
+		-- falling back to the engine's name (review round 12).
+		local title = verdict and type(verdict.title) == 'string' and verdict.title ~= ''
+			and verdict.title or engine
 		local item = {
 			title = title .. (available and '' or ' (not available)'),
 			value = engine, enabled = available, reason = reason,

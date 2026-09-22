@@ -477,6 +477,15 @@ t.test('without verdicts nothing is greyed and the note says why', function()
 	t.equals(note, problem)
 	items, note = Rules.engineItems({ { engine = 'mlx', available = true } })
 	t.equals(items[2].title, 'mlx', 'a verdict without a title does not crash the picker')
+	-- A blank title is no title: the field is a string, so a type check passes it
+	-- through, and the picker would show a row with nothing in it.
+	items, note = Rules.engineItems({
+		{ engine = 'mlx', title = '', available = true },
+		{ engine = 'ollama', title = '', available = false, reason = 'no server is answering' },
+	})
+	t.equals(items[2].title, 'mlx', 'a verdict with a blank title falls back to the engine\'s name')
+	t.equals(items[3].title, 'ollama (not available)', 'a greyed row with a blank title is all suffix')
+	t.equals(note, 'ollama: no server is answering', 'the note line names the engine, not a blank')
 	items, note = Rules.engineItems({})
 	t.equals(#items, 7)
 	t.equals(note, '', 'nothing to say when there are no verdicts and no problem')
