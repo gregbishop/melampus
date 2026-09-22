@@ -19,9 +19,10 @@ script on every run and, on a pushed v* tag, its release job attaches both to
 the GitHub release, which the install docs name (card #402); no doc names a
 workflow file that does not exist; no doc states a test count, because the
 suite grows with every card and CI checks no such number (card #437,
-Done-when 1); and readme.md's opening lists exactly the engines providers.py
+Done-when 1); readme.md's opening lists exactly the engines providers.py
 offers, with what each bills, and names the build specification (card #491,
-Done-when 1 and 3).
+Done-when 1 and 3); and a page whose opening says this runs on macOS and
+Windows does not still offer Linux further down.
 
 The checks are deliberately dumb — substring presence of the backticked name — so
 they never argue with prose style, only with absence. The one exception runs the
@@ -677,6 +678,24 @@ def test_the_openings_privacy_claim_names_the_setting_that_can_send_the_image_el
         assert setting in opening, (
             f"{doc.name}'s opening promises no image leaves the machine without naming "
             f"`{setting}`, the setting that can point the ollama engine at another host")
+
+
+def test_a_doc_whose_opening_says_macos_and_windows_does_not_still_offer_linux():
+    """Review round 1, finding 2: card #491 made the openings say the
+    platforms this ships on — "macOS and Windows", the owner's About — and
+    dropped Linux from readme.md's Requirements. A page whose own opening
+    says that may not, further down, still tell the reader the local engine
+    is the backend "on Windows and Linux": both sentences are in the same
+    file and only one of them can be true of what a user can install. Where
+    Ollama itself runs is a different claim, made by docs/config.md and the
+    modules, and is not this gate's business."""
+    for doc in (README, BRIEF, ARCHITECTURE_DOC):
+        text = doc.read_text(encoding="utf-8")
+        if "macOS and Windows" not in text.split("\n## ", 1)[0]:
+            continue
+        offers = [line.strip() for line in text.splitlines() if "Linux" in line]
+        assert not offers, (
+            f"{doc.name}'s opening says macOS and Windows, but it still offers Linux: {offers}")
 
 
 def test_docs_name_engine_detection_where_the_default_and_the_refusal_are_described():

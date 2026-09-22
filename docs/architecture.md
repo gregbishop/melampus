@@ -84,7 +84,7 @@ Six implementations exist, and `[model] backend` picks one (`providers.py`,
 docs/config.md § `[model]`). `MLXBackend` runs Qwen3-VL locally on Apple Silicon.
 `OllamaBackend` runs whatever vision model a local Ollama server holds, over its
 documented chat endpoint with the standard library, which is the local path on
-Windows and Linux. `AnthropicBackend` and `OpenAIBackend` are the cloud path,
+Windows. `AnthropicBackend` and `OpenAIBackend` are the cloud path,
 built for the §6.6 escalation tail and reused as a primary on machines with no
 local runtime. `CommandBackend` runs an installed command-line program once per
 frame with the image path and the prompt in its arguments and reads the reply
