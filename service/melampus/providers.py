@@ -10,6 +10,7 @@ live here and both callers import them.
 from __future__ import annotations
 
 import json
+import os
 import platform
 import shutil
 import signal
@@ -496,6 +497,48 @@ class Credential:
     fix: str = ""
 
 
+#: The environment a subscription CLI is launched with, by variable name,
+#: in place of melampus's own (Codex review round 3, S1): a photograph is
+#: untrusted input, and a CLI whose agent can run commands (Codex's shell
+#: tool, on by default, and its own environment policy keeps names
+#: containing KEY, SECRET or TOKEN unless a config says otherwise:
+#: config-reference, `shell_environment_policy.ignore_default_excludes`
+#: "default: true") would answer text rendered in one asking for `env`
+#: with whatever melampus was launched with, into its cloud conversation:
+#: the cloud engines' keys, or anything else the shell exports. So the
+#: status check and every run get these and the CLI's own settings
+#: variable (`CliEngine.settings_variable`), nothing else, each copied
+#: from melampus's environment when it is set there. What a process needs
+#: to start and to find its sign-in: PATH (the npm shims run `node` from
+#: it), HOME and USER (measured on studio: `claude --restricted auth
+#: status --json` reports the login with PATH, HOME and USER and not
+#: without USER, the keychain's account; `codex login status` with PATH
+#: and HOME), the rest of the login session's basics (LOGNAME, SHELL,
+#: TMPDIR, the locale, TERM), and the standard proxy and CA variables the
+#: CLI's own network path may need (Claude Code's network-config page:
+#: "Claude Code respects standard proxy environment variables",
+#: `NODE_EXTRA_CA_CERTS` for a custom CA), which name the user's proxy,
+#: not anything of melampus's. On Windows the process also needs the
+#: system root to load its DLLs and the temp and profile folders
+#: (tests/test_binary.py's no-python environment is the same list). A
+#: cloud key never crosses: the CLI engines bill to a subscription, and
+#: Claude Code "always" uses a key over the login when one is in its
+#: environment (CLAUDE_CODE_AUTH_DOCS), so under this list it cannot;
+#: detection still refuses a key it reads from a settings file.
+CLI_ENVIRONMENT: tuple[str, ...] = (
+    "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE", "TERM",
+    "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy",
+    "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS",
+    *(
+        (
+            "SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "COMSPEC", "PATHEXT", "TEMP", "TMP",
+            "USERPROFILE", "USERNAME", "HOMEDRIVE", "HOMEPATH", "APPDATA", "LOCALAPPDATA", "PROGRAMDATA",
+        )
+        if os.name == "nt" else ()
+    ),
+)
+
+
 @dataclass(frozen=True, slots=True)
 class CliEngine:
     """A subscription CLI behind the command seam, in the owner's words: the
@@ -545,6 +588,20 @@ class CliEngine:
     #: check carries it.
     bare: str = ""
     bare_fix: str = ""
+    #: The variable naming the CLI's settings folder, where its sign-in
+    #: lives (Claude Code's CLAUDE_CONFIG_DIR, Codex's CODEX_HOME): the one
+    #: variable of the CLI's own that reaches it beside CLI_ENVIRONMENT.
+    settings_variable: str = ""
+
+    def environment(self) -> dict[str, str]:
+        """What this CLI's status check and runs are launched with: of
+        CLI_ENVIRONMENT and `settings_variable`, those set in melampus's
+        own environment, with their values; nothing else of it."""
+        return {
+            name: os.environ[name]
+            for name in (*CLI_ENVIRONMENT, self.settings_variable)
+            if name and name in os.environ
+        }
 
     def launcher(self, command: list[str]) -> list[str]:
         """The launcher `command` runs the CLI through: its arguments after
@@ -695,7 +752,7 @@ def _cli_verdict(cli: CliEngine, command: list[str] | None, probe_seconds: float
         status = subprocess.run(
             [executable, *check],
             capture_output=True, text=True, encoding="utf-8", errors="replace",
-            stdin=subprocess.DEVNULL, timeout=probe_seconds,
+            stdin=subprocess.DEVNULL, timeout=probe_seconds, env=cli.environment(),
         )
     except subprocess.TimeoutExpired:
         return EngineVerdict(
@@ -888,7 +945,7 @@ CLAUDE_CODE_CLI = CliEngine(
     own_check=claude_code_status, signed_out=_claude_code_signed_out,
     account=_claude_code_account, subscription="a Claude subscription",
     subscriptions=(CLAUDE_CODE_SUBSCRIPTION,), billing_docs=CLAUDE_CODE_AUTH_DOCS,
-    bare=CLAUDE_CODE_BARE, bare_fix=CLAUDE_CODE_BARE_FIX,
+    bare=CLAUDE_CODE_BARE, bare_fix=CLAUDE_CODE_BARE_FIX, settings_variable="CLAUDE_CONFIG_DIR",
 )
 
 
@@ -965,7 +1022,7 @@ CODEX_CLI = CliEngine(
     CODEX_STATUS, CODEX_COMMAND, codex_reply,
     own_check=lambda command: list(CODEX_STATUS), signed_out=_codex_signed_out,
     account=_codex_account, subscription="the ChatGPT plan", bills_per_call=("an API key",),
-    subscriptions=("ChatGPT",),
+    subscriptions=("ChatGPT",), settings_variable="CODEX_HOME",
 )
 
 #: The subscription CLIs, in the owner's order: the verdicts after the
@@ -991,7 +1048,7 @@ def _cli_backend(cli: CliEngine, settings: ModelConfig) -> VLMBackend:
         raise _refusal(f"{verdict.reason}.", works_here=_works_here(verdicts))
     return CommandBackend(
         command, executable=verdict.executable, timeout=settings.timeout_seconds,
-        decode=cli.decode,
+        decode=cli.decode, env=cli.environment(),
     )
 
 

@@ -2117,6 +2117,23 @@ def test_command_backend_expands_the_template_into_one_argv(tmp_path):
         "what the command started is stopped at its exit, by its pid while it is still the command's own")
 
 
+def test_command_backend_launches_the_program_in_the_environment_it_is_given(tmp_path):
+    """Codex review round 3, S1: a backend built with `env` hands exactly
+    that mapping to the launch, so a program that can run commands (a CLI
+    engine's agent) never sees melampus's own environment; without one
+    the child gets the parent's environment as it is (the test above), the
+    `command` engine's contract since card #420."""
+    image = tmp_path / "image.jpg"
+    image.write_bytes(b"jpeg")
+    run = _FakeRun(stdout=ID_OK)
+    environment = {"PATH": "/opt/fake/bin", "HOME": str(tmp_path)}
+
+    _command_backend(run, env=environment).complete(image, "prompt", 900)
+
+    ((_, kwargs),) = run.calls
+    assert kwargs["env"] == environment
+
+
 def test_command_backend_hands_the_program_the_real_path_of_the_image(tmp_path):
     """The path that crosses the command line is the staged file's real
     one, symlinks resolved: on macOS the temp folder is under /var, a link
@@ -3402,7 +3419,7 @@ STATUS = {{
 
 argv = sys.argv[1:]
 with open(LOG, "a", encoding="utf-8") as log:
-    log.write(json.dumps({{"argv": argv, "cwd": os.getcwd()}}) + "\\n")
+    log.write(json.dumps({{"argv": argv, "cwd": os.getcwd(), "environ": sorted(os.environ)}}) + "\\n")
 
 
 def loaded_settings(restricted, bare, sources, named):
@@ -3659,7 +3676,7 @@ OTHER_STATUS = {other_status!r}
 
 argv = sys.argv[1:]
 with open(LOG, "a", encoding="utf-8") as log:
-    log.write(json.dumps({{"argv": argv, "cwd": os.getcwd()}}) + "\\n")
+    log.write(json.dumps({{"argv": argv, "cwd": os.getcwd(), "environ": sorted(os.environ)}}) + "\\n")
 
 if argv[:2] == ["login", "status"]:
     if MODE == "hung":
@@ -4119,6 +4136,48 @@ def test_the_cli_returns_candidates_in_the_same_shape_as_mlx_on_the_fixture(
                 assert given.startswith(template.partition("{prompt}")[0].replace("{image}", staged))
             else:
                 assert given == template.replace("{image}", staged)
+
+
+@posix_only
+@pytest.mark.parametrize("cli", CLIS)
+def test_the_cli_never_sees_melampus_own_environment(monkeypatch, photos, tmp_path, cli):
+    """Codex review round 3, S1, at the real boundary: a photograph is
+    untrusted input, and a CLI whose agent can run commands (Codex's shell
+    tool is on by default) would answer text rendered in one asking for
+    `env` with whatever melampus was launched with, into its cloud
+    conversation: the cloud engines' keys, or anything else in the shell's
+    environment. So the status check and every run are launched with the
+    CLI's own environment (`CliEngine.environment`): the runtime basics
+    and its settings folder's variable, nothing else. Given a synthetic
+    secret and both cloud keys in melampus's environment, when the factory
+    builds the engine and the Identifier runs the fixture, then none of
+    them reached the fake CLI in any invocation, what did is nothing
+    outside that allowlist, and PATH, HOME and the settings variable are
+    there (the real `codex login status` and `claude --restricted auth
+    status --json` report signed in under this list, measured on studio;
+    the fake finds its settings folder through it)."""
+    from melampus.identify import Identifier
+
+    log = _fake_engine_cli(monkeypatch, tmp_path, cli)
+    monkeypatch.setenv("SYNTHETIC_SECRET_FOR_TEST", "not-for-the-model")
+    for name in ALL_KEY_VARIABLES:
+        monkeypatch.setenv(name, "synthetic-not-a-key")
+    config = _cfg(model={"backend": cli.engine})
+    result = Identifier(providers.build_primary_backend(config), config).identify(photos / PHOTO)
+
+    assert result.status == "ok", result.error
+    calls = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+    assert len(calls) == 3, calls  # the status check, the routing run, the identification run
+    settings_variable = _FAKES[cli.engine].config_dir
+    for call in calls:
+        seen = set(call["environ"])
+        assert "SYNTHETIC_SECRET_FOR_TEST" not in seen, f"{call['argv']} saw melampus's environment"
+        assert not seen & set(ALL_KEY_VARIABLES), f"{call['argv']} saw a cloud key: {seen & set(ALL_KEY_VARIABLES)}"
+        # macOS's CoreFoundation writes __CF_USER_TEXT_ENCODING into every
+        # process that loads it (the fake is a python): the OS's, not ours.
+        beyond = {name for name in seen - set(cli.environment()) if not name.startswith("__CF_")}
+        assert not beyond, f"{call['argv']} saw {sorted(beyond)}, outside the CLI's environment"
+        assert {"PATH", "HOME", settings_variable} <= seen, f"{call['argv']} saw only {sorted(seen)}"
 
 
 @posix_only

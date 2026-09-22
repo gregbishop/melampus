@@ -28,7 +28,7 @@ import urllib.request
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterator
+from typing import Callable, Iterator, Mapping
 
 
 @dataclass(slots=True)
@@ -895,7 +895,15 @@ class CommandBackend(VLMBackend):
     still its own and never a number given since to someone else's process.
     The child gets the parent's environment as it is, so the
     program finds its own sign-in; nothing is added to it and no secret
-    crosses the command line. As with every backend, the image is the staged,
+    crosses the command line. `env`, when given, is the whole environment
+    the program is launched with instead: the CLI engines hand in the few
+    variables their program needs (providers.CliEngine.environment), so a
+    program whose agent can run commands (Codex's shell tool) cannot be
+    talked, by text rendered in a photograph, into reading melampus's own
+    environment into its cloud conversation (Codex review round 3, S1);
+    the `command` engine's program still gets the parent's, since it is
+    the user's own and may need variables of its own. As with every
+    backend, the image is the staged,
     metadata-free file and only its path travels; the program runs in that
     file's folder, the temporary one holding it and nothing else, so a
     program that reads freely inside its working directory (Claude Code) is
@@ -951,6 +959,7 @@ class CommandBackend(VLMBackend):
         timeout: float = 180.0,
         run: Callable | None = None,
         decode: Callable[[str], str] | None = None,
+        env: Mapping[str, str] | None = None,
     ) -> None:
         self.command = list(command)
         # The template, so a changed flag is a changed run fingerprint and the
@@ -970,6 +979,7 @@ class CommandBackend(VLMBackend):
         # fake at this edge, the way the other backends take a client.
         self._run = run or subprocess.Popen
         self._decode = decode
+        self.env = None if env is None else dict(env)
 
     @property
     def program(self) -> str:
@@ -1158,6 +1168,9 @@ class CommandBackend(VLMBackend):
                 # melampus was started in (security review, round 2).
                 cwd=str(image_path.resolve().parent),
                 **self.OWN_GROUP,
+                # The environment only when one was given: without it the
+                # launch names none, and the child inherits the parent's.
+                **({} if self.env is None else {"env": self.env}),
             )
         except OSError as exc:
             raise RuntimeError(f"{self.program} could not be run: {exc}") from exc

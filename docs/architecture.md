@@ -91,8 +91,16 @@ mode's JSON result object by an optional `decode` on stdout, and `codex` is the
 same with Codex CLI's (`providers.CODEX_COMMAND`, card #422, docs/config.md
 § Codex CLI), the reply read out of the exec mode's JSONL stream. What
 differs between the two is data (`providers.CliEngine`: program, install
-page, sign-in command, status check, template, decoder); the verdict and the
-factory branch are one function each. `ScriptedBackend` returns canned responses, which is what lets the
+page, sign-in command, status check, template, decoder, the variable naming
+its settings folder); the verdict and the
+factory branch are one function each. Both launch the CLI, for its status
+check and for every run, with the CLI's own environment rather than
+melampus's (`CommandBackend`'s `env`; `providers.CLI_ENVIRONMENT`, the
+runtime basics, plus that settings variable, `CliEngine.environment`), so an
+agent that can run commands (Codex's shell tool) cannot be talked by a
+photograph into reading the shell's exports, the cloud engines' keys among
+them, into its cloud conversation; the `command` engine's program, the
+user's own, still inherits the parent's environment as it is. `ScriptedBackend` returns canned responses, which is what lets the
 pipeline tests cover parsing, validation, retry, caching and the downscale ladder
 in under a second with no weights on disk. Each is a class here and no change
 anywhere else: the prompts, the JSON extraction, the schema validation and the

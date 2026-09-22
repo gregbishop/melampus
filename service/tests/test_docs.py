@@ -842,6 +842,32 @@ def test_config_doc_quotes_the_cli_template_from_its_one_source(engine, must_say
     assert f"`{cli.engine}`" in architecture and source in architecture
 
 
+@pytest.mark.parametrize("engine", ["claude-code", "codex"])
+def test_config_doc_says_what_environment_the_cli_is_launched_with(engine):
+    """Codex review round 3, S1: a CLI engine's status check and runs are
+    launched with the CLI's own environment (`providers.CLI_ENVIRONMENT`
+    and its settings variable), never melampus's, so a photograph's text
+    cannot have an agent that runs commands read the shell's exports into
+    its cloud conversation. Each CLI's section of docs/config.md says so,
+    names the settings variable that does reach it, and names the one
+    source of the list; the `command` row says the user's own program
+    still gets melampus's environment as it is, since that seam is the
+    user's; the architecture doc names the mechanism."""
+    from melampus import providers
+
+    (cli,) = [c for c in providers.CLI_ENGINES if c.engine == engine]
+    text = CONFIG_DOC.read_text(encoding="utf-8")
+    heading = {"claude-code": "Claude Code", "codex": "Codex CLI"}[engine]
+    section = re.search(rf"^### {re.escape(heading)}\n(.*?)(?=^### |^## |\Z)", text, re.MULTILINE | re.DOTALL)
+    assert section, f"docs/config.md has no ### {heading} section"
+    for said in ("environment", f"`{cli.settings_variable}`", "`providers.CLI_ENVIRONMENT`"):
+        assert said in section.group(1), f"docs/config.md § {heading} does not say {said!r}"
+    command_row = _row(text, "command")
+    assert "environment" in command_row, "docs/config.md's command row does not say what environment the program gets"
+    architecture = (REPO / "docs" / "architecture.md").read_text(encoding="utf-8")
+    assert "CLI_ENVIRONMENT" in architecture, "docs/architecture.md does not name the CLI environment"
+
+
 def test_config_doc_command_row_says_where_the_program_runs():
     """Security round 2 (S2) changed the command seam's contract for every
     program, not only Claude Code: the program runs with the staged image's
