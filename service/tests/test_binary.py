@@ -712,8 +712,6 @@ def test_executable_detects_engines_as_json_with_no_python_on_the_path(
     its own, and, where going and installing it is the fix, the install page
     the picker links to (review round 9, finding 1), so the dialog scrapes no
     address out of prose."""
-    from melampus import providers
-
     proc = subprocess.run(
         [str(built_executable), "--detect-engines"],
         env=no_python_environment(tmp_path), capture_output=True, text=True, timeout=600,
