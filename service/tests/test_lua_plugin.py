@@ -308,13 +308,17 @@ def _command_the_plugin_builds(
     """The one shell command MelampusAnalyze.lua builds under the mock SDK
     with `_PLUGIN.path` at `plugin_dir` and the engine preference set to
     `engine` ("" is the default: no preference). `stored_key` is what
-    LrPasswords holds for `engine`'s key variable (card #405); "" means
-    nothing stored."""
+    LrPasswords holds under every key variable, `Rules.KEY_VARIABLES` (as
+    test_import_integration.lua stores both), so a run for openai finds its
+    key (card #405) and a run for an engine that needs none is checked
+    against keys that are there to leak (card #423); "" means nothing
+    stored."""
     return _plugin_under_the_mock(
         plugin_dir, tmp_path,
-        "local variable = Rules.keyVariable(os.getenv('MELAMPUS_ENGINE'))\n"
-        "if variable and os.getenv('MELAMPUS_STORED_KEY') ~= '' then\n"
-        "  mock.state.passwords[variable] = os.getenv('MELAMPUS_STORED_KEY')\n"
+        "if os.getenv('MELAMPUS_STORED_KEY') ~= '' then\n"
+        "  for _, variable in pairs(Rules.KEY_VARIABLES) do\n"
+        "    mock.state.passwords[variable] = os.getenv('MELAMPUS_STORED_KEY')\n"
+        "  end\n"
         "end\n"
         "local ok, message = Analyze.run(os.getenv('MELAMPUS_PREVIEWS'),"
         " os.getenv('MELAMPUS_RESULTS'), 'wildlife', os.getenv('MELAMPUS_ENGINE'))\n"
