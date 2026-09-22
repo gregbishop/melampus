@@ -299,16 +299,36 @@ def test_build_names_the_cache_the_caller_chose_when_it_is_corrupt(
     assert str(tmp_path / "shared") in capsys.readouterr().err
 
 
-def test_build_lets_other_pyinstaller_failures_surface_as_themselves(build, monkeypatch: pytest.MonkeyPatch):
+def _pyinstaller_whose_hook_fails(arguments: list[str]) -> None:
+    raise RuntimeError("hook failed")
+
+
+def _pyinstaller_that_compiles_a_broken_module(arguments: list[str]) -> None:
+    """A SyntaxError from somewhere other than the cache index reader: a
+    module PyInstaller compiled into the bundle."""
+
+    def compile_module(source: str) -> None:
+        compile(source, "broken_module.py", "exec")
+
+    compile_module("def broken(:\n")
+
+
+@pytest.mark.parametrize(
+    ("run", "error", "message"),
+    [(_pyinstaller_whose_hook_fails, RuntimeError, "hook failed"),
+     (_pyinstaller_that_compiles_a_broken_module, SyntaxError, "invalid syntax")],
+)
+def test_build_lets_other_pyinstaller_failures_surface_as_themselves(
+    build, monkeypatch: pytest.MonkeyPatch, capsys, run, error: type[BaseException], message: str
+):
     """Only the cache index maps to the delete-and-re-run advice; anything
-    else PyInstaller raises still comes out with its own traceback."""
-
-    def run(arguments: list[str]) -> None:
-        raise RuntimeError("hook failed")
-
+    else PyInstaller raises still comes out with its own traceback, a
+    SyntaxError from a module it compiled included: the same exception type
+    as the corrupt index, told apart by where it was raised."""
     _fake_pyinstaller(monkeypatch, run)
-    with pytest.raises(RuntimeError, match="hook failed"):
+    with pytest.raises(error, match=message):
         build.main()
+    assert "corrupt" not in capsys.readouterr().err
 
 
 # Shaped like the real script: conftest.py imports it for executable_path()
