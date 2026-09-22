@@ -518,24 +518,44 @@ class Credential:
 #: CLI's own network path may need (Claude Code's network-config page:
 #: "Claude Code respects standard proxy environment variables",
 #: `NODE_EXTRA_CA_CERTS` for a custom CA), which name the user's proxy,
-#: not anything of melampus's. On Windows the process also needs the
-#: system root to load its DLLs and the temp and profile folders
-#: (tests/test_binary.py's no-python environment is the same list). A
-#: cloud key never crosses: the CLI engines bill to a subscription, and
-#: Claude Code "always" uses a key over the login when one is in its
-#: environment (CLAUDE_CODE_AUTH_DOCS), so under this list it cannot;
-#: detection still refuses a key it reads from a settings file.
+#: not anything of melampus's. On Windows (review round 7, C1: each name
+#: with its reason, and none without one) the tail is the floor a Windows
+#: process starts under, tests/test_binary.py's no_python_environment,
+#: which CI's build-windows runs the executable under: SYSTEMROOT
+#: (Python's subprocess docs, Popen `env`: "On Windows, in order to run a
+#: side-by-side assembly the specified env must include a valid
+#: %SystemRoot%"), TEMP and TMP (Windows' GetTempPath "checks for the
+#: existence of environment variables in the following order and uses the
+#: first path found: TMP, TEMP, USERPROFILE, the Windows directory";
+#: Node's os.tmpdir, Claude Code's temp folder on Windows per env-vars
+#: `CLAUDE_CODE_TMPDIR`), and USERPROFILE, the home (Claude Code's
+#: settings page: "On Windows, `~/.claude` means `%USERPROFILE%\.claude`";
+#: authentication: "On Windows, credentials are stored in
+#: `%USERPROFILE%\.claude\.credentials.json`"; Codex's CODEX_HOME defaults
+#: to `~/.codex` (its environment-variables page), and a Rust program's
+#: home on Windows is "the value of the 'USERPROFILE' environment
+#: variable" (std::env::home_dir)). Nothing above that floor has a
+#: documented need: PATHEXT is read by melampus's own `shutil.which`, in
+#: melampus's environment; a `.cmd` shim is refused (_batch_shim), so no
+#: cmd.exe (COMSPEC) is started; managed settings live at the literal
+#: `C:\Program Files\ClaudeCode\` (managed-settings: "Claude Code doesn't
+#: read the legacy Windows path C:\ProgramData\..."), so not PROGRAMDATA;
+#: npm's `%AppData%\npm` prefix and Codex's
+#: `%LOCALAPPDATA%\Programs\OpenAI\Codex\bin` install folder are where
+#: the program is found, through PATH, not what it reads once running;
+#: `%APPDATA%\Anthropic` holds the Console profile, a sign-in detection
+#: refuses; Node's os.homedir and Rust's home_dir read USERPROFILE, not
+#: HOMEDRIVE and HOMEPATH. Card #424, the Windows run, is where a name
+#: above the floor gets earned. A cloud key never crosses: the CLI
+#: engines bill to a subscription, and Claude Code "always" uses a key
+#: over the login when one is in its environment (CLAUDE_CODE_AUTH_DOCS),
+#: so under this list it cannot; detection still refuses a key it reads
+#: from a settings file.
 CLI_ENVIRONMENT: tuple[str, ...] = (
     "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE", "TERM",
     "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy",
     "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS",
-    *(
-        (
-            "SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "COMSPEC", "PATHEXT", "TEMP", "TMP",
-            "USERPROFILE", "USERNAME", "HOMEDRIVE", "HOMEPATH", "APPDATA", "LOCALAPPDATA", "PROGRAMDATA",
-        )
-        if os.name == "nt" else ()
-    ),
+    *(("SYSTEMROOT", "TEMP", "TMP", "USERPROFILE") if os.name == "nt" else ()),
 )
 
 

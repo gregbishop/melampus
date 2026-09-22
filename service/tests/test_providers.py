@@ -4138,6 +4138,34 @@ def test_the_cli_returns_candidates_in_the_same_shape_as_mlx_on_the_fixture(
                 assert given == template.replace("{image}", staged)
 
 
+def test_the_cli_environment_is_the_documented_list():
+    """Review round 7, C1: the allowlist a CLI engine is launched with is
+    pinned name by name, the way the templates are, so a name added later
+    is a red test first, with its reason next to it in providers. The
+    POSIX names: what a process needs to start and find its sign-in
+    (PATH, HOME, USER: measured on studio), the login session's basics,
+    and the standard proxy and CA variables. The Windows tail is the floor
+    a Windows process starts under (tests/test_binary.py's
+    no_python_environment, which CI's build-windows runs the executable
+    under): the system root (Python's subprocess docs: a side-by-side
+    assembly needs "a valid %SystemRoot%"), the temp folder (GetTempPath
+    reads TMP, then TEMP, then USERPROFILE) and the profile (Claude Code's
+    settings and credentials live under `%USERPROFILE%\\.claude`; Codex's
+    `~/.codex` resolves through USERPROFILE on Windows). Nothing above the
+    floor is in the list until card #424, the Windows run, measures a need
+    for it. The tuple is built at import time from `os.name`, so this test
+    pins the tail only where it runs on Windows (#424); here it pins the
+    POSIX names."""
+    posix = (
+        "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE", "TERM",
+        "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy",
+        "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS",
+    )
+    windows = ("SYSTEMROOT", "TEMP", "TMP", "USERPROFILE") if os.name == "nt" else ()
+    assert providers.CLI_ENVIRONMENT == (*posix, *windows)
+    assert not any(name in ALL_KEY_VARIABLES for name in providers.CLI_ENVIRONMENT)
+
+
 @posix_only
 @pytest.mark.parametrize("cli", CLIS)
 def test_the_cli_never_sees_melampus_own_environment(monkeypatch, photos, tmp_path, cli):
