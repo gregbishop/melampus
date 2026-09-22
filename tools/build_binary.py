@@ -63,8 +63,8 @@ def config_dir(checkout: Path) -> Path:
 def _from_the_cache_index(error: BaseException) -> bool:
     """Whether PyInstaller failed reading its cache index: index.dat is Python
     source it evals (PyInstaller/utils/misc.py, load_py_data_struct), so a
-    half-written one, from an interrupted or concurrent build, is a SyntaxError
-    raised there. Any other SyntaxError is a module PyInstaller compiled."""
+    half-written one, from another build using the same directory at the same
+    time, is a SyntaxError raised there. Any other SyntaxError is a module PyInstaller compiled."""
     return isinstance(error, SyntaxError) and any(
         frame.name == "load_py_data_struct" for frame in traceback.extract_tb(error.__traceback__)
     )
@@ -116,9 +116,15 @@ def main() -> int:
         if not _from_the_cache_index(error):
             raise
         cache = os.environ[CONFIG_DIR_VARIABLE]
+        # Not an earlier interrupted build: --clean has PyInstaller empty the
+        # cache before anything reads index.dat (PyInstaller/building/
+        # build_main.py), so only a build running alongside this one can have
+        # half-written it: two builds of one checkout, or a caller-set
+        # PYINSTALLER_CONFIG_DIR that several checkouts share.
         print(
-            f"PyInstaller's cache under {cache} is corrupt (index.dat: {error.msg}), "
-            f"usually from a build that was interrupted; delete {cache} and re-run the build",
+            f"PyInstaller's cache under {cache} is corrupt (index.dat: {error.msg}): "
+            f"another build is using the same cache directory at the same time; "
+            f"wait for it, then delete {cache} and re-run the build",
             file=sys.stderr,
         )
         return 2
