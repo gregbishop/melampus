@@ -508,7 +508,8 @@ end)
 -- receives it. Done-when 2: given no preference, the plugin passes no
 -- --backend and the CLI's default applies. Card #423 adds the two
 -- subscription CLIs, claude-code and codex, which reach it the same way.
-local ENGINES = loadPluginFile('MelampusRules').ENGINES
+local Rules = loadPluginFile('MelampusRules')
+local ENGINES = Rules.ENGINES
 
 t.test('each engine preference reaches the command line as --backend', function()
 	for _, engine in ipairs(ENGINES) do
@@ -650,10 +651,16 @@ t.test('a local engine, a subscription CLI, or no engine, carries no key even wh
 	local stored = { MELAMPUS_OPENAI_KEY = KEY, MELAMPUS_ANTHROPIC_KEY = KEY }
 	-- Card #423: the CLI engines bill to a subscription, never to a key
 	-- here, so their line is the executable and --backend, nothing ahead.
-	for _, engine in ipairs({ 'mlx', 'ollama', 'claude-code', 'codex', '' }) do
-		local command = commandWithKeys(engine, stored)
-		t.equals(command, macCommand(engine), engine .. ': a key travels with a run that needs none')
+	-- Which engines need no key is the plugin's own rule, Rules.keyVariable,
+	-- pinned by name in test_rules.lua; walked over ENGINES here, so the
+	-- next keyless engine is checked without a line here.
+	for _, engine in ipairs(ENGINES) do
+		if not Rules.keyVariable(engine) then
+			local command = commandWithKeys(engine, stored)
+			t.equals(command, macCommand(engine), engine .. ': a key travels with a run that needs none')
+		end
 	end
+	t.equals(commandWithKeys('', stored), macCommand(''), 'a key travels with a run that names no engine')
 end)
 
 t.test('a cloud engine with no stored key runs without one, so the executable says what is missing', function()
