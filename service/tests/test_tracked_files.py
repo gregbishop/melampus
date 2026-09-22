@@ -199,12 +199,32 @@ def test_the_committed_frame_is_not_ignored(tmp_path, path):
 # on the same terms: under the ceiling and carrying no camera metadata, which
 # the secret scanner does not read. And no tracked file may sit under any other
 # fixtures folder, so a corpus cannot slip in even if the ignore rule is edited.
-# Every tracked fixture whose blob is not text is gated as a frame, whatever it
-# is called: an allowlist of image suffixes would let a raw (CR3, DNG), HEIC or
-# BMP in unopened, and a raw carries the whole camera record, while an exemption
-# by suffix would let the same bytes in under a .txt name.
+# Every tracked fixture is gated as a frame unless its blob is text and Pillow
+# reads no image in it, whatever the fixture is called: an allowlist of image
+# suffixes would let a raw (CR3, DNG), HEIC or BMP in unopened, and a raw
+# carries the whole camera record, while an exemption by suffix would let the
+# same bytes in under a .txt name. Text alone does not exempt either: the ASCII
+# Netpbm formats (P1/P2/P3) and XPM are images whose bytes decode as text.
 FRAME_CEILING = 400 * 1024
 CORPUS_DIRS = {"fixtures", "fixtures_full"}
+
+
+def _opened(blob: bytes) -> Image.Image | None:
+    """The image Pillow reads from `blob`, or None when it reads none. The
+    gate's one reading of what a blob is; its callers close what they open."""
+    try:
+        return Image.open(io.BytesIO(blob))
+    except UnidentifiedImageError:
+        return None
+
+
+def _is_image(blob: bytes) -> bool:
+    """Whether Pillow identifies `blob` as an image, whatever it decodes as."""
+    image = _opened(blob)
+    if image is None:
+        return False
+    image.close()
+    return True
 
 
 def _frame_problems(data: bytes) -> list[str]:
@@ -213,12 +233,13 @@ def _frame_problems(data: bytes) -> list[str]:
     size = len(data)
     if size > FRAME_CEILING:
         problems.append(f"{size} bytes, over the {FRAME_CEILING} byte ceiling")
-    try:
-        with Image.open(io.BytesIO(data)) as image:
+    image = _opened(data)
+    if image is None:
+        problems.append("not an image the gate can read")
+    else:
+        with image:
             if image.getexif() or "exif" in image.info:
                 problems.append("carries EXIF")
-    except UnidentifiedImageError:
-        problems.append("not an image the gate can read")
     return problems
 
 
@@ -240,8 +261,9 @@ def _stray_fixture_paths(tracked):
 
 
 def _is_text(blob: bytes) -> bool:
-    """Whether a blob is a text file: what the frame gate exempts. Read from
-    the bytes, because a name is not evidence of what was committed."""
+    """Whether a blob decodes as text. Read from the bytes, because a name is
+    not evidence of what was committed -- and not exempting on its own, because
+    an image can be text too."""
     try:
         blob.decode("utf-8")
     except UnicodeDecodeError:
@@ -251,8 +273,14 @@ def _is_text(blob: bytes) -> bool:
 
 def _gated_fixtures(blobs: dict[str, bytes]) -> list[str]:
     """Tracked fixtures the frame gate opens: every one whose indexed blob is
-    not a text file's."""
-    return [path for path, blob in blobs.items() if not _is_text(blob)]
+    an image's, or is not a text file's. An image can be text -- Pillow reads
+    the ASCII Netpbm formats and XPM -- so only a blob that is text and no
+    image Pillow knows is exempt."""
+    return [
+        path
+        for path, blob in blobs.items()
+        if _is_image(blob) or not _is_text(blob)
+    ]
 
 
 def _frame(image: Image.Image | None = None, **save) -> bytes:
@@ -260,6 +288,14 @@ def _frame(image: Image.Image | None = None, **save) -> bytes:
     buffer = io.BytesIO()
     (image or Image.new("RGB", (8, 8))).save(buffer, format="JPEG", **save)
     return buffer.getvalue()
+
+
+def _ascii_frame(size: tuple[int, int] = (300, 300)) -> bytes:
+    """An ASCII Netpbm frame's bytes: an image Pillow reads whose bytes are
+    also UTF-8 with no NUL, and over the ceiling at this size."""
+    values = ((i * 7) % 256 for i in range(size[0] * size[1] * 3))
+    body = " ".join(f"{value:3d}" for value in values)
+    return f"P3\n{size[0]} {size[1]}\n255\n{body}\n".encode()
 
 
 def test_a_frame_over_the_ceiling_is_refused():
@@ -340,6 +376,22 @@ def test_camera_bytes_under_a_text_name_are_still_gated(tmp_path):
     }
     assert _gated_fixtures(blobs) == [renamed]
     assert _frame_problems(tagged) == ["carries EXIF"]
+
+
+def test_an_ascii_frame_is_gated_whatever_it_decodes_as():
+    """Text is not evidence either. Pillow reads the ASCII Netpbm formats
+    (P1/P2/P3) and XPM, whose bytes decode as UTF-8 with no NUL, so exempting
+    every text blob let an oversized frame in under .ppm and under .txt alike."""
+    ascii_frame = _ascii_frame()
+    named = "service/tests/fixtures/second.ppm"
+    renamed = "service/tests/fixtures/second.txt"
+    blobs = {
+        "service/tests/fixtures/download-lines.txt": b"one\ntwo\n",
+        named: ascii_frame,
+        renamed: ascii_frame,
+    }
+    assert _gated_fixtures(blobs) == [named, renamed]
+    assert any("over the" in problem for problem in _frame_problems(ascii_frame))
 
 
 def test_stray_fixture_paths_are_named():
