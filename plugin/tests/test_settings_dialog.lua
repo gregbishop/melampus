@@ -14,6 +14,7 @@ local t = require('harness')
 local mock = require('lrmock')
 
 local PLUGIN = mock.PLUGIN
+local logText = mock.logText
 local ENGINES = mock.loadPluginFile('MelampusRules').ENGINES
 local OLLAMA_DOWNLOAD = mock.OLLAMA_INSTALL
 local CLAUDE_CODE_INSTALL = mock.CLAUDE_CODE_INSTALL
@@ -100,16 +101,6 @@ local function fakeDownload(lines, code, stderr, startup)
 		if stderr then writeFile(log, stderr, 'a') end
 		return code
 	end
-end
-
---- What the plugin's log holds: the file the module writes at Log.path(),
---- under the mock's home; nil while nothing has landed.
-local function logText()
-	local handle = io.open(require('MelampusLog').path(), 'r')
-	if not handle then return nil end
-	local text = handle:read('*a')
-	handle:close()
-	return text
 end
 
 --- The dialogs the mock recorded, the modal ones (the Settings dialog, with
