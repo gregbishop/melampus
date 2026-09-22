@@ -108,6 +108,14 @@ def run_as_lightroom_would(command: str, **kwargs) -> subprocess.CompletedProces
     return subprocess.run(command, shell=True, **kwargs)
 
 
+# The picker's engines in the executable's order: the CLI's choices without the
+# offline test fake, then the two subscription CLIs (card #423; the command
+# seam is not a picker choice). Spelled once, for the #403 binding and the
+# #423 detection run to hold the plugin's list against.
+PICKER_ENGINES = [*(b for b in providers.BACKEND_CHOICES if b != providers.SCRIPTED),
+                  providers.CLAUDE_CODE, providers.CODEX]
+
+
 def _engines_the_plugin_knows(tmp_path: Path) -> list[str]:
     """`Rules.ENGINES` as the plugin reads it, through lua, in its order: the
     one list the #403 binding and the #423 executable check both hold their
@@ -180,8 +188,7 @@ def test_the_plugin_names_the_engines_the_cli_accepts(tmp_path: Path):
     CLIs (card #423; the command seam is not a picker choice), in the same
     order. A rename on either side fails here rather than as a usage error
     the user never sees."""
-    engines = [b for b in providers.BACKEND_CHOICES if b != providers.SCRIPTED]
-    assert _engines_the_plugin_knows(tmp_path) == [*engines, providers.CLAUDE_CODE, providers.CODEX]
+    assert _engines_the_plugin_knows(tmp_path) == PICKER_ENGINES
 
 
 def test_the_plugin_offers_a_download_row_for_exactly_the_engines_the_cli_fetches_a_model_for(tmp_path: Path):
@@ -478,8 +485,7 @@ def test_the_detection_the_plugin_runs_reaches_the_executable_and_fills_the_pick
         "end\n")
 
     items = [line.split("\t") for line in listing.splitlines()]
-    engines = [b for b in providers.BACKEND_CHOICES if b != providers.SCRIPTED]
-    assert [value for value, _, _ in items] == ["", *engines, providers.CLAUDE_CODE, providers.CODEX], listing
+    assert [value for value, _, _ in items] == ["", *PICKER_ENGINES], listing
     enabled = {value: state == "true" for value, state, _ in items}
     links = {value: link for value, _, link in items}
     assert enabled[""] and enabled["openai"] and enabled["claude"], listing
