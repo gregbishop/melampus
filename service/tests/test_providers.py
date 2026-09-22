@@ -3783,10 +3783,10 @@ class _Fake(NamedTuple):
     """What the tests know about one CLI beyond its CliEngine: the fake
     that stands in for it, the verdict wrapper conftest stubs by name and
     the real one to restore, the probe-seconds constant by name, the
-    account kind the fake's status check names, a user's own template
-    with a model flag, and the variable naming the CLI's settings folder,
-    given a folder of the test's own (empty until a test writes into it)
-    so no test reads a developer's real one."""
+    account kind the fake's status check names, and a user's own template
+    with a model flag. The variable naming the CLI's settings folder is
+    the CliEngine's own, `settings_variable` (review round 7, C3), not a
+    copy here."""
 
     script: str
     verdict: str
@@ -3794,7 +3794,6 @@ class _Fake(NamedTuple):
     probe_seconds: str
     signed_in_as: str
     own_command: list[str]
-    config_dir: str
 
 
 _FAKES = {
@@ -3802,14 +3801,12 @@ _FAKES = {
         _FAKE_CLAUDE_SCRIPT, "claude_code_verdict", REAL_CLAUDE_CODE_VERDICT,
         "CLAUDE_CODE_PROBE_SECONDS", "claude.ai, max",
         [CLAUDE, "-p", "--model", "sonnet", "--output-format", "json", "{image} {prompt}"],
-        "CLAUDE_CONFIG_DIR",
     ),
     providers.CODEX: _Fake(
         _FAKE_CODEX_SCRIPT, "codex_verdict", REAL_CODEX_VERDICT,
         "CODEX_PROBE_SECONDS", "ChatGPT",
         [providers.CODEX_PROGRAM, "exec", "-m", "gpt-5", "--image", "{image}", "--json",
          "{prompt}"],
-        "CODEX_HOME",
     ),
 }
 
@@ -3820,8 +3817,9 @@ def _fake_engine_cli(
 ) -> Path:
     """Put a `cli.program` that imitates the real CLI's documented interface
     on PATH, ahead of any real one, with a settings folder of the test's
-    own (empty until a test writes into it) so no test reads a developer's
-    real one, and the real detection restored against it. `other_status`
+    own (empty until a test writes into it) named by the CLI's own
+    `settings_variable`, so no test reads a developer's real one, and the
+    real detection restored against it. `other_status`
     is the status line the fake codex's "other-account" mode prints;
     `program` names the fake something else (`codex.cmd`, the npm shim's
     name) for a template of the test's own to name.
@@ -3835,7 +3833,7 @@ def _fake_engine_cli(
     ))
     config_dir = tmp_path / f"{cli.program}-config"
     config_dir.mkdir(exist_ok=True)
-    monkeypatch.setenv(fake.config_dir, str(config_dir))
+    monkeypatch.setenv(cli.settings_variable, str(config_dir))
     _real_detection(monkeypatch, cli)
     return log
 
@@ -4196,7 +4194,7 @@ def test_the_cli_never_sees_melampus_own_environment(monkeypatch, photos, tmp_pa
     assert result.status == "ok", result.error
     calls = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
     assert len(calls) == 3, calls  # the status check, the routing run, the identification run
-    settings_variable = _FAKES[cli.engine].config_dir
+    settings_variable = cli.settings_variable
     for call in calls:
         seen = set(call["environ"])
         assert "SYNTHETIC_SECRET_FOR_TEST" not in seen, f"{call['argv']} saw melampus's environment"
