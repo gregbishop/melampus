@@ -290,7 +290,9 @@ all — so text rendered in a photograph can leave a payload or an
 instruction in those directories for the next run to read back.
 `--ephemeral` keeps no session per frame, but it does not close that
 channel: it survives from one frame to the next. Whether that is acceptable
-for this engine is the owner's call, tracked on its own card.
+for this engine is the owner's call; the measurement and the decision it
+leaves open are recorded in security review round 9 on PR #17, and the card
+is the owner's to file.
 Claude Code's template confines reads
 the same way with its own mechanism (`--tools Read`, `--allowedTools
 Read(/{image})`, *Claude Code* above). What the commands Codex runs can

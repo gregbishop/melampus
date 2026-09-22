@@ -878,7 +878,14 @@ def test_config_doc_says_the_codex_profile_leaves_the_shared_temp_directories_wr
     permitted". So a photograph's text has a channel that outlives the
     frame `--ephemeral` ends. The suite never runs the real Codex, so the
     prose is what can be pinned: docs/config.md must name those paths as
-    writable and must not say the profile writes nowhere."""
+    writable and must not say the profile writes nowhere.
+
+    Review round 10, C1: the sentence that leaves the decision to the owner
+    must also say where the decision is recorded, so a reader can follow it.
+    It pointed at "its own card" without a number; the card is the owner's
+    to file and this branch does not invent a number, so what it names is
+    the record that does exist, security review round 9 on PR #17. The
+    negative keeps the prose from going back to an unnamed card."""
     prose = " ".join(CONFIG_DOC.read_text(encoding="utf-8").split())
     for path in ("`/tmp`", "`/private/tmp`", "`/var/tmp`", "`/private/var/tmp`"):
         assert path in prose, f"docs/config.md does not name {path} under the profile"
@@ -886,6 +893,13 @@ def test_config_doc_says_the_codex_profile_leaves_the_shared_temp_directories_wr
         assert said in prose, f"docs/config.md does not say {said!r} of the shared temp directories"
     assert "no write anywhere" not in prose, (
         "docs/config.md still says the profile writes nowhere; writes land in the shared temp directories")
+    deferral = re.search(r"Whether that is acceptable[^.]*\.", prose)
+    assert deferral, "docs/config.md no longer says whose call the shared temp writes are"
+    for said in ("the owner's call", "security review round 9", "PR #17"):
+        assert said in deferral.group(0), (
+            f"docs/config.md does not say {said!r} where it leaves the shared temp writes to the owner")
+    assert "own card" not in prose, (
+        "docs/config.md defers the decision to a card it does not name; name where the decision is recorded")
 
 
 def test_the_docs_say_a_claude_code_key_comes_from_the_settings_not_the_environment():

@@ -345,8 +345,10 @@ CODEX_PROGRAM = "codex"
 #: payload or an instruction in those directories for the next run to read
 #: back: `--ephemeral` keeps no session per frame, but the channel
 #: survives from one frame to the next. Whether that is acceptable for
-#: this engine is the owner's call, on its own card; docs/config.md says
-#: the same and test_docs.py pins it. Permission profiles are documented
+#: this engine is the owner's call; the measurement and the decision it
+#: leaves open are recorded in security review round 9 on PR #17, and the
+#: card is the owner's to file. docs/config.md says the same and
+#: test_docs.py pins it. Permission profiles are documented
 #: as beta ("under active development and may change"); the shape here is
 #: the documentation's own example, pinned by
 #: test_codex_template_is_the_documented_exec_invocation.
