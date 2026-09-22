@@ -391,7 +391,11 @@ t.test('the link is an installable engine\'s alone, from the install page its ve
 	byValue = itemsByValue(items)
 	t.isNil(byValue.mlx.link, 'an address in the mlx reason must not become a link: only an installable engine\'s does')
 	t.isNotNil(string.find(note, MLX_ADDRESS, 1, true), 'the note does not carry the mlx address as text:\n' .. note)
-	local answering = verdicts({ ollama = { available = true, reason = 'Ollama is answering at http://127.0.0.1:11434' } })
+	-- Available, with lrmock's own answering sentence: the note is not read
+	-- here, and the canned reason is spelled once, in the mock. `install` is
+	-- deliberately left as the canned answer's install page, so the assertion
+	-- that an available engine needs no link still has a page to not link.
+	local answering = verdicts({ ollama = { available = true, reason = mock.allAvailable().ollama.reason } })
 	items = Rules.engineItems(answering)
 	byValue = itemsByValue(items)
 	t.isTrue(byValue.ollama.enabled)
