@@ -505,7 +505,7 @@ def test_every_workflow_pins_every_action_to_a_commit_sha_with_its_version():
     fails this test. A tag can be moved to different code; a SHA cannot, and
     the comment is what a reader (and a future bump) sees the SHA as."""
     texts = {workflow.name: workflow.read_text(encoding="utf-8") for workflow in _workflows()}
-    using = {name for name, text in texts.items() if re.search(r"^\s*-?\s*uses:", text, re.MULTILINE)}
+    using = {name for name, text in texts.items() if _uses_lines(text)}
     assert CI_WORKFLOW.name in using, f"a workflow uses no action: {sorted(texts)}"
     unpinned = [f"{name}: {line}" for name, text in texts.items() for line in _unpinned_actions(text)]
     assert not unpinned, f"a workflow names an action by tag, not a commit SHA with its version: {unpinned}"
@@ -527,21 +527,40 @@ def test_the_action_pinning_gate_reads_flow_style_steps_too(tmp_path, monkeypatc
         test_every_workflow_pins_every_action_to_a_commit_sha_with_its_version()
 
 
+def test_the_action_pinning_gate_counts_a_flow_style_step_as_using_an_action(tmp_path, monkeypatch):
+    """Round 1, finding 2: the gate asks "does this workflow use an action"
+    before it asks "is every use pinned", and both questions are about the
+    same lines, so they must be answered by one definition. A ci.yml whose
+    only step is a flow mapping, pinned, with the version as a comment inside
+    the mapping's continuation, uses an action and is pinned: the gate passes
+    on it rather than reporting that the workflow uses no action."""
+    (tmp_path / "ci.yml").write_text(
+        "      - { uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0\n        }\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setitem(globals(), "WORKFLOWS", tmp_path)
+    test_every_workflow_pins_every_action_to_a_commit_sha_with_its_version()
+
+
 RELEASE_ZIPS = ("Melampus-macOS.zip", "Melampus-Windows.zip")
 
 
-def _unpinned_actions(text: str) -> list[str]:
-    """The `uses:` lines in that text not pinned to a commit SHA with the
-    version in a trailing comment. A `uses:` key counts wherever YAML puts
-    it in the line's code (block style, or inside a flow mapping after `{`
-    or `,`); a comment is not code, so a line that only mentions `uses:`
-    after `#` does not."""
+def _uses_lines(text: str) -> list[str]:
+    """The lines of that text with a `uses:` key, stripped. A `uses:` key
+    counts wherever YAML puts it in the line's code (block style, or inside
+    a flow mapping after `{` or `,`); a comment is not code, so a line that
+    only mentions `uses:` after `#` does not."""
     return [
         line.strip()
         for line in text.splitlines()
         if re.search(r"(?:^|[\s{,])uses:", re.split(r"(?:^|\s)#", line, maxsplit=1)[0])
-        and not re.search(r"uses: \S+@[0-9a-f]{40}\s+# v\d", line)
     ]
+
+
+def _unpinned_actions(text: str) -> list[str]:
+    """The `uses:` lines in that text not pinned to a commit SHA with the
+    version in a trailing comment."""
+    return [line for line in _uses_lines(text) if not re.search(r"uses: \S+@[0-9a-f]{40}\s+# v\d", line)]
 
 
 def test_ci_packages_a_zip_per_platform_and_a_tag_releases_both():
