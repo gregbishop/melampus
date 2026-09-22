@@ -231,13 +231,14 @@ end)
 -- its values are the owner's words, and the plugin passes it to the CLI as
 -- --backend. Unset means no --backend at all: the CLI's own default applies
 -- (mlx today; the first engine that can run here once card #404 detects).
-local ENGINES = { 'mlx', 'ollama', 'openai', 'claude' }
+-- Card #423 adds the two subscription CLIs after the owner's four, in the
+-- order the executable's --detect-engines prints them (test_lua_plugin.py
+-- pins the two orders to each other against the real executable).
+local ENGINES = { 'mlx', 'ollama', 'openai', 'claude', 'claude-code', 'codex' }
 
-t.test('the engines are exactly the four words, in order', function()
-	t.equals(#Rules.ENGINES, #ENGINES, 'not the four engines')
-	for i, engine in ipairs(ENGINES) do
-		t.equals(Rules.ENGINES[i], engine, 'engine ' .. i)
-	end
+t.test('the engines are the owner\'s four then the two subscription CLIs, in the executable\'s order', function()
+	t.equals(#Rules.ENGINES, #ENGINES)
+	for i, engine in ipairs(ENGINES) do t.equals(Rules.ENGINES[i], engine, 'engine ' .. i) end
 end)
 
 t.test('the default engine is unset, so the CLI picks', function()
@@ -255,7 +256,7 @@ t.test('each engine name is the engine chosen', function()
 	end
 end)
 
-t.test('an unknown engine is refused with the four choices named', function()
+t.test('an unknown engine is refused with the six choices named', function()
 	local engine, message = Rules.chosenEngine(settings({ engine = 'anthropic' }))
 	t.isNil(engine, 'an unknown engine was passed on to the command line')
 	t.isNotNil(message, 'no message for the unknown engine')
@@ -274,36 +275,87 @@ end)
 -- only shows it. Rules.engineItems turns the decoded verdict list into the
 -- picker's items, in the owner's order, with the unavailable ones disabled, and
 -- a note to show under the picker that carries their reasons.
+-- The canned answer, its titles, its reasons and the signed-in verdicts come
+-- from lrmock, spelled once for every suite.
 local verdicts = mock.detectionVerdicts
+local TITLES, NOT_INSTALLED, NOT_SIGNED_IN = mock.titles, mock.canned['claude-code'].reason, mock.canned.codex.reason
+local SIGNED_IN = mock.signedIn['claude-code'].reason
 
---- The picker's items indexed by value, so a test can name one: byValue.ollama.
-local function itemsByValue(items)
-	local byValue = {}
-	for _, item in ipairs(items) do byValue[item.value] = item end
-	return byValue
-end
+-- The picker's items indexed by value, so a test can name one (byValue.ollama):
+-- lrmock's, the one helper both suites index with.
+local itemsByValue = mock.itemsByValue
 
-t.test('the picker lists the four engines in the owner\'s order, after letting Melampus choose', function()
+t.test('the picker lists the six engines in the executable\'s order, after letting Melampus choose', function()
 	local items = Rules.engineItems(verdicts())
 	t.equals(items[1].value, '', 'the first item must be the unset preference: let the CLI choose')
 	t.isTrue(items[1].enabled, 'letting Melampus choose is always allowed')
-	t.equals(#items, 5, 'the automatic item and the four engines')
+	t.equals(#items, 7, 'the automatic item and the six engines')
 	for i, engine in ipairs(ENGINES) do
 		t.equals(items[i + 1].value, engine, 'item ' .. (i + 1))
 		t.isNotNil(items[i + 1].title, engine .. ' has no title')
 	end
 end)
 
-t.test('unavailable engines are disabled, and the note carries the reason detection gave', function()
-	-- The dialog reads enabled and link from an item and shows the reasons
-	-- from the note under the picker; an item carries nothing the dialog
-	-- does not read.
+t.test('an item\'s title is the one the verdict carries, from the executable, not a table here', function()
+	local items = Rules.engineItems(verdicts())
+	t.equals(items[2].title, TITLES.mlx)
+	t.equals(items[4].title, TITLES.openai)
+	t.equals(items[6].title, TITLES['claude-code'] .. ' (not available)')
+	t.isNil(Rules.ENGINE_TITLES, 'a title table in Lua is a second copy of the executable\'s')
+	items = Rules.engineItems(verdicts({ mlx = { title = 'MLX, renamed by the executable' } }))
+	t.equals(items[2].title, 'MLX, renamed by the executable')
+end)
+
+t.test('a subscription CLI is greyed with its reason when not installed or not signed in, offered when signed in', function()
+	local items, note = Rules.engineItems(verdicts())
+	local byValue = itemsByValue(items)
+	t.isFalse(byValue['claude-code'].enabled, 'claude-code should be greyed when not installed')
+	t.equals(byValue['claude-code'].reason, NOT_INSTALLED)
+	t.equals(byValue['claude-code'].link, mock.CLAUDE_CODE_INSTALL, 'the install page is the link')
+	t.isFalse(byValue.codex.enabled, 'codex should be greyed when not signed in')
+	t.equals(byValue.codex.reason, NOT_SIGNED_IN)
+	t.isNil(byValue.codex.link, 'no address in the not-signed-in reason')
+	t.isNotNil(string.find(note, NOT_INSTALLED, 1, true), 'the note does not carry the claude-code reason:\n' .. note)
+	t.isNotNil(string.find(note, NOT_SIGNED_IN, 1, true), 'the note does not carry the codex reason:\n' .. note)
+
+	items, note = Rules.engineItems(verdicts(mock.signedIn))
+	byValue = itemsByValue(items)
+	t.isTrue(byValue['claude-code'].enabled, 'a signed-in claude-code should be offered')
+	t.equals(byValue['claude-code'].title, TITLES['claude-code'])
+	t.equals(byValue['claude-code'].reason, SIGNED_IN, 'the billing sentence travels with the item')
+	t.isTrue(byValue.codex.enabled, 'a signed-in codex should be offered')
+	t.isNil(string.find(note, 'signed in', 1, true), 'the note explains available engines:\n' .. note)
+end)
+
+t.test('the note for the picked engine is its reason, so a subscription CLI says what it bills to before a run', function()
+	local items = Rules.engineItems(verdicts({ ['claude-code'] = mock.signedIn['claude-code'] }))
+	t.equals(Rules.pickedReason(items, 'claude-code'), SIGNED_IN)
+	t.equals(Rules.pickedReason(items, 'openai'), mock.canned.openai.reason)
+	t.equals(Rules.pickedReason(items, ''), '', 'letting Melampus choose has nothing to explain')
+	t.equals(Rules.pickedReason(items, nil), '')
+	t.equals(Rules.pickedReason(items, 'no-such-engine'), '', 'a stale preference has no reason to show')
+	t.equals(Rules.pickedReason(items, 'codex'), NOT_SIGNED_IN, 'a greyed engine a stale preference points at still says why')
+	items = Rules.engineItems(nil, 'Melampus could not find its analysis program.')
+	t.equals(Rules.pickedReason(items, 'mlx'), '', 'without detection there is no reason; the note already says what is missing')
+end)
+
+t.test('unavailable engines are disabled and carry the reason detection gave, and the note carries it too', function()
+	-- The dialog reads enabled and link from an item, the picked item's
+	-- reason through Rules.pickedReason, and shows every unavailable
+	-- engine's reason from the note under the picker; an item carries
+	-- nothing the dialog does not read.
 	local items, note = Rules.engineItems(verdicts({ mlx = { available = false, reason = 'needs Apple Silicon' } }))
+	t.equals(#items, 7)
 	local byValue = itemsByValue(items)
 	t.isFalse(byValue.mlx.enabled, 'mlx should be greyed')
+	t.equals(byValue.mlx.reason, 'needs Apple Silicon')
 	t.isFalse(byValue.ollama.enabled, 'ollama should be greyed')
+	t.isNotNil(string.find(byValue.ollama.reason, 'no Ollama server', 1, true))
 	for _, item in ipairs(items) do
-		t.isNil(item.reason, item.value .. ' carries a reason nothing reads; the note has it')
+		for key in pairs(item) do
+			t.isTrue(key == 'title' or key == 'value' or key == 'enabled' or key == 'reason' or key == 'link',
+				item.value .. ' carries ' .. key .. ', which nothing reads')
+		end
 	end
 	t.isTrue(byValue.openai.enabled, 'openai is available')
 	t.isTrue(byValue.claude.enabled, 'claude is available')
@@ -323,19 +375,21 @@ t.test('unavailable engines are disabled, and the note carries the reason detect
 	t.isNil(string.find(note, 'API key required', 1, true), 'the note explains available engines:\n' .. note)
 end)
 
-t.test('the link is the ollama item\'s alone, from the address its reason names', function()
-	-- Only Ollama is something to go and install (Done-when 3): another
-	-- engine's reason stays text in the note, address and all.
+t.test('the link is an installable engine\'s alone, from the install page its verdict carries', function()
+	-- Only something to go and install (Ollama, card #405 Done-when 3; the
+	-- subscription CLIs, card #423) gets a link, and only from the install
+	-- page its verdict carries: another engine's reason stays text in the
+	-- note, address and all.
 	local items = Rules.engineItems(verdicts())
 	local byValue = itemsByValue(items)
 	t.equals(byValue.ollama.link, 'https://ollama.com/download')
-	t.isNil(byValue.mlx.link, 'mlx is not ollama, so it gets no link')
-	t.isNil(byValue.openai.link, 'openai is not ollama, so it gets no link')
+	t.isNil(byValue.mlx.link, 'mlx is not something to install, so it gets no link')
+	t.isNil(byValue.openai.link, 'openai is not something to install, so it gets no link')
 	local MLX_ADDRESS = 'https://example.com/apple-silicon'
 	local note
 	items, note = Rules.engineItems(verdicts({ mlx = { available = false, reason = 'needs Apple Silicon; see ' .. MLX_ADDRESS } }))
 	byValue = itemsByValue(items)
-	t.isNil(byValue.mlx.link, 'an address in the mlx reason must not become a link: only ollama\'s does')
+	t.isNil(byValue.mlx.link, 'an address in the mlx reason must not become a link: only an installable engine\'s does')
 	t.isNotNil(string.find(note, MLX_ADDRESS, 1, true), 'the note does not carry the mlx address as text:\n' .. note)
 	local answering = verdicts({ ollama = { available = true, reason = 'Ollama is answering at http://127.0.0.1:11434' } })
 	items = Rules.engineItems(answering)
@@ -344,36 +398,77 @@ t.test('the link is the ollama item\'s alone, from the address its reason names'
 	t.isNil(byValue.ollama.link, 'an available engine needs no link')
 end)
 
+t.test('the link is the install page the verdict carries, never an address its reason happens to name', function()
+	-- Card #405 made the link Ollama's alone, whose unavailable reason is
+	-- melampus's own sentence: the last address in it was always the
+	-- download page. A subscription CLI's reason is the CLI's own words, and
+	-- two of them carry an address that is not an install page: the
+	-- authentication-precedence docs, in the verdict for a sign-in that would
+	-- bill something other than the subscription, and whatever the program
+	-- printed on stderr, in the verdict for a status check that failed some
+	-- other way. Scraping prose would make either one the blue line the
+	-- settings dialog opens in the browser, so where to install an engine is
+	-- the verdict's own field (the executable is the one place that names an
+	-- engine, as the titles are), and the address in the reason stays text in
+	-- the note under the picker.
+	local AUTH_DOCS = 'https://code.claude.com/docs/en/authentication#authentication-precedence'
+	local STDERR_ADDRESS = 'https://not-the-install-page.example/help'
+	local items, note = Rules.engineItems(verdicts({
+		['claude-code'] = { available = false, install = mock.CLAUDE_CODE_INSTALL,
+			reason = 'Claude Code is signed in, but not to claude.ai: `claude auth status --json` says '
+				.. 'nothing about the account this engine can place, and every frame would bill that '
+				.. 'credential instead (' .. AUTH_DOCS .. '); sign in with `claude auth login`' },
+		codex = { available = false, install = '',
+			reason = '`codex login status` exited 2: see ' .. STDERR_ADDRESS },
+	}))
+	local byValue = itemsByValue(items)
+	t.equals(byValue['claude-code'].link, mock.CLAUDE_CODE_INSTALL,
+		'the link must be the install page the verdict carries, not the billing docs its reason names')
+	t.isNil(byValue.codex.link,
+		'an address the program printed on stderr must not become the link: the verdict carries no install page')
+	t.isNotNil(string.find(note, AUTH_DOCS, 1, true), 'the note does not show the billing docs as text:\n' .. note)
+	t.isNotNil(string.find(note, STDERR_ADDRESS, 1, true), 'the note does not show the stderr address as text:\n' .. note)
+	t.isNil(Rules.INSTALLABLE_ENGINES,
+		'a table of which engines are installable is a second copy of what the executable already says')
+end)
+
 t.test('without verdicts nothing is greyed and the note says why', function()
 	local problem = 'Melampus could not find its analysis program.'
 	local items, note = Rules.engineItems(nil, problem)
-	t.equals(#items, 5)
+	t.equals(#items, 7)
 	for _, item in ipairs(items) do
 		t.isTrue(item.enabled, item.value .. ' was greyed with no verdict to grey it')
 		t.isNil(item.link)
 	end
-	for i, engine in ipairs(ENGINES) do t.equals(items[i + 1].value, engine) end
+	for i, engine in ipairs(ENGINES) do
+		t.equals(items[i + 1].value, engine)
+		t.equals(items[i + 1].title, engine, 'with no verdict to name it, the engine\'s name is its title')
+	end
 	t.equals(note, problem)
 	-- Junk from the executable is the same case, and never a crash.
 	items, note = Rules.engineItems({ 'not', 'verdicts' }, problem)
-	t.equals(#items, 5)
+	t.equals(#items, 7)
 	t.isTrue(items[3].enabled)
 	t.equals(note, problem)
+	items, note = Rules.engineItems({ { engine = 'mlx', available = true } })
+	t.equals(items[2].title, 'mlx', 'a verdict without a title does not crash the picker')
 	items, note = Rules.engineItems({})
-	t.equals(#items, 5)
+	t.equals(#items, 7)
 	t.equals(note, '', 'nothing to say when there are no verdicts and no problem')
 end)
 
 t.test('when every engine is available the note is empty', function()
-	local _, note = Rules.engineItems(verdicts({ ollama = { available = true, reason = 'Ollama is answering' } }))
+	local _, note = Rules.engineItems(verdicts(mock.allAvailable()))
 	t.equals(note, '')
 end)
 
-t.test('each cloud engine names the variable its key travels in; local engines none', function()
+t.test('each cloud engine names the variable its key travels in; local and subscription engines none', function()
 	t.equals(Rules.keyVariable('openai'), 'MELAMPUS_OPENAI_KEY')
 	t.equals(Rules.keyVariable('claude'), 'MELAMPUS_ANTHROPIC_KEY')
 	t.isNil(Rules.keyVariable('mlx'))
 	t.isNil(Rules.keyVariable('ollama'))
+	t.isNil(Rules.keyVariable('claude-code'), 'Claude Code bills to its subscription: no key, so no key field')
+	t.isNil(Rules.keyVariable('codex'), 'Codex CLI bills to its plan: no key, so no key field')
 	t.isNil(Rules.keyVariable(''))
 	t.isNil(Rules.keyVariable(nil))
 end)

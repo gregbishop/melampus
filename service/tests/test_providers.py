@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import dataclasses
 import errno
 import http.client
 import io
@@ -513,9 +514,9 @@ def assert_no_image_was_touched(err: str, check: str) -> None:
 def test_detection_lists_the_engines_in_the_owners_order_then_the_subscription_clis(
     no_ambient_keys, no_ambient_ollama
 ):
-    """The list the dialog (card #405) will show: one verdict per engine, in
+    """The list the dialog (card #405) shows: one verdict per engine, in
     the order BACKEND_CHOICES names them, then claude-code and codex (cards
-    #421, #422; the picker learns them in #423), never the test fake."""
+    #421, #422, in the picker since #423), never the test fake."""
     verdicts = providers.detect_engines()
     assert [v.engine for v in verdicts] == [*ENGINES, providers.CLAUDE_CODE, providers.CODEX]
     for verdict in verdicts:
@@ -598,7 +599,7 @@ def test_default_engine_is_always_one_detection_names_available(
     verdicts = providers.detect_engines()
     assert providers.default_engine() == next(v.engine for v in verdicts if v.available) == "openai"
 
-    nothing_available = [providers.EngineVerdict(v.engine, False, v.reason) for v in verdicts]
+    nothing_available = [dataclasses.replace(v, available=False) for v in verdicts]
     monkeypatch.setattr(providers, "detect_engines", lambda ollama_at=None: nothing_available)
     with pytest.raises(StopIteration):
         providers.default_engine()
@@ -1303,8 +1304,10 @@ def test_cli_detect_engines_prints_the_verdicts_as_json_in_order(
 ):
     """Acceptance for Done-when 1 to 3: `melampus-id --detect-engines` needs no
     folder, prints one JSON list to stdout, in the owner's order, each item
-    {engine, available, reason}, and exits 0. Faked off Apple Silicon with no
-    Ollama: mlx and ollama say why not, the cloud engines say which key."""
+    {engine, title, available, reason, install}, and exits 0. Faked off Apple
+    Silicon with no Ollama: mlx and ollama say why not, the cloud engines say
+    which key, and only the engine there is something to go and install
+    carries an install page (review round 9, finding 1)."""
     from melampus.cli import main
 
     fake_platform(monkeypatch, "win32", "AMD64")
@@ -1315,15 +1318,20 @@ def test_cli_detect_engines_prints_the_verdicts_as_json_in_order(
     assert code == 0, err
     verdicts = json.loads(out)
     assert [v["engine"] for v in verdicts] == [*ENGINES, providers.CLAUDE_CODE, providers.CODEX]
-    assert all(set(v) == {"engine", "available", "reason"} for v in verdicts)
+    assert all(set(v) == {"engine", "title", "available", "reason", "install"} for v in verdicts)
+    assert all(v["title"] for v in verdicts), "a verdict with no title for the picker"
     by_engine = {v["engine"]: v for v in verdicts}
-    assert by_engine["mlx"] == {"engine": "mlx", "available": False, "reason": "needs Apple Silicon"}
+    assert by_engine["mlx"] == {
+        "engine": "mlx", "title": providers.ENGINE_TITLES["mlx"], "available": False,
+        "reason": "needs Apple Silicon", "install": ""}
     assert by_engine["ollama"]["available"] is False
     assert providers.OLLAMA_INSTALL in by_engine["ollama"]["reason"]
+    assert by_engine["ollama"]["install"] == providers.OLLAMA_INSTALL
     for engine in ("openai", "claude"):
         assert by_engine[engine]["available"] is True
         assert "API key required" in by_engine[engine]["reason"]
         assert providers.KEY_VARIABLES[engine][0] in by_engine[engine]["reason"]
+        assert by_engine[engine]["install"] == "", "a cloud engine is nothing to go and install"
 
 
 def test_cli_detect_engines_reports_ollama_when_it_answers(monkeypatch, capsys):
@@ -2703,8 +2711,8 @@ def test_command_backend_sees_the_exit_through_waitid_where_there_is_no_kqueue(m
 
 def test_command_is_selectable_by_config_and_flag_but_not_a_picker_choice():
     """`[model] backend = "command"` and `--backend command` select the seam;
-    the plugin's picker learns it in card #423, so BACKEND_CHOICES, the
-    engines the picker offers in the owner's order, is unchanged. It is
+    the plugin's picker does not offer it (detection has no program to check
+    for), so BACKEND_CHOICES, the owner's four in order, is unchanged. It is
     local: no cloud retuning, no cost prompt, no cloud cache file."""
     assert providers.COMMAND == "command"
     assert providers.BACKEND_CHOICES == (*ENGINES, providers.SCRIPTED)
@@ -3858,8 +3866,8 @@ def test_the_cli_is_an_engine_name_on_the_command_seam(cli, name):
     (the owner's words), named configurations of the command seam and not
     new backends: local (bills to a subscription, not per call: no cloud
     retuning, no cost prompt, no cloud cache file), selectable by config
-    and --backend, and not yet a picker choice (the picker learns them in
-    #423), so BACKEND_CHOICES is unchanged."""
+    and --backend, and picker choices after the owner's four (card #423,
+    through detect_engines), so BACKEND_CHOICES is unchanged."""
     assert cli.engine == name
     assert cli.engine in providers.LOCAL_BACKENDS
     assert providers.BACKEND_CHOICES == (*ENGINES, providers.SCRIPTED)
@@ -4249,6 +4257,42 @@ def test_detection_the_cli_not_installed_points_to_the_install(monkeypatch, tmp_
     assert not verdict.available
     assert "not installed" in verdict.reason and cli.install in verdict.reason
     assert f"then sign in with `{cli.sign_in}`" in verdict.reason
+
+
+@posix_only
+@pytest.mark.parametrize("cli", CLIS)
+def test_the_install_page_the_picker_links_to_is_a_field_of_the_verdict(
+    monkeypatch, tmp_path, capsys, no_ambient_keys, no_ambient_ollama, cli
+):
+    """Claude review round 9, finding 1: the picker turns an unavailable
+    engine's install page into the one clickable line in the settings
+    dialog, so the verdict says where that is rather than leaving the
+    plugin to scrape the last address out of the reason. A CLI's reason
+    carries the CLI's own words, and two of them name an address that is
+    not an install page: the authentication-precedence docs, and whatever
+    the program printed on stderr. The field is set only where going and
+    installing is the fix (no Ollama server, a CLI that is not installed);
+    everything else carries none, an installed CLI that is not signed in
+    included. `--detect-engines` prints it, since the picker is its only
+    reader."""
+    from melampus.cli import main
+
+    _no_engine_cli(monkeypatch, tmp_path, cli)
+    assert _verdict(cli.engine).install == cli.install
+    assert _verdict(providers.OLLAMA).install == providers.OLLAMA_INSTALL
+    for engine in ("mlx", "openai", "claude"):
+        assert _verdict(engine).install == "", f"{engine} is nothing to go and install"
+
+    assert main(["--detect-engines"]) == 0
+    printed = {v["engine"]: v for v in json.loads(capsys.readouterr().out)}
+    assert printed[cli.engine]["install"] == cli.install
+    assert printed[providers.OLLAMA]["install"] == providers.OLLAMA_INSTALL
+    assert printed["mlx"]["install"] == ""
+
+    _fake_engine_cli(monkeypatch, tmp_path, cli, mode="not-signed-in")
+    installed = _verdict(cli.engine)
+    assert not installed.available
+    assert installed.install == "", "an installed CLI is not something to go and install"
 
 
 @posix_only
@@ -5065,6 +5109,33 @@ def test_claude_code_that_lapses_mid_run_stops_the_batch_at_the_first_reply(
     assert code == 3, err
     assert "not signed in" in err and providers.CLAUDE_CODE_SIGN_IN in err
     assert not out.exists() and not (tmp_path / "cache.jsonl").exists()
+
+
+@posix_only
+def test_detection_titles_every_engine_for_the_picker(monkeypatch, tmp_path, no_ambient_keys, no_ambient_ollama):
+    """Card #423: the picker's titles come from the verdict, the one source,
+    not a table in Lua. Every verdict carries a title; the four engines'
+    are the plain names, and the two CLIs' name the program (CliEngine
+    .title) and that no key is needed, the same in every state: not
+    installed, installed but not signed in, signed in."""
+    for cli in (providers.CLAUDE_CODE_CLI, providers.CODEX_CLI):
+        _no_engine_cli(monkeypatch, tmp_path, cli)
+    titles = {v.engine: v.title for v in providers.detect_engines()}
+    assert titles == {
+        "mlx": "MLX — local, Apple Silicon",
+        "ollama": "Ollama — local",
+        "openai": "OpenAI — cloud, needs an API key",
+        "claude": "Claude — cloud, needs an API key",
+        "claude-code": "Claude Code — subscription, no API key",
+        "codex": "Codex CLI — subscription, no API key",
+    }
+    assert titles["claude-code"].startswith(providers.CLAUDE_CODE_CLI.title)
+    assert titles["codex"].startswith(providers.CODEX_CLI.title)
+    for mode in ("not-signed-in", "signed-in"):
+        for cli in (providers.CLAUDE_CODE_CLI, providers.CODEX_CLI):
+            _fake_engine_cli(monkeypatch, tmp_path, cli, mode=mode)
+        assert _verdict("claude-code").title == titles["claude-code"], mode
+        assert _verdict("codex").title == titles["codex"], mode
 
 
 # --- card #422: what is Codex CLI's own -----------------------------------

@@ -46,23 +46,83 @@ function M.runThroughTheShell(command)
 	return code
 end
 
+--- Where the engines that are something to go and install are installed
+-- from: what a verdict that says to go and install one carries as its
+-- `install`, and what its reason names. Spelled once for every suite.
+M.OLLAMA_INSTALL = 'https://ollama.com/download'
+M.CLAUDE_CODE_INSTALL = 'https://code.claude.com/docs/en/setup'
+M.CODEX_INSTALL = 'https://developers.openai.com/codex/cli'
+
 --- What `melampus --detect-engines` says on a Mac with no Ollama running,
--- decoded: one verdict per engine, in the order the executable prints them.
--- `overrides[engine]` replaces fields of that engine's verdict. The one
--- canned answer every suite starts from, so a reason is spelled once.
+-- no Claude Code installed and a Codex CLI that is not signed in, decoded:
+-- one verdict per engine, in the order the executable prints them, each
+-- with the title the picker shows (card #423). `overrides[engine]` replaces
+-- fields of that engine's verdict. The one canned answer every suite starts
+-- from, so a title and a reason are spelled once; `M.canned[engine]` is the
+-- same answer by engine, `M.titles[engine]` its title, and `M.signedIn` the
+-- other answer the subscription CLIs give, as an overrides table, and
+-- `M.allAvailable()` the answer with every engine available.
 function M.detectionVerdicts(overrides)
 	local list = {
-		{ engine = 'mlx', available = true, reason = 'runs locally on this Apple Silicon Mac' },
-		{ engine = 'ollama', available = false,
-			reason = 'no Ollama server at http://127.0.0.1:11434; install it from https://ollama.com/download' },
-		{ engine = 'openai', available = true, reason = 'API key required: set MELAMPUS_OPENAI_KEY (or OPENAI_API_KEY)' },
-		{ engine = 'claude', available = true, reason = 'API key required: set MELAMPUS_ANTHROPIC_KEY (or ANTHROPIC_API_KEY)' },
+		{ engine = 'mlx', title = 'MLX — local, Apple Silicon', available = true,
+			reason = 'runs locally on this Apple Silicon Mac', install = '' },
+		{ engine = 'ollama', title = 'Ollama — local', available = false,
+			reason = 'no Ollama server at http://127.0.0.1:11434; install it from ' .. M.OLLAMA_INSTALL,
+			install = M.OLLAMA_INSTALL },
+		{ engine = 'openai', title = 'OpenAI — cloud, needs an API key', available = true,
+			reason = 'API key required: set MELAMPUS_OPENAI_KEY (or OPENAI_API_KEY)', install = '' },
+		{ engine = 'claude', title = 'Claude — cloud, needs an API key', available = true,
+			reason = 'API key required: set MELAMPUS_ANTHROPIC_KEY (or ANTHROPIC_API_KEY)', install = '' },
+		{ engine = 'claude-code', title = 'Claude Code — subscription, no API key', available = false,
+			reason = "Claude Code is not installed: nothing on PATH is called 'claude'; "
+				.. 'install it from ' .. M.CLAUDE_CODE_INSTALL .. ', then sign in with `claude auth login`',
+			install = M.CLAUDE_CODE_INSTALL },
+		-- Installed, so going and installing it is not the fix: no install page.
+		{ engine = 'codex', title = 'Codex CLI — subscription, no API key', available = false,
+			reason = 'Codex CLI is installed but not signed in; run `codex login`', install = '' },
 	}
 	for _, v in ipairs(list) do
 		local o = overrides and overrides[v.engine]
 		if o then for k, value in pairs(o) do v[k] = value end end
 	end
 	return list
+end
+
+M.canned = {}
+M.titles = {}
+for _, v in ipairs(M.detectionVerdicts()) do
+	M.canned[v.engine] = v
+	M.titles[v.engine] = v.title
+end
+
+--- The picker's items (Rules.engineItems, or a popup_menu's) indexed by
+-- value, so a test can name one: M.itemsByValue(items).codex.
+function M.itemsByValue(items)
+	local byValue = {}
+	for _, item in ipairs(items) do byValue[item.value] = item end
+	return byValue
+end
+
+--- The subscription CLIs signed in (card #423): each available, with the
+-- billing sentence providers._cli_verdict prints, the account in brackets.
+M.signedIn = {
+	['claude-code'] = { available = true, install = '',
+		reason = 'Claude Code is signed in (claude.ai, max); every frame bills to that subscription, not to an API key' },
+	codex = { available = true, install = '',
+		reason = 'Codex CLI is signed in (ChatGPT); every frame bills to that subscription, not to an API key' },
+}
+
+--- Every engine available: Ollama answering and both subscription CLIs
+-- signed in, as an overrides table, built fresh each call; `extra[engine]`
+-- is merged on top, so a test can grey one engine against everything else
+-- available.
+function M.allAvailable(extra)
+	local overrides = {
+		ollama = { available = true, install = '', reason = 'Ollama is answering at http://127.0.0.1:11434' },
+		['claude-code'] = M.signedIn['claude-code'], codex = M.signedIn.codex,
+	}
+	for engine, o in pairs(extra or {}) do overrides[engine] = o end
+	return overrides
 end
 
 --- The same answer as the JSON text the executable prints.
@@ -72,8 +132,10 @@ function M.detectionText(overrides)
 	end
 	local parts = {}
 	for _, v in ipairs(M.detectionVerdicts(overrides)) do
-		parts[#parts + 1] = string.format('{"engine": %s, "available": %s, "reason": %s}',
-			quoted(v.engine), tostring(v.available), quoted(v.reason))
+		parts[#parts + 1] = string.format(
+			'{"engine": %s, "title": %s, "available": %s, "reason": %s, "install": %s}',
+			quoted(v.engine), quoted(v.title), tostring(v.available), quoted(v.reason),
+			quoted(v.install or ''))
 	end
 	return '[' .. table.concat(parts, ', ') .. ']'
 end

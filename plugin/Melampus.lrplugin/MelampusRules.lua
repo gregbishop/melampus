@@ -88,9 +88,12 @@ function Rules.defaultSettings()
 	}
 end
 
---- The engines a user can choose between, in the owner's words and order.
--- These are the CLI's --backend names; the offline test fake is not one.
-Rules.ENGINES = { 'mlx', 'ollama', 'openai', 'claude' }
+--- The engines a user can choose between, in the owner's words and the
+-- executable's order: the owner's four, then the two subscription CLIs
+-- (card #423). These are the CLI's --backend names; the offline test fake
+-- is not one. The executable's --detect-engines prints one verdict per
+-- name in this order, and test_lua_plugin.py holds the two to each other.
+Rules.ENGINES = { 'mlx', 'ollama', 'openai', 'claude', 'claude-code', 'codex' }
 
 --- The engine the preference chooses: its name when it is one of
 -- Rules.ENGINES, nil when none is set, so the CLI decides. An unknown value
@@ -114,15 +117,6 @@ end
 -- passed as --backend; the others have no model to fetch.
 Rules.MODEL_ENGINES = { 'mlx', 'ollama' }
 
---- What the picker calls each engine. The reason detection gives says the
--- rest; a title only has to be recognisable.
-Rules.ENGINE_TITLES = {
-	mlx = 'MLX — local, Apple Silicon',
-	ollama = 'Ollama — local',
-	openai = 'OpenAI — cloud, needs an API key',
-	claude = 'Claude — cloud, needs an API key',
-}
-
 --- The variable a cloud engine's API key travels in to the executable
 -- (providers.KEY_VARIABLES on the Python side), which is also the name the
 -- key is stored under. nil for an engine that needs no key.
@@ -137,16 +131,21 @@ end
 
 --- The engine picker's items from what the executable said (card #405):
 -- `verdicts` is the decoded JSON of --detect-engines, a list of
--- { engine, available, reason }. The first item leaves the choice to the
--- executable (the unset preference); then Rules.ENGINES in order, each
--- disabled when detection said it cannot run here. The ollama item alone,
--- when disabled and its reason names a web address, carries the last one
--- it names as `link`: where to install Ollama. Another engine's address
--- stays text in the note. Without verdicts (no executable, or output that
--- is not the list) nothing is greyed and `problem` is the note. Returns the
--- items and the note to show under the picker: one line per unavailable
--- engine with its reason, or the problem. An item carries only what the
--- dialog reads: title, value, enabled, link.
+-- { engine, title, available, reason, install }. The first item leaves the
+-- choice to the executable (the unset preference); then Rules.ENGINES in
+-- order, each titled as its verdict says (the executable is the one place
+-- that names an engine; card #423), disabled when detection said it cannot
+-- run here.
+-- A disabled item whose verdict carries an install page (`install`: where
+-- to go and get the engine, when going and getting it is the fix) carries
+-- that address as `link`. An address a reason merely names stays text in
+-- the note.
+-- Without verdicts (no executable, or output that is not the list) nothing
+-- is greyed, the names stand in for the titles, and `problem` is the note.
+-- Returns the items and the note to show under the picker: one line per
+-- unavailable engine with its reason, or the problem. An item carries only
+-- what the dialog reads: title, value, enabled, link, and the reason
+-- Rules.pickedReason shows for the picked engine.
 function Rules.engineItems(verdicts, problem)
 	local byEngine = {}
 	if type(verdicts) == 'table' then
@@ -164,22 +163,23 @@ function Rules.engineItems(verdicts, problem)
 	for _, engine in ipairs(Rules.ENGINES) do
 		local verdict = byEngine[engine]
 		local available = verdict == nil or verdict.available ~= false
+		local reason = verdict and tostring(verdict.reason or '') or ''
+		local title = verdict and type(verdict.title) == 'string' and verdict.title or engine
 		local item = {
-			title = Rules.ENGINE_TITLES[engine] .. (available and '' or ' (not available)'),
-			value = engine, enabled = available,
+			title = title .. (available and '' or ' (not available)'),
+			value = engine, enabled = available, reason = reason,
 		}
 		if not available then
-			local reason = tostring(verdict.reason or '')
-			-- Only Ollama is something to go and install. The address to go
-			-- to is the last one the reason names (the first may be where a
-			-- local server was looked for), without a trailing full stop or
-			-- semicolon from the sentence around it.
-			if engine == 'ollama' then
-				for address in string.gmatch(reason, 'https?://[^%s]+') do
-					item.link = string.match(address, '^(.-)[.,;:)]*$')
-				end
-			end
-			lines[#lines + 1] = Rules.ENGINE_TITLES[engine] .. ': ' .. reason
+			-- Only something to go and install gets a link, and where to go is
+			-- the address the verdict carries (Ollama, card #405; the two
+			-- subscription CLIs, card #423), never one scraped out of the
+			-- reason: a CLI's reason is the CLI's own words, and can name the
+			-- billing docs or a line the program printed on stderr, neither of
+			-- them an install page (review round 9, finding 1). Whatever a
+			-- reason names stays text in the note, address and all.
+			local install = verdict.install
+			if type(install) == 'string' and install ~= '' then item.link = install end
+			lines[#lines + 1] = title .. ': ' .. reason
 		end
 		items[#items + 1] = item
 	end
@@ -208,6 +208,17 @@ function Rules.canRun(verdicts, engine)
 		if name == engine then return true end
 	end
 	return false
+end
+
+--- What to say under the picker about the picked engine: its item's reason
+-- (card #423: a signed-in subscription CLI's says what every frame bills
+-- to, before a run; a cloud engine's names the key it needs), or '' when
+-- nothing is picked, the value is not an item, or there was no detection.
+function Rules.pickedReason(items, engine)
+	for _, item in ipairs(items or {}) do
+		if item.value == engine and item.value ~= '' then return item.reason or '' end
+	end
+	return ''
 end
 
 --- The engine a picker value comes to (card #408): the picked one, or with

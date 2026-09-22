@@ -61,6 +61,18 @@ OLLAMA = "ollama"
 #: first that can run on this machine.
 BACKEND_CHOICES = ("mlx", OLLAMA, "openai", "claude", SCRIPTED)
 
+#: What the plugin's picker calls the four engines (card #423): the one
+#: copy, carried on each verdict so the dialog holds no title table of its
+#: own. The reason detection gives says the rest; a title only has to be
+#: recognisable. The subscription CLIs' titles are composed from
+#: CliEngine.title in _cli_verdict.
+ENGINE_TITLES = {
+    "mlx": "MLX — local, Apple Silicon",
+    OLLAMA: "Ollama — local",
+    "openai": "OpenAI — cloud, needs an API key",
+    "claude": "Claude — cloud, needs an API key",
+}
+
 #: Where the local Ollama server listens. Ollama's docs/faq.mdx: "Ollama binds
 #: 127.0.0.1 port 11434 by default." One constant: the default of the
 #: `[model] ollama_url` setting (card #406), which is unset until a user
@@ -76,8 +88,9 @@ OLLAMA_INSTALL = "https://ollama.com/download"
 
 #: An installed command-line program driven per frame (card #420): a
 #: subscription CLI is vision with no API key. Selected by `[model] backend`
-#: or --backend, not offered by the plugin's picker until card #423 teaches
-#: detection about it, so it is not in BACKEND_CHOICES.
+#: or --backend; detection knows no program to check for, so the plugin's
+#: picker does not offer it (the two named CLIs below it does, card #423)
+#: and it is not in BACKEND_CHOICES.
 COMMAND = "command"
 
 #: What a `command`, or a CLI engine's template, may not resolve to: Windows
@@ -455,9 +468,11 @@ def ollama_answers(url: str | None = None) -> bool:
 class EngineVerdict:
     """Whether one engine can run on this machine, and why or why not, in the
     words a user sees: the reason is what makes an unavailable engine a
-    greyed-out choice rather than a mystery (card #404)."""
+    greyed-out choice rather than a mystery (card #404), and the title is
+    what the picker calls it (card #423)."""
 
     engine: str
+    title: str
     available: bool
     reason: str
     #: Where the program that decides the verdict was found, when one does
@@ -465,6 +480,17 @@ class EngineVerdict:
     #: runs what detection checked and never resolves it again. None for
     #: the engines no program decides.
     executable: str | None = None
+    #: Where to go and install this engine, when going and installing it is
+    #: what the reason says is missing (no Ollama server, a CLI that is not
+    #: installed): the address the picker offers as its one clickable line
+    #: (card #405, widened to the CLIs by card #423). Here rather than
+    #: scraped out of `reason` by the plugin, because a CLI's reason is the
+    #: CLI's own words and can name an address that is not an install page
+    #: — the authentication-precedence docs, or a line the program printed
+    #: on stderr (review round 9, finding 1). "" for every other verdict,
+    #: an installed CLI that is not signed in included: there is nothing to
+    #: go and get.
+    install: str = ""
 
 
 def _key_required(engine: str) -> str:
@@ -771,12 +797,14 @@ def _cli_verdict(cli: CliEngine, command: list[str] | None, probe_seconds: float
     program = command[0]
     check = cli.status_check(command)
     next_step = cli.bare_fix if cli.bare and cli.bare in check else f"sign in with `{cli.sign_in}`"
+    title = f"{cli.title} — subscription, no API key"
     executable = shutil.which(program)
     if executable is None:
         return EngineVerdict(
-            cli.engine, False,
+            cli.engine, title, False,
             f"{cli.title} is not installed: nothing on PATH is called '{program}'; "
             f"install it from {cli.install}, then {next_step}",
+            install=cli.install,
         )
     if shim := _batch_shim(program, executable):
         return EngineVerdict(cli.engine, False, shim)
@@ -790,11 +818,11 @@ def _cli_verdict(cli: CliEngine, command: list[str] | None, probe_seconds: float
         )
     except subprocess.TimeoutExpired:
         return EngineVerdict(
-            cli.engine, False,
+            cli.engine, title, False,
             f"`{program} {' '.join(check)}` did not answer within {probe_seconds:g}s",
         )
     except OSError as exc:
-        return EngineVerdict(cli.engine, False, f"'{program}' could not be run: {exc}")
+        return EngineVerdict(cli.engine, title, False, f"'{program}' could not be run: {exc}")
     if status.returncode != 0:
         # Not signed in is what the CLI says (`cli.signed_out`) or, without
         # a word, the documented exit alone: "Exits with code 0 if logged
@@ -805,12 +833,12 @@ def _cli_verdict(cli: CliEngine, command: list[str] | None, probe_seconds: float
         said = stderr_lines(status.stderr)
         if cli.signed_out(status) or (status.returncode == 1 and not said):
             return EngineVerdict(
-                cli.engine, False,
+                cli.engine, title, False,
                 f"{cli.title} is installed but not signed in: `{program} {' '.join(check)}` "
                 f"says so; {next_step}",
             )
         return EngineVerdict(
-            cli.engine, False,
+            cli.engine, title, False,
             f"`{program} {' '.join(check)}` exited {status.returncode}"
             + (f": {said}" if said else " with nothing on stderr"),
         )
@@ -823,14 +851,14 @@ def _cli_verdict(cli: CliEngine, command: list[str] | None, probe_seconds: float
             else "nothing about the account this engine can place, and one it cannot place may bill per call"
         )
         return EngineVerdict(
-            cli.engine, False,
+            cli.engine, title, False,
             f"{cli.title} is signed in, but not to {cli.subscription}: `{program} "
             f"{' '.join(check)}` says {said}, and every frame would bill that "
             f"credential instead{f' ({cli.billing_docs})' if cli.billing_docs else ''}; "
             f"{f'{credential.fix}, then ' if credential.fix else ''}{next_step}",
         )
     return EngineVerdict(
-        cli.engine, True,
+        cli.engine, title, True,
         f"{cli.title} is signed in"
         + (f" ({credential.signed_in_as})" if credential.signed_in_as else "")
         + "; every frame bills to that subscription, not to an API key",
@@ -897,8 +925,8 @@ def detect_engines(
     ollama_at: str | None = None, commands: dict[str, list[str]] | None = None
 ) -> list[EngineVerdict]:
     """One verdict per engine, in the owner's order (BACKEND_CHOICES without the
-    test fake), then claude-code and codex (cards #421, #422; the picker
-    learns them in #423).
+    test fake), then claude-code and codex (cards #421, #422): the plugin's
+    picker is built from this list, in this order (card #423).
     This is the one place that knows whether an engine can run here: the
     refusals' "what works" list and the CLI's default both come from it, so
     they cannot disagree with what the dialog (card #405) shows. `ollama_at`
@@ -912,16 +940,17 @@ def detect_engines(
     commands = commands or {}
     return [
         EngineVerdict(
-            "mlx", apple_silicon,
+            "mlx", ENGINE_TITLES["mlx"], apple_silicon,
             "runs locally on this Apple Silicon Mac" if apple_silicon else "needs Apple Silicon",
         ),
         EngineVerdict(
-            OLLAMA, ollama,
+            OLLAMA, ENGINE_TITLES[OLLAMA], ollama,
             f"Ollama is answering at {url}" if ollama
             else f"no Ollama server at {url}; install it from {OLLAMA_INSTALL}",
+            install="" if ollama else OLLAMA_INSTALL,
         ),
-        EngineVerdict("openai", True, _key_required("openai")),
-        EngineVerdict("claude", True, _key_required("claude")),
+        EngineVerdict("openai", ENGINE_TITLES["openai"], True, _key_required("openai")),
+        EngineVerdict("claude", ENGINE_TITLES["claude"], True, _key_required("claude")),
         claude_code_verdict(commands.get(CLAUDE_CODE)),
         codex_verdict(commands.get(CODEX)),
     ]

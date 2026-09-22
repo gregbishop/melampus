@@ -14,6 +14,7 @@ import os
 import shutil
 import subprocess
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
@@ -32,13 +33,17 @@ from huggingface_hub.constants import DOWNLOAD_CHUNK_SIZE
 
 from melampus import providers
 from melampus.download import CANCEL_MARKER, EXIT_CANCELLED, Update
-from test_binary import per_user_config, per_user_data_dir
+from test_binary import no_python_environment, per_user_config, per_user_data_dir
 
 REPO = Path(__file__).resolve().parents[2]
 PLUGIN = REPO / "plugin" / "Melampus.lrplugin"
 TESTS = REPO / "plugin" / "tests"
 
-pytestmark = pytest.mark.skipif(shutil.which("lua") is None, reason="lua not installed")
+#: The interpreter, resolved once on this process's PATH: the one the skip
+#: check found runs every script, whatever PATH a test hands the run.
+LUA = shutil.which("lua")
+
+pytestmark = pytest.mark.skipif(LUA is None, reason="lua not installed")
 
 # The mock keeps its temp directory through sh (mktemp -d, mkdir -p, ls,
 # rm -rf), which cmd.exe does not speak; the suites that fake a macOS
@@ -52,7 +57,7 @@ def run_lua(script: Path, env: dict[str, str] | None = None) -> subprocess.Compl
     # Forward slashes: the paths land in a Lua string literal, where a
     # backslash starts an escape, and Windows opens either kind.
     return subprocess.run(
-        ["lua", "-e", f'package.path="{TESTS.as_posix()}/?.lua;{PLUGIN.as_posix()}/?.lua;"..package.path',
+        [str(LUA), "-e", f'package.path="{TESTS.as_posix()}/?.lua;{PLUGIN.as_posix()}/?.lua;"..package.path',
          str(script)],
         capture_output=True, text=True, cwd=TESTS, env=env,
     )
@@ -106,6 +111,34 @@ def run_as_lightroom_would(command: str, **kwargs) -> subprocess.CompletedProces
     return subprocess.run(command, shell=True, **kwargs)
 
 
+# The picker's engines in the executable's order: the CLI's choices without the
+# offline test fake, then the two subscription CLIs (card #423; the command
+# seam is not a picker choice). Spelled once, for the #403 binding and the
+# #423 detection run to hold the plugin's list against.
+PICKER_ENGINES = [*(b for b in providers.BACKEND_CHOICES if b != providers.SCRIPTED),
+                  providers.CLAUDE_CODE, providers.CODEX]
+# A synthetic key as LrPasswords would hold it, for the runs against the built
+# executable: carried into the command for openai (#405), and kept out of it
+# for a subscription CLI (#423). Spelled once, so the absence is checked
+# against the value that was stored.
+STORED_KEY = "stored-in-lrpasswords-not-a-real-key-9b2d"
+
+
+def _engines_the_plugin_knows(tmp_path: Path) -> list[str]:
+    """`Rules.ENGINES` as the plugin reads it, through lua, in its order: the
+    one list the #403 binding and the #423 executable check both hold their
+    side against, so the script that reads it is spelled once."""
+    script = tmp_path / "engines.lua"
+    script.write_text(
+        "local Rules = require('MelampusRules')\n"
+        "io.write(table.concat(Rules.ENGINES, '\\n'))\n",
+        encoding="utf-8",
+    )
+    proc = run_lua(script)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    return proc.stdout.split("\n")
+
+
 def test_write_rules():
     """CLAUDE.md §5.3 safety rules: no overwrites, dry run, idempotency."""
     run_lua_suite(TESTS / "test_rules.lua")
@@ -131,11 +164,15 @@ def test_import_runs_against_a_mock_lightroom():
 @needs_sh
 def test_settings_dialog_against_a_mock_lightroom(tmp_path: Path):
     """Card #405: executes the real MelampusSettings.lua against the mock SDK.
-    The engine picker lists the four engines in order with the ones detection
-    says cannot run here greyed and their reasons shown; the Ollama link is
-    there exactly when ollama is unavailable; the API key field shows only for
-    the picked cloud engine and stores through LrPasswords, never the
-    preferences, a file, or the log; a missing executable greys nothing.
+    The engine picker lists the engines in the executable's order with the
+    ones detection says cannot run here greyed and their reasons shown; the
+    Ollama link is there exactly when ollama is unavailable; the API key
+    field shows only for the picked cloud engine and stores through
+    LrPasswords, never the preferences, a file, or the log; a missing
+    executable greys nothing. Card #423: claude-code and codex after the
+    four, greyed as not installed or not signed in, offered when signed in,
+    no key field for either, and the picked engine's reason under the
+    picker, the billing sentence for a signed-in CLI.
     Card #408: the download plumbing, stepped through the mock's tasks: the
     command with stdout redirected on both shells, the poller reading the
     progress file, Cancel writing the marker, exit 3 with the log's tail.
@@ -152,23 +189,14 @@ def test_json_decoder():
 
 
 def test_the_plugin_names_the_engines_the_cli_accepts(tmp_path: Path):
-    """Card #403: the four engine names are spelled once per language, in
+    """Card #403: the engine names are spelled once per language, in
     `Rules.ENGINES` for the plugin and `providers.BACKEND_CHOICES` for the
     CLI, and this is what binds them: the plugin's list, read through lua, is
-    the CLI's list without the offline test fake, in the same order. A rename
-    on either side fails here rather than as a usage error the user never
-    sees."""
-    script = tmp_path / "engines.lua"
-    script.write_text(
-        "local Rules = require('MelampusRules')\n"
-        "io.write(table.concat(Rules.ENGINES, '\\n'))\n",
-        encoding="utf-8",
-    )
-    proc = run_lua(script)
-    assert proc.returncode == 0, proc.stdout + proc.stderr
-
-    engines = [b for b in providers.BACKEND_CHOICES if b != providers.SCRIPTED]
-    assert proc.stdout.split("\n") == engines
+    the CLI's list without the offline test fake, then the two subscription
+    CLIs (card #423; the command seam is not a picker choice), in the same
+    order. A rename on either side fails here rather than as a usage error
+    the user never sees."""
+    assert _engines_the_plugin_knows(tmp_path) == PICKER_ENGINES
 
 
 def test_the_plugin_offers_a_download_row_for_exactly_the_engines_the_cli_fetches_a_model_for(tmp_path: Path):
@@ -245,13 +273,17 @@ def _plugin_folder_holding(executable: Path, tmp_path: Path) -> Path:
     return plugin_dir
 
 
-def _plugin_under_the_mock(plugin_dir: Path, tmp_path: Path, body: str, **env: str) -> str:
+def _plugin_under_the_mock(
+    plugin_dir: Path, tmp_path: Path, body: str, environment: Mapping[str, str] = os.environ,
+    **env: str,
+) -> str:
     """Run `body`, Lua, with the mock SDK installed for `plugin_dir` (so
     `_PLUGIN.path` is there) on the platform Lightroom reports for this host
     (a fake Windows Lightroom on a Windows host), and MelampusAnalyze.lua
     loaded fresh under it through the mock's own loader as `Analyze`, with
-    the MelampusRules.lua instance it uses as `Rules`. `env` is what the body
-    reads through os.getenv. Hands back what it wrote.
+    the MelampusRules.lua instance it uses as `Rules`. `environment` is what
+    the run inherits (this process's, unless a test hands it one of its own),
+    `env` what the body reads through os.getenv. Hands back what it wrote.
 
     The mock's temp directory: under TMPDIR on a fake macOS Lightroom, the
     Windows temp folder (TEMP, as Lightroom reports it) on a fake Windows
@@ -266,7 +298,7 @@ def _plugin_under_the_mock(plugin_dir: Path, tmp_path: Path, body: str, **env: s
         + body,
         encoding="utf-8",
     )
-    ran = run_lua(script, env=os.environ | {
+    ran = run_lua(script, env=dict(environment) | {
         "MELAMPUS_PLUGIN_DIR": str(plugin_dir),
         "MELAMPUS_WINDOWS": "1" if WINDOWS else "0",
         "TMPDIR": str(tmp_path),
@@ -283,13 +315,17 @@ def _command_the_plugin_builds(
     """The one shell command MelampusAnalyze.lua builds under the mock SDK
     with `_PLUGIN.path` at `plugin_dir` and the engine preference set to
     `engine` ("" is the default: no preference). `stored_key` is what
-    LrPasswords holds for `engine`'s key variable (card #405); "" means
-    nothing stored."""
+    LrPasswords holds under every key variable, `Rules.KEY_VARIABLES` (as
+    test_import_integration.lua stores both), so a run for openai finds its
+    key (card #405) and a run for an engine that needs none is checked
+    against keys that are there to leak (card #423); "" means nothing
+    stored."""
     return _plugin_under_the_mock(
         plugin_dir, tmp_path,
-        "local variable = Rules.keyVariable(os.getenv('MELAMPUS_ENGINE'))\n"
-        "if variable and os.getenv('MELAMPUS_STORED_KEY') ~= '' then\n"
-        "  mock.state.passwords[variable] = os.getenv('MELAMPUS_STORED_KEY')\n"
+        "if os.getenv('MELAMPUS_STORED_KEY') ~= '' then\n"
+        "  for _, variable in pairs(Rules.KEY_VARIABLES) do\n"
+        "    mock.state.passwords[variable] = os.getenv('MELAMPUS_STORED_KEY')\n"
+        "  end\n"
         "end\n"
         "local ok, message = Analyze.run(os.getenv('MELAMPUS_PREVIEWS'),"
         " os.getenv('MELAMPUS_RESULTS'), 'wildlife', os.getenv('MELAMPUS_ENGINE'))\n"
@@ -340,7 +376,64 @@ def test_the_engine_preference_reaches_the_executable_through_the_command_the_pl
     assert "invalid choice" not in tail, f"the executable does not accept ollama:\n{tail}"
 
 
-@pytest.mark.parametrize("stored_key", ["", "stored-in-lrpasswords-not-a-real-key-9b2d"])
+def test_the_engines_the_plugin_knows_are_the_executables_in_its_order(
+    built_executable: Path, tmp_path: Path
+):
+    """Card #423: the plugin validates the engine preference before the shell
+    (Rules.ENGINES, the picker's order too), and the executable's
+    `--detect-engines` is the list the picker is built from, so the two are
+    one order in two places. Held to each other here against dist/melampus
+    with no python on the path: a name added to one without the other fails
+    CI, and the picker can never offer an engine the run would refuse."""
+    proc = subprocess.run(
+        [str(built_executable), "--detect-engines"],
+        env=no_python_environment(tmp_path), capture_output=True, text=True, timeout=600,
+    )
+    assert proc.returncode == 0, proc.stderr[-3000:]
+    assert [v["engine"] for v in json.loads(proc.stdout)] == _engines_the_plugin_knows(tmp_path)
+
+
+@pytest.mark.parametrize("engine", ["claude-code", "codex"])
+def test_the_cli_engine_preference_reaches_the_executable_through_the_command_the_plugin_builds(
+    built_executable: Path, photos: Path, tmp_path: Path, engine: str
+):
+    """Card #423, Done-when 2 at the real boundary. With the engine
+    preference set to a subscription CLI, the command the plugin builds
+    carries `--backend claude-code` (or codex) and sets no key variable
+    ahead of the executable, whatever LrPasswords holds; run through sh
+    against dist/melampus with nothing on the PATH (so no `claude` or
+    `codex` either), through the shell LrTasks.execute hands it to, the
+    executable receives the name and answers with its own refusal for a CLI
+    that is not installed, naming where to get it, exit 3, in the CLI log
+    the plugin points a failed run at. Nothing runs, nothing is sent
+    anywhere."""
+    cli = {"claude-code": providers.CLAUDE_CODE_CLI, "codex": providers.CODEX_CLI}[engine]
+    plugin_dir = _plugin_folder_holding(built_executable, tmp_path)
+    env = no_python_environment(tmp_path)
+    assert shutil.which(cli.program, path=env["PATH"]) is None
+
+    command = _command_the_plugin_builds(
+        plugin_dir, photos, photos / "results.json", tmp_path, engine=engine,
+        stored_key=STORED_KEY)
+    assert f"--backend {as_the_shell_receives_it(engine)}" in command, command
+    # The executable first: on Windows after the quote the whole line is
+    # wrapped in for cmd.exe, on macOS at the very start.
+    line = command[1:] if WINDOWS else command
+    assert line.startswith(as_the_shell_receives_it(plugin_dir / built_executable.name)), (
+        f"something is set ahead of the executable for an engine that needs no key:\n{command}")
+    assert "MELAMPUS_" not in command and STORED_KEY not in command, command
+
+    proc = run_as_lightroom_would(command, env=env, cwd=tmp_path,
+                                  capture_output=True, text=True, timeout=600)
+
+    tail = _cli_log_tail(tmp_path)
+    assert proc.returncode == 3, f"exit {proc.returncode}: {proc.stderr[-2000:]}\n{tail}"
+    assert f"{cli.title} is not installed" in tail, tail
+    assert cli.install in tail, tail
+    assert "invalid choice" not in tail, f"the executable does not accept {engine}:\n{tail}"
+
+
+@pytest.mark.parametrize("stored_key", ["", STORED_KEY])
 def test_the_stored_key_reaches_the_executable_through_the_command_the_plugin_builds(
     built_executable: Path, photos: Path, tmp_path: Path, stored_key: str
 ):
@@ -386,12 +479,34 @@ def test_the_detection_the_plugin_runs_reaches_the_executable_and_fills_the_pick
     hands it to the shell LrTasks.execute hands it to on this host (sh
     against dist/melampus, cmd.exe against dist/melampus.exe); what the
     executable actually printed then goes through the plugin's own JSON
-    decoder and `Rules.engineItems`: five items in the owner's order, ollama
+    decoder and `Rules.engineItems`: seven items in the executable's order
+    (card #423: the owner's four, then the two subscription CLIs), ollama
     greyed with the download address from the executable's reason as its
-    link, mlx as this machine decides. No Ollama answers on a runner and
-    nothing is sent anywhere; the executable's output on its own, with no
-    python on the path, is test_binary.py's."""
+    link, mlx as this machine decides, and the two CLIs greyed with their
+    install page as the link: the run inherits an environment of the test's
+    own, whose PATH holds the system shell's folders and no `claude` or
+    `codex`, so a developer's installed CLI is never run and decides nothing
+    (conftest's rule; a signed-in verdict reaches the picker through the Lua
+    suites' canned answers). No Ollama answers on a runner and nothing is
+    sent anywhere; the executable's output on its own, with no python on the
+    path, is test_binary.py's."""
     plugin_dir = _plugin_folder_holding(built_executable, tmp_path)
+    # The run's environment: the home of its own (and, on Windows, the
+    # system root and temp folder) no_python_environment gives, its empty
+    # PATH replaced by what the mock's shell needs and nothing more: the
+    # system's own folders (sh, mktemp, mkdir, ls and rm on a Mac; cmd.exe,
+    # named by COMSPEC as the C runtime's system() finds it, on Windows).
+    # Nowhere on it is a claude or codex a developer installed; that the
+    # executable needs no python on it is test_binary.py's to show.
+    env = no_python_environment(tmp_path)
+    if WINDOWS:
+        env["COMSPEC"] = os.environ["COMSPEC"]
+        env["PATH"] = str(Path(env["COMSPEC"]).parent)
+    else:
+        env["PATH"] = os.defpath
+    for cli in (providers.CLAUDE_CODE_CLI, providers.CODEX_CLI):
+        assert shutil.which(cli.program, path=env["PATH"]) is None, (
+            f"a real {cli.program} is on the PATH the executable would run it from")
 
     listing = _plugin_under_the_mock(
         plugin_dir, tmp_path,
@@ -401,10 +516,11 @@ def test_the_detection_the_plugin_runs_reaches_the_executable_and_fills_the_pick
         "assert(#mock.state.executed == 1, 'detection ran ' .. #mock.state.executed .. ' commands')\n"
         "for _, item in ipairs(Rules.engineItems(verdicts, problem)) do\n"
         "  io.write(item.value, '\\t', tostring(item.enabled), '\\t', tostring(item.link), '\\n')\n"
-        "end\n")
+        "end\n",
+        environment=env)
 
     items = [line.split("\t") for line in listing.splitlines()]
-    assert [value for value, _, _ in items] == ["", "mlx", "ollama", "openai", "claude"], listing
+    assert [value for value, _, _ in items] == ["", *PICKER_ENGINES], listing
     enabled = {value: state == "true" for value, state, _ in items}
     links = {value: link for value, _, link in items}
     assert enabled[""] and enabled["openai"] and enabled["claude"], listing
@@ -412,6 +528,9 @@ def test_the_detection_the_plugin_runs_reaches_the_executable_and_fills_the_pick
     assert not enabled["ollama"], f"ollama greyed by nothing; an Ollama server answered?\n{listing}"
     assert links["ollama"] == providers.OLLAMA_INSTALL, listing
     assert all(links[value] == "nil" for value in ("", "mlx", "openai", "claude")), listing
+    for cli in (providers.CLAUDE_CODE_CLI, providers.CODEX_CLI):
+        assert not enabled[cli.engine], f"{cli.program} found on the isolated PATH?\n{listing}"
+        assert links[cli.engine] == cli.install, listing
 
 
 def test_the_command_the_plugin_builds_runs_the_executable_beside_it(

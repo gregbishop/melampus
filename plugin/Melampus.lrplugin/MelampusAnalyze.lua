@@ -314,8 +314,9 @@ local function askJson(flag, output, what, label, accept)
 end
 
 --- Ask the executable which engines can run here: `--detect-engines` (card
--- #404) prints a JSON list of { engine, available, reason }. The Settings
--- dialog calls it once, when it opens.
+-- #404) prints a JSON list of { engine, title, available, reason, install }
+-- (the title and the install page since card #423). The Settings dialog
+-- calls it once, when it opens.
 function Analyze.detectEngines()
 	return askJson('--detect-engines', 'melampus-engines.json', 'about the engines',
 		'engines file', function(verdicts) return type(verdicts) == 'table' and verdicts[1] ~= nil end)

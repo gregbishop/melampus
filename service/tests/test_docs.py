@@ -664,6 +664,48 @@ def test_docs_describe_the_engine_picker_and_where_the_key_lives():
         "readme.md's Lightroom section says keychain, which Windows has not")
 
 
+def test_docs_describe_the_cli_engines_in_the_picker():
+    """Card #423: the two subscription CLIs are in the picker. docs/plugin.md's
+    engine section names them, says they take no key and bill to the
+    subscription, and where their titles come from (the verdict); readme.md's
+    Lightroom section lists them among what the picker offers; docs/config.md's
+    backend row, readme.md and the engine section no longer defer the picker
+    to a card yet to come. Both places that send a reader to
+    docs/settings-dialog.png, which the owner takes and this card's picker has
+    outgrown, carry the note the Download row already has, in the same words:
+    docs/plugin.md's engine section, which links it (review round 9, finding
+    3), and readme.md's Lightroom section, which embeds it (review round 10,
+    finding 1)."""
+    plugin_doc = PLUGIN_DOC.read_text(encoding="utf-8")
+    engine = _section(plugin_doc, "The engine")
+    assert engine is not None, "docs/plugin.md has no ## The engine section"
+    prose = " ".join(engine.split())
+    for named in ("`claude-code`", "`codex`", "subscription", "no API key", "`title`"):
+        assert named in prose, f"docs/plugin.md's engine section does not say {named}"
+    # The picture the section sends a reader to is card #405's four-engine
+    # dialog. Its Download row already carries the note for exactly this
+    # (### The Download row); the picker's own prose had none, so a reader
+    # went from updated words to a picture of the old dialog.
+    picker = " ".join(engine.split("### The Download row")[0].split())
+    assert "`docs/settings-dialog.png` predates" in picker, (
+        "docs/plugin.md's engine section sends a reader to a picture of the old dialog "
+        "without saying the screenshot predates the CLI engines")
+    readme = README.read_text(encoding="utf-8")
+    section = _section(readme, "Reviewing in Lightroom")
+    assert section is not None, "readme.md has no ## Reviewing in Lightroom section"
+    for named in ("claude-code", "codex"):
+        assert named in section, f"readme.md's Lightroom section does not offer {named}"
+    # readme.md embeds that same picture, directly under the paragraph this
+    # card edited, so a reader meets the old four-engine dialog there too.
+    assert "`docs/settings-dialog.png` predates" in section, (
+        "readme.md's Lightroom section embeds a picture of the old dialog without "
+        "saying the screenshot predates the CLI engines")
+    config_doc = CONFIG_DOC.read_text(encoding="utf-8")
+    backend_row = _row(config_doc, "backend")
+    for text in (backend_row, readme, prose):
+        assert "learns" not in text or "#423" not in text, "still defers the picker to card #423"
+
+
 def test_docs_name_the_download_command_where_the_model_and_the_protocol_are_described():
     """Card #407: the model arrives by `melampus-id --download-model`, not by
     a manual `hf download` the user must read the readme for. readme.md's

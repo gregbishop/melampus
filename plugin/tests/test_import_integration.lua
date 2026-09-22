@@ -506,8 +506,10 @@ end)
 -- Done-when 1: given a preference named engine with one of mlx, ollama,
 -- openai, claude, when the plugin builds the CLI command, then the CLI
 -- receives it. Done-when 2: given no preference, the plugin passes no
--- --backend and the CLI's default applies.
-local ENGINES = loadPluginFile('MelampusRules').ENGINES
+-- --backend and the CLI's default applies. Card #423 adds the two
+-- subscription CLIs, claude-code and codex, which reach it the same way.
+local Rules = loadPluginFile('MelampusRules')
+local ENGINES = Rules.ENGINES
 
 t.test('each engine preference reaches the command line as --backend', function()
 	for _, engine in ipairs(ENGINES) do
@@ -645,12 +647,20 @@ t.test('the key is never logged', function()
 	end
 end)
 
-t.test('a local engine, or no engine, carries no key even when keys are stored', function()
+t.test('a local engine, a subscription CLI, or no engine, carries no key even when keys are stored', function()
 	local stored = { MELAMPUS_OPENAI_KEY = KEY, MELAMPUS_ANTHROPIC_KEY = KEY }
-	for _, engine in ipairs({ 'mlx', 'ollama', '' }) do
-		local command = commandWithKeys(engine, stored)
-		t.equals(command, macCommand(engine), engine .. ': a key travels with a run that needs none')
+	-- Card #423: the CLI engines bill to a subscription, never to a key
+	-- here, so their line is the executable and --backend, nothing ahead.
+	-- Which engines need no key is the plugin's own rule, Rules.keyVariable,
+	-- pinned by name in test_rules.lua; walked over ENGINES here, so the
+	-- next keyless engine is checked without a line here.
+	for _, engine in ipairs(ENGINES) do
+		if not Rules.keyVariable(engine) then
+			local command = commandWithKeys(engine, stored)
+			t.equals(command, macCommand(engine), engine .. ': a key travels with a run that needs none')
+		end
 	end
+	t.equals(commandWithKeys('', stored), macCommand(''), 'a key travels with a run that names no engine')
 end)
 
 t.test('a cloud engine with no stored key runs without one, so the executable says what is missing', function()
@@ -735,7 +745,7 @@ t.test('detection runs the executable once with --detect-engines and returns the
 	t.isNotNil(verdicts, 'no verdicts: ' .. tostring(problem))
 	t.equals(#mock.state.executed, 1, 'detection should run the executable exactly once')
 	t.equals(mock.state.executed[1], macDetectionCommand(), 'not the one command that asks for the verdicts')
-	t.equals(#verdicts, 4)
+	t.equals(#verdicts, #ENGINES, 'one verdict per engine the plugin knows')
 	t.equals(verdicts[2].engine, 'ollama')
 	t.isFalse(verdicts[2].available)
 	t.isNotNil(string.find(verdicts[2].reason, 'https://ollama.com/download', 1, true))

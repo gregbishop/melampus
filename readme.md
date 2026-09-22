@@ -103,8 +103,9 @@ subscription, not to an API key (card #421). For Codex CLI it is the `codex`
 engine: `backend = "codex"` (or `--backend codex`) runs `codex exec` with the
 image attached and the built-in template docs/config.md § Codex CLI quotes,
 on the ChatGPT plan Codex is signed in to — install it from [developers.openai.com/codex/cli](https://developers.openai.com/codex/cli),
-sign in with `codex login`, and every frame bills to that plan (card #422;
-the plugin's picker learns the names in card #423). A program that is not
+sign in with `codex login`, and every frame bills to that plan (card #422).
+Both appear in the Lightroom plugin's engine picker, greyed until installed
+and signed in, with no key field (card #423). A program that is not
 installed is refused before any image is read, naming it; so is
 one whose name resolves to a `.cmd` or `.bat` shim on Windows, since cmd.exe
 would parse the prompt (name the `.exe`, or `node` and the script, instead);
@@ -455,11 +456,16 @@ or `unzip Melampus-macOS.zip`), keep the `Melampus.lrplugin` folder somewhere
 it can stay, then in Lightroom: **File → Plug-in Manager → Add** and select
 that folder. It should report *Installed and running*; **Library → Plug-in
 Extras → Melampus: Settings…** opens the settings, where **Where
-identification runs** picks the engine (mlx, ollama, openai, claude; the
-ones this machine cannot run are greyed with the reason) and takes the API
-key for a cloud engine, kept in the system's secure store, not in a file:
+identification runs** picks the engine (mlx, ollama, openai, claude,
+claude-code, codex; the ones this machine cannot run are greyed with the
+reason) and takes the API key for a cloud engine, kept in the system's
+secure store, not in a file; a subscription CLI takes none and says what it
+bills to:
 
 ![The Melampus settings dialog, with the engine picker](docs/settings-dialog.png)
+
+`docs/settings-dialog.png` predates the two CLI engines and the line under
+the picker: it shows the four-engine picker of card #405.
 
 CI (`.github/workflows/ci.yml`) builds and packages both zips through
 `tools/package_plugin.py` on every run; on a pushed `v*` tag its `release` job
