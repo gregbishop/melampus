@@ -48,7 +48,6 @@ WORKFLOW_SUFFIXES = (".yml", ".yaml")  # GitHub runs both
 CI_WORKFLOW = WORKFLOWS / "ci.yml"
 LUA_PLUGIN_TESTS = REPO / "service" / "tests" / "test_lua_plugin.py"
 PLUGIN_DOC = REPO / "docs" / "plugin.md"
-ARCHITECTURE_DOC = REPO / "docs" / "architecture.md"
 GITIGNORE = REPO / ".gitignore"
 README = REPO / "readme.md"
 DOCS = [README, AGENTS_MD, *sorted((REPO / "docs").glob("*.md"))]
