@@ -109,7 +109,8 @@ def metadata_laden(path: Path) -> dict[str, bytes | str]:
 
 
 def _load_tool(script: Path) -> ModuleType:
-    """tools/ is not a package; import the script by path, without running it."""
+    """Import a script by path, without adding it to sys.modules: tools/ is not
+    a package, and a second copy of conftest.py must not displace this one."""
     spec = importlib.util.spec_from_file_location(script.stem, script)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)

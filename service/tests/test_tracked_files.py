@@ -22,7 +22,6 @@ from the working-tree .gitignore because that is the file `git add -A` consults
 when a corpus is about to be staged.
 """
 
-import importlib.util
 import io
 import subprocess
 from pathlib import Path
@@ -30,7 +29,7 @@ from pathlib import Path
 import pytest
 from PIL import Image, UnidentifiedImageError
 
-from conftest import FIXTURE, REPO, metadata_laden
+from conftest import FIXTURE, REPO, _load_tool, metadata_laden
 
 # POSIX ERE, for git grep.
 HOME_PATH = "/(Users|home)/[^/[:space:]`'\"]+/"
@@ -139,11 +138,7 @@ def test_the_frame_sits_under_the_repository_through_a_symlink(tmp_path):
     two disagree and COMMITTED_FRAME raises at import, collecting nothing."""
     link = tmp_path / "link"
     link.symlink_to(REPO)
-    spec = importlib.util.spec_from_file_location(
-        "conftest_through_a_symlink", link / "service" / "tests" / "conftest.py"
-    )
-    conftest = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(conftest)
+    conftest = _load_tool(link / "service" / "tests" / "conftest.py")
     assert conftest.FIXTURE.is_relative_to(conftest.REPO), (
         f"{conftest.FIXTURE} is not under {conftest.REPO}"
     )
