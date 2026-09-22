@@ -645,6 +645,25 @@ def _look_for_weights(
     return proc.stderr[-3000:]
 
 
+@pytest.mark.skipif(
+    sys.platform != "darwin",
+    reason="PyInstaller reads and writes its binary cache only while processing a binary: on "
+           "macOS always (ad-hoc code signing), elsewhere only with --strip or --upx, which "
+           "the build does not pass (PyInstaller/building/utils.py, checkCache)",
+)
+def test_the_build_kept_pyinstallers_cache_inside_the_checkout(
+    built_executable: Path, build_script: types.ModuleType, repo: Path
+):
+    """Card #440, done-when 1 at the real boundary: the installed PyInstaller,
+    handed PYINSTALLER_CONFIG_DIR after `import PyInstaller.__main__`, kept its
+    cache index (bincache*/index.dat) under the directory the script chose,
+    this checkout's build/pyinstaller-config/, or under the one the caller
+    set, which the script leaves alone. The build is the one built_executable
+    ran (or the existing one it found); nothing is built again here."""
+    cache = Path(os.environ.get(CONFIG_DIR_VARIABLE, build_script.config_dir(repo)))
+    assert list(cache.rglob("index.dat")), f"PyInstaller wrote no cache index under {cache}"
+
+
 @pytest.mark.skipif(not on_apple_silicon(), reason="MLX exists only on Apple Silicon")
 def test_executable_carries_the_service_and_mlx(built_executable: Path, photos: Path, tmp_path: Path):
     """Done-when 1 (#399). Asked for the mlx backend with the HuggingFace cache
