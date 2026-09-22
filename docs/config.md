@@ -198,22 +198,25 @@ command = [
   "--ephemeral",
   "--skip-git-repo-check",
   "--ignore-user-config",
-  "--sandbox",
-  "read-only",
   "-c",
   'approval_policy="never"',
   "-c",
   "project_doc_max_bytes=0",
+  "-c",
+  'default_permissions="melampus"',
+  "-c",
+  'permissions.melampus.filesystem={":root"="deny",":minimal"="read",":workspace_roots"={"."="read"}}',
   "--color",
   "never",
   "{prompt}"
 ]
 ```
 
-Every flag is from `codex exec --help` (0.154.0) and Codex's own
+Every flag is from `codex exec --help` (0.155.1) and Codex's own
 documentation ([Non-interactive mode](https://developers.openai.com/codex/non-interactive-mode),
 the [CLI reference](https://developers.openai.com/codex/developer-commands?surface=cli),
-[Image inputs](https://developers.openai.com/codex/image-inputs?surface=cli)):
+[Image inputs](https://developers.openai.com/codex/image-inputs?surface=cli),
+[Permissions](https://developers.openai.com/codex/permissions)):
 `exec` runs "non-interactively" and prints the final message alone; `--image`
 attaches the staged, metadata-free JPEG to the prompt ("PNG and JPEG"
 accepted), and it comes first because the flag takes several files, so a
@@ -224,11 +227,36 @@ the shared JSON extraction sees it; `--ephemeral` writes no session per
 frame; `--skip-git-repo-check` lets it run from wherever melampus was
 launched; `--ignore-user-config` loads no `~/.codex/config.toml`, so no MCP
 server starts per frame and the run is the same on every machine (the
-sign-in is still read); `--sandbox read-only` and
-`-c approval_policy="never"` let the run proceed with nothing writable and
-nobody to approve (`codex exec` 0.154.0 has no `--ask-for-approval` flag;
-the config key is the same documented policy); `-c project_doc_max_bytes=0`
-keeps the launch directory's `AGENTS.md` out of the prompt; `--color never`
+sign-in is still read); `-c approval_policy="never"` lets the run proceed
+with nobody to approve (`codex exec` has no `--ask-for-approval` flag; the
+config key is the same documented policy); `-c project_doc_max_bytes=0`
+keeps the launch directory's `AGENTS.md` out of the prompt, and is what lets
+the profile below start (measured on 0.155.1: without it, Codex's
+`AGENTS.md` loader re-runs its own binary under the profile, which denies
+it, and the session fails to initialize); the two `-c` overrides after it
+are the read boundary: `default_permissions` selects a permission profile
+(Codex's documented mechanism, beta, for "what commands can read or write")
+whose filesystem rules are `":root" = "deny"` (the documentation's own
+words: "By default, deny read access to all files on disk"), `":minimal" =
+"read"` ("a 'minimal' set of files and folders, as determined by Codex",
+the paths common tools need) and the session's workspace root, the staged
+folder, readable and nothing else, with no write anywhere and no network
+for the commands it runs. There is no `--sandbox` flag because the
+documentation says that with one "Codex uses those older sandbox settings
+instead of default_permissions": `--sandbox read-only` stopped writes but
+confined no read (Codex's default exec policy is the whole disk readable),
+so a prompt injection in a photo could have had Codex read any file on the
+machine into its cloud conversation; this profile is the same page's "File
+access limited to workspace" example, read-only. Measured on 0.155.1 with
+`codex sandbox` under this profile, no model call: the staged file is
+read; a file in a sibling temp folder, and the home folder, are "Operation
+not permitted"; a write in the staged folder is denied; `curl` cannot
+resolve a host. What `:minimal` grants is Codex's choice, not this
+project's: `/etc/hosts` and `/tmp` stay readable (measured, even under an
+explicit deny); the home folder, other temp folders and everything else
+outside the staged folder do not. Claude Code's template confines reads
+the same way with its own mechanism (`--tools Read`, `--allowedTools
+Read(/{image})`, *Claude Code* above). `--color never`
 keeps ANSI out of the stderr an error message quotes. The prompt is the last
 argument, the pipeline's prompt in full; the image needs no mention.
 

@@ -266,30 +266,72 @@ CODEX = "codex"
 CODEX_PROGRAM = "codex"
 
 #: The one copy of the template. Every flag is from `codex exec --help`
-#: (0.154.0) and developers.openai.com/codex (non-interactive-mode,
-#: developer-commands, image-inputs): `exec` runs "non-interactively";
-#: `--image {image}` attaches the staged JPEG ("Attach images to the first
-#: message"; "PNG and JPEG" accepted), first, because the flag is variadic
-#: (`-i, --image <FILE>...`) and takes a prompt right after it for a second
-#: file (measured); `--json` makes stdout a JSONL stream, the reply the
-#: agent_message's text and a failure the turn.failed's message
-#: (codex_reply reads both); `--ephemeral` writes no session per frame;
-#: `--skip-git-repo-check` runs from wherever melampus was launched;
-#: `--ignore-user-config` loads no ~/.codex/config.toml ("Authentication
-#: still uses CODEX_HOME"), so no MCP server starts per frame and the run is
-#: the same on every machine; `--sandbox read-only` and `-c
+#: (0.155.1) and Codex's documentation (non-interactive-mode,
+#: developer-commands, image-inputs, permissions): `exec` runs
+#: "non-interactively"; `--image {image}` attaches the staged JPEG ("Attach
+#: images to the first message"; "PNG and JPEG" accepted), first, because
+#: the flag is variadic (`-i, --image <FILE>...`) and takes a prompt right
+#: after it for a second file (measured); `--json` makes stdout a JSONL
+#: stream, the reply the agent_message's text and a failure the
+#: turn.failed's message (codex_reply reads both); `--ephemeral` writes no
+#: session per frame; `--skip-git-repo-check` runs from wherever melampus
+#: was launched; `--ignore-user-config` loads no ~/.codex/config.toml
+#: ("Authentication still uses CODEX_HOME"), so no MCP server starts per
+#: frame and the run is the same on every machine; `-c
 #: approval_policy="never"` (the documented approval_policy value; exec
-#: 0.154.0 rejects --ask-for-approval, measured) let the run proceed with
-#: nobody to approve and nothing writable; `-c project_doc_max_bytes=0`
-#: ("Maximum bytes read from AGENTS.md") keeps the launch directory's
-#: instructions out of the prompt; `--color never` keeps ANSI out of the
-#: stderr the error messages quote. The prompt is the positional argument,
-#: last: the pipeline's prompt in full; the image needs no mention, it is
-#: attached.
+#: rejects --ask-for-approval, measured) lets the run proceed with nobody
+#: to approve; `-c project_doc_max_bytes=0` ("Maximum bytes read from
+#: AGENTS.md") keeps the launch directory's instructions out of the prompt,
+#: and is what lets the profile below start: without it Codex's AGENTS.md
+#: loader re-runs its own binary under the profile, which denies it, and
+#: the session fails to initialize ("fs sandbox helper failed", measured on
+#: 0.155.1 with `codex debug prompt-input`, no model call).
+#:
+#: The two `-c` overrides after it are the read boundary (Codex review
+#: round 2, S1). `--sandbox read-only` stopped writes and confined no read:
+#: exec's default policy renders as `:root` read, the whole disk (measured
+#: the same way), so an injection in the image could have had Codex read
+#: any file on the machine into its cloud conversation. The permissions
+#: documentation (learn.chatgpt.com/docs/permissions, "File access limited
+#: to workspace") is the mechanism: a profile whose filesystem rules are
+#: `":root" = "deny"` ("By default, deny read access to all files on
+#: disk"), `":minimal" = "read"` ("a software agent needs to be able to
+#: read folders that contain common tools, such as `/usr/bin` ... a
+#: 'minimal' set of files and folders, as determined by Codex") and the
+#: session's workspace root, the staged folder, readable
+#: (`":workspace_roots"`: "The current session's workspace roots"; "." is
+#: "the root itself"), selected by `default_permissions`. Both travel as
+#: `-c key=value` ("The `value` portion is parsed as TOML"; a dotted key
+#: with a quoted segment is not, so the filesystem table is one inline
+#: value), so no config file is read and the profile is the same
+#: everywhere. `--sandbox` is gone because the same page says "If
+#: sandbox_mode appears in any loaded config file, you pass --sandbox, or
+#: the selected config profile sets sandbox_mode, Codex uses those older
+#: sandbox settings instead of default_permissions" (config-reference:
+#: "Don't combine with sandbox_mode"). A profile's commands have no
+#: network unless `network.enabled` says so, and nothing is writable: the
+#: profile names no "write". Measured on 0.155.1 with `codex sandbox -P`
+#: under this profile from a staged folder under $TMPDIR, no model call:
+#: the staged file read; a file in a sibling temp folder, and the home
+#: folder, "Operation not permitted"; a write in the staged folder denied;
+#: `curl` could not resolve a host. What `:minimal` grants is Codex's, not
+#: ours: /etc/hosts and /tmp (with /private/tmp and /private/var/tmp) read
+#: as before, even under an explicit deny (measured); the user's home,
+#: other temp folders and everything else outside the staged folder do
+#: not. Permission profiles are documented as beta ("under active
+#: development and may change"); the shape here is the documentation's
+#: own example, pinned by test_codex_template_is_the_documented_exec_invocation.
+#: `--color never` keeps ANSI out of the stderr the error messages quote.
+#: The prompt is the positional argument, last: the pipeline's prompt in
+#: full; the image needs no mention, it is attached.
 CODEX_COMMAND = [
     CODEX_PROGRAM, "exec", "--image", "{image}", "--json", "--ephemeral",
-    "--skip-git-repo-check", "--ignore-user-config", "--sandbox", "read-only",
-    "-c", 'approval_policy="never"', "-c", "project_doc_max_bytes=0", "--color", "never",
+    "--skip-git-repo-check", "--ignore-user-config",
+    "-c", 'approval_policy="never"', "-c", "project_doc_max_bytes=0",
+    "-c", 'default_permissions="melampus"',
+    "-c", 'permissions.melampus.filesystem={":root"="deny",":minimal"="read",'
+          '":workspace_roots"={"."="read"}}',
+    "--color", "never",
     "{prompt}",
 ]
 

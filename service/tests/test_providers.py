@@ -3622,10 +3622,14 @@ _FAKE_CODEX_SCRIPT = '''#!{python}
 """Stands in for Codex CLI 0.154.0's documented non-interactive interface,
 as `codex exec --help`, `codex login status --help` and the docs
 (developers.openai.com/codex: non-interactive-mode, developer-commands,
-image-inputs) describe it, and as measured on 2026-09-18: `codex exec
+image-inputs, permissions) describe it, and as measured on 2026-09-18: `codex exec
 [OPTIONS] [PROMPT]` runs once; `-i/--image <FILE>...` attaches the image to
 the prompt (variadic: a prompt right after it is taken for a second file,
-so a flag must come between); `--json` makes stdout a JSONL stream whose
+so a flag must come between); `-c key=value` overrides are TOML, and a
+`default_permissions` naming a profile with no `[permissions]` table is
+refused before anything runs (measured on 0.155.1; the read boundary
+itself, what the profile lets a command read, is Codex's sandbox and not
+imitated here); `--json` makes stdout a JSONL stream whose
 `item.completed` agent_message carries the reply and whose `turn.failed`
 carries a failure's message; without `--json` only the final message is
 on stdout; a run that cannot proceed exits 1 with the failure in the
@@ -3690,6 +3694,16 @@ ap.add_argument("--color", choices=["always", "never", "auto"], default="auto")
 ap.add_argument("-m", "--model")
 ap.add_argument("prompt", nargs="?")
 args = ap.parse_args(argv[1:])
+# `-c key=value`: "The `value` portion is parsed as TOML", so the overrides
+# together are a TOML document; and `default_permissions` naming a profile
+# that no `[permissions]` table defines is refused before anything runs
+# (measured on 0.155.1: "Error: default_permissions requires a
+# `[permissions]` table", exit 1).
+import tomllib
+overrides = tomllib.loads("\\n".join(args.config))
+profile = overrides.get("default_permissions")
+if profile is not None and profile not in overrides.get("permissions", {{}}):
+    sys.exit("Error: default_permissions requires a `[permissions]` table")
 if args.prompt is None:
     print("Reading prompt from stdin...", file=sys.stderr)
     print("No prompt provided via stdin.", file=sys.stderr)
@@ -4963,9 +4977,9 @@ def test_claude_code_that_lapses_mid_run_stops_the_batch_at_the_first_reply(
 
 
 def test_codex_template_is_the_documented_exec_invocation():
-    """The built-in template, from `codex exec --help` (0.154.0) and
-    developers.openai.com/codex (non-interactive-mode, developer-commands,
-    image-inputs): `exec` runs non-interactively; `--image {image}` attaches
+    """The built-in template, from `codex exec --help` (0.155.1) and Codex's
+    documentation (non-interactive-mode, developer-commands, image-inputs,
+    permissions): `exec` runs non-interactively; `--image {image}` attaches
     the staged JPEG to the prompt ("Attach images to the first message";
     PNG and JPEG accepted), and sits first because the flag is variadic, so
     the prompt must not follow it directly; `--json` makes stdout a JSONL
@@ -4974,24 +4988,66 @@ def test_codex_template_is_the_documented_exec_invocation():
     writes no session per frame; `--skip-git-repo-check` runs from wherever
     melampus was launched; `--ignore-user-config` loads no
     ~/.codex/config.toml (no MCP server per frame; auth still read);
-    `--sandbox read-only` and `-c approval_policy="never"` let the run
-    proceed with nobody to approve and nothing writable (exec 0.154.0 has
-    no --ask-for-approval flag, measured; the config key is the documented
-    equivalent); `-c project_doc_max_bytes=0` keeps the launch directory's
-    AGENTS.md out of the prompt; `--color never` keeps ANSI out of stderr.
-    The prompt is the positional argument, last, the pipeline's prompt in
-    full. It is a valid `[model] command` by the config's own rule."""
+    `-c approval_policy="never"` lets the run proceed with nobody to
+    approve (exec has no --ask-for-approval flag, measured; the config key
+    is the documented equivalent); `-c project_doc_max_bytes=0` keeps the
+    launch directory's AGENTS.md out of the prompt, and is what lets the
+    profile below start (measured: without it Codex's AGENTS.md loader
+    re-runs its own binary under the profile, which denies it, and the
+    session fails to initialize); `--color never` keeps ANSI out of stderr.
+
+    Codex review round 2, S1: `--sandbox read-only` stopped writes and
+    confined no read (the default exec policy renders as `:root` read,
+    measured with `codex debug prompt-input`), so an injection in the
+    image could have Codex read any file on the machine into its cloud
+    conversation. The permissions documentation ("Permissions", the
+    "File access limited to workspace" example) is the mechanism: a
+    profile under `[permissions.<name>.filesystem]` with `":root" =
+    "deny"` ("By default, deny read access to all files on disk"),
+    `":minimal" = "read"` ("a 'minimal' set of files and folders, as
+    determined by Codex", the runtime paths tools need) and the session's
+    workspace root, the staged folder, readable, selected by
+    `default_permissions`. Both travel as `-c` overrides, "parsed as
+    TOML", so the profile is the same on every machine and no config file
+    is read. The `--sandbox` flag is gone because the same page says
+    "If sandbox_mode appears in any loaded config file, you pass
+    --sandbox, or the selected config profile sets sandbox_mode, Codex
+    uses those older sandbox settings instead of default_permissions".
+    The enforcement itself cannot be a test here (the suite never runs the
+    real Codex): it was measured on 0.155.1 with `codex sandbox -P` under
+    this profile, no model call: the staged file read, a sibling temp
+    folder's file and the home folder "Operation not permitted", a write
+    in the staged folder denied, a command's network off. What this test
+    pins is the template's one copy: the profile's overrides parse to
+    exactly that shape, granting read to nothing else. The prompt is the
+    positional argument, last, the pipeline's prompt in full. It is a
+    valid `[model] command` by the config's own rule."""
+    import tomllib
+
     template = providers.CODEX_COMMAND
     assert template[0] == "codex" == providers.CODEX_PROGRAM
     assert template[1:4] == ["exec", "--image", "{image}"]
     assert template[4].startswith("--"), "a flag must follow the variadic --image"
     assert template[4:-1] == [
         "--json", "--ephemeral", "--skip-git-repo-check", "--ignore-user-config",
-        "--sandbox", "read-only", "-c", 'approval_policy="never"',
-        "-c", "project_doc_max_bytes=0", "--color", "never",
+        "-c", 'approval_policy="never"', "-c", "project_doc_max_bytes=0",
+        "-c", 'default_permissions="melampus"',
+        "-c", 'permissions.melampus.filesystem={":root"="deny",":minimal"="read",'
+              '":workspace_roots"={"."="read"}}',
+        "--color", "never",
     ]
     assert template[-1] == "{prompt}"
-    assert "--ask-for-approval" not in template, "codex exec 0.154.0 rejects it"
+    assert "--ask-for-approval" not in template, "codex exec rejects it"
+    assert "--sandbox" not in template, "with --sandbox, Codex ignores default_permissions"
+    overrides = tomllib.loads("\n".join(
+        value for flag, value in zip(template, template[1:]) if flag == "-c"))
+    assert overrides["approval_policy"] == "never"
+    assert overrides["project_doc_max_bytes"] == 0
+    profile = overrides["permissions"][overrides["default_permissions"]]
+    assert profile == {"filesystem": {
+        ":root": "deny", ":minimal": "read", ":workspace_roots": {".": "read"},
+    }}, "the profile grants read to the runtime paths and the staged folder, and nothing else"
+    assert "write" not in repr(profile) and "network" not in profile
     assert _cfg(model={"command": template}).model.command == template
 
 
