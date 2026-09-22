@@ -645,7 +645,17 @@ def test_readme_opening_lists_the_engines_providers_offers_and_names_the_spec():
             expected = "subscription"
         else:
             expected = "nothing"
-        assert expected in row, f"readme.md's row for `{name}` does not say it bills {expected!r}: {row.strip()}"
+        # The What it bills cell alone. Read against the whole row, the word
+        # is satisfied by the Where it runs cell that already carries it, and
+        # a row claiming a subscription CLI costs nothing stays green.
+        cells = [cell.strip() for cell in row.split("|")]
+        assert len(cells) == 3 and not cells[-1], (
+            f"readme.md's row for `{name}` is not an Engine / Where it runs / What it bills "
+            f"row: {row.strip()}")
+        bills = cells[1]
+        assert expected in bills, (
+            f"readme.md's What it bills cell for `{name}` does not say it bills "
+            f"{expected!r}: {bills!r}")
     for spec in ("`AGENTS.md`", "`docs/brief.md`"):
         assert spec in opening, f"readme.md's opening does not name {spec} as the build specification"
     assert "CLAUDE.md" not in opening, "readme.md's opening still calls CLAUDE.md the build specification"
