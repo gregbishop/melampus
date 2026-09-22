@@ -344,7 +344,15 @@ def test_agents_md_points_at_the_standard_and_names_the_tracker():
 def test_docs_name_the_build_and_its_smoke_test():
     """Card #399: the executable is built by tools/build_binary.py and the test
     command builds and smoke-tests it with --build-binary. The stack contract's
-    `build:` line and readme.md must name both, or nobody finds them."""
+    `build:` line and readme.md must name both, or nobody finds them.
+
+    Round 2, finding 1: the option is what builds, not what runs the smoke
+    tests. `built_executable` (conftest.py) builds only when the option is
+    given and then skips only when no executable is there, so without the
+    option the smoke tests run against an existing build and skip only when
+    there is none — which is what conftest.py's own docstring says and what
+    readme.md tells the reader. The brief's sentence on them says the same,
+    or it states a skip the suite does not have."""
     brief = BRIEF.read_text(encoding="utf-8")
     build = re.search(r"^- build: (`[^`]+`)", brief, re.MULTILINE)
     assert build and build.group(1) == "`.venv/bin/python tools/build_binary.py`", (
@@ -358,6 +366,22 @@ def test_docs_name_the_build_and_its_smoke_test():
         if command not in readme
     ]
     assert not missing, f"readme.md does not name: {missing}"
+    about_the_smoke_tests = [
+        sentence for sentence in _sentences(brief)
+        if "--build-binary" in sentence and "smoke test" in sentence
+    ]
+    assert about_the_smoke_tests, (
+        "docs/brief.md does not say what --build-binary does to the smoke tests"
+    )
+    unconditional = [
+        sentence for sentence in about_the_smoke_tests
+        if not re.search(r"existing build|dist/melampus|no build|when (?:one|it) exists",
+                         sentence)
+    ]
+    assert not unconditional, (
+        "docs/brief.md has the smoke tests skipping on a missing option; they skip on a "
+        f"missing build (service/tests/conftest.py's built_executable): {unconditional}"
+    )
 
 
 def test_readme_build_blocks_sync_the_sdk_extras():
