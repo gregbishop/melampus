@@ -26,9 +26,12 @@ function t.contains(list, needle, m)
 	error((m or 'missing entry') .. ': ' .. tostring(needle), 2)
 end
 
+-- Every suite ends with `return t.summary()`; a failing one ends the
+-- interpreter here with exit 1, so `lua test_x.lua` is its own gate.
 function t.summary()
 	for _, f in ipairs(t.failures) do print('  FAIL ' .. f) end
 	print(string.format('%d passed, %d failed', t.passed, t.failed))
+	if t.failed > 0 then os.exit(1) end
 	return t.failed
 end
 
