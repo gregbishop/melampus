@@ -890,9 +890,18 @@ def test_the_test_count_gate_reads_every_doc(tmp_path, monkeypatch):
     this file iterates, and a doc written later must be inside this gate by
     default rather than outside it, so the gate reads `DOCS` itself rather
     than a re-listed subset of it. The folder is a stand-in read at call
-    time, holding one doc, which states a count."""
+    time.
+
+    Round 2, finding 2: it holds two docs, and the count is in the second,
+    because one doc cannot tell the two subsets apart. A gate re-listing
+    paths of its own reads the real docs, which are clean, and raises
+    nothing; a gate reading a proper prefix of `DOCS` — the shape round 1
+    had — never reaches `later.md` and raises nothing either. With one doc
+    the second kind read it anyway and this stayed green while the rest of
+    `DOCS` sat outside the gate."""
+    (tmp_path / "earlier.md").write_text("Run the tests with pytest.\n", encoding="utf-8")
     (tmp_path / "later.md").write_text("The suite is 182 tests today.\n", encoding="utf-8")
     monkeypatch.setitem(globals(), "REPO", tmp_path)
-    monkeypatch.setitem(globals(), "DOCS", [tmp_path / "later.md"])
+    monkeypatch.setitem(globals(), "DOCS", [tmp_path / "earlier.md", tmp_path / "later.md"])
     with pytest.raises(AssertionError, match=r"later\.md: The suite is 182 tests today\."):
         test_docs_state_no_test_count()
