@@ -1,7 +1,7 @@
 # melampus, project brief
 
-Local AI species ID and quality triage for Lightroom Classic. For a selected
-batch of photos it identifies the organism with ranked candidates and
+Species identification and photo-quality triage for Lightroom Classic. For a
+selected batch of photos it identifies the organism with ranked candidates and
 calibrated confidence, scores technical quality (sharpness measured **on the
 subject, not the frame**), re-ranks candidates against real occurrence data
 using capture location and date, and writes the result into native LrC
@@ -10,8 +10,13 @@ ratings, flags, colour labels and keywords.
 Named for the Greek seer who could understand the speech of animals — birds
 especially. *meh-LAM-pus*.
 
-All inference is local, on Apple Silicon, via MLX. No cloud dependency in the
-default path.
+Local first, or a cloud API, or a subscription CLI: six engines, picked in
+the plugin's Settings dialog. `readme.md`'s opening is the one list of them
+and of what each bills, and a test holds that list to `providers.py`. On a
+local engine no image leaves the machine — so long as `[model] ollama_url`
+is not pointed at another host, which sends every frame there. macOS and
+Windows. The plugin is a folder with the one-file executable inside it; a
+user installs no Python.
 
 The original 368-line build spec now lives in `docs/build-spec.md`. It is
 still the reference for architecture and phasing; it is not a page to reload
@@ -22,9 +27,9 @@ every session.
 - stack: python
 - build: `.venv/bin/python tools/build_binary.py` — from the repo root; writes
   `dist/melampus`, the one-file executable, with MLX on Apple Silicon and
-  without it elsewhere (`dist/melampus.exe` on Windows, where the local option
-  is Ollama, the cloud engines the other; needs the `build` extra, see
-  readme.md § Building the executable)
+  without it elsewhere (`dist/melampus.exe` on Windows, every engine but `mlx`:
+  Ollama the local option, the cloud engines and the subscription CLIs the
+  others; needs the `build` extra, see readme.md § Building the executable)
 - test: `.venv/bin/python -m pytest` — from the repo root, locally; add
   `--build-binary` to build the executable first and smoke-test it
 - test in CI: `uv sync --locked --extra dev --extra build --extra cloud --extra openai && uv run pytest -q --build-binary`
@@ -74,9 +79,11 @@ Two things here differ from every other python repo, both deliberately:
 
 Two processes with a thin boundary: a **Lua plugin** inside Lightroom Classic
 (menu items, config dialog, reads GPS and capture date, exports JPEG
-previews, writes catalog metadata) talking JSON over local HTTP to a
-**python service** (MLX inference, sharpness/quality CV, range and season
-re-ranking, occurrence API clients, SQLite result cache).
+previews, writes catalog metadata) running the one-file **python executable**
+that ships inside its own folder (inference through the picked engine,
+sharpness/quality CV, range and season re-ranking, occurrence API clients,
+the result cache) and reading the JSON its `--plugin-out` writes. There is no
+HTTP service.
 
 The point of the split is that the python side is independently testable
 without launching Lightroom. Test it there first; the Lua side is thin glue.

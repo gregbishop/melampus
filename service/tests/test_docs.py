@@ -17,9 +17,14 @@ readme.md's build section, installs the extras the executable carries (card
 #434, Done-when 1 and 3); CI packages one plugin zip per platform through the
 script on every run and, on a pushed v* tag, its release job attaches both to
 the GitHub release, which the install docs name (card #402); no doc names a
-workflow file that does not exist; and no doc states a test count, because
-the suite grows with every card and CI checks no such number (card #437,
-Done-when 1).
+workflow file that does not exist; no doc states a test count, because the
+suite grows with every card and CI checks no such number (card #437,
+Done-when 1); readme.md's opening lists exactly the engines providers.py
+offers, with what each bills, and names the build specification (card #491,
+Done-when 1 and 3), and it is the only opening that lists them — the brief's
+and architecture's cite that table instead of copying it; and a page whose
+opening says this runs on macOS and Windows does not still offer Linux
+further down.
 
 The checks are deliberately dumb — substring presence of the backticked name — so
 they never argue with prose style, only with absence. The one exception runs the
@@ -213,6 +218,28 @@ def _section(text: str, heading: str) -> str | None:
     or the end of the doc; None when the doc has no such section."""
     match = re.search(rf"^## {re.escape(heading)}\n(.*?)(?=^## |\Z)", text, re.MULTILINE | re.DOTALL)
     return match.group(1) if match else None
+
+
+def _opening(text: str) -> str:
+    """A doc's opening — everything before its first `## ` heading — as one
+    line, its wraps normalized to single spaces. Every gate that looks for a
+    phrase in an opening reads it through here: round 2's finding was a gate
+    matching "macOS and Windows" against the raw opening, which skipped
+    docs/brief.md because the phrase is wrapped there, so the Linux claim the
+    gate exists to catch would have passed. The gate that reads readme.md's
+    engine table keeps the raw opening, because it matches line-anchored rows.
+    """
+    return " ".join(text.split("\n## ", 1)[0].split())
+
+
+def test_the_opening_reader_joins_the_lines_a_phrase_is_wrapped_across():
+    """Round 2, Codex finding: docs/brief.md's opening wraps "macOS and
+    Windows" across two lines, so a gate that read the raw opening for that
+    phrase skipped the file and the Linux claim below it. The opening reader
+    hands back one line, so a phrase is found however the paragraph happens
+    to be filled, and it still stops at the first `## ` heading."""
+    text = "# Title\n\nruns on macOS and\nWindows.\n\n## Requirements\n\nLinux too.\n"
+    assert _opening(text) == "# Title runs on macOS and Windows."
 
 
 def test_the_section_reader_takes_the_heading_literally():
@@ -663,6 +690,113 @@ def test_install_docs_name_the_release_zips_and_keep_the_from_source_path():
         assert not missing, f"{name}'s {heading} section does not name {missing}"
         assert "cp dist/melampus plugin/Melampus.lrplugin/" in section, (
             f"{name}'s {heading} section lost the from-source install")
+
+
+def test_readme_opening_lists_the_engines_providers_offers_and_names_the_spec():
+    """Card #491, Done-when 1 and 3: given readme.md's first screen (everything
+    before its first `## ` heading), when read, then its engine table names
+    exactly the engines a user can pick, in the picker's order: providers'
+    BACKEND_CHOICES without the test fake, then the two subscription CLIs; and
+    each row says what the engine bills, from the same module: nothing for a
+    local engine, an API key for one in KEY_VARIABLES, a subscription for a
+    CLI. `scripted` (the fake) and `command` (the seam, not in the picker) must
+    not appear. The opening also names `AGENTS.md` and `docs/brief.md`, not
+    CLAUDE.md, as the build specification: CLAUDE.md is two includes now."""
+    from melampus import providers
+
+    # The raw opening, not `_opening`: the rows below are matched line by line.
+    opening = README.read_text(encoding="utf-8").split("\n## ", 1)[0]
+    rows = re.findall(r"^\| `([\w-]+)` \|(.*)$", opening, re.MULTILINE)
+    listed = [name for name, _ in rows]
+    picker = [*(b for b in providers.BACKEND_CHOICES if b != providers.SCRIPTED),
+              providers.CLAUDE_CODE, providers.CODEX]
+    assert listed == picker, (
+        f"readme.md's opening must list the engines the picker offers, in its order: {picker}, not {listed}"
+    )
+    for name, row in rows:
+        if name in providers.KEY_VARIABLES:
+            expected = "API key"
+        elif name in (providers.CLAUDE_CODE, providers.CODEX):
+            expected = "subscription"
+        else:
+            expected = "nothing"
+        # The What it bills cell alone. Read against the whole row, the word
+        # is satisfied by the Where it runs cell that already carries it, and
+        # a row claiming a subscription CLI costs nothing stays green.
+        cells = [cell.strip() for cell in row.split("|")]
+        assert len(cells) == 3 and not cells[-1], (
+            f"readme.md's row for `{name}` is not an Engine / Where it runs / What it bills "
+            f"row: {row.strip()}")
+        bills = cells[1]
+        assert expected in bills, (
+            f"readme.md's What it bills cell for `{name}` does not say it bills "
+            f"{expected!r}: {bills!r}")
+    for spec in ("`AGENTS.md`", "`docs/brief.md`"):
+        assert spec in opening, f"readme.md's opening does not name {spec} as the build specification"
+    assert "CLAUDE.md" not in opening, "readme.md's opening still calls CLAUDE.md the build specification"
+
+
+def test_the_openings_privacy_claim_names_the_setting_that_can_send_the_image_elsewhere():
+    """Security review, round 1: given an opening that promises no image
+    leaves the machine on a local engine, when read, then it names
+    `ollama_url` in the same breath. `mlx` runs in-process, but the `ollama`
+    backend posts every staged frame to whatever `[model] ollama_url` names,
+    and docs/config.md documents setting it "for a server on another port or
+    host", https included. Unqualified, the first screen promises a
+    confidentiality the configuration does not enforce."""
+    setting = "ollama_url"
+    for doc in (README, BRIEF):
+        opening = _opening(doc.read_text(encoding="utf-8"))
+        if "leaves the machine" not in opening:
+            continue
+        assert setting in opening, (
+            f"{doc.name}'s opening promises no image leaves the machine without naming "
+            f"`{setting}`, the setting that can point the ollama engine at another host")
+
+
+def test_only_the_readme_opening_lists_the_engines_the_other_openings_point_at_it():
+    """Review round 1, finding 3: readme.md's opening carries the one list of
+    the engines, and the gate above holds it to providers.py. The brief's and
+    architecture's openings may name the shape — local first, or a cloud API,
+    or a subscription CLI — and cite that table; they may not restate the
+    names, by key or by the title providers.py gives them, because a copy no
+    gate reads is exactly what drifted before this card. A sentence that names
+    one engine to qualify a claim about it (`[model] ollama_url`, the privacy
+    caveat above) is not a list and does not trip this: engine keys are read
+    as backticked tokens, titles as whole words."""
+    from melampus import providers
+
+    titles = [t.split(" — ")[0] for t in providers.ENGINE_TITLES.values()]
+    names = [*providers.ENGINE_TITLES, providers.CLAUDE_CODE, providers.CODEX]
+    words = [*titles, providers.CLAUDE_CODE_CLI.title, providers.CODEX_CLI.title]
+    for doc in (BRIEF, ARCHITECTURE_DOC):
+        opening = _opening(doc.read_text(encoding="utf-8"))
+        assert "readme.md" in opening, (
+            f"{doc.name}'s opening does not cite readme.md, which carries the engine list")
+        restated = [n for n in names if n in re.findall(r"`([\w-]+)`", opening)]
+        restated += [w for w in words if re.search(rf"\b{re.escape(w)}\b", opening)]
+        assert not restated, (
+            f"{doc.name}'s opening restates readme.md's engine list ({restated}); only the "
+            "README's copy is held to providers.py, so name the shape and cite the table")
+
+
+def test_a_doc_whose_opening_says_macos_and_windows_does_not_still_offer_linux():
+    """Review round 1, finding 2: card #491 made the openings say the
+    platforms this ships on — "macOS and Windows", the owner's About — and
+    dropped Linux from readme.md's Requirements. A page whose own opening
+    says that may not, further down, still tell the reader the local engine
+    is the backend "on Windows and Linux": both sentences are in the same
+    file and only one of them can be true of what a user can install. Where
+    Ollama itself runs is a different claim, made by docs/config.md and the
+    modules, and is not this gate's business."""
+    for doc in (README, BRIEF, ARCHITECTURE_DOC):
+        text = doc.read_text(encoding="utf-8")
+        if "macOS and Windows" not in _opening(text):
+            continue
+        offers = [line.strip() for line in text.splitlines() if "Linux" in line]
+        assert not offers, (
+            f"{doc.name}'s opening says macOS and Windows, but it still offers Linux: {offers}")
+
 
 def test_docs_name_engine_detection_where_the_default_and_the_refusal_are_described():
     """Card #404: the backend's default is now the first engine that can run

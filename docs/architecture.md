@@ -3,15 +3,22 @@
 How the pieces fit, and why they are shaped this way. Design decisions are recorded
 with their reasoning so they can be revisited deliberately rather than by accident.
 
+The scope is readme.md's opening: species identification and photo-quality
+triage for Lightroom Classic, on macOS and Windows; a Lua plugin running a
+one-file Python executable from its own folder; six engines behind one seam
+— local first, or a cloud API, or a subscription CLI — picked in the
+plugin's Settings. Their names, and what each bills, are readme.md's table,
+which a test holds to `providers.py`.
+
 ---
 
 ## The two-process split
 
 ```
 ┌──────────────────────────────┐        ┌───────────────────────────────┐
-│  LrC Plugin (Lua)            │        │  Melampus Service (Python)    │
-│                              │  HTTP  │                               │
-│  • menu items                │◄──────►│  • VLM inference (MLX)        │
+│  LrC Plugin (Lua)            │        │  Melampus executable (Python) │
+│                              │  runs  │                               │
+│  • menu items                │◄──────►│  • VLM inference (six engines)│
 │  • config dialog             │  JSON  │  • sharpness / quality CV     │
 │  • reads GPS + capture date  │        │  • range & season re-ranking  │
 │  • exports JPEG previews     │        │  • occurrence API clients     │
@@ -24,7 +31,9 @@ with their reasoning so they can be revisited deliberately rather than by accide
 which is the difference between a fast feedback loop and a slow one. Everything in
 Stage 1 was built and measured with no Lightroom involvement at all.
 
-Only Stages 1–3 exist today; the Lua side is Stage 4.
+All four stages exist. The plugin runs the executable, `melampus` or
+`melampus.exe`, from its own folder with `--plugin-out` and reads the JSON it
+writes; there is no HTTP service.
 
 ---
 
@@ -34,12 +43,11 @@ Only Stages 1–3 exist today; the Lua side is Stage 4.
 arguments and calls into it. Nothing in the library prompts interactively, assumes a
 working directory, or writes to stdout for control flow.
 
-This is not stylistic. Stage 3 wraps the same library in an HTTP service, and Stage 4
-drives that service from Lua. Anything that only works from a terminal would have to be
-rebuilt.
+This is not stylistic. The executable wraps the same library, and the plugin drives
+it from Lua. Anything that only works from a terminal would have to be rebuilt.
 
 Config is data, not code: `load_config()` accepts a TOML path *and* keyword overrides,
-so the HTTP layer can accept per-request settings without touching the analysis modules.
+so a programmatic caller can pass per-run settings without touching the analysis modules.
 
 ---
 
@@ -77,7 +85,7 @@ Six implementations exist, and `[model] backend` picks one (`providers.py`,
 docs/config.md § `[model]`). `MLXBackend` runs Qwen3-VL locally on Apple Silicon.
 `OllamaBackend` runs whatever vision model a local Ollama server holds, over its
 documented chat endpoint with the standard library, which is the local path on
-Windows and Linux. `AnthropicBackend` and `OpenAIBackend` are the cloud path,
+Windows. `AnthropicBackend` and `OpenAIBackend` are the cloud path,
 built for the §6.6 escalation tail and reused as a primary on machines with no
 local runtime. `CommandBackend` runs an installed command-line program once per
 frame with the image path and the prompt in its arguments and reads the reply
