@@ -753,6 +753,8 @@ def test_config_doc_says_the_commands_exit_ends_its_answer_and_stops_what_it_sta
         "docs/config.md's command row does not say a helper left holding a stream is stopped, not waited on")
     assert "and everything it started" in timeout_row, (
         "docs/config.md's timeout_seconds row does not say the stop reaches everything the program started")
+    assert "counted from before the program is started" in timeout_row, (
+        "docs/config.md's timeout_seconds row does not say starting the program counts against the ceiling")
 
 
 def test_docs_name_the_sigchld_refusal_beside_the_commands_other_refusals():
