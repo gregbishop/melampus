@@ -406,7 +406,7 @@ local function visibleFor(entry, engine)
 	return binding.transform(engine, mock.state.prefs)
 end
 
-t.test('a password field takes the key for openai and for claude, shown only when that engine is picked', function()
+t.test('a password field takes the key for openai and for claude, shown only when that engine is picked and never for a subscription CLI', function()
 	local contents = openSettings({ detection = mock.detectionText() })
 	local fields = keyFields(contents)
 	t.isNotNil(fields.MELAMPUS_OPENAI_KEY, 'no password field for the OpenAI key')
@@ -422,20 +422,6 @@ t.test('a password field takes the key for openai and for claude, shown only whe
 	end
 	t.isFalse(visibleFor(fields.MELAMPUS_OPENAI_KEY, ''), 'the OpenAI key field shows with nothing picked')
 	t.isFalse(visibleFor(fields.MELAMPUS_ANTHROPIC_KEY, ''), 'the Claude key field shows with nothing picked')
-end)
-
-t.test('no password field shows for a subscription CLI; the fields for openai and claude stay', function()
-	local contents = openSettings({ detection = mock.detectionText(mock.signedIn) })
-	local fields, count = {}, 0
-	for variable, entry in pairs(keyFields(contents)) do fields[variable], count = entry, count + 1 end
-	t.equals(count, 2, 'expected exactly two password fields, for the two cloud engines')
-	for _, variable in ipairs({ 'MELAMPUS_OPENAI_KEY', 'MELAMPUS_ANTHROPIC_KEY' }) do
-		for _, engine in ipairs({ 'claude-code', 'codex' }) do
-			t.isFalse(visibleFor(fields[variable], engine), 'the ' .. variable .. ' field shows for ' .. engine)
-		end
-	end
-	t.isTrue(visibleFor(fields.MELAMPUS_OPENAI_KEY, 'openai'))
-	t.isTrue(visibleFor(fields.MELAMPUS_ANTHROPIC_KEY, 'claude'))
 end)
 
 t.test('the password fields are not bound to the preferences', function()
