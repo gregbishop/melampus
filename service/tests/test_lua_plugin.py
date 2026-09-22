@@ -311,13 +311,17 @@ def _plugin_folder_holding(executable: Path, tmp_path: Path) -> Path:
     return plugin_dir
 
 
-def _plugin_under_the_mock(plugin_dir: Path, tmp_path: Path, body: str, **env: str) -> str:
+def _plugin_under_the_mock(
+    plugin_dir: Path, tmp_path: Path, body: str, *, home: Path | None = None, **env: str
+) -> str:
     """Run `body`, Lua, with the mock SDK installed for `plugin_dir` (so
     `_PLUGIN.path` is there) on the platform Lightroom reports for this host
     (a fake Windows Lightroom on a Windows host), and MelampusAnalyze.lua
     loaded fresh under it through the mock's own loader as `Analyze`, with
-    the MelampusRules.lua instance it uses as `Rules`. `env` is what the body
-    reads through os.getenv. Hands back what it wrote.
+    the MelampusRules.lua instance it uses as `Rules`. `home` is the home
+    folder the fake Lightroom reports, when a test names one; else the
+    mock's own. `env` is what the body reads through os.getenv. Hands back
+    what it wrote.
 
     The mock's temp directory: under TMPDIR on a fake macOS Lightroom, the
     Windows temp folder (TEMP, as Lightroom reports it) on a fake Windows
@@ -325,7 +329,8 @@ def _plugin_under_the_mock(plugin_dir: Path, tmp_path: Path, body: str, **env: s
     script = tmp_path / "under-the-mock.lua"
     script.write_text(
         "local mock = require('lrmock')\n"
-        "local Analyze = mock.loadUnderMock('MelampusAnalyze', nil,"
+        "local Analyze = mock.loadUnderMock('MelampusAnalyze',"
+        " { home = os.getenv('MELAMPUS_HOME') },"
         " os.getenv('MELAMPUS_PLUGIN_DIR'),"
         " { windows = os.getenv('MELAMPUS_WINDOWS') == '1' })\n"
         "local Rules = require('MelampusRules')\n"
@@ -337,7 +342,7 @@ def _plugin_under_the_mock(plugin_dir: Path, tmp_path: Path, body: str, **env: s
         "MELAMPUS_WINDOWS": "1" if WINDOWS else "0",
         "TMPDIR": str(tmp_path),
         "TEMP": str(tmp_path),
-    } | env)
+    } | ({"MELAMPUS_HOME": str(home)} if home is not None else {}) | env)
     assert ran.returncode == 0, ran.stdout + ran.stderr
     return ran.stdout
 
@@ -428,23 +433,11 @@ def test_the_log_lands_under_the_data_directory_the_executable_reports(
     data_root = Path(json.loads(proc.stdout)["cancel_path"]).parent.parent
     assert data_root == per_user_data_dir(Path(env["HOME"]))
 
-    script = tmp_path / "log-path.lua"
-    script.write_text(
-        "local mock = require('lrmock')\n"
-        "local Log = mock.loadUnderMock('MelampusLog', { home = os.getenv('MELAMPUS_HOME') },"
-        " os.getenv('MELAMPUS_PLUGIN_DIR'), { windows = os.getenv('MELAMPUS_WINDOWS') == '1' })\n"
-        "io.write(Log.dataRoot() .. '\\n' .. Log.path())\n",
-        encoding="utf-8",
-    )
-    built = run_lua(script, env=os.environ | {
-        "MELAMPUS_HOME": env["HOME"],
-        "MELAMPUS_PLUGIN_DIR": str(PLUGIN),
-        "MELAMPUS_WINDOWS": "1" if WINDOWS else "0",
-        "TMPDIR": str(tmp_path),
-        "TEMP": str(tmp_path),
-    })
-    assert built.returncode == 0, built.stdout + built.stderr
-    lua_root, lua_log = built.stdout.splitlines()
+    lua_root, lua_log = _plugin_under_the_mock(
+        PLUGIN, tmp_path,
+        "io.write(require('MelampusLog').dataRoot() .. '\\n' .. require('MelampusLog').path())\n",
+        home=Path(env["HOME"]),
+    ).splitlines()
     assert Path(lua_root) == data_root, f"the plugin's root {lua_root} is not the executable's {data_root}"
     assert Path(lua_log) == data_root / "logs" / "Melampus.log"
 
