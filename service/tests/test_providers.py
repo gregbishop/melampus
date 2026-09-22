@@ -3965,15 +3965,22 @@ def test_the_cli_run_through_a_launcher_is_checked_through_the_same_launcher(
 def test_the_cli_in_a_process_that_ignores_sigchld_is_refused_and_names_the_fix(
     monkeypatch, tmp_path, no_ambient_keys, no_ambient_ollama, cli
 ):
-    """Review round 4 (C1, S3): given the CLI installed and signed in, and
-    the process melampus runs in ignoring SIGCHLD (the disposition faked,
-    as the `command` test fakes it), when the backend is asked for, then
-    it is refused after the verdict, through the same shape and words as
-    `command`: SIGCHLD named, the fix (start melampus from a shell, or
-    restore the default), and the backends that do work here from the
-    verdicts already taken. The disposition is asked once, not once per
-    verdict or per frame."""
-    _fake_engine_cli(monkeypatch, tmp_path, cli)
+    """Review round 4 (C1, S3) and round 5 (C1): given the CLI installed
+    and not signed in, and the process melampus runs in ignoring SIGCHLD
+    (the disposition faked, as the `command` test fakes it), when the
+    backend is asked for, then it is refused through the same shape and
+    words as `command`: SIGCHLD named, the fix (start melampus from a
+    shell, or restore the default), and the backends that do work here
+    from the verdicts already taken, the CLI engines not among them. The
+    status check never ran (its exit could not be read under that
+    disposition: CPython's Popen._try_wait reports 0 for a child the
+    kernel already reaped, so a check that did run would say "signed in"
+    of a CLI that is not), so the refusal says nothing of signing in, and
+    the verdict is the refusal's sentence, so --detect-engines and the
+    settings dialog say it too. The disposition is read once per CLI
+    verdict in the one detection (once here: conftest stubs the other
+    CLI's verdict), never per frame."""
+    log = _fake_engine_cli(monkeypatch, tmp_path, cli, mode="not-signed-in")
     asked: list[int] = []
 
     def getsignal(signalnum):
@@ -3986,9 +3993,16 @@ def test_the_cli_in_a_process_that_ignores_sigchld_is_refused_and_names_the_fix(
     assert asked == [signal.SIGCHLD]
     assert "ignores SIGCHLD" in message, message
     assert "shell" in message and "default" in message, message
+    assert "signed in" not in message and "not to" not in message, message
+    assert not log.exists(), f"the status check ran under an ignored SIGCHLD:\n{log.read_text(encoding='utf-8')}"
     for works_here in ("claude", "openai", "scripted"):
         assert works_here in message, f"{works_here!r} is not named as working here:\n{message}"
     assert "--backend" in message
+    works_here = message.partition("The backends that work on this machine are: ")[2]
+    assert cli.engine not in works_here, message
+    (verdict,) = [v for v in providers.detect_engines() if v.engine == cli.engine]
+    assert not verdict.available and verdict.executable is None
+    assert f"{verdict.reason}." in message, (verdict.reason, message)
 
 
 @posix_only
@@ -3996,24 +4010,34 @@ def test_the_cli_in_a_process_that_ignores_sigchld_is_refused_and_names_the_fix(
 def test_the_cli_is_refused_at_the_real_boundary_when_sigchld_is_ignored(
     monkeypatch, tmp_path, no_ambient_keys, no_ambient_ollama, cli
 ):
-    """Review round 4 (C1, S3), at the real boundary: SIGCHLD really set to
-    SIG_IGN in this process (restored afterwards), the fake CLI on PATH
-    found by the real shutil.which and asked its status by the real
-    detection, and the factory refuses through BackendUnavailable naming
-    SIGCHLD before any frame is run, since with children reaped by the
-    kernel the backend's every stop would signal a pid the CLI no longer
-    holds."""
-    _fake_engine_cli(monkeypatch, tmp_path, cli)
+    """Review round 4 (C1, S3) and round 5 (C1), at the real boundary:
+    SIGCHLD really set to SIG_IGN in this process (restored afterwards),
+    the fake CLI on PATH, not signed in, found by the real shutil.which,
+    and the factory refuses through BackendUnavailable naming SIGCHLD
+    before any frame is run, since with children reaped by the kernel the
+    backend's every stop would signal a pid the CLI no longer holds. The
+    real detection never runs the status check: under this disposition
+    its exit reads as 0 whatever the CLI says (Popen._try_wait cannot get
+    the status of a child the kernel reaped), so a verdict from it would
+    call this not-signed-in CLI signed in; the refusal says nothing of
+    signing in, the check's log does not exist, and the verdict is the
+    refusal's sentence."""
+    log = _fake_engine_cli(monkeypatch, tmp_path, cli, mode="not-signed-in")
     before = signal.signal(signal.SIGCHLD, signal.SIG_IGN)
     try:
         with pytest.raises(providers.BackendUnavailable) as err:
             providers.build_primary_backend(_cfg(model={"backend": cli.engine, "timeout_seconds": 30}))
+        (verdict,) = [v for v in providers.detect_engines() if v.engine == cli.engine]
     finally:
         signal.signal(signal.SIGCHLD, before)
     message = str(err.value)
     assert "ignores SIGCHLD" in message, message
     assert "shell" in message and "default" in message, message
+    assert "signed in" not in message and "not to" not in message, message
+    assert not log.exists(), f"the status check ran under an ignored SIGCHLD:\n{log.read_text(encoding='utf-8')}"
     assert "--backend" in message
+    assert not verdict.available and verdict.executable is None
+    assert f"{verdict.reason}." in message, (verdict.reason, message)
 
 
 @posix_only

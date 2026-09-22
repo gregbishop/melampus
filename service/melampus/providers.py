@@ -598,8 +598,12 @@ def _sigchld_ignored() -> str | None:
     unreaped, so the pid is still its own. A launcher that ignores SIGCHLD
     (inherited across exec) has the kernel reap the program the moment it
     exits, so every such stop would signal a number that may be someone
-    else's: refused once, by every branch that builds a CommandBackend,
-    rather than once per frame (CommandBackend's contract)."""
+    else's: refused once, where the program is resolved for the seam (the
+    `command` branch and _cli_verdict, which asks before its status check
+    is run, since under that disposition the check's exit cannot be read
+    either: Popen._try_wait reports 0 for a child the kernel reaped, so
+    the verdict would be wrong; review round 5, C1), rather than once per
+    frame (CommandBackend's contract)."""
     if hasattr(signal, "SIGCHLD") and signal.getsignal(signal.SIGCHLD) is signal.SIG_IGN:
         return (
             "The process that started melampus ignores SIGCHLD, so the command's exit "
@@ -620,7 +624,9 @@ def _cli_verdict(cli: CliEngine, command: list[str] | None, probe_seconds: float
     raises; a verdict reports. The reasons are the words the user sees:
     not installed with where to get it, resolving to a batch shim with
     the file found and the fix (_batch_shim, before the check is run
-    through it), not signed in with the check as
+    through it), a process that ignores SIGCHLD with the fix
+    (_sigchld_ignored, before the check is run, whose exit that
+    disposition would make unreadable), not signed in with the check as
     run and the command that signs in, signed in but not to the
     subscription with the check as run, what to remove and the sign-in, a
     check that did not answer or failed some other way (in the CLI's own
@@ -641,6 +647,8 @@ def _cli_verdict(cli: CliEngine, command: list[str] | None, probe_seconds: float
         )
     if shim := _batch_shim(program, executable):
         return EngineVerdict(cli.engine, False, shim)
+    if ignored := _sigchld_ignored():
+        return EngineVerdict(cli.engine, False, ignored)
     try:
         status = subprocess.run(
             [executable, *check],
@@ -929,8 +937,6 @@ def _cli_backend(cli: CliEngine, settings: ModelConfig) -> VLMBackend:
     verdict = next(v for v in verdicts if v.engine == cli.engine)
     if not verdict.available:
         raise _refusal(f"{verdict.reason}.", works_here=_works_here(verdicts))
-    if ignored := _sigchld_ignored():
-        raise _refusal(f"{ignored}.", works_here=_works_here(verdicts))
     return CommandBackend(
         command, executable=verdict.executable, timeout=settings.timeout_seconds,
         decode=cli.decode,
