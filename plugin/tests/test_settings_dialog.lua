@@ -414,14 +414,14 @@ t.test('a password field takes the key for openai and for claude, shown only whe
 	local count = 0
 	for _ in pairs(fields) do count = count + 1 end
 	t.equals(count, 2, 'expected exactly two password fields')
-	for _, engine in ipairs({ '', 'mlx', 'ollama', 'claude', 'claude-code', 'codex' }) do
-		t.isFalse(visibleFor(fields.MELAMPUS_OPENAI_KEY, engine), 'the OpenAI key field shows for ' .. engine)
+	-- Each field shows for its own engine alone, over the plugin's list, so
+	-- the next engine is checked without a line here.
+	for _, engine in ipairs(ENGINES) do
+		t.equals(visibleFor(fields.MELAMPUS_OPENAI_KEY, engine), engine == 'openai', 'the OpenAI key field, picking ' .. engine)
+		t.equals(visibleFor(fields.MELAMPUS_ANTHROPIC_KEY, engine), engine == 'claude', 'the Claude key field, picking ' .. engine)
 	end
-	t.isTrue(visibleFor(fields.MELAMPUS_OPENAI_KEY, 'openai'))
-	for _, engine in ipairs({ '', 'mlx', 'ollama', 'openai', 'claude-code', 'codex' }) do
-		t.isFalse(visibleFor(fields.MELAMPUS_ANTHROPIC_KEY, engine), 'the Claude key field shows for ' .. engine)
-	end
-	t.isTrue(visibleFor(fields.MELAMPUS_ANTHROPIC_KEY, 'claude'))
+	t.isFalse(visibleFor(fields.MELAMPUS_OPENAI_KEY, ''), 'the OpenAI key field shows with nothing picked')
+	t.isFalse(visibleFor(fields.MELAMPUS_ANTHROPIC_KEY, ''), 'the Claude key field shows with nothing picked')
 end)
 
 t.test('no password field shows for a subscription CLI; the fields for openai and claude stay', function()
@@ -645,7 +645,7 @@ for _, case in ipairs(MODEL_ENGINES) do
 		local row = modelRow(contents, engine)
 		t.isTrue(visibleFor({ view = row }, engine))
 		t.equals(visibleFor({ view = row }, ''), engine == 'mlx', 'the default on this Mac is mlx')
-		for _, other in ipairs({ 'mlx', 'ollama', 'openai', 'claude', 'claude-code', 'codex' }) do
+		for _, other in ipairs(ENGINES) do
 			if other ~= engine then t.isFalse(visibleFor({ view = row }, other), 'the row shows for ' .. other) end
 		end
 	end)
