@@ -882,10 +882,15 @@ def test_config_doc_says_the_codex_profile_leaves_the_shared_temp_directories_wr
 
     Review round 10, C1: the sentence that leaves the decision to the owner
     must also say where the decision is recorded, so a reader can follow it.
-    It pointed at "its own card" without a number; the card is the owner's
-    to file and this branch does not invent a number, so what it names is
-    the record that does exist, security review round 9 on PR #17. The
-    negative keeps the prose from going back to an unnamed card."""
+    It pointed at "its own card" without a number; the card did not exist
+    yet and this branch did not invent a number, so what it named was the
+    record that did exist, security review round 9 on PR #17. The negative
+    keeps the prose from going back to an unnamed card.
+
+    The owner has since filed that card, #505, so the sentence names it as
+    well: security review round 9 on PR #17 is where the measurement is,
+    card #505 is where the decision is recorded, and the prose no longer
+    says the card is his to file."""
     prose = " ".join(CONFIG_DOC.read_text(encoding="utf-8").split())
     for path in ("`/tmp`", "`/private/tmp`", "`/var/tmp`", "`/private/var/tmp`"):
         assert path in prose, f"docs/config.md does not name {path} under the profile"
@@ -895,7 +900,7 @@ def test_config_doc_says_the_codex_profile_leaves_the_shared_temp_directories_wr
         "docs/config.md still says the profile writes nowhere; writes land in the shared temp directories")
     deferral = re.search(r"Whether that is acceptable[^.]*\.", prose)
     assert deferral, "docs/config.md no longer says whose call the shared temp writes are"
-    for said in ("the owner's call", "security review round 9", "PR #17"):
+    for said in ("the owner's call", "security review round 9", "PR #17", "card #505"):
         assert said in deferral.group(0), (
             f"docs/config.md does not say {said!r} where it leaves the shared temp writes to the owner")
     assert "own card" not in prose, (
