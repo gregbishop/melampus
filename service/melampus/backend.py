@@ -1056,14 +1056,17 @@ class CommandBackend(VLMBackend):
         time.sleep(within)
         return os.waitid(os.P_PID, process.pid, look) is not None
 
-    def _wait(self, process, readers: list[threading.Thread], overflowed: list[str]) -> bool:
-        """Whether the command exited within `timeout`. Its exit ends its
-        answer: the moment it is seen (_exited, without reaping) the tree
-        it heads is stopped, so a worker it left holding stdout or stderr
-        dies and the pipe ends, the readers are given a short bound to
-        reach those ends (five seconds, and never past the timeout, which
-        is the ceiling on the call as a whole), and what they read is the
-        reply. Past the timeout, at the ceiling (`overflowed`, which the
+    def _wait(self, process, readers: list[threading.Thread], overflowed: list[str],
+              deadline: float) -> bool:
+        """Whether the command exited by `deadline` (time.monotonic, armed
+        by complete before the program was started, so starting it counts
+        against the timeout too). Its exit ends its answer: the moment it
+        is seen (_exited, without reaping) the tree it heads is stopped,
+        so a worker it left holding stdout or stderr dies and the pipe
+        ends, the readers are given a short bound to reach those ends
+        (five seconds, and never past the deadline, which is the ceiling
+        on the call as a whole), and what they read is the reply. Past
+        the deadline, at the ceiling (`overflowed`, which the
         readers raise and this loop sees within a step), or on any other
         interruption (Ctrl+C), the tree and the command are stopped the
         same way, as subprocess.run kills its child: the command does not
@@ -1072,14 +1075,16 @@ class CommandBackend(VLMBackend):
         the last thing done here, so the pid the tree is stopped by is
         still the command's own; on the interruption path it is stopped,
         not reaped, and the interrupt propagates."""
-        deadline = time.monotonic() + self.timeout
+        # The deadline is checked before every look, the first included: a
+        # launch that consumed it leaves nothing to look within, and the
+        # exit its process shows is past the ceiling, not within it.
         step = 0.0005
+        in_time = False
         try:
-            while not (in_time := self._exited(process, step)) and not overflowed:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
+            while (remaining := deadline - time.monotonic()) > 0 and not overflowed:
+                if in_time := self._exited(process, min(step, remaining)):
                     break
-                step = min(step * 2, remaining, 0.05)
+                step = min(step * 2, 0.05)
         except BaseException:
             self._stop(process)
             raise
@@ -1106,7 +1111,8 @@ class CommandBackend(VLMBackend):
 
     def complete(self, image_path: Path, prompt: str, max_tokens: int) -> Completion:
         argv = self._argv(image_path, prompt)
-        started = time.perf_counter()
+        started = time.monotonic()
+        deadline = started + self.timeout
         try:
             process = self._run(
                 argv,
@@ -1125,8 +1131,8 @@ class CommandBackend(VLMBackend):
         ]
         for reader in readers:
             reader.start()
-        in_time = self._wait(process, readers, overflowed)
-        elapsed = time.perf_counter() - started
+        in_time = self._wait(process, readers, overflowed, deadline)
+        elapsed = time.monotonic() - started
         stdout, stderr = (sinks[name].decode("utf-8", "replace") for name in ("stdout", "stderr"))
 
         if overflowed:

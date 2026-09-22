@@ -2284,6 +2284,34 @@ def test_command_backend_stops_the_whole_process_tree_on_timeout(tmp_path):
     assert process.returncode is not None, "the killed command was not reaped"
 
 
+def test_command_backend_counts_starting_the_program_against_the_timeout(tmp_path):
+    """Codex round 21 (backend.py:999, :1002): the timeout is the ceiling on
+    the call as a whole, starting the program included. A launch that is
+    slow (a program that takes long to exec, a PATH on a slow volume)
+    counts against it, so a launch that consumed the whole timeout, 0.3s
+    here against a 0.6s launch, is reported as the timeout it is, not
+    answered as a success with a fresh full timeout after it. The fake's
+    process factory sleeps past the timeout before returning a process
+    that has already exited with a good reply."""
+    image = tmp_path / "image.jpg"
+    image.write_bytes(b"jpeg")
+    run = _FakeRun(stdout=ID_OK)
+    backend = _command_backend(run, timeout=0.3)
+
+    def slow_launch(argv, **kwargs):
+        time.sleep(0.6)
+        return run(argv, **kwargs)
+    backend._run = slow_launch
+
+    started = time.monotonic()
+    with pytest.raises(TimeoutError, match="did not answer within 0.3s"):
+        backend.complete(image, "prompt", 10)
+
+    assert time.monotonic() - started < 1.5, "the launch was given a fresh timeout on top of its own"
+    (process,) = run.processes
+    assert process.returncode is not None, "the command was not reaped"
+
+
 def test_command_backend_uses_the_reply_of_a_command_that_exited_leaving_its_pipe_held(tmp_path):
     """The command's exit ends its answer. A command that printed its reply,
     exited 0 and left a process it started holding its stdout is not a
