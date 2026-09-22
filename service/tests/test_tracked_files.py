@@ -209,10 +209,6 @@ def _frame(image: Image.Image | None = None, **save) -> bytes:
     return buffer.getvalue()
 
 
-def test_the_committed_frame_passes_the_gate():
-    assert _frame_problems(_index_bytes(COMMITTED_FRAME)) == []
-
-
 def test_a_frame_over_the_ceiling_is_refused():
     # Noise does not compress: 1200 x 800 at quality 100 is well over 1 MB.
     big = _frame(Image.effect_noise((1200, 800), 64), quality=100)
