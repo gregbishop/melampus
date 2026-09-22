@@ -704,6 +704,17 @@ function M.loadUnderMock(name, resetOptions, folder, installOptions)
 	return M.loadPluginFile(name)
 end
 
+--- What the plugin's log holds: the file the module writes at Log.path(),
+--- under the mock's home; nil while nothing has landed. Shared by the suites
+--- that assert on what was logged, and on what was not.
+function M.logText()
+	local handle = io.open(require('MelampusLog').path(), 'r')
+	if not handle then return nil end
+	local text = handle:read('*a')
+	handle:close()
+	return text
+end
+
 --- The plugin's default settings, from MelampusRules.lua loaded fresh, with
 --- each table of overrides applied in turn (a nil one is skipped).
 function M.defaultPrefs(...)
