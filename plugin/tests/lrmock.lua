@@ -56,7 +56,8 @@ M.CLAUDE_CODE_INSTALL = 'https://code.claude.com/docs/en/setup'
 -- fields of that engine's verdict. The one canned answer every suite starts
 -- from, so a title and a reason are spelled once; `M.canned[engine]` is the
 -- same answer by engine, `M.titles[engine]` its title, and `M.signedIn` the
--- other answer the subscription CLIs give, as an overrides table.
+-- other answer the subscription CLIs give, as an overrides table, and
+-- `M.allAvailable()` the answer with every engine available.
 function M.detectionVerdicts(overrides)
 	local list = {
 		{ engine = 'mlx', title = 'MLX — local, Apple Silicon', available = true,
@@ -103,6 +104,19 @@ M.signedIn = {
 	codex = { available = true,
 		reason = 'Codex CLI is signed in (ChatGPT); every frame bills to that subscription, not to an API key' },
 }
+
+--- Every engine available: Ollama answering and both subscription CLIs
+-- signed in, as an overrides table, built fresh each call; `extra[engine]`
+-- is merged on top, so a test can grey one engine against everything else
+-- available.
+function M.allAvailable(extra)
+	local overrides = {
+		ollama = { available = true, reason = 'Ollama is answering at http://127.0.0.1:11434' },
+		['claude-code'] = M.signedIn['claude-code'], codex = M.signedIn.codex,
+	}
+	for engine, o in pairs(extra or {}) do overrides[engine] = o end
+	return overrides
+end
 
 --- The same answer as the JSON text the executable prints.
 function M.detectionText(overrides)
