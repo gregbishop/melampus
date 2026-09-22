@@ -10,17 +10,22 @@ live here and both callers import them.
 from __future__ import annotations
 
 import json
+import os
 import platform
 import shutil
 import signal
 import subprocess
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
+from typing import NoReturn
 from urllib.parse import urlsplit
 
 from pydantic import SecretStr
 
-from .backend import CommandFailed, VLMBackend, _Deadline, _NotedHTTP, _NotedHTTPS, stderr_lines
+from .backend import (
+    CommandBackend, CommandFailed, VLMBackend, _Deadline, _NotedHTTP, _NotedHTTPS, stderr_lines,
+)
 from .config import MelampusConfig, ModelConfig
 
 #: Where each provider's key is looked for, in order, when the config has none.
@@ -75,11 +80,12 @@ OLLAMA_INSTALL = "https://ollama.com/download"
 #: detection about it, so it is not in BACKEND_CHOICES.
 COMMAND = "command"
 
-#: What a `command` may not resolve to: Windows launches a batch file through
-#: cmd.exe regardless of what subprocess is told (Python's subprocess docs,
-#: Security Considerations), and cmd.exe would parse the prompt, newlines,
-#: quotes and braces included, instead of passing it as one argument. An
-#: npm-installed CLI is such a shim; its real entry is the fix.
+#: What a `command`, or a CLI engine's template, may not resolve to: Windows
+#: launches a batch file through cmd.exe regardless of what subprocess is
+#: told (Python's subprocess docs, Security Considerations), and cmd.exe
+#: would parse the prompt, newlines, quotes and braces included, instead of
+#: passing it as one argument. An npm-installed CLI is such a shim; its
+#: real entry is the fix (_batch_shim, asked wherever a program is resolved).
 BATCH_SUFFIXES = (".cmd", ".bat")
 
 #: Claude Code as an engine (card #421): the command seam configured for
@@ -109,7 +115,8 @@ CLAUDE_CODE_PROGRAM = "claude"
 #: the mode that skips keychain reads. The status check carries this
 #: flag too, read off the template (CLAUDE_CODE_SETTINGS_FLAGS says how),
 #: so the credential it reports is read under the settings the run
-#: loads, in the same inherited environment (Codex round 1, S2).
+#: loads, in the same environment, `CliEngine.environment` (Codex round
+#: 1, S2; round 3, S1).
 CLAUDE_CODE_ISOLATION = "--restricted"
 
 #: The one copy of the template. Every flag is from `claude --help` (2.1.277)
@@ -214,7 +221,7 @@ CLAUDE_CODE_SETTINGS_FLAGS = {
 #: list none: none, api_key, api_key_helper, oauth_token, third_party.
 #: Only claude.ai is the subscription, and even then the login can be set
 #: aside for a key: a print-mode run uses whatever credential Claude
-#: Code's precedence puts first, the environment melampus runs from
+#: Code's precedence puts first, a loaded settings file's `env` block
 #: included (authentication § Authentication precedence: "In
 #: non-interactive mode (-p), the key is always used when present"), and
 #: the status object then names it in `apiKeySource` (measured: the login
@@ -226,19 +233,32 @@ CLAUDE_CODE_SETTINGS_FLAGS = {
 #: key while the cloud guards, off for a local engine, ask nothing.
 CLAUDE_CODE_SUBSCRIPTION = "claude.ai"
 
-#: What to remove for each credential that is not the subscription, by
-#: the status object's name for it (apiKeySource first, then authMethod),
-#: in the docs' own variable names (authentication § Authentication
-#: precedence; `claude auth login --help`: "--console  Use Anthropic
-#: Console (API usage billing) instead of Claude subscription", the
-#: sign-in the program reports as apiKeySource "/login managed key").
+#: What to remove, and from where, for each credential that is not the
+#: subscription, by the status object's name for it (apiKeySource first,
+#: then authMethod), in the docs' own variable names (authentication §
+#: Authentication precedence; `claude auth login --help`: "--console  Use
+#: Anthropic Console (API usage billing) instead of Claude subscription",
+#: the sign-in the program reports as apiKeySource "/login managed key").
+#: The place is a settings file, never the shell (review round 7, C2):
+#: the check and the run are launched with `CliEngine.environment`, so a
+#: variable of these reaches Claude Code only from the `env` block of a
+#: settings file it loads (settings § Settings precedence: "An `env`
+#: block inside a settings file is an ordinary key and follows the levels
+#: above"; under `--restricted` that is managed settings and
+#: `--settings`, and a template of the user's own without it loads the
+#: user file too), the way an apiKeyHelper is a settings key.
 CLAUDE_CODE_CREDENTIAL_FIX = {
-    "ANTHROPIC_API_KEY": "unset ANTHROPIC_API_KEY",
-    "api_key": "unset ANTHROPIC_API_KEY",
+    "ANTHROPIC_API_KEY": "remove ANTHROPIC_API_KEY from the `env` block of the settings",
+    "api_key": "remove ANTHROPIC_API_KEY from the `env` block of the settings",
     "apiKeyHelper": "remove apiKeyHelper from the settings",
     "api_key_helper": "remove apiKeyHelper from the settings",
-    "oauth_token": "unset CLAUDE_CODE_OAUTH_TOKEN and ANTHROPIC_AUTH_TOKEN",
-    "third_party": "unset CLAUDE_CODE_USE_BEDROCK, CLAUDE_CODE_USE_VERTEX and CLAUDE_CODE_USE_FOUNDRY",
+    "oauth_token": (
+        "remove CLAUDE_CODE_OAUTH_TOKEN and ANTHROPIC_AUTH_TOKEN from the `env` block of the settings"
+    ),
+    "third_party": (
+        "remove CLAUDE_CODE_USE_BEDROCK, CLAUDE_CODE_USE_VERTEX and CLAUDE_CODE_USE_FOUNDRY"
+        " from the `env` block of the settings"
+    ),
     "/login managed key": "that is the Console sign-in (API usage billing), so run `claude auth logout`",
 }
 
@@ -250,8 +270,135 @@ CLAUDE_CODE_AUTH_DOCS = "https://code.claude.com/docs/en/authentication#authenti
 #: --detect-engines must never hang the settings dialog.
 CLAUDE_CODE_PROBE_SECONDS = 10.0
 
+#: Codex CLI as an engine (card #422): the second CLI behind the same seam,
+#: for when Claude is at its limit or the owner prefers it. `codex` resolves
+#: to a CommandBackend on CODEX_COMMAND, or on `[model] command` when the
+#: user sets one. Runs bill to the ChatGPT plan Codex is signed in to; a
+#: Codex signed in with an API key is refused (CODEX_CLI).
+CODEX = "codex"
+
+#: The program, as shutil.which looks for it: `codex` on PATH.
+CODEX_PROGRAM = "codex"
+
+#: The one copy of the template. Every flag is from `codex exec --help`
+#: (0.155.1) and Codex's documentation (non-interactive-mode,
+#: developer-commands, image-inputs, permissions): `exec` runs
+#: "non-interactively"; `--image {image}` attaches the staged JPEG ("Attach
+#: images to the first message"; "PNG and JPEG" accepted), first, because
+#: the flag is variadic (`-i, --image <FILE>...`) and takes a prompt right
+#: after it for a second file (measured); `--json` makes stdout a JSONL
+#: stream, the reply the agent_message's text and a failure the
+#: turn.failed's message (codex_reply reads both); `--ephemeral` writes no
+#: session per frame; `--skip-git-repo-check` runs from wherever melampus
+#: was launched; `--ignore-user-config` loads no ~/.codex/config.toml
+#: ("Authentication still uses CODEX_HOME"), so no MCP server starts per
+#: frame and the run is the same on every machine; `-c
+#: approval_policy="never"` (the documented approval_policy value; exec
+#: rejects --ask-for-approval, measured) lets the run proceed with nobody
+#: to approve; `-c project_doc_max_bytes=0` ("Maximum bytes read from
+#: AGENTS.md") keeps the launch directory's instructions out of the prompt,
+#: and is what lets the profile below start: without it Codex's AGENTS.md
+#: loader re-runs its own binary under the profile, which denies it, and
+#: the session fails to initialize ("fs sandbox helper failed", measured on
+#: 0.155.1 with `codex debug prompt-input`, no model call).
+#:
+#: The two `-c` overrides after it are the read boundary (Codex review
+#: round 2, S1). `--sandbox read-only` stopped writes and confined no read:
+#: exec's default policy renders as `:root` read, the whole disk (measured
+#: the same way), so an injection in the image could have had Codex read
+#: any file on the machine into its cloud conversation. The permissions
+#: documentation (learn.chatgpt.com/docs/permissions, "File access limited
+#: to workspace") is the mechanism: a profile whose filesystem rules are
+#: `":root" = "deny"` ("By default, deny read access to all files on
+#: disk"), `":minimal" = "read"` ("a software agent needs to be able to
+#: read folders that contain common tools, such as `/usr/bin` ... a
+#: 'minimal' set of files and folders, as determined by Codex") and the
+#: session's workspace root, the staged folder, readable
+#: (`":workspace_roots"`: "The current session's workspace roots"; "." is
+#: "the root itself"), selected by `default_permissions`. Both travel as
+#: `-c key=value` ("The `value` portion is parsed as TOML"; a dotted key
+#: with a quoted segment is not, so the filesystem table is one inline
+#: value), so no config file is read and the profile is the same
+#: everywhere. `--sandbox` is gone because the same page says "If
+#: sandbox_mode appears in any loaded config file, you pass --sandbox, or
+#: the selected config profile sets sandbox_mode, Codex uses those older
+#: sandbox settings instead of default_permissions" (config-reference:
+#: "Don't combine with sandbox_mode"). A profile's commands have no
+#: network unless `network.enabled` says so, and writes are denied
+#: everywhere the profile governs except the shared temp directories
+#: `:minimal` grants. Measured on 0.155.1 with `codex sandbox -P` under
+#: this profile from a staged folder under melampus's own staging root
+#: (images.STAGING_ROOT), no model call: the staged file read; a file in
+#: a sibling staged folder, and the home folder, "Operation not
+#: permitted"; a write in the staged folder, in a sibling staged folder
+#: and in the home folder denied; `curl` could not resolve a host. The
+#: workspace root being the whole boundary is why images.staged_pixels
+#: pins where it stages instead of leaving it to $TMPDIR: `tempfile`
+#: falls back to /tmp when that variable is unset, /tmp is inside the
+#: grant below, and the same measurement with the workspace root in /tmp
+#: read a file in another /tmp folder, listed /tmp and overwrote the
+#: staged image (security review round 12; docs/config.md says the same
+#: and test_docs.py pins it, test_pipeline.py pins the code). Pinning the
+#: directory is not the whole of it either: where melampus's own directory
+#: lands follows the checkout root in a checkout and $XDG_DATA_HOME inside
+#: the executable, so a checkout under /tmp puts it back in the grant.
+#: images.staging_root resolves that root and refuses to stage when it is
+#: inside the grant, naming it (security review round 9).
+#: What `:minimal` grants is Codex's, not ours:
+#: /etc/hosts and /tmp (with /private/tmp and /private/var/tmp) read
+#: as before, even under an explicit deny (measured); the user's home,
+#: other temp folders and everything else outside the staged folder do
+#: not. The same grant is where the write boundary stops (security review
+#: round 9, measured the same way): /tmp, /private/tmp, /var/tmp and
+#: /private/var/tmp are writable, and a command may execute what it wrote
+#: there, which is still on disk after the run. The profile cannot close
+#: that at this version: all four named "deny" in the filesystem table
+#: still allowed the write, and dropping `":minimal"="read"` left the
+#: session producing no output at all. So a photograph's text can leave a
+#: payload or an instruction in those directories for the next run to read
+#: back: `--ephemeral` keeps no session per frame, but the channel
+#: survives from one frame to the next. Whether that is acceptable for
+#: this engine is the owner's call; the measurement is recorded in
+#: security review round 9 on PR #17, and the decision it leaves open is
+#: card #505. docs/config.md says the same and
+#: test_docs.py pins it. Permission profiles are documented
+#: as beta ("under active development and may change"); the shape here is
+#: the documentation's own example, pinned by
+#: test_codex_template_is_the_documented_exec_invocation.
+#: `--color never` keeps ANSI out of the stderr the error messages quote.
+#: The prompt is the positional argument, last: the pipeline's prompt in
+#: full; the image needs no mention, it is attached.
+CODEX_COMMAND = [
+    CODEX_PROGRAM, "exec", "--image", "{image}", "--json", "--ephemeral",
+    "--skip-git-repo-check", "--ignore-user-config",
+    "-c", 'approval_policy="never"', "-c", "project_doc_max_bytes=0",
+    "-c", 'default_permissions="melampus"',
+    "-c", 'permissions.melampus.filesystem={":root"="deny",":minimal"="read",'
+          '":workspace_roots"={"."="read"}}',
+    "--color", "never",
+    "{prompt}",
+]
+
+#: Where to get Codex CLI when nothing on PATH is called `codex`.
+CODEX_INSTALL = "https://developers.openai.com/codex/cli"
+
+#: How to sign in from a shell (`codex login --help`: "Manage login"; with
+#: no flags "Codex opens a browser for the ChatGPT OAuth flow", the plan).
+CODEX_SIGN_IN = "codex login"
+
+#: The documented, cheap sign-in check (developer-commands: "Print the
+#: active authentication mode and exit with 0 when logged in"; measured on
+#: 0.154.0: exit 0 and "Logged in using ChatGPT" on stderr, or exit 1 and
+#: "Not logged in"): no model call, so detection spends nothing. It does
+#: not know the plan's usage limit; only a run does (codex_reply).
+CODEX_STATUS = ("login", "status")
+
+#: How long the status check may take. A native binary answers it in
+#: milliseconds (measured: 0.01 s); ten seconds is a broken install.
+CODEX_PROBE_SECONDS = 10.0
+
 #: The backends that run on this machine and bill nobody per call.
-LOCAL_BACKENDS = ("mlx", OLLAMA, COMMAND, CLAUDE_CODE, SCRIPTED)
+LOCAL_BACKENDS = ("mlx", OLLAMA, COMMAND, CLAUDE_CODE, CODEX, SCRIPTED)
 
 
 class BackendUnavailable(RuntimeError):
@@ -377,126 +524,421 @@ def claude_code_status(command: list[str]) -> list[str]:
     return [*carried, *CLAUDE_CODE_STATUS]
 
 
-def claude_code_verdict(command: list[str] | None = None) -> EngineVerdict:
-    """Whether Claude Code can be the engine here (card #421): the program
-    `command` (CLAUDE_CODE_COMMAND unless the user set a template) names
-    must be on PATH, and its status check, under that template's own
-    settings flags (claude_code_status), must say signed in to the
-    subscription. Never raises; a verdict reports. The reasons are the
-    words the user sees: not installed with where to get it, not signed in
-    with the check as run and the command that signs in, signed in but
-    not to the subscription with the check as run, what to remove and the
-    sign-in (CLAUDE_CODE_SUBSCRIPTION says why), a check that did not
-    answer or failed some other way (in the CLI's own words), or available
-    and billing to the subscription. A template carrying CLAUDE_CODE_BARE
-    is told to remove it in place of the sign-in, which cannot help it, in
-    every verdict that would name the sign-in, the not-installed one
-    included (review round 7, 1)."""
-    command = command or CLAUDE_CODE_COMMAND
+@dataclass(frozen=True, slots=True)
+class Credential:
+    """What a passed status check says the CLI is signed in with, as
+    `CliEngine.account` reads it: `kind` is the account kind in the words
+    `CliEngine.subscriptions` and `bills_per_call` use ("" when the check
+    names nothing the reader can place); `signed_in_as` what the available
+    verdict shows, the kind and, when named, the plan; `said` what the
+    check said about the credential, safe to quote in a refusal ("" quotes
+    nothing); `fix` what to remove before signing in, when known."""
+
+    kind: str
+    signed_in_as: str = ""
+    said: str = ""
+    fix: str = ""
+
+
+#: The environment a subscription CLI is launched with, by variable name,
+#: in place of melampus's own (Codex review round 3, S1): a photograph is
+#: untrusted input, and a CLI whose agent can run commands (Codex's shell
+#: tool, on by default, and its own environment policy keeps names
+#: containing KEY, SECRET or TOKEN unless a config says otherwise:
+#: config-reference, `shell_environment_policy.ignore_default_excludes`
+#: "default: true") would answer text rendered in one asking for `env`
+#: with whatever melampus was launched with, into its cloud conversation:
+#: the cloud engines' keys, or anything else the shell exports. So the
+#: status check and every run get these and the CLI's own settings
+#: variable (`CliEngine.settings_variable`), nothing else, each copied
+#: from melampus's environment when it is set there. What a process needs
+#: to start and to find its sign-in: PATH (the npm shims run `node` from
+#: it), HOME and USER (measured on studio: `claude --restricted auth
+#: status --json` reports the login with PATH, HOME and USER and not
+#: without USER, the keychain's account; `codex login status` with PATH
+#: and HOME), the rest of the login session's basics (LOGNAME, SHELL,
+#: TMPDIR, the locale, TERM), and the standard proxy and CA variables the
+#: CLI's own network path may need (Claude Code's network-config page:
+#: "Claude Code respects standard proxy environment variables",
+#: `NODE_EXTRA_CA_CERTS` for a custom CA), which name the user's proxy,
+#: not anything of melampus's. On Windows (review round 7, C1: each name
+#: with its reason, and none without one) the tail is the floor a Windows
+#: process starts under, tests/test_binary.py's no_python_environment,
+#: which CI's build-windows runs the executable under: SYSTEMROOT
+#: (Python's subprocess docs, Popen `env`: "On Windows, in order to run a
+#: side-by-side assembly the specified env must include a valid
+#: %SystemRoot%"), TEMP and TMP (Windows' GetTempPath "checks for the
+#: existence of environment variables in the following order and uses the
+#: first path found: TMP, TEMP, USERPROFILE, the Windows directory";
+#: Node's os.tmpdir, Claude Code's temp folder on Windows per env-vars
+#: `CLAUDE_CODE_TMPDIR`), and USERPROFILE, the home (Claude Code's
+#: settings page: "On Windows, `~/.claude` means `%USERPROFILE%\.claude`";
+#: authentication: "On Windows, credentials are stored in
+#: `%USERPROFILE%\.claude\.credentials.json`"; Codex's CODEX_HOME defaults
+#: to `~/.codex` (its environment-variables page), and a Rust program's
+#: home on Windows is "the value of the 'USERPROFILE' environment
+#: variable" (std::env::home_dir)). Nothing above that floor has a
+#: documented need: PATHEXT is read by melampus's own `shutil.which`, in
+#: melampus's environment; a `.cmd` shim is refused (_batch_shim), so no
+#: cmd.exe (COMSPEC) is started; managed settings live at the literal
+#: `C:\Program Files\ClaudeCode\` (managed-settings: "Claude Code doesn't
+#: read the legacy Windows path C:\ProgramData\..."), so not PROGRAMDATA;
+#: npm's `%AppData%\npm` prefix and Codex's
+#: `%LOCALAPPDATA%\Programs\OpenAI\Codex\bin` install folder are where
+#: the program is found, through PATH, not what it reads once running;
+#: `%APPDATA%\Anthropic` holds the Console profile, a sign-in detection
+#: refuses; Node's os.homedir and Rust's home_dir read USERPROFILE, not
+#: HOMEDRIVE and HOMEPATH. Card #424, the Windows run, is where a name
+#: above the floor gets earned. A cloud key never crosses: the CLI
+#: engines bill to a subscription, and Claude Code "always" uses a key
+#: over the login when one is in its environment (CLAUDE_CODE_AUTH_DOCS),
+#: so under this list it cannot; detection still refuses a key it reads
+#: from a settings file.
+CLI_ENVIRONMENT: tuple[str, ...] = (
+    "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE", "TERM",
+    "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy",
+    "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS",
+    *(("SYSTEMROOT", "TEMP", "TMP", "USERPROFILE") if os.name == "nt" else ()),
+)
+
+
+@dataclass(frozen=True, slots=True)
+class CliEngine:
+    """A subscription CLI behind the command seam, in the owner's words: the
+    engine's name, the program shutil.which looks for, where to get it, how
+    to sign in, the built-in template, the decoder that turns its stdout
+    into the reply, and how its status check is derived from a template and
+    read: which of its words are "not signed in", and what credential a
+    passed check reports. What differs between Claude Code and Codex is
+    data here; the verdict and the factory are one function each."""
+
+    engine: str
+    title: str
+    program: str
+    install: str
+    sign_in: str
+    command: list[str]
+    decode: Callable[[str], str]
+    #: The check's argv for the CLI's own arguments (the template less its
+    #: launcher): the documented cheap status check the engine's own
+    #: constant states once — CLAUDE_CODE_STATUS behind whatever of the
+    #: template's flags decide the credential (claude_code_status carries
+    #: Claude Code's settings flags), CODEX_STATUS alone.
+    #: `status_check` puts the template's launcher before it.
+    own_check: Callable[[list[str]], list[str]]
+    #: Whether a failed check says not signed in, in the CLI's own words;
+    #: a failure that does not is reported as what ran and what it said.
+    signed_out: Callable[[subprocess.CompletedProcess], bool]
+    #: The credential a passed check reports.
+    account: Callable[[subprocess.CompletedProcess], Credential]
+    #: The subscription this engine runs on, for the refusal's sentence.
+    subscription: str
+    #: The account kinds that bill to that subscription, as `account` names
+    #: them. Set, the guard fails closed: a passed check naming any other
+    #: kind, or one `account` reads nothing from, is refused, and the words
+    #: it could not place are not quoted (a status line is an unversioned
+    #: CLI's prose; a wording melampus has not measured may carry key
+    #: material, and an account it cannot place may bill per call). Empty,
+    #: any signed-in account is accepted.
+    subscriptions: tuple[str, ...] = ()
+    #: The account kinds that bill per call rather than to a subscription,
+    #: as `account` names them; signed in with one, the refusal says so.
+    bills_per_call: tuple[str, ...] = ()
+    #: Where the billing precedence is documented, for the refusal.
+    billing_docs: str = ""
+    #: The flag under which no sign-in can help (Claude Code's `--bare`), and
+    #: what a verdict says to do instead of naming the sign-in when the
+    #: check carries it.
+    bare: str = ""
+    bare_fix: str = ""
+    #: The variable naming the CLI's settings folder, where its sign-in
+    #: lives (Claude Code's CLAUDE_CONFIG_DIR, Codex's CODEX_HOME): the one
+    #: variable of the CLI's own that reaches it beside CLI_ENVIRONMENT.
+    settings_variable: str = ""
+
+    def environment(self) -> dict[str, str]:
+        """What this CLI's status check and runs are launched with: of
+        CLI_ENVIRONMENT and `settings_variable`, those set in melampus's
+        own environment, with their values; nothing else of it."""
+        return {
+            name: os.environ[name]
+            for name in (*CLI_ENVIRONMENT, self.settings_variable)
+            if name and name in os.environ
+        }
+
+    def launcher(self, command: list[str]) -> list[str]:
+        """The launcher `command` runs the CLI through: its arguments after
+        the program up to the CLI's own first argument (`self.command[1]`:
+        Claude Code's `-p`, Codex's `exec`) or the first flag, whichever
+        comes first. Empty for the common template, whose program is the
+        CLI itself; the script an npm shim wraps when the program is `node`
+        (_batch_shim's own fix; Codex round 1, C1), so the status check can
+        run the CLI the template runs. A flag ends it because Claude Code
+        takes its global flags before `-p`, and those are the CLI's own,
+        for `own_check` to decide about, not a launcher's. Launcher
+        elements are arguments to the program, which is the one thing
+        resolved and run, so they are not asked _batch_shim's question."""
+        launcher: list[str] = []
+        for argument in command[1:]:
+            if argument == self.command[1] or argument.startswith("-"):
+                break
+            launcher.append(argument)
+        return launcher
+
+    def status_check(self, command: list[str]) -> list[str]:
+        """The check's argv after the executable, for the template that
+        will run: its launcher, then `own_check` of the CLI's own
+        arguments, so the check runs the CLI the template runs, through
+        the same launcher and under the same settings flags."""
+        launcher = self.launcher(command)
+        return [*launcher, *self.own_check([command[0], *command[1 + len(launcher):]])]
+
+
+def _claude_code_status_object(status: subprocess.CompletedProcess) -> dict:
+    """The status object `claude auth status --json` printed, or {}."""
+    try:
+        account = json.loads(status.stdout)
+    except ValueError:
+        return {}
+    return account if isinstance(account, dict) else {}
+
+
+def _claude_code_signed_out(status: subprocess.CompletedProcess) -> bool:
+    """Not signed in is what the status object says: `loggedIn` false."""
+    return _claude_code_status_object(status).get("loggedIn") is False
+
+
+def _claude_code_account(status: subprocess.CompletedProcess) -> Credential:
+    """The credential `claude auth status --json` reports: authMethod, set
+    aside for a key when apiKeySource names one (CLAUDE_CODE_SUBSCRIPTION
+    says why that is not the subscription), with the fix
+    CLAUDE_CODE_CREDENTIAL_FIX knows for it."""
+    account = _claude_code_status_object(status)
+    method = str(account.get("authMethod") or "")
+    key_source = str(account.get("apiKeySource") or "")
+    return Credential(
+        kind="" if key_source else method,
+        signed_in_as=", ".join(
+            str(account[key]) for key in ("authMethod", "subscriptionType") if account.get(key)
+        ),
+        said=", ".join(
+            f"{key} {account[key]}" for key in ("authMethod", "apiKeySource") if account.get(key)
+        ),
+        fix=(
+            CLAUDE_CODE_CREDENTIAL_FIX.get(key_source) or CLAUDE_CODE_CREDENTIAL_FIX.get(method)
+            or "remove that credential from the settings Claude Code loads"
+        ),
+    )
+
+
+def _batch_shim(program: str, executable: str) -> str | None:
+    """Why `program`, resolved to `executable`, may not be run, when the
+    executable is a batch file (BATCH_SUFFIXES, any case): the sentence
+    for the refusal and the verdict, else None. Asked wherever a template's
+    program is resolved for the command seam (the `command` branch and
+    _cli_verdict), before anything is run through it, so the CLI engines'
+    status checks never go through cmd.exe either (review round 4, C1/S3).
+    The path is the program (printable: the config refuses one that is
+    not) under a PATH directory, and PATH came from whatever launched
+    melampus, so it is shown through plain, the way a program's stderr
+    is."""
+    if not executable.lower().endswith(BATCH_SUFFIXES):
+        return None
+    return (
+        f"The command '{program}' resolves to {CommandBackend.plain(executable)}, a batch "
+        "file that Windows runs through cmd.exe whatever it is told, so the prompt "
+        "would be parsed as shell text rather than passed as one argument. Name the "
+        "program's real entry in [model] command instead: its .exe, or node and the "
+        "script the shim wraps"
+    )
+
+
+def _sigchld_ignored() -> str | None:
+    """Why no command seam may be built in this process, when it ignores
+    SIGCHLD: the sentence for the refusal, else None. The backend stops the
+    tree the program heads by its pid while the program is exited but
+    unreaped, so the pid is still its own. A launcher that ignores SIGCHLD
+    (inherited across exec) has the kernel reap the program the moment it
+    exits, so every such stop would signal a number that may be someone
+    else's: refused once, where the program is resolved for the seam (the
+    `command` branch and _cli_verdict, which asks before its status check
+    is run, since under that disposition the check's exit cannot be read
+    either: Popen._try_wait reports 0 for a child the kernel reaped, so
+    the verdict would be wrong; review round 5, C1), rather than once per
+    frame (CommandBackend's contract)."""
+    if hasattr(signal, "SIGCHLD") and signal.getsignal(signal.SIGCHLD) is signal.SIG_IGN:
+        return (
+            "The process that started melampus ignores SIGCHLD, so the command's exit "
+            "cannot be seen without losing its pid: the kernel reaps the program the "
+            "moment it exits, and what it started could not be stopped safely. Start "
+            "melampus from a shell, or restore SIGCHLD's default disposition in the "
+            "launcher"
+        )
+    return None
+
+
+def _cli_verdict(cli: CliEngine, command: list[str] | None, probe_seconds: float) -> EngineVerdict:
+    """Whether a subscription CLI can be the engine here: the program
+    `command` (`cli.command` unless the user set a template) names must be
+    on PATH, and its status check, derived from that template
+    (`cli.status_check`), must say signed in within `probe_seconds`, to an
+    account that bills to the subscription (`cli.subscriptions`). Never
+    raises; a verdict reports. The reasons are the words the user sees:
+    not installed with where to get it, resolving to a batch shim with
+    the file found and the fix (_batch_shim, before the check is run
+    through it), a process that ignores SIGCHLD with the fix
+    (_sigchld_ignored, before the check is run, whose exit that
+    disposition would make unreadable), not signed in with the check as
+    run and the command that signs in, signed in but not to the
+    subscription with the check as run, what to remove and the sign-in, a
+    check that did not answer or failed some other way (in the CLI's own
+    words), or available and billing to the subscription. A template
+    carrying `cli.bare` is told to remove it in place of the sign-in,
+    which cannot help it, in every verdict that would name the sign-in,
+    the not-installed one included (review round 7, 1)."""
+    command = command or cli.command
     program = command[0]
-    check = claude_code_status(command)
-    next_step = CLAUDE_CODE_BARE_FIX if CLAUDE_CODE_BARE in check else f"sign in with `{CLAUDE_CODE_SIGN_IN}`"
+    check = cli.status_check(command)
+    next_step = cli.bare_fix if cli.bare and cli.bare in check else f"sign in with `{cli.sign_in}`"
     executable = shutil.which(program)
     if executable is None:
         return EngineVerdict(
-            CLAUDE_CODE, False,
-            f"Claude Code is not installed: nothing on PATH is called '{program}'; "
-            f"install it from {CLAUDE_CODE_INSTALL}, then {next_step}",
+            cli.engine, False,
+            f"{cli.title} is not installed: nothing on PATH is called '{program}'; "
+            f"install it from {cli.install}, then {next_step}",
         )
+    if shim := _batch_shim(program, executable):
+        return EngineVerdict(cli.engine, False, shim)
+    if ignored := _sigchld_ignored():
+        return EngineVerdict(cli.engine, False, ignored)
     try:
         status = subprocess.run(
             [executable, *check],
             capture_output=True, text=True, encoding="utf-8", errors="replace",
-            stdin=subprocess.DEVNULL, timeout=CLAUDE_CODE_PROBE_SECONDS,
+            stdin=subprocess.DEVNULL, timeout=probe_seconds, env=cli.environment(),
         )
     except subprocess.TimeoutExpired:
         return EngineVerdict(
-            CLAUDE_CODE, False,
-            f"`{program} {' '.join(check)}` did not answer within "
-            f"{CLAUDE_CODE_PROBE_SECONDS:g}s",
+            cli.engine, False,
+            f"`{program} {' '.join(check)}` did not answer within {probe_seconds:g}s",
         )
     except OSError as exc:
-        return EngineVerdict(CLAUDE_CODE, False, f"'{program}' could not be run: {exc}")
-    try:
-        account = json.loads(status.stdout)
-    except ValueError:
-        account = {}
-    if not isinstance(account, dict):
-        account = {}
+        return EngineVerdict(cli.engine, False, f"'{program}' could not be run: {exc}")
     if status.returncode != 0:
-        # Not signed in is what the status object says (`loggedIn` false) or,
-        # without one, the documented exit alone: "Exits with code 0 if
-        # logged in, 1 if not" (cli-reference), nothing on stderr. Any other
-        # failure (an older CLI with no `auth` subcommand, a usage error, a
+        # Not signed in is what the CLI says (`cli.signed_out`) or, without
+        # a word, the documented exit alone: "Exits with code 0 if logged
+        # in, 1 if not" (cli-reference), nothing on stderr. Any other
+        # failure (an older CLI with no status subcommand, a usage error, a
         # crash) is reported in the CLI's own words, since signing in would
         # not help.
         said = stderr_lines(status.stderr)
-        if account.get("loggedIn") is False or (status.returncode == 1 and not said):
+        if cli.signed_out(status) or (status.returncode == 1 and not said):
             return EngineVerdict(
-                CLAUDE_CODE, False,
-                f"Claude Code is installed but not signed in: `{program} {' '.join(check)}` "
+                cli.engine, False,
+                f"{cli.title} is installed but not signed in: `{program} {' '.join(check)}` "
                 f"says so; {next_step}",
             )
         return EngineVerdict(
-            CLAUDE_CODE, False,
+            cli.engine, False,
             f"`{program} {' '.join(check)}` exited {status.returncode}"
             + (f": {said}" if said else " with nothing on stderr"),
         )
-    method = str(account.get("authMethod") or "")
-    key_source = str(account.get("apiKeySource") or "")
-    if method != CLAUDE_CODE_SUBSCRIPTION or key_source:
-        said = ", ".join(
-            f"{key} {account[key]}" for key in ("authMethod", "apiKeySource") if account.get(key)
-        ) or "nothing about the account"
-        fix = (
-            CLAUDE_CODE_CREDENTIAL_FIX.get(key_source) or CLAUDE_CODE_CREDENTIAL_FIX.get(method)
-            or "remove that credential from the environment melampus runs from"
+    credential = cli.account(status)
+    if credential.kind in cli.bills_per_call or (
+        cli.subscriptions and credential.kind not in cli.subscriptions
+    ):
+        said = credential.said or (
+            f"{credential.kind}, which bills per call" if credential.kind in cli.bills_per_call
+            else "nothing about the account this engine can place, and one it cannot place may bill per call"
         )
         return EngineVerdict(
-            CLAUDE_CODE, False,
-            f"Claude Code is signed in, but not to a Claude subscription: `{program} "
+            cli.engine, False,
+            f"{cli.title} is signed in, but not to {cli.subscription}: `{program} "
             f"{' '.join(check)}` says {said}, and every frame would bill that "
-            f"credential instead ({CLAUDE_CODE_AUTH_DOCS}); {fix}, then {next_step}",
+            f"credential instead{f' ({cli.billing_docs})' if cli.billing_docs else ''}; "
+            f"{f'{credential.fix}, then ' if credential.fix else ''}{next_step}",
         )
-    signed_in_as = ", ".join(
-        str(account[key]) for key in ("authMethod", "subscriptionType") if account.get(key)
-    )
     return EngineVerdict(
-        CLAUDE_CODE, True,
-        "Claude Code is signed in" + (f" ({signed_in_as})" if signed_in_as else "")
+        cli.engine, True,
+        f"{cli.title} is signed in"
+        + (f" ({credential.signed_in_as})" if credential.signed_in_as else "")
         + "; every frame bills to that subscription, not to an API key",
         executable=executable,
     )
 
 
-def claude_code_command(settings: ModelConfig) -> list[str] | None:
-    """The template a claude-code run would ask and run: `[model] command`
-    when the engine is claude-code and a command is set, else None for the
-    built-in CLAUDE_CODE_COMMAND. Read here, once, by the factory and by
-    --detect-engines, so the verdict the dialog shows is the verdict the run
-    gets (Done-when 2), as the ollama address is: the program it names is
-    the one asked, under the settings flags it carries (Codex round 2, C1).
-    """
-    if (settings.backend or "").strip().lower() == CLAUDE_CODE and settings.command:
-        return list(settings.command)
-    return None
+def claude_code_verdict(command: list[str] | None = None) -> EngineVerdict:
+    """Whether Claude Code can be the engine here (card #421): the program
+    `command` (CLAUDE_CODE_COMMAND unless the user set a template) names on
+    PATH, and its status check, under that template's own settings flags
+    (claude_code_status), saying signed in to the subscription
+    (CLAUDE_CODE_SUBSCRIPTION says why "signed in" alone is not enough),
+    within CLAUDE_CODE_PROBE_SECONDS. Never raises; a verdict reports."""
+    return _cli_verdict(CLAUDE_CODE_CLI, command, CLAUDE_CODE_PROBE_SECONDS)
+
+
+def cli_commands(settings: ModelConfig) -> dict[str, list[str]]:
+    """The template a subscription CLI's run would ask and run, by engine:
+    `[model] command` when the engine is that CLI's and a command is set,
+    else nothing, for the CLI's built-in template. Read here, once, by the
+    factory and by --detect-engines, so the verdict the dialog shows is
+    the verdict the run gets (Done-when 2), as the ollama address is: the
+    program it names is the one asked, under the settings flags it carries
+    (Codex round 2, C1)."""
+    engine = (settings.backend or "").strip().lower()
+    return {
+        cli.engine: list(settings.command)
+        for cli in CLI_ENGINES if engine == cli.engine and settings.command
+    }
+
+
+def _codex_signed_out(status: subprocess.CompletedProcess) -> bool:
+    """Not signed in is what `codex login status` says: "Not logged in" on
+    stderr, exit 1 (measured on 0.154.0)."""
+    return "not logged in" in (status.stderr or "").lower()
+
+
+def _codex_account(status: subprocess.CompletedProcess) -> Credential:
+    """`codex login status`: "Logged in using ChatGPT" on stderr (measured
+    on 0.154.0); the words after "using" are the account kind. An API-key
+    sign-in (`codex login --with-api-key`) says "Logged in using an API key
+    - " and a masked fragment of the key (measured on 0.155.1): the kind
+    stops at that " - ", so no key material reaches a verdict, which goes
+    to stdout, the plugin's engines file and the settings dialog."""
+    _, using, kind = (status.stderr or "").strip().partition("Logged in using ")
+    kind = kind.splitlines()[0].partition(" - ")[0].strip() if using else ""
+    return Credential(kind=kind, signed_in_as=kind)
+
+
+def codex_verdict(command: list[str] | None = None) -> EngineVerdict:
+    """Whether Codex CLI can be the engine here (card #422): the program
+    `command` (CODEX_COMMAND unless the user set a template) names on PATH
+    and `codex login status` saying signed in to the ChatGPT plan (an
+    API-key sign-in bills per call and is refused; so is any account the
+    check does not name as ChatGPT), under CODEX_PROBE_SECONDS. Never raises; a verdict reports. Whether the plan
+    is at its usage limit is not knowable here without a model call; the
+    first run says, and the batch stops on it naming the reset time
+    (codex_reply)."""
+    return _cli_verdict(CODEX_CLI, command, CODEX_PROBE_SECONDS)
 
 
 def detect_engines(
-    ollama_at: str | None = None, claude_code_command: list[str] | None = None
+    ollama_at: str | None = None, commands: dict[str, list[str]] | None = None
 ) -> list[EngineVerdict]:
     """One verdict per engine, in the owner's order (BACKEND_CHOICES without the
-    test fake), then claude-code (card #421; the picker learns it in #423).
+    test fake), then claude-code and codex (cards #421, #422; the picker
+    learns them in #423).
     This is the one place that knows whether an engine can run here: the
     refusals' "what works" list and the CLI's default both come from it, so
     they cannot disagree with what the dialog (card #405) shows. `ollama_at`
-    is the configured address, if any (`[model] ollama_url`);
-    `claude_code_command` the configured template, if any (a `[model]
-    command` under claude-code, read by `claude_code_command(settings)`),
-    else the built-in CLAUDE_CODE_COMMAND."""
+    is the configured address, if any (`[model] ollama_url`); `commands`
+    the configured template for a CLI engine, if any (a `[model] command`
+    under that engine, read by `cli_commands(settings)`, by engine), else
+    the CLI's built-in template."""
     apple_silicon = on_apple_silicon()
     url = ollama_url(ollama_at)
     ollama = ollama_answers(url)
+    commands = commands or {}
     return [
         EngineVerdict(
             "mlx", apple_silicon,
@@ -509,7 +951,8 @@ def detect_engines(
         ),
         EngineVerdict("openai", True, _key_required("openai")),
         EngineVerdict("claude", True, _key_required("claude")),
-        claude_code_verdict(claude_code_command),
+        claude_code_verdict(commands.get(CLAUDE_CODE)),
+        codex_verdict(commands.get(CODEX)),
     ]
 
 
@@ -533,13 +976,143 @@ def claude_code_reply(stdout: str) -> str:
         return stdout
     result = str(reply.get("result") or "")
     if reply.get("is_error"):
-        if "not logged in" in result.lower():
-            raise CommandFailed(
-                f"Claude Code is not signed in; run `{CLAUDE_CODE_SIGN_IN}` and try again "
-                f"(it said: {result})"
-            )
-        raise CommandFailed(f"Claude Code reported an error: {result}")
+        _cli_refuse(CLAUDE_CODE_CLI, result, signed_out="not logged in" in result.lower())
     return result
+
+
+def _cli_refuse(cli: CliEngine, message: str, *, signed_out: bool) -> NoReturn:
+    """A CLI's run failed in its own words, `message`: CommandFailed (the
+    engine is broken, not the frame; the batch stops) in the user's terms.
+    `signed_out` is the decoder's reading of those words: then the refusal
+    names the command that signs in; otherwise it carries the CLI's words
+    alone. What differs between the CLIs is the title and the sign-in
+    command, the CliEngine's data. The words are the model's side writing
+    (a prompt injection in the image can put anything in Codex's
+    `turn.failed` message or Claude Code's `result`), bound for the
+    terminal and the log through the CLI's `_fail`, so they go through
+    CommandBackend.plain as a program's stderr does: one printable line,
+    no escape to clear the screen, no line break to fake a line of the
+    log (Codex review round 2, S2)."""
+    message = CommandBackend.plain(message)
+    if signed_out:
+        raise CommandFailed(
+            f"{cli.title} is not signed in; run `{cli.sign_in}` and try again (it said: {message})"
+        )
+    raise CommandFailed(f"{cli.title} reported an error: {message}")
+
+
+#: Claude Code, as the one verdict and the one factory branch see it.
+CLAUDE_CODE_CLI = CliEngine(
+    CLAUDE_CODE, "Claude Code", CLAUDE_CODE_PROGRAM, CLAUDE_CODE_INSTALL, CLAUDE_CODE_SIGN_IN,
+    CLAUDE_CODE_COMMAND, claude_code_reply,
+    own_check=claude_code_status, signed_out=_claude_code_signed_out,
+    account=_claude_code_account, subscription="a Claude subscription",
+    subscriptions=(CLAUDE_CODE_SUBSCRIPTION,), billing_docs=CLAUDE_CODE_AUTH_DOCS,
+    bare=CLAUDE_CODE_BARE, bare_fix=CLAUDE_CODE_BARE_FIX, settings_variable="CLAUDE_CONFIG_DIR",
+)
+
+
+def codex_reply(stdout: str) -> str:
+    """The reply text out of Codex CLI's `--json` stdout: the JSONL stream's
+    last `item.completed` agent_message (docs: the sample stream; `-o`
+    writes "the final message"). A `turn.failed` is the engine refusing,
+    not the frame: measured on 0.154.0, a plan at its usage limit fails the
+    turn with "You've hit your usage limit ... try again at <time>", and no
+    credentials fail it with "401 Unauthorized", both exit 1 with the
+    stream on stdout; each is CommandFailed in the user's terms (the reset
+    time as the CLI said it; the sign-in command) plus Codex's own words,
+    and any other failure is CommandFailed in Codex's words alone. `error`
+    events before a completed turn are the CLI's own retries, not
+    failures. A stdout that is not an event stream (a user's own `[model]
+    command` without `--json`, or a bare reply that happens to be JSON
+    without a `type`) passes through untouched."""
+    events = []
+    for line in stdout.splitlines():
+        if not line.strip():
+            continue
+        try:
+            event = json.loads(line)
+        except ValueError:
+            return stdout
+        if not isinstance(event, dict) or "type" not in event:
+            return stdout
+        events.append(event)
+    if not events:
+        return stdout
+    reply = ""
+    for event in events:
+        if event["type"] == "turn.failed":
+            _codex_refuse(str((event.get("error") or {}).get("message") or "the turn failed"))
+        item = event.get("item") or {}
+        if event["type"] == "item.completed" and item.get("type") == "agent_message":
+            reply = str(item.get("text") or "")
+    return reply
+
+
+def _codex_refuse(message: str) -> NoReturn:
+    """A failed turn's `message`, as CommandFailed: the usage limit is
+    Codex's own refusal, named with the reset time as the CLI said it
+    (measured: "... try again at Sep 19th, 2026 7:46 AM."); the measured
+    "401 Unauthorized" is not signed in, read by its word, since Codex's
+    failures end in a hex request id whose digits may contain 401; and
+    anything else is Codex's words, both through the refusal shared with
+    Claude Code. The reset time is read out of the plain words (the same
+    rendering the shared refusal gives the message), so what an
+    injection put after "try again at " reaches the terminal as words."""
+    message = CommandBackend.plain(message)
+    lowered = message.lower()
+    if "usage limit" in lowered:
+        _, _, when = message.partition("try again at ")
+        raise CommandFailed(
+            "Codex CLI is at its usage limit"
+            + (f", until {when.strip().rstrip('.')}" if when.strip() else "")
+            + f"; wait for it to reset or switch engines (it said: {message})"
+        )
+    _cli_refuse(CODEX_CLI, message, signed_out="unauthorized" in lowered)
+
+
+#: Codex CLI, as the one verdict and the one factory branch see it. Signed
+#: in with an API key (`codex login --with-api-key`; the status check says
+#: "Logged in using an API key", measured on 0.155.1), every frame would
+#: bill the OpenAI API per token with none of the cloud guards, so that
+#: account kind is refused by name: this engine runs on the ChatGPT plan
+#: only ("Logged in using ChatGPT", measured on 0.154.0 and 0.155.1), and
+#: a status line naming anything else, or nothing _codex_account reads, is
+#: refused too, since the wording is one version's and the guard is
+#: about money.
+CODEX_CLI = CliEngine(
+    CODEX, "Codex CLI", CODEX_PROGRAM, CODEX_INSTALL, CODEX_SIGN_IN,
+    CODEX_COMMAND, codex_reply,
+    own_check=lambda command: list(CODEX_STATUS), signed_out=_codex_signed_out,
+    account=_codex_account, subscription="the ChatGPT plan", bills_per_call=("an API key",),
+    subscriptions=("ChatGPT",), settings_variable="CODEX_HOME",
+)
+
+#: The subscription CLIs, in the owner's order: the verdicts after the
+#: four engines, and the templates cli_commands reads.
+CLI_ENGINES = (CLAUDE_CODE_CLI, CODEX_CLI)
+
+
+def _cli_backend(cli: CliEngine, settings: ModelConfig) -> VLMBackend:
+    """The seam configured for one subscription CLI: the built-in template
+    unless the user set [model] command, and the reply decoded from the
+    CLI's stdout. Resolved before any image is read, like `command`, and
+    as `ollama` does it: one detection, on the template's program, whose
+    verdict for this CLI is the refusal's sentence and whose list is its
+    "what works", so the CLI is asked its status once, under the
+    template's own settings flags, refused or built, and what runs is the
+    executable that verdict resolved. The template is read once, by the
+    reader --detect-engines uses."""
+    commands = cli_commands(settings)
+    command = commands.get(cli.engine) or list(cli.command)
+    verdicts = detect_engines(settings.ollama_url, commands)
+    verdict = next(v for v in verdicts if v.engine == cli.engine)
+    if not verdict.available:
+        raise _refusal(f"{verdict.reason}.", works_here=_works_here(verdicts))
+    return CommandBackend(
+        command, executable=verdict.executable, timeout=settings.timeout_seconds,
+        decode=cli.decode, env=cli.environment(),
+    )
 
 
 def _works_here(verdicts: list[EngineVerdict]) -> tuple[str, ...]:
@@ -579,8 +1152,6 @@ def resolve_provider_key(provider: str, explicit: SecretStr | None = None) -> st
     Order: explicit config (from the git-ignored local file or an override), then
     the provider's own environment variables.
     """
-    import os
-
     if explicit:
         # SecretStr keeps it out of reprs and tracebacks; unwrap only here.
         return explicit.get_secret_value()
@@ -649,8 +1220,6 @@ def build_primary_backend(config: MelampusConfig) -> VLMBackend:
                 "(docs/config.md § [model]).",
                 settings.ollama_url,
             )
-        from .backend import CommandBackend
-
         program = settings.command[0]
         executable = shutil.which(program)
         if executable is None:
@@ -660,60 +1229,22 @@ def build_primary_backend(config: MelampusConfig) -> VLMBackend:
                 "its full path in [model] command.",
                 settings.ollama_url,
             )
-        if executable.lower().endswith(BATCH_SUFFIXES):
-            # The path is the program (printable: the config refuses one
-            # that is not) under a PATH directory, and PATH came from
-            # whatever launched melampus, so it is shown through plain,
-            # the way a program's stderr is.
-            raise _refuse_here(
-                f"The command '{program}' resolves to "
-                f"{CommandBackend.plain(executable)}, a batch file "
-                "that Windows runs through cmd.exe whatever it is told, so the "
-                "prompt would be parsed as shell text rather than passed as one "
-                "argument. Name the program's real entry in [model] command "
-                "instead: its .exe, or node and the script the shim wraps.",
-                settings.ollama_url,
-            )
-        # The backend stops the tree the program heads by its pid while the
-        # program is exited but unreaped, so the pid is still its own. A
-        # launcher that ignores SIGCHLD (inherited across exec) has the
-        # kernel reap the program the moment it exits, so every such stop
-        # would signal a number that may be someone else's: refused here,
-        # once, rather than once per frame.
-        if hasattr(signal, "SIGCHLD") and signal.getsignal(signal.SIGCHLD) is signal.SIG_IGN:
-            raise _refuse_here(
-                "The process that started melampus ignores SIGCHLD, so the "
-                "command's exit cannot be seen without losing its pid: the kernel "
-                "reaps the program the moment it exits, and what it started could "
-                "not be stopped safely. Start melampus from a shell, or restore "
-                "SIGCHLD's default disposition in the launcher.",
-                settings.ollama_url,
-            )
+        # The same two refusals the CLI engines make, from the same helpers
+        # (review round 4, C1/S3): a batch shim where the program is
+        # resolved, SIGCHLD ignored before the seam is built.
+        if shim := _batch_shim(program, executable):
+            raise _refuse_here(f"{shim}.", settings.ollama_url)
+        if ignored := _sigchld_ignored():
+            raise _refuse_here(f"{ignored}.", settings.ollama_url)
         return CommandBackend(
             settings.command, executable=executable, timeout=settings.timeout_seconds
         )
 
     if kind == CLAUDE_CODE:
-        # The seam configured for Claude Code: the built-in template unless
-        # the user set [model] command, and the reply unwrapped from the
-        # result object. Resolved before any image is read, like `command`,
-        # and as `ollama` does it: one detection, on the template's program,
-        # whose claude-code verdict is the refusal's sentence and whose list
-        # is its "what works", so Claude Code is asked its status once,
-        # under the template's own settings flags, refused or built, and
-        # what runs is the executable that verdict resolved. The template
-        # is read once, by the reader --detect-engines uses.
-        command = claude_code_command(settings) or list(CLAUDE_CODE_COMMAND)
-        verdicts = detect_engines(settings.ollama_url, command)
-        verdict = next(v for v in verdicts if v.engine == CLAUDE_CODE)
-        if not verdict.available:
-            raise _refusal(f"{verdict.reason}.", works_here=_works_here(verdicts))
-        from .backend import CommandBackend
+        return _cli_backend(CLAUDE_CODE_CLI, settings)
 
-        return CommandBackend(
-            command, executable=verdict.executable, timeout=settings.timeout_seconds,
-            decode=claude_code_reply,
-        )
+    if kind == CODEX:
+        return _cli_backend(CODEX_CLI, settings)
 
     if kind == SCRIPTED:
         from .backend import ScriptedBackend

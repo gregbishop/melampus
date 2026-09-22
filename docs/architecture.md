@@ -87,8 +87,20 @@ the downscale ladder is another): a subscription CLI such as Claude Code or
 Codex is vision with no API key. The seam knows no program; `claude-code` is a
 name for it with Claude Code's template built in (`providers.CLAUDE_CODE_COMMAND`,
 card #421, docs/config.md § Claude Code) and its reply unwrapped from the print
-mode's JSON result object by an optional `decode` on stdout; Codex's is card
-#422. `ScriptedBackend` returns canned responses, which is what lets the
+mode's JSON result object by an optional `decode` on stdout, and `codex` is the
+same with Codex CLI's (`providers.CODEX_COMMAND`, card #422, docs/config.md
+§ Codex CLI), the reply read out of the exec mode's JSONL stream. What
+differs between the two is data (`providers.CliEngine`: program, install
+page, sign-in command, status check, template, decoder, the variable naming
+its settings folder); the verdict and the
+factory branch are one function each. Both launch the CLI, for its status
+check and for every run, with the CLI's own environment rather than
+melampus's (`CommandBackend`'s `env`; `providers.CLI_ENVIRONMENT`, the
+runtime basics, plus that settings variable, `CliEngine.environment`), so an
+agent that can run commands (Codex's shell tool) cannot be talked by a
+photograph into reading the shell's exports, the cloud engines' keys among
+them, into its cloud conversation; the `command` engine's program, the
+user's own, still inherits the parent's environment as it is. `ScriptedBackend` returns canned responses, which is what lets the
 pipeline tests cover parsing, validation, retry, caching and the downscale ladder
 in under a second with no weights on disk. Each is a class here and no change
 anywhere else: the prompts, the JSON extraction, the schema validation and the
@@ -99,16 +111,34 @@ engine can run on this machine at all is `providers.detect_engines`' question,
 answered before any image is read; an Ollama that is not running is refused
 there with the address tried and where to install it, and a command that
 `shutil.which` cannot find, or resolves to a `.cmd`/`.bat` file that Windows
-would hand to cmd.exe, is refused the same way, naming it; so is the command
-engine when the process that started melampus ignores SIGCHLD (`SIG_IGN` is
-inherited across exec), since the kernel would then reap the program the moment
-it exits and the pid its tree is stopped by could be someone else's: start
-melampus from a shell, or restore the signal's default in the launcher; and
-Claude Code is refused as not installed or, by its own `claude auth status`, as
-not signed in, or as signed in but not to the subscription. The one failure that
-stops a batch rather than being recorded on the frame is a command exiting
+would hand to cmd.exe, is refused the same way, naming it (a CLI engine's
+template too, in its verdict, before its status check would run through the
+shim: `_batch_shim`, one helper wherever a program is resolved for the seam);
+so is the command engine, and either CLI engine, when the process that started
+melampus ignores SIGCHLD (`SIG_IGN` is inherited across exec;
+`_sigchld_ignored`, one helper asked where the program is resolved for the
+seam, the `command` branch and a CLI engine's verdict, there before its status
+check would run, since under that disposition the check's exit cannot be read
+and a CLI that is not signed in would be reported as signed in), since the kernel would then reap the program
+the moment it exits and the pid its tree is stopped by could be someone else's:
+start melampus from a shell, or restore the signal's default in the launcher;
+and
+Claude Code and Codex CLI are refused as not installed or, by their own `claude
+auth status` and `codex login status`, as not signed in, or as signed in but not
+to the subscription (Claude Code's login set aside for a key; an account that
+bills per call, `CliEngine.bills_per_call`: Codex's API-key sign-in; one the
+status check does not name as the subscription, `CliEngine.subscriptions`:
+Codex's is ChatGPT, and the guard fails closed on a wording it has not
+measured, and does not quote it). The one failure that stops a batch rather
+than being recorded on the frame is a command exiting
 non-zero (`CommandFailed`): that is a broken engine, not a bad file, and every
-frame would fail the same way.
+frame would fail the same way. A CLI's decoder raises the same before the
+exit code is judged, so a plan at its usage limit (Codex fails the turn on
+stdout, naming the reset time) or a lapsed sign-in is explained in the CLI's
+own words rather than as "exited 1"; those words go through
+`CommandBackend.plain` in the shared refusal as a program's stderr does, so
+an escape sequence or a line break the model's side wrote reaches neither
+the terminal nor the log.
 
 ---
 

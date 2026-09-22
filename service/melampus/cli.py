@@ -17,13 +17,14 @@ from .images import content_hash
 from .providers import (
     BACKEND_CHOICES,
     CLAUDE_CODE,
+    CODEX,
     COMMAND,
     KEY_VARIABLES,
     OLLAMA,
     BackendUnavailable,
     apply_cloud_primary_defaults,
     build_primary_backend,
-    claude_code_command,
+    cli_commands,
     default_engine,
     detect_engines,
     is_cloud_primary,
@@ -350,12 +351,13 @@ def main(argv: list[str] | None = None) -> int:
                     help="do not read melampus.local.toml beside the data: --config "
                          "alone, over the defaults, is the whole configuration")
     ap.add_argument("--model", default=None, help="override model repo")
-    ap.add_argument("--backend", choices=(*BACKEND_CHOICES, COMMAND, CLAUDE_CODE), default=None,
+    ap.add_argument("--backend", choices=(*BACKEND_CHOICES, COMMAND, CLAUDE_CODE, CODEX), default=None,
                     help="which engine answers: mlx locally on Apple Silicon, "
                          "ollama locally through an Ollama server, openai or "
                          "claude for machines with no local runtime, command "
                          "(an installed program named by [model] command), "
-                         "claude-code (Claude Code, signed in to a subscription), or "
+                         "claude-code (Claude Code, signed in to a subscription), "
+                         "codex (Codex CLI, signed in to a ChatGPT plan), or "
                          "scripted (a fake that answers nothing; for smoke tests "
                          "without weights). Default: the first that can run "
                          "here, per --detect-engines")
@@ -450,12 +452,12 @@ def main(argv: list[str] | None = None) -> int:
         # The address probed is the configured one, read the way the run
         # reads it (--config and --no-local-config alike), so the verdict
         # cannot disagree with what --backend ollama would talk to; the
-        # Claude Code template probed is the configured one the same way.
+        # CLI template probed is the configured one the same way.
         # The dialog's contract (card #404): engine, available, reason. A
         # verdict's resolved executable is the factory's, not the dialog's.
         print(json.dumps([
             {"engine": v.engine, "available": v.available, "reason": v.reason}
-            for v in detect_engines(config.model.ollama_url, claude_code_command(config.model))
+            for v in detect_engines(config.model.ollama_url, cli_commands(config.model))
         ], indent=2))
         return 0
     if args.download_model or args.model_status or args.remove_model:

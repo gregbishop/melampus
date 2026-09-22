@@ -33,6 +33,7 @@ from pathlib import Path
 
 import pytest
 
+from melampus import providers
 from melampus.config import MelampusConfig
 
 REPO = Path(__file__).resolve().parents[2]
@@ -801,31 +802,177 @@ def test_docs_say_the_command_runs_once_per_completion():
             f"{doc} does not name the two completions a frame is made of")
 
 
-def test_config_doc_quotes_the_claude_code_template_from_its_one_source():
-    """Card #421: one place holds Claude Code's template,
-    providers.CLAUDE_CODE_COMMAND. docs/config.md quotes it as the
-    `[model] command` a user would set to override it, in a TOML block
-    that parses to exactly that list, so the doc cannot rot into a second
-    copy; and it says what to install, how to sign in, and that runs bill
-    to the subscription."""
+@pytest.mark.parametrize(
+    ("engine", "must_say"),
+    [
+        ("claude-code", ("subscription",)),
+        ("codex", ("usage limit", "bills per call", "Tricolored Heron")),
+    ],
+    ids=["claude-code", "codex"],
+)
+def test_config_doc_quotes_the_cli_template_from_its_one_source(engine, must_say):
+    """Cards #421 and #422: one place holds each CLI's template, the
+    CliEngine's `command`. docs/config.md quotes it as the `[model] command`
+    a user would set to override it, in a TOML block that parses to exactly
+    that list, so the doc cannot rot into a second copy; and it says what
+    to install, how to sign in, and what is that CLI's own (`must_say`):
+    that Claude Code's runs bill to the subscription; that Codex's stop at
+    the plan's usage limit, that an API-key sign-in bills per call and is
+    refused, and what the real success run answered on the committed
+    fixture (a measurement, not a status that goes stale). The readme and
+    the architecture doc name the engine and the template's one source."""
     import tomllib
 
-    from melampus import providers
-
-    text = (REPO / "docs" / "config.md").read_text(encoding="utf-8")
+    (cli,) = [c for c in providers.CLI_ENGINES if c.engine == engine]
+    text = CONFIG_DOC.read_text(encoding="utf-8")
     blocks = [
         block for block in re.findall(r"```toml\n(.*?)```", text, re.DOTALL)
-        if 'backend = "claude-code"' in block
+        if f'backend = "{cli.engine}"' in block
     ]
-    assert blocks, "docs/config.md has no ```toml block with backend = \"claude-code\""
+    assert blocks, f"docs/config.md has no ```toml block with backend = \"{cli.engine}\""
     (block,) = blocks
-    assert tomllib.loads(block)["model"]["command"] == providers.CLAUDE_CODE_COMMAND
-    for said in (providers.CLAUDE_CODE_INSTALL, f"`{providers.CLAUDE_CODE_SIGN_IN}`", "subscription"):
+    assert tomllib.loads(block)["model"]["command"] == cli.command
+    for said in (cli.install, f"`{cli.sign_in}`", *must_say):
         assert said in text, f"docs/config.md does not say {said!r}"
     readme = (REPO / "readme.md").read_text(encoding="utf-8")
-    assert "`claude-code`" in readme and "--backend claude-code" in readme
+    assert f"`{cli.engine}`" in readme and f"--backend {cli.engine}" in readme
     architecture = (REPO / "docs" / "architecture.md").read_text(encoding="utf-8")
-    assert "claude-code" in architecture
+    source = f"{cli.engine.upper().replace('-', '_')}_COMMAND"
+    assert f"`{cli.engine}`" in architecture and source in architecture
+
+
+@pytest.mark.parametrize("cli", providers.CLI_ENGINES, ids=lambda cli: cli.engine)
+def test_config_doc_says_what_environment_the_cli_is_launched_with(cli):
+    """Codex review round 3, S1: a CLI engine's status check and runs are
+    launched with the CLI's own environment (`providers.CLI_ENVIRONMENT`
+    and its settings variable), never melampus's, so a photograph's text
+    cannot have an agent that runs commands read the shell's exports into
+    its cloud conversation. Each CLI's section of docs/config.md says so,
+    names the settings variable that does reach it, and names the one
+    source of the list. One case per CliEngine, from `CLI_ENGINES` itself
+    (review round 8, C2), and the section's heading is the CliEngine's
+    `title`, the word the refusals print (review round 7, C4), so a third
+    CLI needs no entry here; the `command` row says the user's own program
+    still gets melampus's environment as it is, since that seam is the
+    user's; the architecture doc names the mechanism."""
+    text = CONFIG_DOC.read_text(encoding="utf-8")
+    section = re.search(rf"^### {re.escape(cli.title)}\n(.*?)(?=^### |^## |\Z)", text, re.MULTILINE | re.DOTALL)
+    assert section, f"docs/config.md has no ### {cli.title} section"
+    for said in ("environment", f"`{cli.settings_variable}`", "`providers.CLI_ENVIRONMENT`"):
+        assert said in section.group(1), f"docs/config.md § {cli.title} does not say {said!r}"
+    command_row = _row(text, "command")
+    assert "environment" in command_row, "docs/config.md's command row does not say what environment the program gets"
+    architecture = (REPO / "docs" / "architecture.md").read_text(encoding="utf-8")
+    assert "CLI_ENVIRONMENT" in architecture, "docs/architecture.md does not name the CLI environment"
+
+
+def test_config_doc_says_the_codex_profile_leaves_the_shared_temp_directories_writable():
+    """Security review round 9, S1: the permission profile `CODEX_COMMAND`
+    carries denies writes everywhere it governs except the shared temp
+    directories `":minimal" = "read"` grants. Measured on codex-cli 0.155.1
+    with `codex sandbox -P` under that exact profile, no model call: a
+    command wrote to `/tmp`, `/private/tmp`, `/var/tmp` and
+    `/private/var/tmp`, made one of them executable and ran it, and the
+    files were still on disk outside the sandbox afterwards, while a write
+    in the staged folder and in the home folder was "Operation not
+    permitted". So a photograph's text has a channel that outlives the
+    frame `--ephemeral` ends. The suite never runs the real Codex, so the
+    prose is what can be pinned: docs/config.md must name those paths as
+    writable and must not say the profile writes nowhere.
+
+    Review round 10, C1: the sentence that leaves the decision to the owner
+    must also say where the decision is recorded, so a reader can follow it.
+    It pointed at "its own card" without a number; the card did not exist
+    yet and this branch did not invent a number, so what it named was the
+    record that did exist, security review round 9 on PR #17. The negative
+    keeps the prose from going back to an unnamed card.
+
+    The owner has since filed that card, #505, so the sentence names it as
+    well: security review round 9 on PR #17 is where the measurement is,
+    card #505 is where the decision is recorded, and the prose no longer
+    says the card is his to file."""
+    prose = " ".join(CONFIG_DOC.read_text(encoding="utf-8").split())
+    for path in ("`/tmp`", "`/private/tmp`", "`/var/tmp`", "`/private/var/tmp`"):
+        assert path in prose, f"docs/config.md does not name {path} under the profile"
+    for said in ("writable", "execute what it wrote", "from one frame to the next"):
+        assert said in prose, f"docs/config.md does not say {said!r} of the shared temp directories"
+    assert "no write anywhere" not in prose, (
+        "docs/config.md still says the profile writes nowhere; writes land in the shared temp directories")
+    deferral = re.search(r"Whether that is acceptable[^.]*\.", prose)
+    assert deferral, "docs/config.md no longer says whose call the shared temp writes are"
+    for said in ("the owner's call", "security review round 9", "PR #17", "card #505"):
+        assert said in deferral.group(0), (
+            f"docs/config.md does not say {said!r} where it leaves the shared temp writes to the owner")
+    assert "own card" not in prose, (
+        "docs/config.md defers the decision to a card it does not name; name where the decision is recorded")
+
+
+def test_config_doc_says_the_staged_folder_sits_outside_the_shared_temp_directories():
+    """Security review round 12, S1: the profile's read boundary is the
+    staged folder, and it holds only because of where that folder is made.
+
+    `":minimal" = "read"` grants /tmp (with /private/tmp, /var/tmp and
+    /private/var/tmp) whole and writable, and `tempfile` falls back to /tmp
+    whenever $TMPDIR is unset — ordinary on Linux, in a container and under
+    a cleared environment. A staged folder placed by $TMPDIR alone would sit
+    inside the grant on exactly those machines, and the profile's central
+    property, that an injection in a photograph cannot read past the one
+    staged file, would be void there: measured on codex-cli 0.155.1 with
+    `codex sandbox -P` under this profile, workspace root in /tmp, a file in
+    another /tmp folder was read, `ls /tmp` listed the directory and the
+    staged image itself was overwritten and read back.
+
+    `images.staged_pixels` stages under melampus's own directory instead
+    (`images.STAGING_ROOT`, the one `config.cache_file` names), which the
+    same measurement refuses in a checkout and in the executable's layout
+    alike, and test_pipeline.py pins the code. The suite never runs the real
+    Codex, so what docs/config.md can be held to is the dependence it must
+    not leave unstated: the doc has to say where the staged folder is made
+    and why it is not $TMPDIR."""
+    prose = " ".join(CONFIG_DOC.read_text(encoding="utf-8").split())
+    # The sentence ends at a full stop followed by a space; the dots inside
+    # `images.staged_pixels` and `config.cache_file` are not sentence ends.
+    staging = re.search(r"That read boundary.*?\.(?=\s|$)", prose)
+    assert staging, "docs/config.md does not say where the staged folder is made"
+    for said in ("`images.staged_pixels`", "`config.cache_file`", "not under `$TMPDIR`"):
+        assert said in staging.group(0), (
+            f"docs/config.md does not say {said!r} where it says where the staged folder is made")
+    for said in ("`$TMPDIR` is unset", "overwritten and read back"):
+        assert said in prose, (
+            f"docs/config.md does not say {said!r} of a staged folder left to $TMPDIR")
+    # Security review round 9 (a later round, same line): melampus's own
+    # directory is not by itself outside the grant. It follows the checkout
+    # root in a checkout and $XDG_DATA_HOME/Melampus inside the executable,
+    # and a checkout under /tmp or a frozen run with that variable pointed
+    # there puts the staged folder back inside the grant, measured the same
+    # way. `images.staging_root` resolves that root and refuses it, so the
+    # doc must not leave the dependence on where the root lands unstated.
+    for said in ("`$XDG_DATA_HOME`", "`images.staging_root`", "refuses to stage"):
+        assert said in prose, (
+            f"docs/config.md does not say {said!r} of a staging root that lands in the grant")
+
+
+def test_the_docs_say_a_claude_code_key_comes_from_the_settings_not_the_environment():
+    """Review round 8, C1 (review round 7, C2's defect in one more place):
+    melampus's own environment never reaches Claude Code
+    (`CliEngine.environment`), so an API key its status check reports cannot
+    have come from the shell melampus was started in (only from the `env`
+    block of a settings file Claude Code loads), and the refusal names what
+    to remove and from where (`CLAUDE_CODE_CREDENTIAL_FIX["api_key"]`, "remove
+    ANTHROPIC_API_KEY from the `env` block of the settings", pinned in
+    test_providers.py). Both prose docs that describe that refusal must say
+    the same: neither may put the key in the environment or tell the user to
+    unset it."""
+    for doc, prose in (
+        ("readme.md", README.read_text(encoding="utf-8")),
+        ("docs/config.md", CONFIG_DOC.read_text(encoding="utf-8")),
+    ):
+        prose = " ".join(prose.split())  # the prose wraps; the phrase must not hide across a line break
+        assert "`env` block of a settings file" in prose, (
+            f"{doc} does not say such a key can only come from the `env` block of a settings file")
+        assert "what to remove" in prose, f"{doc} does not say the refusal names what to remove"
+        assert "key in the environment" not in prose, f"{doc} still puts the key in melampus's own environment"
+        assert "what to unset" not in prose, f"{doc} still says the refusal names what to unset"
 
 
 def test_config_doc_command_row_says_where_the_program_runs():

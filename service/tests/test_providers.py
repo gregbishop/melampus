@@ -29,13 +29,16 @@ import time
 import types
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from http.server import ThreadingHTTPServer
 from pathlib import Path
+from typing import NamedTuple
 
 import pytest
 from conftest import (
     PHOTO,
     REAL_CLAUDE_CODE_VERDICT,
+    REAL_CODEX_VERDICT,
     BadStatusLine,
     FakeOllama,
     QuietHandler,
@@ -507,14 +510,14 @@ def assert_no_image_was_touched(err: str, check: str) -> None:
         assert about_the_file not in err, f"the image was touched before the {check}:\n{err}"
 
 
-def test_detection_lists_the_engines_in_the_owners_order_then_claude_code(
+def test_detection_lists_the_engines_in_the_owners_order_then_the_subscription_clis(
     no_ambient_keys, no_ambient_ollama
 ):
     """The list the dialog (card #405) will show: one verdict per engine, in
-    the order BACKEND_CHOICES names them, then claude-code (card #421;
-    the picker learns it in #423), never the test fake."""
+    the order BACKEND_CHOICES names them, then claude-code and codex (cards
+    #421, #422; the picker learns them in #423), never the test fake."""
     verdicts = providers.detect_engines()
-    assert [v.engine for v in verdicts] == [*ENGINES, providers.CLAUDE_CODE]
+    assert [v.engine for v in verdicts] == [*ENGINES, providers.CLAUDE_CODE, providers.CODEX]
     for verdict in verdicts:
         assert isinstance(verdict.available, bool)
         assert verdict.reason, f"{verdict.engine} has no reason"
@@ -1311,7 +1314,7 @@ def test_cli_detect_engines_prints_the_verdicts_as_json_in_order(
     out, err = capsys.readouterr()
     assert code == 0, err
     verdicts = json.loads(out)
-    assert [v["engine"] for v in verdicts] == [*ENGINES, providers.CLAUDE_CODE]
+    assert [v["engine"] for v in verdicts] == [*ENGINES, providers.CLAUDE_CODE, providers.CODEX]
     assert all(set(v) == {"engine", "available", "reason"} for v in verdicts)
     by_engine = {v["engine"]: v for v in verdicts}
     assert by_engine["mlx"] == {"engine": "mlx", "available": False, "reason": "needs Apple Silicon"}
@@ -2114,6 +2117,23 @@ def test_command_backend_expands_the_template_into_one_argv(tmp_path):
         "what the command started is stopped at its exit, by its pid while it is still the command's own")
 
 
+def test_command_backend_launches_the_program_in_the_environment_it_is_given(tmp_path):
+    """Codex review round 3, S1: a backend built with `env` hands exactly
+    that mapping to the launch, so a program that can run commands (a CLI
+    engine's agent) never sees melampus's own environment; without one
+    the child gets the parent's environment as it is (the test above), the
+    `command` engine's contract since card #420."""
+    image = tmp_path / "image.jpg"
+    image.write_bytes(b"jpeg")
+    run = _FakeRun(stdout=ID_OK)
+    environment = {"PATH": "/opt/fake/bin", "HOME": str(tmp_path)}
+
+    _command_backend(run, env=environment).complete(image, "prompt", 900)
+
+    ((_, kwargs),) = run.calls
+    assert kwargs["env"] == environment
+
+
 def test_command_backend_hands_the_program_the_real_path_of_the_image(tmp_path):
     """The path that crosses the command line is the staged file's real
     one, symlinks resolved: on macOS the temp folder is under /var, a link
@@ -2902,11 +2922,13 @@ def _script_on_path(monkeypatch, tmp_path, name: str, text: str) -> Path:
     return script
 
 
-def _real_detection(monkeypatch) -> None:
-    """Run the real Claude Code detection against what this test put on
-    PATH: conftest's autouse fixture stubs it out for every test, so one
-    that has placed its own `claude` (or none) restores the real one."""
-    monkeypatch.setattr(providers, "claude_code_verdict", REAL_CLAUDE_CODE_VERDICT)
+def _real_detection(monkeypatch, cli: providers.CliEngine) -> None:
+    """Run the real detection of `cli` against what this test put on PATH:
+    conftest's autouse fixture stubs it out for every test, so one that
+    has placed its own `claude` or `codex` (or none) restores the real one,
+    by the name _FAKES knows it by."""
+    fake = _FAKES[cli.engine]
+    monkeypatch.setattr(providers, fake.verdict, fake.real_verdict)
 
 
 def _fake_cli(monkeypatch, tmp_path, *, exit_code: int = 0, stderr: str = "",
@@ -2924,7 +2946,8 @@ def _fake_cli(monkeypatch, tmp_path, *, exit_code: int = 0, stderr: str = "",
 
 def _command_settings(tmp_path, command: list[str], backend: str = providers.COMMAND) -> Path:
     """A config file naming `command` as the template under `backend`:
-    `command` itself, or `claude-code` for a template of the user's own."""
+    `command` itself, or a CLI engine's (any `cli.engine` in
+    providers.CLI_ENGINES) for a template of the user's own."""
     settings = tmp_path / "settings.toml"
     settings.write_text(
         f'[model]\nbackend = {json.dumps(backend)}\ncommand = {json.dumps(command)}\n', encoding="utf-8")
@@ -3397,7 +3420,7 @@ STATUS = {{
 
 argv = sys.argv[1:]
 with open(LOG, "a", encoding="utf-8") as log:
-    log.write(json.dumps({{"argv": argv, "cwd": os.getcwd()}}) + "\\n")
+    log.write(json.dumps({{"argv": argv, "cwd": os.getcwd(), "environ": sorted(os.environ)}}) + "\\n")
 
 
 def loaded_settings(restricted, bare, sources, named):
@@ -3562,54 +3585,801 @@ answer = ROUTING if "router" in args.prompt else IDENTIFICATION
 result("```json\\n" + answer + "\\n```")
 '''
 
+# --- card #422: Codex CLI as an engine --------------------------------------
 
-def _fake_claude(monkeypatch, tmp_path, *, mode: str = "signed-in") -> Path:
-    """Put a `claude` that imitates the real CLI's documented interface on
-    PATH, ahead of any real Claude Code, with a settings folder of the
-    test's own (CLAUDE_CONFIG_DIR, empty until a test writes a
-    settings.json into it) so no test reads a developer's real one. Returns
-    the log it appends each invocation's argv and cwd to."""
-    log = tmp_path / "claude-calls.jsonl"
-    _script_on_path(monkeypatch, tmp_path, CLAUDE, _FAKE_CLAUDE_SCRIPT.format(
+
+#: The usage-limit reply the real Codex CLI 0.154.0 gave on the one exec
+#: attempt (2026-09-18, the owner's plan at its limit), verbatim.
+_CODEX_USAGE_LIMIT = (
+    "You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to "
+    "purchase more credits or try again at Sep 19th, 2026 7:46 AM."
+)
+
+#: The not-signed-in failure measured with an empty CODEX_HOME: every
+#: attempt is refused with a 401 and the turn fails on it, exit 1.
+_CODEX_UNAUTHORIZED = (
+    "unexpected status 401 Unauthorized: Missing bearer or basic authentication in "
+    "header, url: https://api.openai.com/v1/responses, cf-ray: a3d4aafb6870e669-DEN, "
+    "request id: req_8d75516fb1544d9e8b56bb59d3f4fa67"
+)
+
+#: What `codex login status` prints after "Logged in using an API key - "
+#: (measured on 0.155.1 with a synthetic key in a throwaway CODEX_HOME):
+#: the key's first eight characters, `***`, its last five. Key material,
+#: masked by Codex; none of it may reach a verdict.
+_CODEX_API_KEY_FRAGMENT = "syntheti***a-key"
+
+
+def _codex_events(*events: dict) -> str:
+    """A `--json` stdout: one event per line, as the docs' sample stream."""
+    return "".join(json.dumps(event) + "\n" for event in events)
+
+
+def _codex_answer(text: str) -> str:
+    """The documented success stream around one agent message."""
+    return _codex_events(
+        {"type": "thread.started", "thread_id": "01a0b730-6b11-7720-9573-672388e3cc7e"},
+        {"type": "turn.started"},
+        {"type": "item.completed", "item": {"id": "item_0", "type": "agent_message", "text": text}},
+        {"type": "turn.completed", "usage": {"input_tokens": 1620, "cached_input_tokens": 0,
+                                             "output_tokens": 61, "reasoning_output_tokens": 0}},
+    )
+
+
+def _codex_failure(message: str) -> str:
+    """The measured failure stream: an error event, then the turn fails on it."""
+    return _codex_events(
+        {"type": "thread.started", "thread_id": "01a0b730-6b11-7720-9573-672388e3cc7e"},
+        {"type": "turn.started"},
+        {"type": "error", "message": message},
+        {"type": "turn.failed", "error": {"message": message}},
+    )
+
+
+_FAKE_CODEX_SCRIPT = '''#!{python}
+"""Stands in for Codex CLI 0.154.0's documented non-interactive interface,
+as `codex exec --help`, `codex login status --help` and the docs
+(developers.openai.com/codex: non-interactive-mode, developer-commands,
+image-inputs, permissions) describe it, and as measured on 2026-09-18: `codex exec
+[OPTIONS] [PROMPT]` runs once; `-i/--image <FILE>...` attaches the image to
+the prompt (variadic: a prompt right after it is taken for a second file,
+so a flag must come between); `-c key=value` overrides are TOML, and a
+`default_permissions` naming a profile with no `[permissions]` table is
+refused before anything runs (measured on 0.155.1; the read boundary
+itself, what the profile lets a command read, is Codex's sandbox and not
+imitated here); `--json` makes stdout a JSONL stream whose
+`item.completed` agent_message carries the reply and whose `turn.failed`
+carries a failure's message; without `--json` only the final message is
+on stdout; a run that cannot proceed exits 1 with the failure in the
+stream and progress on stderr; `codex login status` exits 0 when signed
+in ("Logged in using ChatGPT" on stderr) and 1 when not ("Not logged in").
+MODE: "signed-in" answers; "api-key" answers too, but the status check
+says "Logged in using an API key - " and a masked fragment of the key,
+first eight characters, `***`, last five (measured on 0.155.1 after
+`codex login --with-api-key`); "other-account" passes the status check
+with OTHER_STATUS, a line the test supplies that no version measured
+(what a future Codex might print); "not-signed-in" fails the status check
+the measured way ("Not logged in", exit 1); "expired" passes the status
+check and fails every run with the measured 401, the way a session that
+lapses mid-batch would; "usage-limit" passes the status check and fails
+every run with the measured usage-limit reply; "hung" never answers the
+status check."""
+import json
+import os
+import sys
+
+MODE = {mode!r}
+ROUTING = {routing!r}
+IDENTIFICATION = {identification!r}
+LOG = {log!r}
+USAGE_LIMIT = {usage_limit!r}
+UNAUTHORIZED = {unauthorized!r}
+API_KEY_FRAGMENT = {api_key_fragment!r}
+OTHER_STATUS = {other_status!r}
+
+argv = sys.argv[1:]
+with open(LOG, "a", encoding="utf-8") as log:
+    log.write(json.dumps({{"argv": argv, "cwd": os.getcwd(), "environ": sorted(os.environ)}}) + "\\n")
+
+if argv[:2] == ["login", "status"]:
+    if MODE == "hung":
+        import time
+        time.sleep(30)
+    if MODE == "not-signed-in":
+        print("Not logged in", file=sys.stderr)
+        sys.exit(1)
+    if MODE == "api-key":
+        print("Logged in using an API key - " + API_KEY_FRAGMENT, file=sys.stderr)
+        sys.exit(0)
+    if MODE == "other-account":
+        print(OTHER_STATUS, file=sys.stderr)
+        sys.exit(0)
+    print("Logged in using ChatGPT", file=sys.stderr)
+    sys.exit(0)
+
+if argv[:1] != ["exec"]:
+    sys.exit("the fake codex knows `exec` and `login status` only")
+
+import argparse
+
+ap = argparse.ArgumentParser(prog="codex exec")
+ap.add_argument("-i", "--image", nargs="+", action="extend", default=[])
+ap.add_argument("--json", action="store_true")
+ap.add_argument("--ephemeral", action="store_true")
+ap.add_argument("--skip-git-repo-check", action="store_true")
+ap.add_argument("--ignore-user-config", action="store_true")
+ap.add_argument("-c", "--config", action="append", default=[])
+ap.add_argument("--color", choices=["always", "never", "auto"], default="auto")
+ap.add_argument("-m", "--model")
+ap.add_argument("prompt", nargs="?")
+args = ap.parse_args(argv[1:])
+# `-c key=value`: "The `value` portion is parsed as TOML", so the overrides
+# together are a TOML document; and `default_permissions` naming a profile
+# that no `[permissions]` table defines is refused before anything runs
+# (measured on 0.155.1: "Error: default_permissions requires a
+# `[permissions]` table", exit 1).
+import tomllib
+overrides = tomllib.loads("\\n".join(args.config))
+profile = overrides.get("default_permissions")
+if profile is not None and profile not in overrides.get("permissions", {{}}):
+    sys.exit("Error: default_permissions requires a `[permissions]` table")
+if args.prompt is None:
+    print("Reading prompt from stdin...", file=sys.stderr)
+    print("No prompt provided via stdin.", file=sys.stderr)
+    sys.exit(1)
+print("Reading additional input from stdin...", file=sys.stderr)
+
+
+def event(**fields):
+    if args.json:
+        print(json.dumps(fields))
+
+
+def fail(message):
+    event(type="thread.started", thread_id="01a0b730-6b11-7720-9573-672388e3cc7e")
+    event(type="turn.started")
+    event(type="error", message=message)
+    event(type="turn.failed", error={{"message": message}})
+    sys.exit(1)
+
+
+if MODE == "expired":
+    fail(UNAUTHORIZED)
+if MODE == "usage-limit":
+    fail(USAGE_LIMIT)
+for image in args.image:
+    if not os.path.isfile(image):
+        fail("image not found: " + image)
+answer = "```json\\n" + (ROUTING if "router" in args.prompt else IDENTIFICATION) + "\\n```"
+event(type="thread.started", thread_id="01a0b730-6b11-7720-9573-672388e3cc7e")
+event(type="turn.started")
+event(type="item.completed", item={{"id": "item_0", "type": "agent_message", "text": answer}})
+event(type="turn.completed", usage={{"input_tokens": 1620, "cached_input_tokens": 0,
+                                    "output_tokens": 61, "reasoning_output_tokens": 0}})
+if not args.json:
+    print(answer)
+'''
+
+
+# --- cards #421 and #422: the two CLIs behind the one verdict and factory ---
+
+#: The subscription CLIs, as the one verdict and the one factory branch see
+#: them, from the tuple providers holds (review round 4, C2: a CLI added
+#: there reaches every test in this section, not only cli_commands):
+#: every test in this section runs once per CLI and asserts on the
+#: CliEngine's fields, never on a copy of them.
+CLIS = [pytest.param(cli, id=cli.engine) for cli in providers.CLI_ENGINES]
+
+
+def _hostile(message: str) -> str:
+    """A CLI's failure message as an image-borne injection could have the
+    model write it: a clear-screen escape before the words, a carriage
+    return, line feed and forged log line after them, and a colour escape
+    at the end. The decoder's refusal carries the CLI's words to the
+    terminal and the log through `_fail`, so it must reach them as
+    `CommandBackend.plain` renders a program's stderr: one printable line
+    (Codex review round 2, S2)."""
+    return f"\x1b[2J{message}\r\n[melampus] frame 7: ok\x1b[31m"
+
+
+class _Fake(NamedTuple):
+    """What the tests know about one CLI beyond its CliEngine: the fake
+    that stands in for it, the verdict wrapper conftest stubs by name and
+    the real one to restore, the probe-seconds constant by name, the
+    account kind the fake's status check names, and a user's own template
+    with a model flag. The variable naming the CLI's settings folder is
+    the CliEngine's own, `settings_variable` (review round 7, C3), not a
+    copy here."""
+
+    script: str
+    verdict: str
+    real_verdict: Callable[..., providers.EngineVerdict]
+    probe_seconds: str
+    signed_in_as: str
+    own_command: list[str]
+
+
+_FAKES = {
+    providers.CLAUDE_CODE: _Fake(
+        _FAKE_CLAUDE_SCRIPT, "claude_code_verdict", REAL_CLAUDE_CODE_VERDICT,
+        "CLAUDE_CODE_PROBE_SECONDS", "claude.ai, max",
+        [CLAUDE, "-p", "--model", "sonnet", "--output-format", "json", "{image} {prompt}"],
+    ),
+    providers.CODEX: _Fake(
+        _FAKE_CODEX_SCRIPT, "codex_verdict", REAL_CODEX_VERDICT,
+        "CODEX_PROBE_SECONDS", "ChatGPT",
+        [providers.CODEX_PROGRAM, "exec", "-m", "gpt-5", "--image", "{image}", "--json",
+         "{prompt}"],
+    ),
+}
+
+
+def _fake_engine_cli(
+    monkeypatch, tmp_path, cli: providers.CliEngine, *, mode: str = "signed-in",
+    other_status: str = "", program: str = "",
+) -> Path:
+    """Put a `cli.program` that imitates the real CLI's documented interface
+    on PATH, ahead of any real one, with a settings folder of the test's
+    own (empty until a test writes into it) named by the CLI's own
+    `settings_variable`, so no test reads a developer's real one, and the
+    real detection restored against it. `other_status`
+    is the status line the fake codex's "other-account" mode prints;
+    `program` names the fake something else (`codex.cmd`, the npm shim's
+    name) for a template of the test's own to name.
+    Returns the log it appends each invocation's argv and cwd to."""
+    fake = _FAKES[cli.engine]
+    log = tmp_path / f"{cli.program}-calls.jsonl"
+    _script_on_path(monkeypatch, tmp_path, program or cli.program, fake.script.format(
         python=sys.executable, mode=mode, routing=ROUTING_OK, identification=ID_OK, log=str(log),
+        usage_limit=_CODEX_USAGE_LIMIT, unauthorized=_CODEX_UNAUTHORIZED,
+        api_key_fragment=_CODEX_API_KEY_FRAGMENT, other_status=other_status,
     ))
-    config_dir = tmp_path / "claude-config"
+    config_dir = tmp_path / f"{cli.program}-config"
     config_dir.mkdir(exist_ok=True)
-    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_dir))
-    _real_detection(monkeypatch)
+    monkeypatch.setenv(cli.settings_variable, str(config_dir))
+    _real_detection(monkeypatch, cli)
     return log
 
 
-def _no_claude(monkeypatch, tmp_path) -> None:
-    """A PATH on which nothing is called `claude`, keeping the interpreter's
-    own folder so a shebang script elsewhere on it still runs."""
+def _no_engine_cli(monkeypatch, tmp_path, cli: providers.CliEngine) -> None:
+    """A PATH on which nothing is called `cli.program`, keeping the
+    interpreter's own folder so a shebang script elsewhere on it still runs."""
     empty = tmp_path / "empty-bin"
     empty.mkdir(exist_ok=True)
     monkeypatch.setenv("PATH", f"{empty}{os.pathsep}{Path(sys.executable).parent}")
-    _real_detection(monkeypatch)
-    assert shutil.which(CLAUDE) is None, "a real claude is still on the test PATH"
+    _real_detection(monkeypatch, cli)
+    assert shutil.which(cli.program) is None, f"a real {cli.program} is still on the test PATH"
 
 
-def test_claude_code_is_an_engine_name_on_the_command_seam():
-    """Card #421: `claude-code` is the engine's name (the owner's words), a
-    named configuration of the command seam and not a new backend: it is
-    local (bills to a subscription, not per call: no cloud retuning, no
-    cost prompt, no cloud cache file), selectable by config and --backend,
-    and not yet a picker choice (the picker learns it in #423), so
-    BACKEND_CHOICES is unchanged."""
-    assert providers.CLAUDE_CODE == "claude-code"
-    assert providers.CLAUDE_CODE in providers.LOCAL_BACKENDS
+@pytest.mark.parametrize(
+    ("cli", "name"),
+    [(providers.CLAUDE_CODE_CLI, "claude-code"), (providers.CODEX_CLI, "codex")],
+    ids=["claude-code", "codex"],
+)
+def test_the_cli_is_an_engine_name_on_the_command_seam(cli, name):
+    """Cards #421, #422: `claude-code` and `codex` are the engines' names
+    (the owner's words), named configurations of the command seam and not
+    new backends: local (bills to a subscription, not per call: no cloud
+    retuning, no cost prompt, no cloud cache file), selectable by config
+    and --backend, and not yet a picker choice (the picker learns them in
+    #423), so BACKEND_CHOICES is unchanged."""
+    assert cli.engine == name
+    assert cli.engine in providers.LOCAL_BACKENDS
     assert providers.BACKEND_CHOICES == (*ENGINES, providers.SCRIPTED)
-    assert not providers.is_cloud_primary(_cfg(model={"backend": "claude-code"}))
+    assert not providers.is_cloud_primary(_cfg(model={"backend": cli.engine}))
 
 
-def test_cli_accepts_backend_claude_code(photos, tmp_path, capsys):
+@pytest.mark.parametrize("cli", CLIS)
+def test_cli_accepts_backend_for_the_cli(photos, tmp_path, capsys, cli):
     from melampus.cli import main
 
-    code = main([str(photos), "--backend", "claude-code", "--report-only",
+    code = main([str(photos), "--backend", cli.engine, "--report-only",
                  "--cache", str(tmp_path / "cache.jsonl")])
 
     assert code == 0, capsys.readouterr().err
+
+
+@posix_only
+@pytest.mark.parametrize("cli", CLIS)
+def test_the_cli_primary_builds_the_command_backend_on_the_built_in_template(
+    monkeypatch, tmp_path, cli
+):
+    """Given the CLI's engine and the CLI installed and signed in, the
+    factory builds a CommandBackend on the built-in template, the path
+    shutil.which resolved the program to, timeout_seconds, and the reply
+    decoder; `[model] command`, when the user sets one, replaces the
+    template (a different model flag, a full path) and keeps the rest."""
+    _fake_engine_cli(monkeypatch, tmp_path, cli)
+
+    backend = providers.build_primary_backend(
+        _cfg(model={"backend": cli.engine, "timeout_seconds": 30}))
+    assert isinstance(backend, CommandBackend)
+    assert backend.command == cli.command
+    assert backend.executable == shutil.which(cli.program)
+    assert backend.timeout == 30.0
+    assert backend.name == shlex.join(cli.command)
+
+    own = _FAKES[cli.engine].own_command
+    backend = providers.build_primary_backend(_cfg(model={"backend": cli.engine, "command": own}))
+    assert backend.command == own
+    assert backend.executable == shutil.which(cli.program)
+
+
+@posix_only
+@pytest.mark.parametrize("cli", CLIS)
+def test_the_cli_resolving_to_a_batch_shim_is_refused_before_its_status_check_runs(
+    monkeypatch, tmp_path, no_ambient_keys, no_ambient_ollama, cli
+):
+    """Review round 4 (C1, S3): the CLI engines build the seam `command`
+    builds, so what it refuses they refuse, by the same words. Given
+    `[model] command` under the CLI's engine names a program that
+    resolves to a `.cmd` (a fake `claude.cmd` or `codex.cmd` on PATH that
+    would answer its status check: the npm shim Windows resolves the bare
+    name to), when the backend is asked for, then it is refused up front
+    through the same shape as `command`, naming the file found and the fix
+    (the real entry in `[model] command`), and the status check never ran:
+    nothing goes through cmd.exe, the check included. The verdict is the
+    refusal's sentence, so --detect-engines and the settings dialog say it
+    too, with no executable to run."""
+    shim = f"{cli.program}.cmd"
+    log = _fake_engine_cli(monkeypatch, tmp_path, cli, program=shim)
+    command = [shim, *cli.command[1:]]
+    with pytest.raises(providers.BackendUnavailable) as err:
+        providers.build_primary_backend(_cfg(model={"backend": cli.engine, "command": command}))
+    message = str(err.value)
+    assert f"The command '{shim}' resolves to {shutil.which(shim)}, a batch file" in message, message
+    assert "cmd.exe" in message, message
+    assert "[model] command" in message and ".exe" in message and "node" in message, message
+    assert "--backend" in message
+    assert not log.exists(), f"the status check ran through the shim:\n{log.read_text(encoding='utf-8')}"
+    (verdict,) = [
+        v for v in providers.detect_engines(commands={cli.engine: command}) if v.engine == cli.engine
+    ]
+    assert not verdict.available and verdict.executable is None
+    assert f"{verdict.reason}." in message, (verdict.reason, message)
+
+
+@posix_only
+@pytest.mark.parametrize("cli", CLIS)
+def test_the_cli_run_through_a_launcher_is_checked_through_the_same_launcher(
+    monkeypatch, photos, tmp_path, capsys, no_ambient_keys, no_ambient_ollama, cli
+):
+    """Codex round 1 (C1): the batch-shim refusal's own fix, `node` and the
+    script the shim wraps in `[model] command`, must work. Given a template
+    whose program is an interpreter and whose next argument is the CLI's
+    script (the fake is a Python script: `python fake exec ...`, `python
+    fake -p ...`, exactly the launcher and the script), when detection
+    asks, then the status check runs through the same launcher, `python
+    fake login status` and `python fake --restricted auth status --json`,
+    never `python login status` (the interpreter, told to run a file
+    called `login`), so the verdict is available with the interpreter as
+    its executable and the fake's log shows the check reached the script
+    (its own argv after the launcher); a not-signed-in verdict quotes the
+    check as it ran, launcher and script included; the factory builds a
+    CommandBackend on that template; and `melampus-id FOLDER --backend
+    <engine> --json-out FILE` with the template in the config runs the
+    whole pipeline through it and writes the candidates."""
+    from melampus.cli import main
+
+    log = _fake_engine_cli(monkeypatch, tmp_path, cli)
+    script = shutil.which(cli.program)
+    command = [sys.executable, script, *cli.command[1:]]
+    own_check = cli.status_check(cli.command)
+
+    (verdict,) = [
+        v for v in providers.detect_engines(commands={cli.engine: command}) if v.engine == cli.engine
+    ]
+    assert verdict.available, verdict.reason
+    assert verdict.executable == shutil.which(sys.executable)
+    calls = [json.loads(line)["argv"] for line in log.read_text(encoding="utf-8").splitlines()]
+    assert calls == [own_check], "the check did not reach the script through the launcher"
+    assert cli.status_check(command) == [script, *own_check]
+
+    backend = providers.build_primary_backend(_cfg(model={"backend": cli.engine, "command": command}))
+    assert isinstance(backend, CommandBackend)
+    assert backend.command == command
+    assert backend.executable == verdict.executable
+
+    out = tmp_path / "results.json"
+    code = main([str(photos), "--config", str(_command_settings(tmp_path, command, cli.engine)),
+                 "--no-local-config", "--backend", cli.engine,
+                 "--cache", str(tmp_path / "cache.jsonl"), "--json-out", str(out)])
+    err = capsys.readouterr().err
+    assert code == 0, err
+    assert f"loading {shlex.join(command)}" in err, err
+    (result,) = json.loads(out.read_text(encoding="utf-8"))
+    assert result["status"] == "ok"
+    assert result["model"] == shlex.join(command)
+    assert [c["common_name"] for c in result["identification"]["candidates"]] == [
+        "Tricolored Heron", "Little Blue Heron"]
+
+    log.unlink()
+    _fake_engine_cli(monkeypatch, tmp_path, cli, mode="not-signed-in")
+    (verdict,) = [
+        v for v in providers.detect_engines(commands={cli.engine: command}) if v.engine == cli.engine
+    ]
+    assert not verdict.available
+    assert f"`{sys.executable} {script} {' '.join(own_check)}`" in verdict.reason, verdict.reason
+
+
+@posix_only
+@pytest.mark.parametrize("cli", CLIS)
+def test_the_cli_in_a_process_that_ignores_sigchld_is_refused_and_names_the_fix(
+    monkeypatch, tmp_path, no_ambient_keys, no_ambient_ollama, cli
+):
+    """Review round 4 (C1, S3) and round 5 (C1): given the CLI installed
+    and not signed in, and the process melampus runs in ignoring SIGCHLD
+    (the disposition faked, as the `command` test fakes it), when the
+    backend is asked for, then it is refused through the same shape and
+    words as `command`: SIGCHLD named, the fix (start melampus from a
+    shell, or restore the default), and the backends that do work here
+    from the verdicts already taken, the CLI engines not among them. The
+    status check never ran (its exit could not be read under that
+    disposition: CPython's Popen._try_wait reports 0 for a child the
+    kernel already reaped, so a check that did run would say "signed in"
+    of a CLI that is not), so the refusal says nothing of signing in, and
+    the verdict is the refusal's sentence, so --detect-engines and the
+    settings dialog say it too. The disposition is read once per CLI
+    verdict in the one detection (once here: conftest stubs the other
+    CLI's verdict), never per frame."""
+    log = _fake_engine_cli(monkeypatch, tmp_path, cli, mode="not-signed-in")
+    asked: list[int] = []
+
+    def getsignal(signalnum):
+        asked.append(signalnum)
+        return signal.SIG_IGN
+    monkeypatch.setattr(signal, "getsignal", getsignal)
+    with pytest.raises(providers.BackendUnavailable) as err:
+        providers.build_primary_backend(_cfg(model={"backend": cli.engine}))
+    message = str(err.value)
+    assert asked == [signal.SIGCHLD]
+    assert "ignores SIGCHLD" in message, message
+    assert "shell" in message and "default" in message, message
+    assert "signed in" not in message and "not to" not in message, message
+    assert not log.exists(), f"the status check ran under an ignored SIGCHLD:\n{log.read_text(encoding='utf-8')}"
+    for works_here in ("claude", "openai", "scripted"):
+        assert works_here in message, f"{works_here!r} is not named as working here:\n{message}"
+    assert "--backend" in message
+    works_here = message.partition("The backends that work on this machine are: ")[2]
+    assert cli.engine not in works_here, message
+    (verdict,) = [v for v in providers.detect_engines() if v.engine == cli.engine]
+    assert not verdict.available and verdict.executable is None
+    assert f"{verdict.reason}." in message, (verdict.reason, message)
+
+
+@posix_only
+@pytest.mark.parametrize("cli", CLIS)
+def test_the_cli_is_refused_at_the_real_boundary_when_sigchld_is_ignored(
+    monkeypatch, tmp_path, no_ambient_keys, no_ambient_ollama, cli
+):
+    """Review round 4 (C1, S3) and round 5 (C1), at the real boundary:
+    SIGCHLD really set to SIG_IGN in this process (restored afterwards),
+    the fake CLI on PATH, not signed in, found by the real shutil.which,
+    and the factory refuses through BackendUnavailable naming SIGCHLD
+    before any frame is run, since with children reaped by the kernel the
+    backend's every stop would signal a pid the CLI no longer holds. The
+    real detection never runs the status check: under this disposition
+    its exit reads as 0 whatever the CLI says (Popen._try_wait cannot get
+    the status of a child the kernel reaped), so a verdict from it would
+    call this not-signed-in CLI signed in; the refusal says nothing of
+    signing in, the check's log does not exist, and the verdict is the
+    refusal's sentence."""
+    log = _fake_engine_cli(monkeypatch, tmp_path, cli, mode="not-signed-in")
+    before = signal.signal(signal.SIGCHLD, signal.SIG_IGN)
+    try:
+        with pytest.raises(providers.BackendUnavailable) as err:
+            providers.build_primary_backend(_cfg(model={"backend": cli.engine, "timeout_seconds": 30}))
+        (verdict,) = [v for v in providers.detect_engines() if v.engine == cli.engine]
+    finally:
+        signal.signal(signal.SIGCHLD, before)
+    message = str(err.value)
+    assert "ignores SIGCHLD" in message, message
+    assert "shell" in message and "default" in message, message
+    assert "signed in" not in message and "not to" not in message, message
+    assert not log.exists(), f"the status check ran under an ignored SIGCHLD:\n{log.read_text(encoding='utf-8')}"
+    assert "--backend" in message
+    assert not verdict.available and verdict.executable is None
+    assert f"{verdict.reason}." in message, (verdict.reason, message)
+
+
+@posix_only
+@pytest.mark.parametrize("cli", CLIS)
+def test_the_cli_returns_candidates_in_the_same_shape_as_mlx_on_the_fixture(
+    monkeypatch, photos, tmp_path, cli
+):
+    """Cards #421 and #422, Done-when 1 and 3, at the real boundary: the
+    fake CLI on PATH takes the documented flags, finds the image (Claude
+    Code's reads the path out of the prompt the way the Read tool would,
+    refusing when the tool is not allowed or the file is not there; Codex's
+    checks the attached file), and answers the routing prompt then the bird
+    prompt inside its documented output. The factory builds the backend,
+    the Identifier stages the committed fixture, and the candidates equal,
+    field for field, the scripted pipeline's for the same replies. Every
+    run's argv is the template with the staged copy's path in `{image}`'s
+    place and never the original's anywhere."""
+    from melampus.identify import Identifier
+
+    log = _fake_engine_cli(monkeypatch, tmp_path, cli)
+    config = _cfg(model={"backend": cli.engine})
+    backend = providers.build_primary_backend(config)
+    result = Identifier(backend, config).identify(photos / PHOTO)
+    expected = Identifier(
+        ScriptedBackend([ROUTING_OK, ID_OK], name=shlex.join(cli.command)), config
+    ).identify(photos / PHOTO)
+
+    assert result.status == "ok", result.error
+    assert result.model == shlex.join(cli.command)
+    assert result.identification == expected.identification
+    assert result.taxon_routing == expected.taxon_routing
+    assert [c.common_name for c in result.identification.ranked()] == [
+        "Tricolored Heron", "Little Blue Heron"]
+    calls = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+    runs = [c for c in calls if c["argv"] != cli.status_check(cli.command)]
+    assert len(runs) == 2, calls
+    original = str(photos / PHOTO)
+    for call in runs:
+        argv = call["argv"]
+        assert len(argv) == len(cli.command) - 1, argv
+        # The staged copy's path, read back out of the first argument that
+        # carries `{image}` alone or in a rule (`Read(/{image})`).
+        staged = next(
+            given[len(template.partition("{image}")[0]):len(given) - len(template.partition("{image}")[2])]
+            for given, template in zip(argv, cli.command[1:])
+            if "{image}" in template and "{prompt}" not in template
+        )
+        assert original not in staged and "melampus-" in staged, "not the staged copy"
+        assert staged == os.path.realpath(staged), "the argument names a path through a symlink"
+        assert call["cwd"] == os.path.dirname(staged), \
+            "the program's working directory is not the staged image's folder"
+        for given, template in zip(argv, cli.command[1:]):
+            if "{prompt}" in template:
+                assert original not in given and "melampus-" not in given.replace(staged, "")
+                assert given.startswith(template.partition("{prompt}")[0].replace("{image}", staged))
+            else:
+                assert given == template.replace("{image}", staged)
+
+
+def test_the_cli_environment_is_the_documented_list():
+    """Review round 7, C1: the allowlist a CLI engine is launched with is
+    pinned name by name, the way the templates are, so a name added later
+    is a red test first, with its reason next to it in providers. The
+    POSIX names: what a process needs to start and find its sign-in
+    (PATH, HOME, USER: measured on studio), the login session's basics,
+    and the standard proxy and CA variables. The Windows tail is the floor
+    a Windows process starts under (tests/test_binary.py's
+    no_python_environment, which CI's build-windows runs the executable
+    under): the system root (Python's subprocess docs: a side-by-side
+    assembly needs "a valid %SystemRoot%"), the temp folder (GetTempPath
+    reads TMP, then TEMP, then USERPROFILE) and the profile (Claude Code's
+    settings and credentials live under `%USERPROFILE%\\.claude`; Codex's
+    `~/.codex` resolves through USERPROFILE on Windows). Nothing above the
+    floor is in the list until card #424, the Windows run, measures a need
+    for it. The tuple is built at import time from `os.name`, so this test
+    pins the tail only where it runs on Windows (#424); here it pins the
+    POSIX names."""
+    posix = (
+        "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE", "TERM",
+        "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy",
+        "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS",
+    )
+    windows = ("SYSTEMROOT", "TEMP", "TMP", "USERPROFILE") if os.name == "nt" else ()
+    assert providers.CLI_ENVIRONMENT == (*posix, *windows)
+    assert not any(name in ALL_KEY_VARIABLES for name in providers.CLI_ENVIRONMENT)
+
+
+@posix_only
+@pytest.mark.parametrize("cli", CLIS)
+def test_the_cli_never_sees_melampus_own_environment(monkeypatch, photos, tmp_path, cli):
+    """Codex review round 3, S1, at the real boundary: a photograph is
+    untrusted input, and a CLI whose agent can run commands (Codex's shell
+    tool is on by default) would answer text rendered in one asking for
+    `env` with whatever melampus was launched with, into its cloud
+    conversation: the cloud engines' keys, or anything else in the shell's
+    environment. So the status check and every run are launched with the
+    CLI's own environment (`CliEngine.environment`): the runtime basics
+    and its settings folder's variable, nothing else. Given a synthetic
+    secret and both cloud keys in melampus's environment, when the factory
+    builds the engine and the Identifier runs the fixture, then none of
+    them reached the fake CLI in any invocation, what did is nothing
+    outside that allowlist, and PATH, HOME and the settings variable are
+    there (the real `codex login status` and `claude --restricted auth
+    status --json` report signed in under this list, measured on studio;
+    the fake finds its settings folder through it)."""
+    from melampus.identify import Identifier
+
+    log = _fake_engine_cli(monkeypatch, tmp_path, cli)
+    monkeypatch.setenv("SYNTHETIC_SECRET_FOR_TEST", "not-for-the-model")
+    for name in ALL_KEY_VARIABLES:
+        monkeypatch.setenv(name, "synthetic-not-a-key")
+    config = _cfg(model={"backend": cli.engine})
+    result = Identifier(providers.build_primary_backend(config), config).identify(photos / PHOTO)
+
+    assert result.status == "ok", result.error
+    calls = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+    assert len(calls) == 3, calls  # the status check, the routing run, the identification run
+    settings_variable = cli.settings_variable
+    for call in calls:
+        seen = set(call["environ"])
+        assert "SYNTHETIC_SECRET_FOR_TEST" not in seen, f"{call['argv']} saw melampus's environment"
+        assert not seen & set(ALL_KEY_VARIABLES), f"{call['argv']} saw a cloud key: {seen & set(ALL_KEY_VARIABLES)}"
+        # macOS's CoreFoundation writes __CF_USER_TEXT_ENCODING into every
+        # process that loads it (the fake is a python): the OS's, not ours.
+        beyond = {name for name in seen - set(cli.environment()) if not name.startswith("__CF_")}
+        assert not beyond, f"{call['argv']} saw {sorted(beyond)}, outside the CLI's environment"
+        assert {"PATH", "HOME", settings_variable} <= seen, f"{call['argv']} saw only {sorted(seen)}"
+
+
+@posix_only
+@pytest.mark.parametrize("cli", CLIS)
+def test_detection_the_cli_is_available_when_installed_and_signed_in(monkeypatch, tmp_path, cli):
+    """Cards #421 and #422, Done-when 2: given the CLI installed and signed
+    in, when detection runs, then its engine is available and the reason
+    says runs bill to the subscription, naming the account kind the status
+    check printed. The check is the documented, cheap one (`claude auth
+    status` "Exits with code 0 if logged in, 1 if not", cli-reference;
+    `codex login status` "exit with 0 when logged in", developer-commands),
+    one call, no model call, under the template's own settings flags
+    (cli.status_check)."""
+    log = _fake_engine_cli(monkeypatch, tmp_path, cli)
+    verdict = _verdict(cli.engine)
+    assert verdict.available, verdict.reason
+    assert "subscription" in verdict.reason and _FAKES[cli.engine].signed_in_as in verdict.reason
+    calls = [json.loads(line)["argv"] for line in log.read_text(encoding="utf-8").splitlines()]
+    assert calls == [cli.status_check(cli.command)]
+
+
+@posix_only
+@pytest.mark.parametrize("cli", CLIS)
+def test_detection_the_cli_not_signed_in_names_the_sign_in_command(monkeypatch, tmp_path, cli):
+    """Done-when 2: installed but not signed in (the status check exits 1),
+    then unavailable with the reason "not signed in", the check as run
+    (flags included, like every other verdict that ran one; review round
+    6, 1) and the command that signs in."""
+    _fake_engine_cli(monkeypatch, tmp_path, cli, mode="not-signed-in")
+    verdict = _verdict(cli.engine)
+    assert not verdict.available
+    assert "not signed in" in verdict.reason and cli.sign_in in verdict.reason
+    check = " ".join(cli.status_check(cli.command))
+    assert f"`{cli.program} {check}`" in verdict.reason, verdict.reason
+
+
+@pytest.mark.parametrize("cli", CLIS)
+def test_detection_the_cli_not_installed_points_to_the_install(monkeypatch, tmp_path, cli):
+    """Done-when 2: not installed, then unavailable with the reason "not
+    installed" and where to get it, then the sign-in."""
+    _no_engine_cli(monkeypatch, tmp_path, cli)
+    verdict = _verdict(cli.engine)
+    assert not verdict.available
+    assert "not installed" in verdict.reason and cli.install in verdict.reason
+    assert f"then sign in with `{cli.sign_in}`" in verdict.reason
+
+
+@posix_only
+@pytest.mark.parametrize("cli", CLIS)
+def test_detection_the_cli_gives_up_when_the_status_check_hangs(monkeypatch, tmp_path, cli):
+    """--detect-engines never hangs: a status check that does not answer
+    within the CLI's probe seconds is an unavailable verdict saying so,
+    not a stalled dialog."""
+    _fake_engine_cli(monkeypatch, tmp_path, cli, mode="hung")
+    monkeypatch.setattr(providers, _FAKES[cli.engine].probe_seconds, 0.5)
+    verdict = _verdict(cli.engine)
+    assert not verdict.available
+    assert "did not answer" in verdict.reason
+
+
+@pytest.mark.parametrize("cli", CLIS)
+def test_the_cli_probe_timeout_is_short(cli):
+    """Short enough that a broken install cannot stall the settings dialog;
+    long enough for the CLI's start (measured: 0.1 s for the Node CLI,
+    0.01 s for the binary)."""
+    assert 1.0 <= getattr(providers, _FAKES[cli.engine].probe_seconds) <= 15.0
+
+
+@posix_only
+@pytest.mark.parametrize("cli", CLIS)
+def test_the_refusal_names_the_cli_when_it_is_signed_in(
+    monkeypatch, tmp_path, no_ambient_ollama, cli
+):
+    """One truth: the backends a refusal names as working here follow
+    detection, so the CLI's engine is named when the CLI is signed in and
+    not otherwise."""
+    _fake_engine_cli(monkeypatch, tmp_path, cli)
+    assert cli.engine in providers._works_here(providers.detect_engines())
+    _fake_engine_cli(monkeypatch, tmp_path, cli, mode="not-signed-in")
+    assert cli.engine not in providers._works_here(providers.detect_engines())
+
+
+@posix_only
+@pytest.mark.parametrize("cli", CLIS)
+def test_cli_detect_engines_prints_the_clis_verdict(
+    monkeypatch, tmp_path, capsys, no_ambient_keys, cli
+):
+    """--detect-engines carries the fifth and sixth verdicts after the four,
+    claude-code then codex, as JSON."""
+    from melampus.cli import main
+
+    _fake_engine_cli(monkeypatch, tmp_path, cli, mode="not-signed-in")
+    assert main(["--detect-engines"]) == 0
+    verdicts = json.loads(capsys.readouterr().out)
+    assert [v["engine"] for v in verdicts] == [*ENGINES, "claude-code", "codex"]
+    (verdict,) = [v for v in verdicts if v["engine"] == cli.engine]
+    assert verdict["available"] is False
+    assert cli.sign_in in verdict["reason"]
+
+
+@posix_only
+@pytest.mark.parametrize("cli", CLIS)
+def test_the_cli_not_signed_in_is_refused_before_any_image_is_read(
+    monkeypatch, tmp_path, capsys, link_to_nowhere, cli
+):
+    """Cards #421 and #422, Done-when 2 at analysis time, where detection
+    can tell: the CLI installed but not signed in, and the folder's one
+    image is a link to nowhere, so opening it would fail loudly. The CLI
+    exits 3 on a refusal that says to run the sign-in command and never
+    mentions the file: the status check ran before any image was read."""
+    from melampus.cli import main
+
+    _fake_engine_cli(monkeypatch, tmp_path, cli, mode="not-signed-in")
+
+    code = main([str(link_to_nowhere), "--backend", cli.engine, "--cache", str(tmp_path / "cache.jsonl")])
+
+    err = capsys.readouterr().err
+    assert code == 3, err
+    assert "not signed in" in err and cli.sign_in in err
+    assert_no_image_was_touched(err, "sign-in check")
+
+
+@pytest.mark.parametrize("cli", CLIS)
+def test_the_cli_not_installed_is_refused_before_any_image_is_read(
+    monkeypatch, tmp_path, capsys, link_to_nowhere, cli
+):
+    """Done-when 2 at analysis time, not installed: exit 3 naming the
+    program, where to install it and how to sign in, before any image is
+    read."""
+    from melampus.cli import main
+
+    _no_engine_cli(monkeypatch, tmp_path, cli)
+
+    code = main([str(link_to_nowhere), "--backend", cli.engine, "--cache", str(tmp_path / "cache.jsonl")])
+
+    err = capsys.readouterr().err
+    assert code == 3, err
+    assert "not installed" in err and cli.install in err
+    assert cli.sign_in in err
+    assert_no_image_was_touched(err, "install check")
+
+
+@posix_only
+@pytest.mark.parametrize("cli", CLIS)
+def test_cli_backend_for_the_cli_writes_a_json_result(
+    monkeypatch, photos, tmp_path, capsys, cli
+):
+    """Acceptance for Done-when 1: `melampus-id FOLDER --backend <engine>
+    --json-out FILE` with the fake CLI on PATH, signed in, on the committed
+    fixture, runs the whole pipeline and writes a JSON result with the
+    candidates, attributed to the template, nothing retuned for a cloud
+    and no cost prompt."""
+    from melampus.cli import main
+
+    _fake_engine_cli(monkeypatch, tmp_path, cli)
+    out = tmp_path / "results.json"
+
+    code = main([str(photos), "--backend", cli.engine, "--cache", str(tmp_path / "cache.jsonl"),
+                 "--json-out", str(out)])
+
+    err = capsys.readouterr().err
+    assert code == 0, err
+    assert f"loading {shlex.join(cli.command)}" in err, err
+    assert "cloud default" not in err and "estimate" not in err.lower()
+    (result,) = json.loads(out.read_text(encoding="utf-8"))
+    assert result["file"] == PHOTO
+    assert result["status"] == "ok"
+    assert result["model"] == shlex.join(cli.command)
+    assert [c["common_name"] for c in result["identification"]["candidates"]] == [
+        "Tricolored Heron", "Little Blue Heron"]
+
+
+# --- card #421: what is Claude Code's own ---------------------------------
 
 
 def test_claude_code_template_is_the_documented_print_mode_invocation():
@@ -3699,6 +4469,33 @@ def test_claude_code_reply_surfaces_any_other_error_result():
     assert "API Error: 429 rate limited" in str(err.value)
 
 
+@pytest.mark.parametrize(
+    "result, words",
+    [
+        ("Not logged in · Please run /login", ["not signed in", "claude auth login", "Not logged in"]),
+        ("API Error: 429 rate limited", ["API Error: 429 rate limited"]),
+    ],
+    ids=["not-logged-in", "other"],
+)
+def test_claude_code_reply_refusals_carry_the_error_results_words_as_one_printable_line(
+    result, words,
+):
+    """The `result` of an `is_error` run is the model's side writing (a
+    prompt injection in the image can put anything there), and the
+    refusal prints it on the terminal and in the log through `_fail`. So
+    it reaches the refusal as `CommandBackend.plain` renders a program's
+    stderr: every character printable, no line break to fake a line of
+    the log, no escape to clear or recolour the screen, the words kept."""
+    stdout = json.dumps({"type": "result", "is_error": True, "result": _hostile(result)})
+    with pytest.raises(CommandFailed) as err:
+        providers.claude_code_reply(stdout)
+    message = str(err.value)
+    assert message.isprintable(), message
+    assert "\n" not in message and "\r" not in message and "\x1b" not in message
+    for word in words:
+        assert word in message
+
+
 def test_command_backend_decodes_stdout_before_the_reply_is_read(tmp_path):
     """The seam's one extension for a CLI that wraps its reply: an optional
     `decode` on stdout, applied before the empty-reply check, so a wrapper
@@ -3726,31 +4523,6 @@ def test_command_backend_decodes_stdout_before_the_reply_is_read(tmp_path):
         _command_backend(_FakeRun(stdout="wrapper"), decode=refuse).complete(image, "p", 10)
 
 
-@posix_only
-def test_claude_code_primary_builds_the_command_backend_on_the_built_in_template(
-    monkeypatch, tmp_path
-):
-    """Given engine claude-code and Claude Code installed and signed in, the
-    factory builds a CommandBackend on the built-in template, the path
-    shutil.which resolved `claude` to, timeout_seconds, and the reply
-    decoder; `[model] command`, when the user sets one, replaces the
-    template (a different model flag, a full path) and keeps the rest."""
-    _fake_claude(monkeypatch, tmp_path)
-
-    backend = providers.build_primary_backend(
-        _cfg(model={"backend": "claude-code", "timeout_seconds": 30}))
-    assert isinstance(backend, CommandBackend)
-    assert backend.command == providers.CLAUDE_CODE_COMMAND
-    assert backend.executable == shutil.which(CLAUDE)
-    assert backend.timeout == 30.0
-    assert backend.name == shlex.join(providers.CLAUDE_CODE_COMMAND)
-
-    own = [CLAUDE, "-p", "--model", "sonnet", "--output-format", "json", "{image} {prompt}"]
-    backend = providers.build_primary_backend(_cfg(model={"backend": "claude-code", "command": own}))
-    assert backend.command == own
-    assert backend.executable == shutil.which(CLAUDE)
-
-
 def _status_checks(log: Path) -> list[list[str]]:
     """The `auth status` invocations the fake `claude` logged, as received,
     global flags before the subcommand included."""
@@ -3769,13 +4541,13 @@ def test_claude_code_primary_asks_claude_code_once_refused_or_built(monkeypatch,
     run on the template's program, so a user's own program in [model]
     command is the one asked, once, and the built-in `claude` is not."""
     built_in = providers.claude_code_status(providers.CLAUDE_CODE_COMMAND)
-    log = _fake_claude(monkeypatch, tmp_path, mode="not-signed-in")
+    log = _fake_engine_cli(monkeypatch, tmp_path, providers.CLAUDE_CODE_CLI, mode="not-signed-in")
     with pytest.raises(providers.BackendUnavailable, match="not signed in"):
         providers.build_primary_backend(_cfg(model={"backend": "claude-code"}))
     assert _status_checks(log) == [built_in]
 
     log.unlink()
-    _fake_claude(monkeypatch, tmp_path)
+    _fake_engine_cli(monkeypatch, tmp_path, providers.CLAUDE_CODE_CLI)
     backend = providers.build_primary_backend(_cfg(model={"backend": "claude-code"}))
     assert _status_checks(log) == [built_in]
     assert backend.executable == shutil.which(CLAUDE)
@@ -3785,50 +4557,6 @@ def test_claude_code_primary_asks_claude_code_once_refused_or_built(monkeypatch,
     backend = providers.build_primary_backend(_cfg(model={"backend": "claude-code", "command": own}))
     assert _status_checks(log) == [providers.claude_code_status(own)], "the built-in's verdict was asked too"
     assert backend.executable == shutil.which(CLAUDE)
-
-
-@posix_only
-def test_claude_code_returns_candidates_in_the_same_shape_as_mlx_on_the_fixture(
-    monkeypatch, photos, tmp_path
-):
-    """Card #421, Done-when 1 and 3, at the real boundary: the fake `claude`
-    on PATH takes the documented print-mode flags, reads the image path out
-    of the prompt the way the Read tool would (refusing when the tool is
-    not allowed or the file is not there), and answers the routing prompt
-    then the bird prompt inside the JSON result object. The factory builds
-    the backend, the Identifier stages the committed fixture, and the
-    candidates equal, field for field, the scripted pipeline's for the same
-    replies."""
-    from melampus.identify import Identifier
-
-    log = _fake_claude(monkeypatch, tmp_path)
-    config = _cfg(model={"backend": "claude-code"})
-    backend = providers.build_primary_backend(config)
-    result = Identifier(backend, config).identify(photos / PHOTO)
-    expected = Identifier(
-        ScriptedBackend([ROUTING_OK, ID_OK], name=shlex.join(providers.CLAUDE_CODE_COMMAND)), config
-    ).identify(photos / PHOTO)
-
-    assert result.status == "ok", result.error
-    assert result.model == shlex.join(providers.CLAUDE_CODE_COMMAND)
-    assert result.identification == expected.identification
-    assert result.taxon_routing == expected.taxon_routing
-    assert [c.common_name for c in result.identification.ranked()] == [
-        "Tricolored Heron", "Little Blue Heron"]
-    calls = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
-    runs = [c for c in calls if c["argv"][:1] == ["-p"]]
-    assert len(runs) == 2, calls
-    for call in runs:
-        argv = call["argv"]
-        rule = argv[argv.index("--allowedTools") + 1]
-        assert rule.startswith("Read(//") and rule.endswith(")"), rule
-        staged = rule[len("Read(/"):-1]
-        assert argv[:-1] == [a.replace("{image}", staged) for a in providers.CLAUDE_CODE_COMMAND[1:-1]]
-        assert str(photos / PHOTO) not in argv[-1], "the original file's path reached the program"
-        assert "melampus-" in staged and staged in argv[-1], "the rule and the prompt name different files"
-        assert staged == os.path.realpath(staged), "the rule names a path through a symlink"
-        assert call["cwd"] == os.path.dirname(staged), \
-            "the program's working directory is not the staged image's folder"
 
 
 @posix_only
@@ -3846,7 +4574,7 @@ def test_the_fake_claude_models_the_documented_working_directory_rule(monkeypatc
     and the outside read is denied even with a rule naming it. The fake
     reads every file the prompt names, as text rendered in a photograph
     could ask it to, and the first denial is the reply."""
-    _fake_claude(monkeypatch, tmp_path)
+    _fake_engine_cli(monkeypatch, tmp_path, providers.CLAUDE_CODE_CLI)
     image = tmp_path / "staged" / "image.jpg"
     image.parent.mkdir()
     image.write_bytes(b"jpeg")
@@ -3885,7 +4613,7 @@ def test_claude_code_runs_without_the_users_own_permission_grants(monkeypatch, t
     the broad grant is in the user's settings: the fake models the grant.
     The template loads no settings file and confines reads to the staged
     folder: with the grant present, the outside read is denied."""
-    _fake_claude(monkeypatch, tmp_path)
+    _fake_engine_cli(monkeypatch, tmp_path, providers.CLAUDE_CODE_CLI)
     image = tmp_path / "staged" / "image.jpg"
     image.parent.mkdir()
     image.write_bytes(b"jpeg")
@@ -3913,39 +4641,11 @@ def test_claude_code_runs_without_the_users_own_permission_grants(monkeypatch, t
 
 
 @posix_only
-def test_detection_claude_code_is_available_when_installed_and_signed_in(monkeypatch, tmp_path):
-    """Card #421, Done-when 2: given Claude Code installed and signed in, when
-    detection runs, then claude-code is available and the reason says runs
-    bill to the subscription. The check is the documented, cheap one:
-    `claude auth status` "Exits with code 0 if logged in, 1 if not"
-    (cli-reference), no model call."""
-    log = _fake_claude(monkeypatch, tmp_path)
-    verdict = _verdict("claude-code")
-    assert verdict.available, verdict.reason
-    assert "subscription" in verdict.reason
-    calls = [json.loads(line)["argv"] for line in log.read_text(encoding="utf-8").splitlines()]
-    assert calls == [providers.claude_code_status(providers.CLAUDE_CODE_COMMAND)]
-
-
-@posix_only
-def test_detection_claude_code_not_signed_in_names_the_sign_in_command(monkeypatch, tmp_path):
-    """Done-when 2: installed but not signed in, then unavailable with the
-    reason "not signed in", the check as run (flags included, like every
-    other verdict that ran one; review round 6, 1) and the command that
-    signs in."""
-    _fake_claude(monkeypatch, tmp_path, mode="not-signed-in")
-    verdict = _verdict("claude-code")
-    assert not verdict.available
-    assert "not signed in" in verdict.reason and providers.CLAUDE_CODE_SIGN_IN in verdict.reason
-    assert "`claude --restricted auth status --json`" in verdict.reason, verdict.reason
-
-
-@posix_only
 def test_detection_claude_code_not_signed_in_is_the_documented_exit_alone(monkeypatch, tmp_path):
     """Done-when 2: the documented check is "Exits with code 0 if logged in,
     1 if not" (cli-reference), so exit 1 with nothing on stderr is not
     signed in even when no status JSON came back to say `loggedIn`."""
-    _fake_claude(monkeypatch, tmp_path, mode="silent-not-signed-in")
+    _fake_engine_cli(monkeypatch, tmp_path, providers.CLAUDE_CODE_CLI, mode="silent-not-signed-in")
     verdict = _verdict("claude-code")
     assert not verdict.available
     assert "not signed in" in verdict.reason and providers.CLAUDE_CODE_SIGN_IN in verdict.reason
@@ -3958,7 +4658,7 @@ def test_detection_claude_code_reports_a_status_check_that_failed_some_other_way
     is not "not signed in", and `claude auth login` would not help. The
     verdict says what ran, the exit code and the CLI's own first words
     on stderr, the way a failed run's CommandFailed does."""
-    _fake_claude(monkeypatch, tmp_path, mode="no-auth-command")
+    _fake_engine_cli(monkeypatch, tmp_path, providers.CLAUDE_CODE_CLI, mode="no-auth-command")
     verdict = _verdict("claude-code")
     assert not verdict.available
     assert "not signed in" not in verdict.reason
@@ -3976,7 +4676,7 @@ def test_detection_claude_code_that_cannot_be_run_says_so_in_the_systems_words(m
     verdict is unavailable, says it could not be run with the system's own
     error, and does not point at the sign-in, which would not help."""
     _script_on_path(monkeypatch, tmp_path, CLAUDE, "#!/nonexistent\n")
-    _real_detection(monkeypatch)
+    _real_detection(monkeypatch, providers.CLAUDE_CODE_CLI)
     verdict = _verdict("claude-code")
     assert not verdict.available
     assert "could not be run" in verdict.reason
@@ -3984,18 +4684,13 @@ def test_detection_claude_code_that_cannot_be_run_says_so_in_the_systems_words(m
     assert providers.CLAUDE_CODE_SIGN_IN not in verdict.reason
 
 
-def test_detection_claude_code_not_installed_points_to_the_install(monkeypatch, tmp_path):
-    """Done-when 2: not installed, then unavailable with the reason "not
-    installed" and where to get it, then the sign-in; for a template
-    carrying `--bare`, which no sign-in can help (review round 6, 1), the
-    next step after installing is to remove the flag, not to sign in
-    (review round 7, 1), so one round trip tells the whole story."""
-    _no_claude(monkeypatch, tmp_path)
-    verdict = _verdict("claude-code")
-    assert not verdict.available
-    assert "not installed" in verdict.reason and providers.CLAUDE_CODE_INSTALL in verdict.reason
-    assert f"then sign in with `{providers.CLAUDE_CODE_SIGN_IN}`" in verdict.reason
-
+@posix_only
+def test_claude_code_not_installed_with_a_bare_template_says_to_remove_the_flag(monkeypatch, tmp_path):
+    """Done-when 2: not installed, for a template carrying `--bare`, which
+    no sign-in can help (review round 6, 1): the next step after installing
+    is to remove the flag, not to sign in (review round 7, 1), so one round
+    trip tells the whole story."""
+    _no_engine_cli(monkeypatch, tmp_path, providers.CLAUDE_CODE_CLI)
     template = providers.CLAUDE_CODE_COMMAND
     bare = [*template[:-1], providers.CLAUDE_CODE_BARE, template[-1]]
     with pytest.raises(providers.BackendUnavailable, match="not installed") as err:
@@ -4010,10 +4705,15 @@ def test_detection_claude_code_not_installed_points_to_the_install(monkeypatch, 
 @pytest.mark.parametrize(
     ("mode", "names"),
     [
-        ("api-key", ("authMethod api_key", "apiKeySource ANTHROPIC_API_KEY", "unset ANTHROPIC_API_KEY")),
-        ("login-and-api-key", ("authMethod claude.ai", "apiKeySource ANTHROPIC_API_KEY", "unset ANTHROPIC_API_KEY")),
-        ("oauth-token", ("authMethod oauth_token", "unset CLAUDE_CODE_OAUTH_TOKEN")),
-        ("third-party", ("authMethod third_party", "unset CLAUDE_CODE_USE_BEDROCK")),
+        ("api-key", ("authMethod api_key", "apiKeySource ANTHROPIC_API_KEY",
+                     "remove ANTHROPIC_API_KEY from the `env` block of the settings")),
+        ("login-and-api-key", ("authMethod claude.ai", "apiKeySource ANTHROPIC_API_KEY",
+                               "remove ANTHROPIC_API_KEY from the `env` block of the settings")),
+        ("oauth-token", ("authMethod oauth_token",
+                         "remove CLAUDE_CODE_OAUTH_TOKEN and ANTHROPIC_AUTH_TOKEN from the `env` block of the settings")),
+        ("third-party", ("authMethod third_party",
+                         "remove CLAUDE_CODE_USE_BEDROCK, CLAUDE_CODE_USE_VERTEX and CLAUDE_CODE_USE_FOUNDRY"
+                         " from the `env` block of the settings")),
         ("console", ("apiKeySource /login managed key", "claude auth logout")),
     ],
 )
@@ -4022,18 +4722,20 @@ def test_detection_claude_code_signed_in_but_not_to_the_subscription_is_refused(
 ):
     """Codex round 1, C1 and S2 (one defect): the engine promises every frame
     bills the subscription, and a print-mode run uses whatever credential
-    Claude Code's precedence puts first, the environment melampus runs
-    from included (authentication § Authentication precedence: "In
-    non-interactive mode (-p), the key is always used when present"). So a
-    status check that passes on another credential (an API key; the
-    subscription login set aside for one, which the real CLI reports as
-    authMethod claude.ai with apiKeySource named and subscriptionType
-    null; an OAuth or bearer token from the environment; a cloud provider;
-    the Console sign-in without a key) is not available: the verdict is a
+    Claude Code's precedence puts first (authentication § Authentication
+    precedence: "In non-interactive mode (-p), the key is always used when
+    present"). So a status check that passes on another credential (an
+    API key; the subscription login set aside for one, which the real CLI
+    reports as authMethod claude.ai with apiKeySource named and
+    subscriptionType null; an OAuth or bearer token; a cloud provider; the
+    Console sign-in without a key) is not available: the verdict is a
     sixth shape, signed in but not to the subscription, naming what the
-    status check said, what to remove, and the sign-in, and never "not
-    signed in", which is another fix."""
-    _fake_claude(monkeypatch, tmp_path, mode=mode)
+    status check said, what to remove and from where, and the sign-in,
+    and never "not signed in", which is another fix. The place is a
+    settings file's `env` block, never the shell (review round 7, C2):
+    melampus's own environment never reaches the check or the run
+    (`CliEngine.environment`, Codex round 3, S1)."""
+    _fake_engine_cli(monkeypatch, tmp_path, providers.CLAUDE_CODE_CLI, mode=mode)
     verdict = _verdict("claude-code")
     assert not verdict.available
     assert "not to a Claude subscription" in verdict.reason, verdict.reason
@@ -4048,7 +4750,7 @@ def test_detection_claude_code_available_only_on_a_verified_subscription(monkeyp
     """The available verdict is positive evidence, not the absence of a
     refusal: `authMethod` claude.ai with no `apiKeySource`, the shape
     measured on a signed-in Mac, and the reason names the account kind."""
-    _fake_claude(monkeypatch, tmp_path)
+    _fake_engine_cli(monkeypatch, tmp_path, providers.CLAUDE_CODE_CLI)
     verdict = _verdict("claude-code")
     assert verdict.available, verdict.reason
     assert "claude.ai, max" in verdict.reason and "subscription" in verdict.reason
@@ -4061,8 +4763,9 @@ def test_the_status_check_runs_under_the_templates_isolation(monkeypatch, tmp_pa
     subcommand (the real CLI processes the global flag there: measured,
     `claude --setting-sources bogus auth status --json` is refused as an
     invalid setting source), so the credential it reports is read under
-    the settings the run loads, and the same inherited environment."""
-    log = _fake_claude(monkeypatch, tmp_path)
+    the settings the run loads, and the same environment,
+    `CliEngine.environment`."""
+    log = _fake_engine_cli(monkeypatch, tmp_path, providers.CLAUDE_CODE_CLI)
     assert _verdict("claude-code").available
     assert _status_checks(log) == [["--restricted", "auth", "status", "--json"]]
 
@@ -4083,7 +4786,7 @@ def test_the_status_check_is_probed_under_the_templates_own_settings_flags(monke
     auth status --json` reports authMethod api_key_helper, apiKeySource
     apiKeyHelper; a user settings file with apiKeyHelper reports the same
     with no flag and authMethod none under `--restricted`."""
-    log = _fake_claude(monkeypatch, tmp_path)
+    log = _fake_engine_cli(monkeypatch, tmp_path, providers.CLAUDE_CODE_CLI)
     template = providers.CLAUDE_CODE_COMMAND
 
     def build(command: list[str]):
@@ -4152,11 +4855,12 @@ def test_a_bare_template_is_never_signed_in_to_the_subscription(monkeypatch, tmp
     exit 1), and the refusal quotes the check it ran, `--bare` included,
     and says to remove `--bare` from `[model] command`, never to sign in:
     signing in cannot help a template that never reads the login (review
-    round 6, 1). The same under a key in the environment, which bare mode
-    does read (headless: "set ANTHROPIC_API_KEY ... because bare mode
-    doesn't use your subscription login"): the key to unset, and `--bare`
-    to remove."""
-    log = _fake_claude(monkeypatch, tmp_path)
+    round 6, 1). The same under a key in its environment (a loaded
+    settings file's `env` block; melampus's own never reaches it), which
+    bare mode does read (headless: "set ANTHROPIC_API_KEY ... because bare
+    mode doesn't use your subscription login"): the key to remove, and
+    `--bare` to remove."""
+    log = _fake_engine_cli(monkeypatch, tmp_path, providers.CLAUDE_CODE_CLI)
     template = providers.CLAUDE_CODE_COMMAND
     bare = [*template[:-1], "--bare", template[-1]]
     with pytest.raises(providers.BackendUnavailable, match="not signed in") as err:
@@ -4167,12 +4871,13 @@ def test_a_bare_template_is_never_signed_in_to_the_subscription(monkeypatch, tmp
     assert "remove `--bare` from `[model] command`" in reason, reason
     assert providers.CLAUDE_CODE_SIGN_IN not in reason, reason
 
-    _fake_claude(monkeypatch, tmp_path, mode="api-key")
+    _fake_engine_cli(monkeypatch, tmp_path, providers.CLAUDE_CODE_CLI, mode="api-key")
     with pytest.raises(providers.BackendUnavailable, match="not to a Claude subscription") as err:
         providers.build_primary_backend(_cfg(model={"backend": "claude-code", "command": bare}))
     reason = str(err.value)
     assert "`claude --restricted --bare auth status --json`" in reason, reason
-    assert "unset ANTHROPIC_API_KEY" in reason and "remove `--bare` from `[model] command`" in reason, reason
+    assert providers.CLAUDE_CODE_CREDENTIAL_FIX["api_key"] in reason, reason
+    assert "remove `--bare` from `[model] command`" in reason, reason
     assert providers.CLAUDE_CODE_SIGN_IN not in reason, reason
 
 
@@ -4186,7 +4891,12 @@ def test_the_status_check_argv_is_derived_from_the_template():
     --settings=helper.json auth status --json` reports apiKeySource
     apiKeyHelper exactly as the two-argument form does, and
     `--setting-sources=bogus` is refused as an invalid setting source, so
-    the `=` spelling is carried as given, one argument)."""
+    the `=` spelling is carried as given, one argument). A template that
+    runs the CLI through a launcher (`node` and the script an npm shim
+    wraps, the batch-shim refusal's own fix) is checked through the same
+    launcher, for either CLI (Codex round 1, C1). Each engine's status
+    argv is stated once, in the module constant `own_check` ends with, and
+    nowhere else on the CliEngine (review round 9, C1)."""
     assert providers.claude_code_status(providers.CLAUDE_CODE_COMMAND) == [
         "--restricted", "auth", "status", "--json"]
     assert providers.claude_code_status([CLAUDE, "-p", "--output-format", "json", "{image} {prompt}"]) == [
@@ -4205,6 +4915,31 @@ def test_the_status_check_argv_is_derived_from_the_template():
         "auth", "status", "--json"]
     assert providers.claude_code_status([CLAUDE, "-p", "--settings=a=b", "--bare", "{image} {prompt}"]) == [
         "--settings=a=b", "--bare", "auth", "status", "--json"]
+    # Codex round 1 (C1): a launcher before the CLI's own arguments, the
+    # interpreter and the script an npm shim wraps, is carried as it is,
+    # then the settings flags as before; a global flag before `-p` is the
+    # CLI's own, not a launcher's, and ends the launcher.
+    claude_code, codex = providers.CLAUDE_CODE_CLI, providers.CODEX_CLI
+    assert claude_code.status_check(providers.CLAUDE_CODE_COMMAND) == [
+        "--restricted", "auth", "status", "--json"]
+    assert claude_code.status_check(["node", "/opt/claude/cli.js", *providers.CLAUDE_CODE_COMMAND[1:]]) == [
+        "/opt/claude/cli.js", "--restricted", "auth", "status", "--json"]
+    assert claude_code.status_check(["node", "cli.js", "--settings=a=b", "-p", "{image} {prompt}"]) == [
+        "cli.js", "--settings=a=b", "auth", "status", "--json"]
+    assert claude_code.status_check([CLAUDE, "--model", "sonnet", "-p", "{image} {prompt}"]) == [
+        "auth", "status", "--json"]
+    assert codex.status_check(providers.CODEX_COMMAND) == ["login", "status"]
+    assert codex.status_check(["node", "/opt/codex/codex.js", *providers.CODEX_COMMAND[1:]]) == [
+        "/opt/codex/codex.js", "login", "status"]
+    assert codex.status_check(["node", "codex.js", "-m", "gpt-5", "exec", "{image}", "{prompt}"]) == [
+        "codex.js", "login", "status"]
+    # Review round 9 (C1): each engine's status argv is stated once, in the
+    # module constant its `own_check` ends with. A CliEngine field holding
+    # it as well would be a second statement, and the dead one.
+    for cli, stated in ((claude_code, providers.CLAUDE_CODE_STATUS), (codex, providers.CODEX_STATUS)):
+        assert cli.status_check(cli.command)[-len(stated):] == list(stated)
+        assert not hasattr(cli, "status"), (
+            f"{cli.title} states its status argv twice: CliEngine.status as well as the constant")
 
 
 @posix_only
@@ -4217,61 +4952,18 @@ def test_cli_detect_engines_probes_the_users_own_template_under_its_flags(
     as signed in but not to the subscription, the verdict its run gets."""
     from melampus.cli import main
 
-    log = _fake_claude(monkeypatch, tmp_path)
+    log = _fake_engine_cli(monkeypatch, tmp_path, providers.CLAUDE_CODE_CLI)
     template = providers.CLAUDE_CODE_COMMAND
     own = [*template[:-1], "--settings", str(api_key_helper), template[-1]]
     settings = _command_settings(tmp_path, own, backend=providers.CLAUDE_CODE)
 
     assert main(["--detect-engines", "--config", str(settings)]) == 0
 
-    verdicts = json.loads(capsys.readouterr().out)
-    assert verdicts[-1]["engine"] == "claude-code"
-    assert verdicts[-1]["available"] is False, verdicts[-1]["reason"]
-    assert "not to a Claude subscription" in verdicts[-1]["reason"]
-    assert "remove apiKeyHelper from the settings" in verdicts[-1]["reason"]
+    (verdict,) = [v for v in json.loads(capsys.readouterr().out) if v["engine"] == "claude-code"]
+    assert verdict["available"] is False, verdict["reason"]
+    assert "not to a Claude subscription" in verdict["reason"]
+    assert "remove apiKeyHelper from the settings" in verdict["reason"]
     assert _status_checks(log) == [["--restricted", "--settings", str(api_key_helper), "auth", "status", "--json"]]
-
-
-@posix_only
-def test_detection_claude_code_gives_up_when_the_status_check_hangs(monkeypatch, tmp_path):
-    """--detect-engines never hangs: a status check that does not answer
-    within CLAUDE_CODE_PROBE_SECONDS is an unavailable verdict saying so,
-    not a stalled dialog."""
-    _fake_claude(monkeypatch, tmp_path, mode="hung")
-    monkeypatch.setattr(providers, "CLAUDE_CODE_PROBE_SECONDS", 0.5)
-    verdict = _verdict("claude-code")
-    assert not verdict.available
-    assert "did not answer" in verdict.reason
-
-
-def test_claude_code_probe_timeout_is_short():
-    """Short enough that a broken install cannot stall the settings dialog;
-    long enough for a Node CLI's start (measured: 0.1 s)."""
-    assert 1.0 <= providers.CLAUDE_CODE_PROBE_SECONDS <= 15.0
-
-
-@posix_only
-def test_the_refusal_names_claude_code_when_it_is_signed_in(monkeypatch, tmp_path, no_ambient_ollama):
-    """One truth: the backends a refusal names as working here follow
-    detection, so claude-code is named when Claude Code is signed in and
-    not otherwise."""
-    _fake_claude(monkeypatch, tmp_path)
-    assert "claude-code" in providers._works_here(providers.detect_engines())
-    _fake_claude(monkeypatch, tmp_path, mode="not-signed-in")
-    assert "claude-code" not in providers._works_here(providers.detect_engines())
-
-
-@posix_only
-def test_cli_detect_engines_prints_the_claude_code_verdict(monkeypatch, tmp_path, capsys, no_ambient_keys):
-    """--detect-engines carries the fifth verdict after the four, as JSON."""
-    from melampus.cli import main
-
-    _fake_claude(monkeypatch, tmp_path, mode="not-signed-in")
-    assert main(["--detect-engines"]) == 0
-    verdicts = json.loads(capsys.readouterr().out)
-    assert [v["engine"] for v in verdicts] == [*ENGINES, "claude-code"]
-    assert verdicts[-1]["available"] is False
-    assert providers.CLAUDE_CODE_SIGN_IN in verdicts[-1]["reason"]
 
 
 @posix_only
@@ -4287,39 +4979,17 @@ def test_cli_detect_engines_probes_the_program_the_claude_code_run_would(
     installed), and it is the one asked, once."""
     from melampus.cli import main
 
-    log = _fake_claude(monkeypatch, tmp_path)
+    log = _fake_engine_cli(monkeypatch, tmp_path, providers.CLAUDE_CODE_CLI)
     script = shutil.which(CLAUDE)
-    _no_claude(monkeypatch, tmp_path)
+    _no_engine_cli(monkeypatch, tmp_path, providers.CLAUDE_CODE_CLI)
     own = [script, "-p", "--output-format", "json", "{image} {prompt}"]
     settings = _command_settings(tmp_path, own, backend=providers.CLAUDE_CODE)
 
     assert main(["--detect-engines", "--config", str(settings)]) == 0
 
-    verdicts = json.loads(capsys.readouterr().out)
-    assert verdicts[-1]["engine"] == "claude-code"
-    assert verdicts[-1]["available"] is True, verdicts[-1]["reason"]
+    (verdict,) = [v for v in json.loads(capsys.readouterr().out) if v["engine"] == "claude-code"]
+    assert verdict["available"] is True, verdict["reason"]
     assert _status_checks(log) == [providers.claude_code_status(own)]
-
-
-@posix_only
-def test_claude_code_not_signed_in_is_refused_before_any_image_is_read(
-    monkeypatch, tmp_path, capsys, link_to_nowhere
-):
-    """Card #421, Done-when 2 at analysis time, where detection can tell:
-    Claude Code installed but not signed in, and the folder's one image is
-    a link to nowhere, so opening it would fail loudly. The CLI exits 3 on
-    a refusal that says to run the sign-in command and never mentions the
-    file: the status check ran before any image was read."""
-    from melampus.cli import main
-
-    _fake_claude(monkeypatch, tmp_path, mode="not-signed-in")
-
-    code = main([str(link_to_nowhere), "--backend", "claude-code", "--cache", str(tmp_path / "cache.jsonl")])
-
-    err = capsys.readouterr().err
-    assert code == 3, err
-    assert "not signed in" in err and providers.CLAUDE_CODE_SIGN_IN in err
-    assert_no_image_was_touched(err, "sign-in check")
 
 
 @posix_only
@@ -4329,17 +4999,17 @@ def test_claude_code_on_an_api_key_is_refused_before_any_image_is_read(
     """C1 and S2 at analysis time: the subscription login set aside for an
     API key in the environment (the shape a `claude` cloud engine's key
     leaves behind), and the folder's one image a link to nowhere. Exit 3
-    on a refusal naming the key to unset and the sign-in, before any image
-    is read, and never mentioning the file."""
+    on a refusal naming the key to remove, and from where, and the
+    sign-in, before any image is read, and never mentioning the file."""
     from melampus.cli import main
 
-    _fake_claude(monkeypatch, tmp_path, mode="login-and-api-key")
+    _fake_engine_cli(monkeypatch, tmp_path, providers.CLAUDE_CODE_CLI, mode="login-and-api-key")
 
     code = main([str(link_to_nowhere), "--backend", "claude-code", "--cache", str(tmp_path / "cache.jsonl")])
 
     err = capsys.readouterr().err
     assert code == 3, err
-    assert "not to a Claude subscription" in err and "unset ANTHROPIC_API_KEY" in err
+    assert "not to a Claude subscription" in err and providers.CLAUDE_CODE_CREDENTIAL_FIX["api_key"] in err
     assert providers.CLAUDE_CODE_SIGN_IN in err
     assert_no_image_was_touched(err, "sign-in check")
 
@@ -4359,7 +5029,7 @@ def test_claude_code_on_a_helper_named_by_settings_is_refused_before_any_image_i
     remove, before any image is read, never mentioning the file."""
     from melampus.cli import main
 
-    log = _fake_claude(monkeypatch, tmp_path)
+    log = _fake_engine_cli(monkeypatch, tmp_path, providers.CLAUDE_CODE_CLI)
     template = providers.CLAUDE_CODE_COMMAND
     own = [*template[:-1], f"--settings={api_key_helper}", template[-1]]
     settings = _command_settings(tmp_path, own, backend=providers.CLAUDE_CODE)
@@ -4378,31 +5048,12 @@ def test_cli_detect_engines_prints_the_not_subscription_verdict(monkeypatch, tmp
     """Done-when 2 gains the sixth shape: --detect-engines shows it."""
     from melampus.cli import main
 
-    _fake_claude(monkeypatch, tmp_path, mode="api-key")
+    _fake_engine_cli(monkeypatch, tmp_path, providers.CLAUDE_CODE_CLI, mode="api-key")
     assert main(["--detect-engines"]) == 0
-    verdicts = json.loads(capsys.readouterr().out)
-    assert verdicts[-1]["engine"] == "claude-code"
-    assert verdicts[-1]["available"] is False
-    assert "not to a Claude subscription" in verdicts[-1]["reason"]
-    assert "unset ANTHROPIC_API_KEY" in verdicts[-1]["reason"]
-
-
-def test_claude_code_not_installed_is_refused_before_any_image_is_read(
-    monkeypatch, tmp_path, capsys, link_to_nowhere
-):
-    """Done-when 2 at analysis time, not installed: exit 3 naming `claude`,
-    where to install it and how to sign in, before any image is read."""
-    from melampus.cli import main
-
-    _no_claude(monkeypatch, tmp_path)
-
-    code = main([str(link_to_nowhere), "--backend", "claude-code", "--cache", str(tmp_path / "cache.jsonl")])
-
-    err = capsys.readouterr().err
-    assert code == 3, err
-    assert "not installed" in err and providers.CLAUDE_CODE_INSTALL in err
-    assert providers.CLAUDE_CODE_SIGN_IN in err
-    assert_no_image_was_touched(err, "install check")
+    (verdict,) = [v for v in json.loads(capsys.readouterr().out) if v["engine"] == "claude-code"]
+    assert verdict["available"] is False
+    assert "not to a Claude subscription" in verdict["reason"]
+    assert "remove ANTHROPIC_API_KEY from the `env` block of the settings" in verdict["reason"]
 
 
 @posix_only
@@ -4416,7 +5067,7 @@ def test_claude_code_that_lapses_mid_run_stops_the_batch_at_the_first_reply(
     recording it on every frame; nothing is cached."""
     from melampus.cli import main
 
-    _fake_claude(monkeypatch, tmp_path, mode="expired")
+    _fake_engine_cli(monkeypatch, tmp_path, providers.CLAUDE_CODE_CLI, mode="expired")
     out = tmp_path / "results.json"
 
     code = main([str(photos), "--backend", "claude-code", "--cache", str(tmp_path / "cache.jsonl"),
@@ -4428,28 +5079,361 @@ def test_claude_code_that_lapses_mid_run_stops_the_batch_at_the_first_reply(
     assert not out.exists() and not (tmp_path / "cache.jsonl").exists()
 
 
+# --- card #422: what is Codex CLI's own -----------------------------------
+
+
+def test_codex_template_is_the_documented_exec_invocation():
+    """The built-in template, from `codex exec --help` (0.155.1) and Codex's
+    documentation (non-interactive-mode, developer-commands, image-inputs,
+    permissions): `exec` runs non-interactively; `--image {image}` attaches
+    the staged JPEG to the prompt ("Attach images to the first message";
+    PNG and JPEG accepted), and sits first because the flag is variadic, so
+    the prompt must not follow it directly; `--json` makes stdout a JSONL
+    stream whose agent_message is the reply and whose turn.failed is a
+    failure in the CLI's own words (codex_reply reads both); `--ephemeral`
+    writes no session per frame; `--skip-git-repo-check` runs from wherever
+    melampus was launched; `--ignore-user-config` loads no
+    ~/.codex/config.toml (no MCP server per frame; auth still read);
+    `-c approval_policy="never"` lets the run proceed with nobody to
+    approve (exec has no --ask-for-approval flag, measured; the config key
+    is the documented equivalent); `-c project_doc_max_bytes=0` keeps the
+    launch directory's AGENTS.md out of the prompt, and is what lets the
+    profile below start (measured: without it Codex's AGENTS.md loader
+    re-runs its own binary under the profile, which denies it, and the
+    session fails to initialize); `--color never` keeps ANSI out of stderr.
+
+    Codex review round 2, S1: `--sandbox read-only` stopped writes and
+    confined no read (the default exec policy renders as `:root` read,
+    measured with `codex debug prompt-input`), so an injection in the
+    image could have Codex read any file on the machine into its cloud
+    conversation. The permissions documentation ("Permissions", the
+    "File access limited to workspace" example) is the mechanism: a
+    profile under `[permissions.<name>.filesystem]` with `":root" =
+    "deny"` ("By default, deny read access to all files on disk"),
+    `":minimal" = "read"` ("a 'minimal' set of files and folders, as
+    determined by Codex", the runtime paths tools need) and the session's
+    workspace root, the staged folder, readable, selected by
+    `default_permissions`. Both travel as `-c` overrides, "parsed as
+    TOML", so the profile is the same on every machine and no config file
+    is read. The `--sandbox` flag is gone because the same page says
+    "If sandbox_mode appears in any loaded config file, you pass
+    --sandbox, or the selected config profile sets sandbox_mode, Codex
+    uses those older sandbox settings instead of default_permissions".
+    The enforcement itself cannot be a test here (the suite never runs the
+    real Codex): it was measured on 0.155.1 with `codex sandbox -P` under
+    this profile, no model call: the staged file read, a sibling temp
+    folder's file and the home folder "Operation not permitted", a write
+    in the staged folder denied, a command's network off. What this test
+    pins is the template's one copy: the profile's overrides parse to
+    exactly that shape, granting read to nothing else. The `"write" not in
+    repr(profile)` below pins that text too — the profile names no "write"
+    — and nothing more: it is not evidence that nothing is writable.
+    Security review round 9, S1 measured the same profile allowing a write,
+    and the execution of what was written, in the shared temp directories
+    `:minimal` grants (/tmp, /private/tmp, /var/tmp, /private/var/tmp).
+    That boundary is stated in providers.py and docs/config.md, and pinned
+    by test_docs.py's
+    test_config_doc_says_the_codex_profile_leaves_the_shared_temp_directories_writable. The prompt is the
+    positional argument, last, the pipeline's prompt in full. It is a
+    valid `[model] command` by the config's own rule."""
+    import tomllib
+
+    template = providers.CODEX_COMMAND
+    assert template[0] == "codex" == providers.CODEX_PROGRAM
+    assert template[1:4] == ["exec", "--image", "{image}"]
+    assert template[4].startswith("--"), "a flag must follow the variadic --image"
+    assert template[4:-1] == [
+        "--json", "--ephemeral", "--skip-git-repo-check", "--ignore-user-config",
+        "-c", 'approval_policy="never"', "-c", "project_doc_max_bytes=0",
+        "-c", 'default_permissions="melampus"',
+        "-c", 'permissions.melampus.filesystem={":root"="deny",":minimal"="read",'
+              '":workspace_roots"={"."="read"}}',
+        "--color", "never",
+    ]
+    assert template[-1] == "{prompt}"
+    assert "--ask-for-approval" not in template, "codex exec rejects it"
+    assert "--sandbox" not in template, "with --sandbox, Codex ignores default_permissions"
+    overrides = tomllib.loads("\n".join(
+        value for flag, value in zip(template, template[1:]) if flag == "-c"))
+    assert overrides["approval_policy"] == "never"
+    assert overrides["project_doc_max_bytes"] == 0
+    profile = overrides["permissions"][overrides["default_permissions"]]
+    assert profile == {"filesystem": {
+        ":root": "deny", ":minimal": "read", ":workspace_roots": {".": "read"},
+    }}, "the profile grants read to the runtime paths and the staged folder, and nothing else"
+    assert "write" not in repr(profile) and "network" not in profile
+    assert _cfg(model={"command": template}).model.command == template
+
+
+@pytest.mark.parametrize(
+    ("stdout", "expected"),
+    [
+        (_codex_answer("```json\n" + ROUTING_OK + "\n```"), "```json\n" + ROUTING_OK + "\n```"),
+        (_codex_events(
+            {"type": "thread.started", "thread_id": "x"},
+            {"type": "turn.started"},
+            {"type": "item.completed", "item": {"id": "item_0", "type": "reasoning",
+                                                 "text": "Looking at the image."}},
+            {"type": "item.completed", "item": {"id": "item_1", "type": "agent_message",
+                                                 "text": "Let me look."}},
+            {"type": "item.completed", "item": {"id": "item_2", "type": "agent_message",
+                                                 "text": ID_OK}},
+            {"type": "turn.completed", "usage": {}},
+        ), ID_OK),
+        ("Sure:\n" + ID_OK, "Sure:\n" + ID_OK),
+        ('{"taxon": "bird", "confidence": 0.9, "reasoning": "a heron"}',
+         '{"taxon": "bird", "confidence": 0.9, "reasoning": "a heron"}'),
+    ],
+    ids=["jsonl-agent-message", "last-of-several", "text", "bare-reply-json"],
+)
+def test_codex_reply_is_the_agent_message_of_the_jsonl_stream(stdout, expected):
+    """Reply extraction: `--json` makes stdout a JSONL stream (docs: "every
+    event Codex emits"), and the shared JSON extraction must see only the
+    final agent message's text, not the events. Several agent messages: the
+    last is the reply (the docs' -o writes "the final message"). A stdout
+    that is not an event stream, as a user's own `[model] command` without
+    `--json` prints, or a bare reply that happens to be JSON without a
+    `type`, passes through untouched."""
+    assert providers.codex_reply(stdout) == expected
+
+
+def test_codex_reply_maps_the_usage_limit_to_a_refusal_naming_the_reset_time():
+    """Measured on 0.154.0 with the owner's plan at its limit: exit 1, the
+    stream's `error` and `turn.failed` both carrying "You've hit your usage
+    limit ... try again at Sep 19th, 2026 7:46 AM." That is the engine
+    refusing, not the frame: CommandFailed naming the limit and, as the CLI
+    said it, when it resets, so the batch stops at the first reply."""
+    with pytest.raises(CommandFailed) as err:
+        providers.codex_reply(_codex_failure(_CODEX_USAGE_LIMIT))
+    message = str(err.value)
+    assert "usage limit" in message
+    assert "Sep 19th, 2026 7:46 AM" in message
+    assert _CODEX_USAGE_LIMIT in message
+
+
+def test_codex_reply_maps_unauthorized_to_the_sign_in_command():
+    """Measured on 0.154.0 with an empty CODEX_HOME (no credentials): every
+    attempt is refused 401 Unauthorized and the turn fails on it, exit 1.
+    The refusal names the command that signs in, `codex login`."""
+    with pytest.raises(CommandFailed) as err:
+        providers.codex_reply(_codex_failure(_CODEX_UNAUTHORIZED))
+    message = str(err.value)
+    assert "not signed in" in message and providers.CODEX_SIGN_IN in message
+    assert providers.CODEX_SIGN_IN == "codex login"
+
+
+def test_codex_reply_surfaces_any_other_failed_turn():
+    """Any other turn.failed (a model that is not found, a network that is
+    down) is CommandFailed carrying Codex's own words; transient `error`
+    events before a completed turn are not failures. Codex's failures end
+    in a hex request id (and a cf-ray), so the digits "401" inside one are
+    not the measured "401 Unauthorized": that failure is not a sign-in
+    failure and must not send the user to `codex login`."""
+    with pytest.raises(CommandFailed) as err:
+        providers.codex_reply(_codex_failure("model not found: gpt-0"))
+    assert "model not found: gpt-0" in str(err.value)
+
+    with_request_id = "model not found: gpt-0 (request id: req_5c401e9a7b2d4f0e9a1b2c3d4e5f6a7b)"
+    with pytest.raises(CommandFailed) as err:
+        providers.codex_reply(_codex_failure(with_request_id))
+    assert with_request_id in str(err.value)
+    assert "not signed in" not in str(err.value)
+    assert providers.CODEX_SIGN_IN not in str(err.value)
+
+    recovered = _codex_events(
+        {"type": "thread.started", "thread_id": "x"},
+        {"type": "turn.started"},
+        {"type": "error", "message": "Reconnecting... 1/5 (stream disconnected)"},
+        {"type": "item.completed", "item": {"id": "item_0", "type": "agent_message", "text": "ok"}},
+        {"type": "turn.completed", "usage": {}},
+    )
+    assert providers.codex_reply(recovered) == "ok"
+
+
+@pytest.mark.parametrize(
+    "failure, words",
+    [
+        (_CODEX_USAGE_LIMIT, ["usage limit", "until Sep 19th, 2026 7:46 AM", "You've hit"]),
+        (_CODEX_UNAUTHORIZED, ["not signed in", "codex login", "401 Unauthorized"]),
+        ("model not found: gpt-0", ["model not found: gpt-0"]),
+    ],
+    ids=["usage-limit", "unauthorized", "other"],
+)
+def test_codex_reply_refusals_carry_the_failed_turns_words_as_one_printable_line(failure, words):
+    """A `turn.failed` message is the model's side writing (a prompt
+    injection in the image can put anything in it), and the refusal
+    prints it on the terminal and in the log through `_fail`. So it
+    reaches the refusal as `CommandBackend.plain` renders a program's
+    stderr: every character printable, no line break to fake a line of
+    the log, no escape to clear or recolour the screen, the words kept,
+    and the reset time the usage limit names read out of the plain
+    words, not the raw ones."""
+    with pytest.raises(CommandFailed) as err:
+        providers.codex_reply(_codex_failure(_hostile(failure)))
+    message = str(err.value)
+    assert message.isprintable(), message
+    assert "\n" not in message and "\r" not in message and "\x1b" not in message
+    for word in words:
+        assert word in message
+
+
+def test_codex_reply_with_no_agent_message_is_an_empty_reply():
+    """A stream that completes without an agent message is "printed
+    nothing" for the seam (recorded on the frame, the batch goes on), not
+    a crash on a missing key."""
+    stream = _codex_events(
+        {"type": "thread.started", "thread_id": "x"},
+        {"type": "turn.started"},
+        {"type": "turn.completed", "usage": {}},
+    )
+    assert providers.codex_reply(stream).strip() == ""
+
+
 @posix_only
-def test_cli_backend_claude_code_writes_a_json_result(monkeypatch, photos, tmp_path, capsys):
-    """Acceptance for Done-when 1: `melampus-id FOLDER --backend claude-code
-    --json-out FILE` with the fake `claude` on PATH, signed in, on the
-    committed fixture, runs the whole pipeline and writes a JSON result
-    with the candidates, attributed to the template, nothing retuned for a
-    cloud and no cost prompt."""
+def test_detection_codex_at_its_usage_limit_is_still_signed_in(monkeypatch, tmp_path):
+    """Done-when 2, the limit: `codex login status` does not know the plan's
+    usage limit (measured: it says only "Logged in using ChatGPT"; `codex
+    doctor` reports nothing on it either), and detection spends no model
+    call to find out, so the verdict is signed in; the first run's refusal
+    names the limit and the reset time (the test below)."""
+    log = _fake_engine_cli(monkeypatch, tmp_path, providers.CODEX_CLI, mode="usage-limit")
+    verdict = _verdict("codex")
+    assert verdict.available, verdict.reason
+    calls = [json.loads(line)["argv"] for line in log.read_text(encoding="utf-8").splitlines()]
+    assert calls == [["login", "status"]], "detection spent a run to learn the limit"
+
+
+@posix_only
+def test_detection_codex_signed_in_with_an_api_key_is_refused_naming_the_kind_and_never_the_key(
+    monkeypatch, tmp_path
+):
+    """Measured on 0.155.1: after `codex login --with-api-key`, `codex login
+    status` exits 0 with "Logged in using an API key - " and a masked
+    fragment of the key (first eight characters, `***`, last five). That
+    sign-in bills the OpenAI API per token, not the ChatGPT plan, and
+    `codex` is a local engine with none of the cloud guards, so the verdict
+    refuses it: unavailable, naming the account kind, that it bills per
+    call, and `codex login` (no flags: the plan); and never any part of the
+    key: the reason goes to --detect-engines' stdout, to the plugin's
+    melampus-engines.json on disk, and to the settings dialog."""
+    _fake_engine_cli(monkeypatch, tmp_path, providers.CODEX_CLI, mode="api-key")
+    verdict = _verdict("codex")
+    assert not verdict.available, verdict.reason
+    assert "API key" in verdict.reason and "per call" in verdict.reason
+    assert providers.CODEX_SIGN_IN in verdict.reason
+    for key_material in (_CODEX_API_KEY_FRAGMENT, "syntheti", "a-key", "***"):
+        assert key_material not in verdict.reason, f"key material in a verdict: {verdict.reason}"
+    assert "codex" not in providers._works_here(providers.detect_engines())
+
+
+@posix_only
+@pytest.mark.parametrize(
+    "status_line",
+    [
+        "Logged in using API key " + _CODEX_API_KEY_FRAGMENT,
+        "Logged in using a kind this test made up",
+        "Signed in.",
+    ],
+    ids=["api-key-reworded", "unknown-kind", "unparseable"],
+)
+def test_detection_codex_signed_in_to_anything_but_chatgpt_is_refused_without_quoting_it(
+    monkeypatch, tmp_path, status_line
+):
+    """The billing guard fails closed. `codex login status` is an
+    unversioned CLI's human-readable stderr, and the API-key wording the
+    guard knows was measured on one version (0.155.1). If a later Codex
+    words it differently, moves the line, or names a kind melampus has
+    never seen, the status check still exits 0 and the guard must refuse,
+    not pass: a passed check naming anything but the ChatGPT plan (or
+    naming nothing the parser reads) is unavailable, says to run `codex
+    login`, and does not quote the line it could not place, since an
+    account kind melampus does not know may carry key material the way
+    the measured API-key line does. Three lines no version measured: the
+    API-key wording without its " - " separator (the fragment would
+    otherwise ride into the reason), an invented kind, and a line the
+    parser does not read at all."""
+    _fake_engine_cli(monkeypatch, tmp_path, providers.CODEX_CLI, mode="other-account",
+                     other_status=status_line)
+    verdict = _verdict("codex")
+    assert not verdict.available, verdict.reason
+    assert providers.CODEX_SIGN_IN in verdict.reason and "per call" in verdict.reason
+    for not_quoted in (_CODEX_API_KEY_FRAGMENT, "syntheti", "a-key", "***", "made up",
+                       "Signed in."):
+        assert not_quoted not in verdict.reason, f"the status line is quoted: {verdict.reason}"
+    assert "codex" not in providers._works_here(providers.detect_engines())
+
+
+@posix_only
+def test_codex_at_its_usage_limit_stops_the_batch_at_the_first_reply(
+    monkeypatch, photos, tmp_path, capsys
+):
+    """Done-when 2, the limit, where only a run can tell: the status check
+    passed, and the first run fails the turn with the measured usage-limit
+    message (exit 1, the stream on stdout). The run stops at exit 3 on a
+    refusal naming the limit and, as the CLI said it, when it resets,
+    rather than recording it on every frame; nothing is cached."""
     from melampus.cli import main
 
-    _fake_claude(monkeypatch, tmp_path)
+    _fake_engine_cli(monkeypatch, tmp_path, providers.CODEX_CLI, mode="usage-limit")
     out = tmp_path / "results.json"
 
-    code = main([str(photos), "--backend", "claude-code", "--cache", str(tmp_path / "cache.jsonl"),
+    code = main([str(photos), "--backend", "codex", "--cache", str(tmp_path / "cache.jsonl"),
                  "--json-out", str(out)])
 
     err = capsys.readouterr().err
-    assert code == 0, err
-    assert f"loading {shlex.join(providers.CLAUDE_CODE_COMMAND)}" in err, err
-    assert "cloud default" not in err and "estimate" not in err.lower()
-    (result,) = json.loads(out.read_text(encoding="utf-8"))
-    assert result["file"] == PHOTO
-    assert result["status"] == "ok"
-    assert result["model"] == shlex.join(providers.CLAUDE_CODE_COMMAND)
-    assert [c["common_name"] for c in result["identification"]["candidates"]] == [
+    assert code == 3, err
+    assert "usage limit" in err and "Sep 19th, 2026 7:46 AM" in err
+    assert not out.exists() and not (tmp_path / "cache.jsonl").exists()
+
+
+@posix_only
+def test_codex_that_lapses_mid_run_stops_the_batch_at_the_first_reply(
+    monkeypatch, photos, tmp_path, capsys
+):
+    """Done-when 2's other half, where detection cannot tell: the status
+    check passed, and the first run fails the turn with the measured 401
+    (exit 1, the stream on stdout), the way a session that lapses
+    mid-batch does. The run stops at exit 3 on a refusal naming the
+    sign-in command and Codex's own words, rather than recording it on
+    every frame; nothing is cached."""
+    from melampus.cli import main
+
+    _fake_engine_cli(monkeypatch, tmp_path, providers.CODEX_CLI, mode="expired")
+    out = tmp_path / "results.json"
+
+    code = main([str(photos), "--backend", "codex", "--cache", str(tmp_path / "cache.jsonl"),
+                 "--json-out", str(out)])
+
+    err = capsys.readouterr().err
+    assert code == 3, err
+    assert "not signed in" in err and providers.CODEX_SIGN_IN in err
+    assert "401 Unauthorized" in err, err
+    assert not out.exists() and not (tmp_path / "cache.jsonl").exists()
+
+
+@posix_only
+def test_a_users_own_codex_command_without_json_passes_the_reply_through(
+    monkeypatch, photos, tmp_path
+):
+    """A user's own `[model] command` need not say `--json`: `codex exec`
+    then prints only the final message (non-interactive-mode docs), and
+    codex_reply, seeing no event stream, passes it through untouched to
+    the shared JSON extraction. At the real boundary: the fake `codex` in
+    text mode, a template with a model flag and no `--json`, and the
+    Identifier's candidates on the committed fixture equal the built-in
+    template's."""
+    from melampus.identify import Identifier
+
+    log = _fake_engine_cli(monkeypatch, tmp_path, providers.CODEX_CLI)
+    own = [providers.CODEX_PROGRAM, "exec", "-m", "gpt-5", "--image", "{image}",
+           "--skip-git-repo-check", "{prompt}"]
+    config = _cfg(model={"backend": "codex", "command": own})
+    result = Identifier(providers.build_primary_backend(config), config).identify(photos / PHOTO)
+
+    assert result.status == "ok", result.error
+    assert result.model == shlex.join(own)
+    assert [c.common_name for c in result.identification.ranked()] == [
         "Tricolored Heron", "Little Blue Heron"]
+    calls = [json.loads(line)["argv"] for line in log.read_text(encoding="utf-8").splitlines()]
+    runs = [argv for argv in calls if argv[:1] == ["exec"]]
+    assert len(runs) == 2 and all("--json" not in argv for argv in runs), calls

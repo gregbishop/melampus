@@ -47,12 +47,12 @@ executable's equivalents are the per-user `cache/` files described above.
 
 | Key | Default | Why |
 |---|---|---|
-| `backend` | *(the first engine that can run here)* | Which engine answers. The engines are `mlx` (local, Apple Silicon only — the local-first choice), `ollama` (local, through an Ollama server: Windows, Linux, or a Mac that prefers it; `ollama_model` and `ollama_url` below), `openai`, and `claude` (the Anthropic API); `command` runs an installed program named by `command` below, once per completion (a frame is two: the taxon routing prompt, then the group's identification prompt; a corrective retry or a fallback size is another), and reads its stdout — how a subscription CLI becomes the engine with no key (card #420); `claude-code` is that seam configured for Claude Code (card #421; see *Claude Code* below), billing to the subscription it is signed in to; the Codex template is card #422, and the plugin's picker learns these names in #423, so until then they are chosen here or with `--backend`; `scripted` is the test fake, not an engine (answers nothing, needs no weights; it exists so the shipped executable can be smoke-tested — see readme.md § Building the executable). The Lightroom plugin's `engine` preference passes the same names as `--backend` (docs/plugin.md § The engine); unset, the plugin passes nothing and this setting decides. Left unset here too, the CLI runs detection (card #404) and takes the first engine that can run on this machine, in the order above: `mlx` on Apple Silicon, else `ollama` when a server answers at `ollama_url` (unset, Ollama's documented default `http://127.0.0.1:11434`), else `openai`. Asked for `ollama` with no server answering there, the run is refused before any image is read: the message names the address tried and where to install Ollama, exit 3, the way `mlx` is refused off Apple Silicon; asked for `command` with a program that is not installed or not on PATH, likewise, naming the program; asked for `claude-code` with Claude Code not installed or not signed in, likewise, naming where to install it or the command that signs in. A program that exits non-zero mid-run stops the batch at exit 3 with its exit code and the first lines of its stderr, their printable words only, so an escape sequence the program wrote cannot reach the terminal or the log through the message (a broken engine, not a bad frame); a timeout or empty stdout is recorded on that frame and the batch goes on. `--detect-engines` (`melampus-id --detect-engines`, no folder needed) prints the same verdicts as JSON, one per engine with a plain-words reason: `needs Apple Silicon`, where to install Ollama, which key variable a cloud engine needs, and after the four, whether Claude Code is installed and signed in. The refusal for an engine that cannot run here names the ones that can, from the same detection. CLAUDE.md §3 built the backend seam; making it a setting is what lets the same repo run on a machine with no local runtime at all (Windows). A cloud primary bills **every** frame, not just an escalated tail, so three guards apply: the CLI prints an estimate and asks before spending (`--yes` skips the question for non-interactive callers such as the plugin), `max_images` hard-caps the run regardless, and results go to their own cache file (`identifications-cloud.jsonl`) so a later local pass cannot silently overwrite answers that were paid for. When a cloud backend is selected, MLX-shaped defaults you have not overridden are retuned: `max_edge` 2048, no fallback ladder, `max_tokens` 1200, `routing_max_tokens` 900 — the same treatment escalation applies, for the same reasons. The estimate is priced by `escalation.input_usd_per_mtok` / `output_usd_per_mtok`; set them to your model's rates or the number is confidently wrong. |
+| `backend` | *(the first engine that can run here)* | Which engine answers. The engines are `mlx` (local, Apple Silicon only — the local-first choice), `ollama` (local, through an Ollama server: Windows, Linux, or a Mac that prefers it; `ollama_model` and `ollama_url` below), `openai`, and `claude` (the Anthropic API); `command` runs an installed program named by `command` below, once per completion (a frame is two: the taxon routing prompt, then the group's identification prompt; a corrective retry or a fallback size is another), and reads its stdout — how a subscription CLI becomes the engine with no key (card #420); `claude-code` is that seam configured for Claude Code (card #421; see *Claude Code* below), billing to the subscription it is signed in to; `codex` is the same seam configured for Codex CLI (card #422; see *Codex CLI* below), billing to the ChatGPT plan it is signed in to; the plugin's picker learns these names in #423, so until then they are chosen here or with `--backend`; `scripted` is the test fake, not an engine (answers nothing, needs no weights; it exists so the shipped executable can be smoke-tested — see readme.md § Building the executable). The Lightroom plugin's `engine` preference passes the same names as `--backend` (docs/plugin.md § The engine); unset, the plugin passes nothing and this setting decides. Left unset here too, the CLI runs detection (card #404) and takes the first engine that can run on this machine, in the order above: `mlx` on Apple Silicon, else `ollama` when a server answers at `ollama_url` (unset, Ollama's documented default `http://127.0.0.1:11434`), else `openai`. Asked for `ollama` with no server answering there, the run is refused before any image is read: the message names the address tried and where to install Ollama, exit 3, the way `mlx` is refused off Apple Silicon; asked for `command` with a program that is not installed or not on PATH, likewise, naming the program; asked for `claude-code` with Claude Code not installed or not signed in, likewise, naming where to install it or the command that signs in; `codex` the same, and a Codex plan at its usage limit stops the batch at the first reply, naming when the limit resets. A program that exits non-zero mid-run stops the batch at exit 3 with its exit code and the first lines of its stderr, their printable words only, so an escape sequence the program wrote cannot reach the terminal or the log through the message (a broken engine, not a bad frame); a timeout or empty stdout is recorded on that frame and the batch goes on. `--detect-engines` (`melampus-id --detect-engines`, no folder needed) prints the same verdicts as JSON, one per engine with a plain-words reason: `needs Apple Silicon`, where to install Ollama, which key variable a cloud engine needs, and after the four, whether Claude Code and Codex CLI are installed and signed in. The refusal for an engine that cannot run here names the ones that can, from the same detection. CLAUDE.md §3 built the backend seam; making it a setting is what lets the same repo run on a machine with no local runtime at all (Windows). A cloud primary bills **every** frame, not just an escalated tail, so three guards apply: the CLI prints an estimate and asks before spending (`--yes` skips the question for non-interactive callers such as the plugin), `max_images` hard-caps the run regardless, and results go to their own cache file (`identifications-cloud.jsonl`) so a later local pass cannot silently overwrite answers that were paid for. When a cloud backend is selected, MLX-shaped defaults you have not overridden are retuned: `max_edge` 2048, no fallback ladder, `max_tokens` 1200, `routing_max_tokens` 900 — the same treatment escalation applies, for the same reasons. The estimate is priced by `escalation.input_usd_per_mtok` / `output_usd_per_mtok`; set them to your model's rates or the number is confidently wrong. |
 | `repo` | `mlx-community/Qwen3-VL-30B-A3B-Instruct-4bit` | CLAUDE.md §3 requires the model be a setting, not a hardcode. This is the MoE build named in the spec: 18.3 GB with roughly 3B active parameters, so it runs far faster than a dense model of similar quality. 128 GB of unified memory allows going considerably larger — see the table in the README. Used by the `mlx` backend only. |
 | `name` | *(provider default)* | Cloud model name, for `backend = "claude"` or `"openai"`. Unset means the provider's default (`providers.DEFAULT_MODELS`) — vision model names age quickly, so treat that as a starting point. |
 | `ollama_model` | `qwen3-vl:8b-instruct` | The model the `ollama` backend asks, as a tag from [ollama.com/library](https://ollama.com/library); it must take image input. The default is the Instruct build of the same family the `mlx` default uses, 6.1 GB, from [ollama.com/library/qwen3-vl/tags](https://ollama.com/library/qwen3-vl/tags); `qwen3-vl:30b-a3b-instruct` (20 GB) there is the Mac default's twin for a machine that can hold it. Not the library's bare `qwen3-vl` tag: that is the thinking build, which spends the token budget thinking before any JSON appears (the trap `escalation.routing_max_tokens` documents). The Lightroom plugin's Settings dialog has a Download button for it, which asks Ollama to pull it (§ Downloading the model, card #409), as does `melampus-id --download-model --backend ollama`; `ollama pull qwen3-vl:8b-instruct` does the same by hand. A model that is not there fails each frame with Ollama's own "not found" message. |
 | `ollama_url` | *(unset)* | Where the `ollama` backend's server listens. Unset means Ollama's documented default, `http://127.0.0.1:11434` (Ollama's docs/faq.mdx: "Ollama binds 127.0.0.1 port 11434 by default"), written once as `providers.OLLAMA_URL`; set this for a server on another port or host. It is read the way a request uses it: `https://` is spoken as TLS with the certificate verified, and a path in front of the endpoints (a reverse proxy's `http://host/ollama`) is kept, so `/api/chat` and `/api/version` go on the end of the address as typed. One address, read one way: it is what detection probes for the default engine and `--detect-engines`, what the not-running refusal names, and what every request goes to. |
-| `command` | *(unset)* | The program the `command` backend runs (card #420), one list element per argument, with `{image}` and `{prompt}` placeholders, for example `command = ["my-vlm", "--image", "{image}", "--prompt", "{prompt}"]`. It is an argv list, never a shell string: the prompt, spaces, quotes and newlines included, is one argument, and nothing is quoted or escaped. `{image}` is replaced by the absolute path of the staged, metadata-free JPEG (never the original file); `{prompt}` by the prompt in full. The program's stdout is the reply, parsed exactly as MLX's is; its stderr is kept for error messages only. The program runs with the staged file's folder as its working directory, a temporary one holding that file and nothing else, deleted after the frame (a program that reads freely inside its working directory sees that one file and nothing else): so name the program by an absolute path or a bare name on PATH (a relative path is made absolute against the folder melampus was launched from — from Lightroom that is the app's own, not this config's or melampus's — before the run), and have it find its own files against its own location, not against `.`. Each is read to at most 4 MiB (4194304 bytes): a reply of candidates is kilobytes, so a program that streams past that is stopped, with everything it started, and the frame is recorded as an error naming the stream and the ceiling while the batch goes on. The program's exit ends its answer: the moment it exits, everything it started is stopped and what was read is the reply, so a helper it leaves holding its stdout or stderr (a server it means to keep warm between calls) is stopped, not waited on, and must be started some other way if it is to outlive the call. The placeholders go in the arguments after the program: the first element is the program, replaced by its resolved path when it is run, so a placeholder in it never reaches the program, and a template lacking either placeholder in the arguments after the program is refused when the config loads, naming the placeholder. An element carrying a character that is not printable (an escape sequence, a line break, a bell) is refused there too, naming the element's position and the character, because the template is printed as it is, in the `loading` line and in every error message that names the program, and such a character would reach the terminal and the log through them. The first element is looked up on PATH before any image is read; a program that resolves to a `.cmd` or `.bat` file (an npm-installed shim, on Windows) is refused there, naming the file, because Windows runs a batch file through cmd.exe whatever it is told and cmd.exe would parse the prompt rather than pass it as one argument: name the program's real entry instead, its `.exe`, or `node` and the script the shim wraps; and a melampus started by a launcher that ignores SIGCHLD (a supervisor or a parent that set `SIG_IGN`, inherited across exec) is refused there too, naming the signal, because the kernel then reaps the program the moment it exits and everything it started could not be stopped safely by its pid: start melampus from a shell, or restore the signal's default in the launcher. Unset by default: no program is assumed installed. With `backend = "claude-code"` it is optional and replaces the built-in template (*Claude Code* below); Codex's template is card #422. |
+| `command` | *(unset)* | The program the `command` backend runs (card #420), one list element per argument, with `{image}` and `{prompt}` placeholders, for example `command = ["my-vlm", "--image", "{image}", "--prompt", "{prompt}"]`. It is an argv list, never a shell string: the prompt, spaces, quotes and newlines included, is one argument, and nothing is quoted or escaped. `{image}` is replaced by the absolute path of the staged, metadata-free JPEG (never the original file); `{prompt}` by the prompt in full. The program's stdout is the reply, parsed exactly as MLX's is; its stderr is kept for error messages only. The program runs with the staged file's folder as its working directory, a temporary one holding that file and nothing else, deleted after the frame (a program that reads freely inside its working directory sees that one file and nothing else): so name the program by an absolute path or a bare name on PATH (a relative path is made absolute against the folder melampus was launched from — from Lightroom that is the app's own, not this config's or melampus's — before the run), and have it find its own files against its own location, not against `.`. The program is launched with melampus's own environment as it is, since it is yours and may need variables of its own; a CLI engine's program is not (*Claude Code* and *Codex CLI* below). Each is read to at most 4 MiB (4194304 bytes): a reply of candidates is kilobytes, so a program that streams past that is stopped, with everything it started, and the frame is recorded as an error naming the stream and the ceiling while the batch goes on. The program's exit ends its answer: the moment it exits, everything it started is stopped and what was read is the reply, so a helper it leaves holding its stdout or stderr (a server it means to keep warm between calls) is stopped, not waited on, and must be started some other way if it is to outlive the call. The placeholders go in the arguments after the program: the first element is the program, replaced by its resolved path when it is run, so a placeholder in it never reaches the program, and a template lacking either placeholder in the arguments after the program is refused when the config loads, naming the placeholder. An element carrying a character that is not printable (an escape sequence, a line break, a bell) is refused there too, naming the element's position and the character, because the template is printed as it is, in the `loading` line and in every error message that names the program, and such a character would reach the terminal and the log through them. The first element is looked up on PATH before any image is read; a program that resolves to a `.cmd` or `.bat` file (an npm-installed shim, on Windows) is refused there, naming the file, because Windows runs a batch file through cmd.exe whatever it is told and cmd.exe would parse the prompt rather than pass it as one argument: name the program's real entry instead, its `.exe`, or `node` and the script the shim wraps; and a melampus started by a launcher that ignores SIGCHLD (a supervisor or a parent that set `SIG_IGN`, inherited across exec) is refused there too, naming the signal, because the kernel then reaps the program the moment it exits and everything it started could not be stopped safely by its pid: start melampus from a shell, or restore the signal's default in the launcher. Unset by default: no program is assumed installed. With `backend = "claude-code"` or `"codex"` it is optional and replaces the built-in template (*Claude Code* and *Codex CLI* below). |
 | `base_url` | *(unset)* | OpenAI-compatible endpoint override: OpenRouter, LM Studio, vLLM, a proxy. Turns the `openai` backend into a general escape hatch rather than one vendor's client. |
 | `api_key` | *(unset)* | Cloud key for the primary backend. Never set it in tracked source — prefer `MELAMPUS_ANTHROPIC_KEY` / `MELAMPUS_OPENAI_KEY` (or the provider's own variable), or put it in the git-ignored `melampus.local.toml`. Stored as a `SecretStr` so a repr or traceback cannot leak it. |
 | `effort` | `high` | Anthropic-only thinking effort for a cloud primary; ignored elsewhere. Same rationale as `escalation.effort`: these frames deserve the model actually thinking. |
@@ -134,14 +134,37 @@ costs: **every frame bills to that Claude subscription**, its rate limits
 included; melampus reads no API key for it and needs none; nothing is charged
 per call, so the cloud guards (the estimate, `max_images`, the cloud cache
 file) do not apply. Claude Code itself would use an API key over the login
-when one is in the environment melampus runs from (its documented precedence:
+when one is in its environment (its documented precedence:
 "In non-interactive mode (`-p`), the key is always used when present"), which
-is why detection refuses that case rather than let a batch bill it, below. Detection (`--detect-engines`) probes the template a `claude-code` run
+is why detection refuses that case rather than let a batch bill it, below,
+and why the run never gets melampus's environment to begin with: the status
+check and every run are launched with Claude Code's own environment, the
+runtime basics (`PATH`, `HOME`, `USER`, the login session's other basics, the
+standard proxy and CA variables; one list, `providers.CLI_ENVIRONMENT`) and
+`CLAUDE_CONFIG_DIR`, the variable naming its settings folder, each copied
+from melampus's environment when set there, and nothing else of it: not
+`ANTHROPIC_API_KEY`, not the OAuth or bearer token variables, not whatever
+else the shell melampus was started from exports. A photograph is untrusted
+input, and an agent that can run commands would answer text rendered in one
+asking for `env` with its whole environment, into its cloud conversation;
+Claude Code's template leaves it no such tool (`--tools Read`), Codex CLI's
+agent has one, and the seam launches both CLIs the same way (Codex review
+round 3). Measured on studio: `claude --restricted auth status --json`
+reports the login under that list, and not without `USER`, which the
+keychain lookup needs; a proxy or custom CA goes in those standard
+variables, or in a settings file named by `--settings` in a `[model]
+command` of your own. Detection (`--detect-engines`) probes the template a `claude-code` run
 would run, read from the same config: the built-in one above, or
 `[model] command` when one is set under `backend = "claude-code"`, so the
 verdict the dialog shows is the verdict the run gets. It reports
 `claude-code` as not installed when that template's program is not found (for
-the built-in, nothing on PATH is called `claude`), as not signed in when
+the built-in, nothing on PATH is called `claude`), as refused when that program
+resolves to a `.cmd`/`.bat` shim (the *command* row above: naming the file,
+and the status check is never run through it), as refused when the process
+that started melampus ignores SIGCHLD (the *command* row above: naming the
+fix, and the status check is never run, since under that disposition its
+exit cannot be read and a CLI that is not signed in would be reported as
+signed in), as not signed in when
 `claude --restricted auth status --json` says so (`loggedIn` false, or its
 documented exit 1 with nothing on stderr: a cheap check, no model call, under
 the template's own settings flags, `--restricted` for the built-in, so it
@@ -153,12 +176,22 @@ your own is checked under whatever it carries of `--restricted`, `--bare`,
 refused as the run would bill it, below, and one with `--bare` is never
 signed in, since bare mode never reads the login, so its verdict says to
 remove `--bare` from the command rather than to sign in, which could not
-help it; every verdict quotes the check as it ran), as signed in but not to
+help it; and a command that runs Claude Code through a launcher, `node` and
+the script the shim wraps (the *command* row's own fix), is checked through
+that same launcher, `node <script> auth status --json` with whatever it
+carries of those flags between; every
+verdict quotes the check as it ran), as signed in but not to
 the subscription when that check passes
 on another credential (`authMethod` other than `claude.ai`: an API key, an
-OAuth or bearer token from the environment, a cloud provider; or the login
-set aside for a key, which the check reports as `apiKeySource` with
-`subscriptionType` null), naming what to unset or remove and the sign-in, as
+OAuth or bearer token, a cloud provider; or the login set aside for a key,
+which the check reports as `apiKeySource` with `subscriptionType` null;
+since melampus's own environment never reaches the check, above, such a
+variable can be set only by the `env` block of a settings file the check
+loads (code.claude.com/docs/en/settings: "An `env` block inside a settings
+file is an ordinary key and follows the levels above"; under `--restricted`
+that is managed settings and `--settings`, and a command of your own
+without it loads the user file too), or by an `apiKeyHelper` there),
+naming what to remove, and from where, and the sign-in, as
 failed in the CLI's own words when that check exits some other way (an older
 `claude` with no `auth` subcommand), and otherwise as available, naming the
 account kind (`claude.ai`, and the subscription); a run asked for
@@ -167,6 +200,184 @@ session that lapses mid-batch is caught at the first reply (Claude Code prints
 `Not logged in` as its result, exit 1) and stops the batch at exit 3 with the
 same sign-in pointer. On winpc Claude Code is not installed yet; the real run
 there is card #424.
+
+### Codex CLI
+
+`backend = "codex"` (card #422) is the `command` engine with Codex CLI's
+template built in, the second CLI behind the same seam for when Claude is at
+its limit or you prefer it: one place holds it, `providers.CODEX_COMMAND`, and
+this is what it says, as the `[model] command` you would set to change it (a
+`-m` model, say):
+
+```toml
+[model]
+backend = "codex"
+command = [
+  "codex",
+  "exec",
+  "--image",
+  "{image}",
+  "--json",
+  "--ephemeral",
+  "--skip-git-repo-check",
+  "--ignore-user-config",
+  "-c",
+  'approval_policy="never"',
+  "-c",
+  "project_doc_max_bytes=0",
+  "-c",
+  'default_permissions="melampus"',
+  "-c",
+  'permissions.melampus.filesystem={":root"="deny",":minimal"="read",":workspace_roots"={"."="read"}}',
+  "--color",
+  "never",
+  "{prompt}"
+]
+```
+
+Every flag is from `codex exec --help` (0.155.1) and Codex's own
+documentation ([Non-interactive mode](https://developers.openai.com/codex/non-interactive-mode),
+the [CLI reference](https://developers.openai.com/codex/developer-commands?surface=cli),
+[Image inputs](https://developers.openai.com/codex/image-inputs?surface=cli),
+[Permissions](https://developers.openai.com/codex/permissions)):
+`exec` runs "non-interactively" and prints the final message alone; `--image`
+attaches the staged, metadata-free JPEG to the prompt ("PNG and JPEG"
+accepted), and it comes first because the flag takes several files, so a
+prompt placed right after it would be read as a second file (measured: the
+prompt was then expected on stdin); `--json` makes stdout a JSONL event
+stream, and the reply is the last `agent_message` in it, unwrapped before
+the shared JSON extraction sees it; `--ephemeral` writes no session per
+frame; `--skip-git-repo-check` lets it run from wherever melampus was
+launched; `--ignore-user-config` loads no `~/.codex/config.toml`, so no MCP
+server starts per frame and the run is the same on every machine (the
+sign-in is still read); `-c approval_policy="never"` lets the run proceed
+with nobody to approve (`codex exec` has no `--ask-for-approval` flag; the
+config key is the same documented policy); `-c project_doc_max_bytes=0`
+keeps the launch directory's `AGENTS.md` out of the prompt, and is what lets
+the profile below start (measured on 0.155.1: without it, Codex's
+`AGENTS.md` loader re-runs its own binary under the profile, which denies
+it, and the session fails to initialize); the two `-c` overrides after it
+are the read boundary: `default_permissions` selects a permission profile
+(Codex's documented mechanism, beta, for "what commands can read or write")
+whose filesystem rules are `":root" = "deny"` (the documentation's own
+words: "By default, deny read access to all files on disk"), `":minimal" =
+"read"` ("a 'minimal' set of files and folders, as determined by Codex",
+the paths common tools need) and the session's workspace root, the staged
+folder, readable and nothing else. Writes are denied everywhere the profile
+governs except the shared temp directories `:minimal` grants, and the
+commands it runs have no network. There is no `--sandbox` flag because the
+documentation says that with one "Codex uses those older sandbox settings
+instead of default_permissions": `--sandbox read-only` stopped writes but
+confined no read (Codex's default exec policy is the whole disk readable),
+so a prompt injection in a photo could have had Codex read any file on the
+machine into its cloud conversation; this profile is the same page's "File
+access limited to workspace" example, read-only. Measured on 0.155.1 with
+`codex sandbox` under this profile, no model call: the staged file is
+read; a file in a sibling temp folder, and the home folder, are "Operation
+not permitted"; a write in the staged folder, in a sibling temp folder and
+in the home folder is denied; `curl` cannot resolve a host. That read
+boundary is worth the name only because of where the staged folder is:
+`images.staged_pixels` makes it under melampus's own directory, the one
+`config.cache_file` names, and not under `$TMPDIR`. `tempfile` falls back to
+`/tmp` whenever `$TMPDIR` is unset — ordinary on Linux, in a container and
+under a cleared environment — and `/tmp` is one of the directories
+`:minimal` grants whole, so a staged folder placed by the variable alone
+would sit inside the grant on exactly the machines nobody sets it on.
+Measured the same way (security review round 12): with the workspace root in
+`/tmp`, a file in another `/tmp` folder was read, `ls /tmp` listed the
+directory, and the staged image itself was overwritten and read back; under
+melampus's own directory all three are refused, in a checkout and in the
+executable's layout alike. Where that directory lands is not melampus's to
+choose, though: it follows the checkout root in a checkout, and
+`$XDG_DATA_HOME/Melampus` or the platform's per-user data directory inside
+the executable. A checkout under `/tmp`, or a frozen run with
+`$XDG_DATA_HOME` pointed there, puts the staged folder back inside the grant
+— measured the same way (security review round 9), with a checkout in `/tmp`
+and the staging root at its `.melampus_cache/staging`: a sibling frame's
+staged file was read, the staging root was listed, and the staged image was
+overwritten and read back. So melampus resolves that root and
+checks it before it stages anything, and refuses to stage at all when it
+lands inside `/tmp`, `/private/tmp`, `/var/tmp` or `/private/var/tmp`, naming
+the root and what to move (`images.staging_root`; resolved, because `/tmp` is
+a symlink to `/private/tmp` on a Mac and a root reached through a link of its
+own is where the link leads). What `:minimal`
+grants is Codex's choice, not this project's: `/etc/hosts` and `/tmp` stay
+readable (measured, even under an explicit deny); the home folder, other
+temp folders and everything else outside the staged folder do not. That
+grant is also where the write boundary stops (security review round 9,
+measured the same way): `/tmp`, `/private/tmp`, `/var/tmp` and
+`/private/var/tmp` are **writable**, a command may execute what it wrote
+there, and what it wrote is still on disk after the run. The profile cannot
+close that at 0.155.1 — naming all four `"deny"` in the filesystem table
+still allowed the write, the same way their reads survive an explicit deny,
+and dropping `":minimal" = "read"` left the session producing no output at
+all — so text rendered in a photograph can leave a payload or an
+instruction in those directories for the next run to read back.
+`--ephemeral` keeps no session per frame, but it does not close that
+channel: it survives from one frame to the next. Whether that is acceptable
+for this engine is the owner's call; the measurement is recorded in security
+review round 9 on PR #17, and the decision it leaves open is card #505.
+Claude Code's template confines reads
+the same way with its own mechanism (`--tools Read`, `--allowedTools
+Read(/{image})`, *Claude Code* above). What the commands Codex runs can
+see of the environment is closed one layer up, at the seam (Codex review
+round 3): Codex's shell tool is on by default, and a command it runs
+inherits Codex's environment, which its own policy leaves whole (the
+config reference: `shell_environment_policy.ignore_default_excludes`, "Keep
+variables containing KEY, SECRET, or TOKEN", "default: true"), so text
+rendered in a photograph asking for `env` would have put whatever melampus
+was launched with into the cloud conversation: the cloud engines' keys, or
+anything else the shell exports. So the status check and every run are
+launched with Codex's own environment, the runtime basics (`PATH`, `HOME`,
+`USER`, the login session's other basics, the standard proxy and CA
+variables; one list, `providers.CLI_ENVIRONMENT`, shared with Claude Code)
+and `CODEX_HOME`, the variable naming its settings folder, each copied from
+melampus's environment when set there, and nothing else of it. Measured on
+studio: `codex login status` reports "Logged in using ChatGPT" under that
+list, and `Not logged in` with `CODEX_HOME` pointed at an empty folder, so
+the sign-in is read through it. `--color never`
+keeps ANSI out of the stderr an error message quotes. The prompt is the last
+argument, the pipeline's prompt in full; the image needs no mention.
+
+What to install: Codex CLI, from [developers.openai.com/codex/cli](https://developers.openai.com/codex/cli),
+so that `codex` is on the PATH melampus runs from. How to sign in:
+`codex login` (with no flags, the ChatGPT plan). What it costs: **every frame
+bills to that ChatGPT plan**, its usage limits included, and no API key is
+read or needed here; nothing is charged per call, so the cloud guards (the
+estimate, `max_images`, the cloud cache file) do not apply. Detection
+(`--detect-engines`) reports `codex` as not installed when nothing on PATH is
+called `codex`, as refused when that resolves to a `.cmd`/`.bat` shim (the
+*command* row above: naming the file, and the status check is never run
+through it), as refused when the process that started melampus ignores
+SIGCHLD (the *command* row above: naming the fix, and the status check is
+never run, since under that disposition its exit cannot be read and a CLI
+that is not signed in would be reported as signed in), as not signed in
+when `codex login status` exits non-zero
+(its documented, cheap check: no model call; a command that runs Codex
+through a launcher, `node` and the script the shim wraps, the *command*
+row's own fix, is checked through that same launcher, `node <script> login
+status`), as refused when that check says
+the sign-in is an API key (`codex login --with-api-key`: that account
+bills per call, which none of the cloud guards would watch here, so the
+reason names the kind, never the key, and says to run `codex login` for the
+plan), as refused when it says anything else than "Logged in using ChatGPT"
+(the guard fails closed: that line is one version's wording, and an account
+melampus cannot place may bill per call, so the reason says the check did
+not name the plan and does not quote it), and otherwise as available,
+naming the account kind; a run asked for `codex` is refused the same way
+before any image is read, exit 3. The plan's
+usage limit is not knowable
+without a model call (the status check does not report it, nor does
+`codex doctor`), so detection does not try: a plan at its limit is caught
+at the first reply (Codex fails the turn with "You've hit your usage limit
+... try again at <time>", exit 1) and the batch stops at exit 3 naming the
+limit and the reset time as Codex said it, with nothing cached; a session
+that lapses mid-batch (a 401 in the stream) stops it the same way, naming
+`codex login`. On the committed fixture (studio, 2026-09-19, after a
+reset), `--backend codex --json-out` ran the whole pipeline in 28 s, exit 0,
+and identified the bird as Tricolored Heron (*Egretta tricolor*) at
+confidence 0.99; the day before, with the plan at its limit, the same
+command exited 3 naming the limit and the reset time.
 
 ### Choosing a model
 

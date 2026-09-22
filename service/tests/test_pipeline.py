@@ -7,16 +7,21 @@ and the no-leak guarantee are all verifiable in milliseconds and in CI.
 from __future__ import annotations
 
 import json
+import sys
+import tempfile
 from pathlib import Path
 
 import pytest
 from PIL import Image
 
+from melampus import config as melampus_config
 from melampus.backend import ScriptedBackend
 from melampus.cache import ResultCache
-from melampus.config import load_config
+from melampus.config import cache_file, load_config
 from melampus.identify import Identifier, extract_json
-from melampus.images import NEUTRAL_NAME, content_hash, staged_pixels
+from melampus.images import (
+    MINIMAL_GRANTED_TEMP, NEUTRAL_NAME, STAGING_ROOT, content_hash, staged_pixels,
+)
 from melampus.prompts import PromptError, PromptLibrary
 from melampus.runner import run_batch
 from melampus.schema import Identification, Taxon
@@ -132,6 +137,137 @@ def test_staging_strips_every_metadata_channel(tmp_path: Path):
             assert "icc_profile" not in img.info
             assert "comment" not in img.info
             assert max(img.size) <= 800
+
+
+def test_staged_folder_is_outside_the_shared_temp_directories(tmp_path: Path, monkeypatch):
+    """Where the staged folder sits is the Codex profile's read boundary.
+
+    The run analysing a frame is launched with that folder as its cwd
+    (backend.CommandBackend.complete), and the Codex template's permission
+    profile denies reads everywhere but `:minimal` and the session's
+    workspace root, which is that cwd. So a staged folder inside one of the
+    directories `:minimal` grants whole is not a boundary at all: measured,
+    a sibling folder in /tmp was read and the staged image itself was
+    overwritten and read back by the run.
+
+    `tempfile` puts its directories under $TMPDIR, which on a Mac is a
+    per-user folder under /var/folders and outside the grant. With $TMPDIR
+    unset — ordinary on Linux, in a container, under a cleared environment
+    — the fallback is /tmp itself, so a boundary that depended on the
+    variable would be void exactly where nobody set it. This pins the root
+    instead: `tempfile.tempdir` set to the unset-$TMPDIR fallback, and the
+    staged folder must still land under melampus's own directory, the one
+    config.cache_file names.
+    """
+    monkeypatch.setattr(tempfile, "tempdir", "/tmp")
+    source = tmp_path / "SECRET_SPECIES_NAME.jpg"
+    Image.new("RGB", (1200, 800), (70, 100, 60)).save(source, format="JPEG")
+
+    with staged_pixels(source, max_edge=800) as staged:
+        folder = staged.resolve().parent
+        granted = [d for d in MINIMAL_GRANTED_TEMP if folder.is_relative_to(d)]
+        assert not granted, (
+            f"the staged folder {folder} sits in {granted}, which Codex's `:minimal` "
+            "grant covers whole: a sibling folder is readable and the staged image "
+            "is writable by the run analysing it"
+        )
+        assert folder.parent == cache_file("staging").resolve(), (
+            f"the staged folder {folder} is not under melampus's own staging root"
+        )
+
+
+def _granted_temp_directory():
+    """A real directory inside the grant, for the layouts below to point a root at.
+
+    `/tmp` exists on both platforms the suite runs on and is in
+    MINIMAL_GRANTED_TEMP on both; on a Mac it is a symlink to /private/tmp,
+    so a path made here already has to be resolved before it can be judged.
+    """
+    return tempfile.TemporaryDirectory(prefix="melampus-granted-", dir="/tmp")
+
+
+@pytest.mark.parametrize("layout", ("checkout", "frozen"))
+def test_staging_refuses_a_root_inside_the_shared_temp_directories(
+    tmp_path: Path, monkeypatch, layout: str
+):
+    """Staging under melampus's own directory is not by itself the boundary.
+
+    `config.cache_file` resolves under the checkout root in a checkout and
+    under the per-user data directory inside the executable, and neither is
+    guaranteed to sit outside the directories `:minimal` grants whole: a
+    checkout under /tmp puts `.melampus_cache/staging` inside the grant, and
+    so does a frozen Linux run with $XDG_DATA_HOME pointed there. On those
+    layouts the property round 12 established — that an injection in a
+    photograph cannot read past the one staged file, and cannot rewrite it —
+    is void again, so the root has to be checked before it is used, not
+    assumed (Codex security review round 9 on PR #17).
+
+    Nothing may be created inside the grant on the way to the refusal: the
+    granted directory is still empty afterwards.
+    """
+    source = tmp_path / "SECRET_SPECIES_NAME.jpg"
+    Image.new("RGB", (1200, 800), (70, 100, 60)).save(source, format="JPEG")
+
+    with _granted_temp_directory() as granted:
+        root = Path(granted)
+        if layout == "checkout":
+            monkeypatch.setattr(melampus_config, "_CHECKOUT", root)
+        else:
+            monkeypatch.setattr(sys, "_MEIPASS", str(tmp_path / "bundle"), raising=False)
+            monkeypatch.setattr(sys, "platform", "linux")
+            monkeypatch.setenv("XDG_DATA_HOME", str(root))
+        staging = cache_file(STAGING_ROOT).resolve()
+        assert any(staging.is_relative_to(d) for d in MINIMAL_GRANTED_TEMP), (
+            f"the {layout} layout under test does not put the staging root in the grant"
+        )
+
+        with pytest.raises(RuntimeError) as refusal:
+            with staged_pixels(source, max_edge=800):
+                pass
+
+        message = str(refusal.value)
+        assert str(staging) in message, (
+            f"the refusal does not name the staging root it refused: {message}")
+        assert any(d in message for d in MINIMAL_GRANTED_TEMP), (
+            f"the refusal does not name the granted directory the root sits in: {message}")
+        assert not list(root.iterdir()), (
+            f"staging made {[str(p) for p in root.iterdir()]} inside the grant before refusing")
+
+
+def test_staging_refuses_a_root_that_reaches_the_shared_temp_directories_by_symlink(
+    tmp_path: Path, monkeypatch
+):
+    """Where the root really is, not what it is spelled.
+
+    /tmp is itself a symlink to /private/tmp on a Mac, and a checkout or a
+    data directory can be reached through a link of its own, so a root has to
+    be resolved before it is judged: a staging root that is a symlink into a
+    granted directory is inside the grant, whatever its own path looks like.
+    """
+    source = tmp_path / "SECRET_SPECIES_NAME.jpg"
+    Image.new("RGB", (1200, 800), (70, 100, 60)).save(source, format="JPEG")
+
+    anchor = cache_file(STAGING_ROOT).resolve()
+    if any(anchor.is_relative_to(d) for d in MINIMAL_GRANTED_TEMP):
+        pytest.skip("this checkout is itself inside the grant; the layout test covers that")
+    anchor.mkdir(parents=True, exist_ok=True)
+
+    with _granted_temp_directory() as granted, \
+            tempfile.TemporaryDirectory(prefix="melampus-link-", dir=anchor) as home:
+        checkout = Path(home)
+        (checkout / ".melampus_cache").mkdir()
+        (checkout / ".melampus_cache" / STAGING_ROOT).symlink_to(granted, target_is_directory=True)
+        monkeypatch.setattr(melampus_config, "_CHECKOUT", checkout)
+
+        with pytest.raises(RuntimeError) as refusal:
+            with staged_pixels(source, max_edge=800):
+                pass
+
+        message = str(refusal.value)
+        assert str(Path(granted).resolve()) in message, (
+            f"the refusal judges the link by its own path, not by where it leads: {message}")
+        assert not list(Path(granted).iterdir()), (
+            "staging wrote through the link into the granted directory before refusing")
 
 
 def test_backend_never_receives_original_filename(photo: Path, config):
