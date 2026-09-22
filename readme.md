@@ -93,16 +93,24 @@ identification prompt; a retry or a fallback size is another) with the image
 path and the prompt in its arguments and reads the reply from its stdout, so a
 CLI that bills to a subscription rather than per call, such as Claude Code or
 Codex CLI, is vision with no API key
-([docs/config.md](docs/config.md) § `[model]`). The seam is generic; the
-configured templates for Claude Code (card #421) and Codex (card #422) ship
-separately, and the plugin's picker learns the name in card #423. A program
-that is not installed is refused before any image is read, naming it; so is
+([docs/config.md](docs/config.md) § `[model]`). The seam is generic. For
+Claude Code it comes configured as the `claude-code` engine:
+`backend = "claude-code"` (or `--backend claude-code`) runs `claude` in its
+print mode with the built-in template docs/config.md § Claude Code quotes, on
+whatever plan Claude Code is signed in to — install it from [code.claude.com/docs/en/setup](https://code.claude.com/docs/en/setup),
+sign in with `claude auth login`, and every frame bills to that
+subscription, not to an API key (card #421; Codex's template is card #422,
+and the plugin's picker learns the names in card #423). A program that is
+not installed is refused before any image is read, naming it; so is
 one whose name resolves to a `.cmd` or `.bat` shim on Windows, since cmd.exe
 would parse the prompt (name the `.exe`, or `node` and the script, instead);
 and so is the engine when the process that started melampus ignores SIGCHLD,
 since the kernel would then reap the program the moment it exits and what it
 started could not be stopped safely (start melampus from a shell, or restore
-the signal's default in the launcher).
+the signal's default in the launcher); Claude Code not signed in, likewise,
+naming the sign-in command; Claude Code signed in but not to the subscription
+(an API key in the environment, which its print mode would bill instead),
+likewise, naming what to unset.
 
 **Cloud.** The same two backends the Mac uses for escalation, promoted to
 answering everything. Same prompts, same schema validation, same corrective
@@ -143,12 +151,13 @@ set in your environment. Then everything works as on the Mac, plugin included:
 ```
 
 One-off runs can skip the config file: `--backend ollama`, `--backend claude`,
-`--backend command` (with `[model] command` set). With no `--backend`
-and no `[model] backend`, the CLI takes the first engine that can run on this
-machine, in the order mlx, ollama, openai, claude (docs/config.md § `[model]`);
-`--detect-engines` (`melampus-id --detect-engines`, no folder needed) prints
-those verdicts as JSON, each with the reason an engine cannot run here or what
-it needs. The Lightroom plugin's `engine` preference (docs/plugin.md § The
+`--backend claude-code`, `--backend command` (with `[model] command` set).
+With no `--backend` and no `[model] backend`, the CLI takes the first engine
+that can run on this machine, in the order mlx, ollama, openai, claude
+(docs/config.md § `[model]`); `--detect-engines` (`melampus-id
+--detect-engines`, no folder needed) prints those verdicts as JSON, each with
+the reason an engine cannot run here or what it needs, and after the four,
+whether Claude Code is installed and signed in. The Lightroom plugin's `engine` preference (docs/plugin.md § The
 engine) passes the same name as `--backend`, and left unset it defers to the
 backend and key above, else to that detection.
 

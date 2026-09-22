@@ -853,6 +853,23 @@ class CommandFailed(RuntimeError):
     backend failures instead of recording it on every frame in turn."""
 
 
+#: How much of a program's stderr an error message carries: enough to say
+#: what went wrong, not a CLI's whole usage text.
+STDERR_LINES = 3
+
+
+def stderr_lines(stderr: str, limit: int = STDERR_LINES) -> str:
+    """What a program said on stderr, as one message: the first `limit`
+    lines it wrote that are words once read through `VLMBackend.plain`,
+    joined with " / ". They land in the frame's error record, the log and
+    the terminal, so an escape sequence in them would clear the screen or
+    recolour it, and a control would fake a line of the log. A line that
+    is only controls is not a line, so it spends none of the `limit`;
+    `islice` stops the reading at the cap."""
+    words = (VLMBackend.plain(line) for line in (stderr or "").splitlines())
+    return " / ".join(itertools.islice(filter(None, words), limit))
+
+
 class CommandBackend(VLMBackend):
     """An installed command-line program behind the same interface (card
     #420): one run per completion, the reply on stdout. Claude Code and Codex
@@ -878,7 +895,10 @@ class CommandBackend(VLMBackend):
     The child gets the parent's environment as it is, so the
     program finds its own sign-in; nothing is added to it and no secret
     crosses the command line. As with every backend, the image is the staged,
-    metadata-free file and only its path travels. `max_tokens` has no
+    metadata-free file and only its path travels; the program runs in that
+    file's folder, the temporary one holding it and nothing else, so a
+    program that reads freely inside its working directory (Claude Code) is
+    confined to the one file it was handed. `max_tokens` has no
     placeholder: the program's own limits apply.
 
     stdout goes through the same JSON extraction and schema validation as
@@ -891,11 +911,14 @@ class CommandBackend(VLMBackend):
     raised. The command's exit ends its answer: whatever it started is
     stopped then too, so a helper it leaves holding stdout or stderr is
     stopped rather than waited on, and what was read is the reply.
+    `decode`, when given, turns stdout into the reply text first: a CLI
+    that wraps its reply in a result object (Claude Code's `--output-format
+    json`, card #421) is unwrapped there, and a wrapper that reports a
+    failure raises CommandFailed from it, before the exit code is judged,
+    so a CLI that prints its failure on stdout and exits non-zero is
+    explained in its own words. Without it stdout is the reply as it came.
     """
 
-    #: How much of stderr an error message carries: enough to say what went
-    #: wrong, not a CLI's whole usage text.
-    STDERR_LINES = 3
     #: The most of stdout, and of stderr, that is kept: a JSON reply of
     #: candidates is kilobytes, and a CLI's progress chatter over a whole
     #: run is far less than this, so a program that streams megabytes is
@@ -926,6 +949,7 @@ class CommandBackend(VLMBackend):
         executable: str | None = None,
         timeout: float = 180.0,
         run: Callable | None = None,
+        decode: Callable[[str], str] | None = None,
     ) -> None:
         self.command = list(command)
         # The template, so a changed flag is a changed run fingerprint and the
@@ -934,11 +958,17 @@ class CommandBackend(VLMBackend):
         # argument) is not `--label bird --mode precise` (three), and they
         # run the program differently, so they must not share a fingerprint.
         self.name = shlex.join(self.command)
-        self.executable = executable or self.command[0]
+        executable = executable or self.command[0]
+        # What runs, decided once: a program named by a path (`./tools/vlm`,
+        # which shutil.which hands back as given) is made absolute here,
+        # against melampus's cwd, because the run moves into the staged
+        # image's folder. A bare name is left for PATH.
+        self.executable = os.path.abspath(executable) if os.path.dirname(executable) else executable
         self.timeout = timeout
         # Shaped like subprocess.Popen(argv, **kwargs): the tests hand in a
         # fake at this edge, the way the other backends take a client.
         self._run = run or subprocess.Popen
+        self._decode = decode
 
     @property
     def program(self) -> str:
@@ -946,22 +976,16 @@ class CommandBackend(VLMBackend):
         return self.command[0]
 
     def _argv(self, image_path: Path, prompt: str) -> list[str]:
+        # The real path, symlinks resolved (macOS stages under /var, a link
+        # to /private/var): a program that checks a path-scoped permission
+        # rule against both the path as given and where it resolves (Claude
+        # Code's allow rules) sees one path that is the same either way.
+        image = str(image_path.resolve())
         expanded = [
-            argument.replace("{image}", str(image_path)).replace("{prompt}", prompt)
+            argument.replace("{image}", image).replace("{prompt}", prompt)
             for argument in self.command
         ]
         return [self.executable, *expanded[1:]]
-
-    def _stderr_lines(self, stderr: str) -> str:
-        """The first STDERR_LINES lines the program wrote that are words
-        once read through `plain`, joined with " / ": they land in the
-        frame's error record, the log and the terminal, so an escape
-        sequence in them would clear the screen or recolour it, and a
-        control would fake a line of the log. A line that is only
-        controls is not a line, so it spends none of the STDERR_LINES;
-        `islice` stops the reading at the cap."""
-        words = (self.plain(line) for line in stderr.splitlines())
-        return " / ".join(itertools.islice(filter(None, words), self.STDERR_LINES))
 
     def _stop_tree(self, pid: int) -> None:
         """Stop the process tree the command with `pid` heads (OWN_GROUP):
@@ -1123,6 +1147,15 @@ class CommandBackend(VLMBackend):
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 stdin=subprocess.DEVNULL,
+                # Where the program runs: the staged image's own folder, the
+                # temporary one holding that file and nothing else, never the
+                # cwd melampus inherited from wherever it was launched (from
+                # Lightroom that is the app's, `/` on a Mac). A program that
+                # reads freely inside its working directory and asks for
+                # anything outside it (Claude Code's Read tool) is thereby
+                # confined to the one file it was handed, whatever folder
+                # melampus was started in (security review, round 2).
+                cwd=str(image_path.resolve().parent),
                 **self.OWN_GROUP,
             )
         except OSError as exc:
@@ -1149,19 +1182,26 @@ class CommandBackend(VLMBackend):
                 f"{self.program} did not answer within {self.timeout:g}s; "
                 "raise [model] timeout_seconds if it needs longer"
             )
+        text = stdout
+        if self._decode is not None and text.strip():
+            # First, whatever the exit code: a CLI that prints its failure as
+            # the result on stdout (Claude Code: "Not logged in", exit 1,
+            # nothing on stderr) is explained by the decoder, not by an
+            # empty stderr.
+            text = self._decode(text)
         if process.returncode != 0:
-            said = self._stderr_lines(stderr)
+            said = stderr_lines(stderr)
             raise CommandFailed(
                 f"{self.program} exited {process.returncode}"
                 + (f": {said}" if said else " with nothing on stderr")
             )
-        if not stdout.strip():
-            said = self._stderr_lines(stderr)
+        if not text.strip():
+            said = stderr_lines(stderr)
             raise RuntimeError(
                 f"{self.program} printed nothing on stdout"
                 + (f": {said}" if said else "")
             )
-        return Completion(text=stdout, seconds=elapsed)
+        return Completion(text=text, seconds=elapsed)
 
 
 class ScriptedBackend(VLMBackend):

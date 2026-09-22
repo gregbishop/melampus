@@ -58,6 +58,7 @@ import pytest
 from huggingface_hub.constants import DOWNLOAD_CHUNK_SIZE
 from huggingface_hub.file_download import REGEX_COMMIT_HASH, repo_folder_name
 
+from melampus import providers
 from melampus.download import Update
 
 # pytester runs a pytest inside pytest: how test_binary.py proves what this
@@ -140,6 +141,25 @@ def package_script() -> ModuleType:
     """tools/package_plugin.py (card #402): the one place that knows the
     release zip's layout."""
     return _load_tool(PACKAGE_SCRIPT)
+
+
+#: The real Claude Code detection, kept for the tests that run it against a
+#: fake `claude` on PATH (test_providers._fake_claude); every other test
+#: gets the stub below.
+REAL_CLAUDE_CODE_VERDICT = providers.claude_code_verdict
+
+
+@pytest.fixture(autouse=True)
+def no_ambient_claude_code(monkeypatch):
+    """A developer's installed Claude Code must not decide what any test
+    asserts, nor be run by one: detection (card #421) reports it not
+    installed without looking. A test that wants Claude Code puts a fake
+    `claude` on PATH and restores REAL_CLAUDE_CODE_VERDICT."""
+    monkeypatch.setattr(
+        providers, "claude_code_verdict",
+        lambda command=None: providers.EngineVerdict(
+            providers.CLAUDE_CODE, False, "Claude Code is not installed (kept out of the tests)"),
+    )
 
 
 @pytest.fixture()
