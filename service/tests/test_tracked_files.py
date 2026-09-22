@@ -9,12 +9,17 @@ running the installer again.
 
 Checks against the git index rather than the working tree: no tracked symlink
 resolves outside the repository, no tracked file names an absolute home-directory
-path, and service/uv.lock is tracked. One check against the working tree: that
-lockfile is current with service/pyproject.toml. Card #441 adds the corpus
-gates: .gitignore ignores a photo corpus folder wherever it lands in the
-checkout, no tracked file sits under any other fixtures folder, and every frame
-in service/tests/fixtures/ is small and EXIF-free like the first one. The frame
-gate reads each blob from the index, so it judges the bytes a push would carry.
+path, and service/uv.lock is tracked. Card #441 adds the corpus gates: .gitignore
+ignores a photo corpus folder wherever it lands in the checkout, no tracked file
+sits under any other fixtures folder, and every frame in service/tests/fixtures/
+is small and EXIF-free like the first one. The frame gate reads each blob from
+the index, so it judges the bytes a push would carry.
+
+Two checks read the working tree instead, because each judges what the next
+commit would do rather than what the last one carried: that the lockfile is
+current with service/pyproject.toml, and the ignore rules, which are checked
+from the working-tree .gitignore because that is the file `git add -A` consults
+when a corpus is about to be staged.
 """
 
 import importlib.util
