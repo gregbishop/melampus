@@ -7,6 +7,7 @@ and the no-leak guarantee are all verifiable in milliseconds and in CI.
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -186,7 +187,25 @@ def _granted_temp_directory():
     return tempfile.TemporaryDirectory(prefix="melampus-granted-", dir="/tmp")
 
 
-@pytest.mark.parametrize("layout", ("checkout", "frozen"))
+def _differently_cased(path: Path) -> Path:
+    """The same directory, spelled with the granted component in another case.
+
+    A Mac's boot volume is case-insensitive: /private/TMP and /private/tmp
+    are one directory, `os.path.samefile` says so, and /private/TMP is a
+    real directory rather than a symlink, so `Path.resolve` keeps the case
+    it was handed and nothing normalises it away. A root spelled that way
+    is inside the grant while `is_relative_to("/private/tmp")` is False.
+    A case-sensitive filesystem has no such pair and nothing to prove here.
+    """
+    resolved = path.resolve()
+    granted = Path(next(d for d in MINIMAL_GRANTED_TEMP if resolved.is_relative_to(d)))
+    cased = granted.with_name(granted.name.upper()) / resolved.relative_to(granted)
+    if not (cased.exists() and os.path.samefile(cased, resolved)):
+        pytest.skip(f"this filesystem is case-sensitive: {cased} is not {resolved}")
+    return cased
+
+
+@pytest.mark.parametrize("layout", ("checkout", "frozen", "differently cased"))
 def test_staging_refuses_a_root_inside_the_shared_temp_directories(
     tmp_path: Path, monkeypatch, layout: str
 ):
@@ -202,6 +221,14 @@ def test_staging_refuses_a_root_inside_the_shared_temp_directories(
     is void again, so the root has to be checked before it is used, not
     assumed (Codex security review round 9 on PR #17).
 
+    Nor is a resolved path what the check can be made on. A Mac's boot
+    volume is case-insensitive, so the third layout — a checkout at
+    /private/TMP/… — is the same directory as one at /private/tmp/… while
+    `resolve()` keeps the case it was handed and `is_relative_to` says no
+    (Codex security review round 10, S1). The root does not exist yet at the
+    point it is checked, either, so identity has to be taken on an ancestor
+    that does; this layout asserts both before it expects the refusal.
+
     Nothing may be created inside the grant on the way to the refusal: the
     granted directory is still empty afterwards.
     """
@@ -210,16 +237,30 @@ def test_staging_refuses_a_root_inside_the_shared_temp_directories(
 
     with _granted_temp_directory() as granted:
         root = Path(granted)
-        if layout == "checkout":
-            monkeypatch.setattr(melampus_config, "_CHECKOUT", root)
-        else:
+        if layout == "frozen":
             monkeypatch.setattr(sys, "_MEIPASS", str(tmp_path / "bundle"), raising=False)
             monkeypatch.setattr(sys, "platform", "linux")
             monkeypatch.setenv("XDG_DATA_HOME", str(root))
+        else:
+            if layout == "differently cased":
+                root = _differently_cased(root)
+            monkeypatch.setattr(melampus_config, "_CHECKOUT", root)
         staging = cache_file(STAGING_ROOT).resolve()
-        assert any(staging.is_relative_to(d) for d in MINIMAL_GRANTED_TEMP), (
-            f"the {layout} layout under test does not put the staging root in the grant"
-        )
+        if layout == "differently cased":
+            assert not any(staging.is_relative_to(d) for d in MINIMAL_GRANTED_TEMP), (
+                f"{staging} is already caught by its spelling; this layout proves nothing"
+            )
+            assert os.path.samefile(staging.parents[1], granted), (
+                f"{staging.parents[1]} is not the granted directory it was made in"
+            )
+            assert not staging.exists() and not staging.parent.exists(), (
+                "the staging root already exists, so this layout does not exercise the "
+                "case the check has to handle: identity taken on an ancestor"
+            )
+        else:
+            assert any(staging.is_relative_to(d) for d in MINIMAL_GRANTED_TEMP), (
+                f"the {layout} layout under test does not put the staging root in the grant"
+            )
 
         with pytest.raises(RuntimeError) as refusal:
             with staged_pixels(source, max_edge=800):

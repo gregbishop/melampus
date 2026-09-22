@@ -950,6 +950,15 @@ def test_config_doc_says_the_staged_folder_sits_outside_the_shared_temp_director
     for said in ("`$XDG_DATA_HOME`", "`images.staging_root`", "refuses to stage"):
         assert said in prose, (
             f"docs/config.md does not say {said!r} of a staging root that lands in the grant")
+    # Codex review round 10, S1: resolving the root is not the whole of the
+    # check either. A Mac's boot volume is case-insensitive, so /private/TMP
+    # and /private/tmp are one directory (measured: os.path.samefile says so)
+    # while `Path.resolve` keeps the case it was handed, and a root spelled
+    # that way passed a path comparison. The check compares filesystem
+    # identity, so the doc must not describe it as a comparison of paths.
+    for said in ("case-insensitive", "filesystem identity"):
+        assert said in prose, (
+            f"docs/config.md does not say {said!r} of how a staging root is judged")
 
 
 def test_the_docs_say_a_claude_code_key_comes_from_the_settings_not_the_environment():

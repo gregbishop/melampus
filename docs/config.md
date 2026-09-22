@@ -300,7 +300,12 @@ checks it before it stages anything, and refuses to stage at all when it
 lands inside `/tmp`, `/private/tmp`, `/var/tmp` or `/private/var/tmp`, naming
 the root and what to move (`images.staging_root`; resolved, because `/tmp` is
 a symlink to `/private/tmp` on a Mac and a root reached through a link of its
-own is where the link leads). What `:minimal`
+own is where the link leads). Resolved is not enough on its own: a Mac's boot
+volume is case-insensitive, so `/private/TMP` and `/private/tmp` are one
+directory while `resolve()` keeps whichever case it was handed, and a root
+spelled `/private/TMP/…` passed a comparison of paths. The root is judged by
+filesystem identity instead — the directory the ancestor really is, since the
+staging root itself does not exist yet when it is checked. What `:minimal`
 grants is Codex's choice, not this project's: `/etc/hosts` and `/tmp` stay
 readable (measured, even under an explicit deny); the home folder, other
 temp folders and everything else outside the staged folder do not. That

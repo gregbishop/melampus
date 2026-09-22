@@ -10,6 +10,7 @@ bypassing this module.
 from __future__ import annotations
 
 import hashlib
+import os
 import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -49,6 +50,49 @@ STAGING_ROOT = "staging"
 MINIMAL_GRANTED_TEMP = ("/tmp", "/private/tmp", "/var/tmp", "/private/var/tmp")
 
 
+def _same_directory(left: Path, right: Path) -> bool:
+    """Whether two paths are the same directory on disk, by the filesystem's
+    own identity (device and inode) rather than by spelling. Missing is not
+    the same: nothing can be inside a directory that is not there."""
+    try:
+        return os.path.samefile(left, right)
+    except OSError:
+        return False
+
+
+def _granted_containing(root: Path) -> str | None:
+    """Which of MINIMAL_GRANTED_TEMP `root` sits inside, or None.
+
+    Spelling does not settle it. A Mac's boot volume is case-insensitive, so
+    /private/TMP and /private/tmp are one directory — `os.path.samefile` says
+    so — while `Path.resolve` keeps whatever case it was handed, and
+    /private/TMP is a real directory rather than a symlink, so nothing
+    normalises it away: measured here, a root at
+    /private/TMP/melampus-x/.melampus_cache/staging resolves to itself and
+    `is_relative_to("/private/tmp")` is False, which let a root inside the
+    grant through the check (Codex security review round 10, S1). So the
+    ancestors are compared by identity as well.
+
+    By identity on an *ancestor*, because the staging root usually does not
+    exist when it is checked: `staged_pixels` asks for it before the mkdir
+    that creates it, and `samefile` on a missing path only raises. The walk
+    goes up from the root until a directory that exists is found; every
+    ancestor above one that exists, exists too, so the whole chain is
+    checked once the first real directory is reached. `is_relative_to`
+    still runs first, for a granted directory this machine does not have at
+    all — /var/tmp is absent on some Linux images, and `mkdir(parents=True)`
+    would make it — where identity has nothing to compare against.
+    """
+    ancestors = (root, *root.parents)
+    for granted in MINIMAL_GRANTED_TEMP:
+        target = Path(granted)
+        if root.is_relative_to(granted) or any(
+            _same_directory(ancestor, target) for ancestor in ancestors
+        ):
+            return granted
+    return None
+
+
 def staging_root() -> Path:
     """The directory staged folders are made in, resolved and checked first.
 
@@ -64,7 +108,9 @@ def staging_root() -> Path:
     checked before it is used rather than assumed, and it is checked
     resolved: /tmp is a symlink to /private/tmp on a Mac, and a root reached
     through a link of its own is where the link leads, not where it is
-    spelled.
+    spelled. Resolved is still only a path, though, and a path is not what
+    the filesystem thinks: `_granted_containing` is what judges the root,
+    and it compares the directories themselves.
 
     A root inside the grant is refused, not worked around. Staging elsewhere
     would mean picking a directory melampus can prove is outside the grant,
@@ -83,7 +129,7 @@ def staging_root() -> Path:
     table (Codex review round 10, C1).
     """
     root = cache_file(STAGING_ROOT).resolve()
-    granted = next((d for d in MINIMAL_GRANTED_TEMP if root.is_relative_to(d)), None)
+    granted = _granted_containing(root)
     if granted is not None:
         raise BackendUnavailable(
             f"melampus would stage images in {root}, which is inside {granted}: one of "
