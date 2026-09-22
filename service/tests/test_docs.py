@@ -869,6 +869,29 @@ def test_config_doc_says_what_environment_the_cli_is_launched_with(engine):
     assert "CLI_ENVIRONMENT" in architecture, "docs/architecture.md does not name the CLI environment"
 
 
+def test_the_docs_say_a_claude_code_key_comes_from_the_settings_not_the_environment():
+    """Review round 8, C1 (review round 7, C2's defect in one more place):
+    melampus's own environment never reaches Claude Code
+    (`CliEngine.environment`), so an API key its status check reports cannot
+    have come from the shell melampus was started in (only from the `env`
+    block of a settings file Claude Code loads), and the refusal names what
+    to remove and from where (`CLAUDE_CODE_CREDENTIAL_FIX["api_key"]`, "remove
+    ANTHROPIC_API_KEY from the `env` block of the settings", pinned in
+    test_providers.py). Both prose docs that describe that refusal must say
+    the same: neither may put the key in the environment or tell the user to
+    unset it."""
+    for doc, prose in (
+        ("readme.md", README.read_text(encoding="utf-8")),
+        ("docs/config.md", CONFIG_DOC.read_text(encoding="utf-8")),
+    ):
+        prose = " ".join(prose.split())  # the prose wraps; the phrase must not hide across a line break
+        assert "`env` block of a settings file" in prose, (
+            f"{doc} does not say such a key can only come from the `env` block of a settings file")
+        assert "what to remove" in prose, f"{doc} does not say the refusal names what to remove"
+        assert "key in the environment" not in prose, f"{doc} still puts the key in melampus's own environment"
+        assert "what to unset" not in prose, f"{doc} still says the refusal names what to unset"
+
+
 def test_config_doc_command_row_says_where_the_program_runs():
     """Security round 2 (S2) changed the command seam's contract for every
     program, not only Claude Code: the program runs with the staged image's

@@ -113,8 +113,10 @@ since the kernel would then reap the program the moment it exits and what it
 started could not be stopped safely (start melampus from a shell, or restore
 the signal's default in the launcher); a CLI not signed in, likewise,
 naming the sign-in command; Claude Code signed in but not to the subscription
-(an API key in the environment, which its print mode would bill instead),
-likewise, naming what to unset; a Codex signed in with an API key,
+(an API key its print mode would bill instead, which, since melampus's own
+environment never reaches Claude Code, would have to come from the `env`
+block of a settings file it loads), likewise, naming what to remove and from
+where; a Codex signed in with an API key,
 likewise, since that bills per call, not to the plan, and so is one whose
 status check names anything but the ChatGPT plan; a Codex plan at its usage
 limit stops the batch at the first reply, naming when the limit resets.
