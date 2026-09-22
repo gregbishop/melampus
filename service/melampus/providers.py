@@ -115,7 +115,8 @@ CLAUDE_CODE_PROGRAM = "claude"
 #: the mode that skips keychain reads. The status check carries this
 #: flag too, read off the template (CLAUDE_CODE_SETTINGS_FLAGS says how),
 #: so the credential it reports is read under the settings the run
-#: loads, in the same inherited environment (Codex round 1, S2).
+#: loads, in the same environment, `CliEngine.environment` (Codex round
+#: 1, S2; round 3, S1).
 CLAUDE_CODE_ISOLATION = "--restricted"
 
 #: The one copy of the template. Every flag is from `claude --help` (2.1.277)
@@ -220,7 +221,7 @@ CLAUDE_CODE_SETTINGS_FLAGS = {
 #: list none: none, api_key, api_key_helper, oauth_token, third_party.
 #: Only claude.ai is the subscription, and even then the login can be set
 #: aside for a key: a print-mode run uses whatever credential Claude
-#: Code's precedence puts first, the environment melampus runs from
+#: Code's precedence puts first, a loaded settings file's `env` block
 #: included (authentication § Authentication precedence: "In
 #: non-interactive mode (-p), the key is always used when present"), and
 #: the status object then names it in `apiKeySource` (measured: the login
@@ -232,19 +233,32 @@ CLAUDE_CODE_SETTINGS_FLAGS = {
 #: key while the cloud guards, off for a local engine, ask nothing.
 CLAUDE_CODE_SUBSCRIPTION = "claude.ai"
 
-#: What to remove for each credential that is not the subscription, by
-#: the status object's name for it (apiKeySource first, then authMethod),
-#: in the docs' own variable names (authentication § Authentication
-#: precedence; `claude auth login --help`: "--console  Use Anthropic
-#: Console (API usage billing) instead of Claude subscription", the
-#: sign-in the program reports as apiKeySource "/login managed key").
+#: What to remove, and from where, for each credential that is not the
+#: subscription, by the status object's name for it (apiKeySource first,
+#: then authMethod), in the docs' own variable names (authentication §
+#: Authentication precedence; `claude auth login --help`: "--console  Use
+#: Anthropic Console (API usage billing) instead of Claude subscription",
+#: the sign-in the program reports as apiKeySource "/login managed key").
+#: The place is a settings file, never the shell (review round 7, C2):
+#: the check and the run are launched with `CliEngine.environment`, so a
+#: variable of these reaches Claude Code only from the `env` block of a
+#: settings file it loads (settings § Settings precedence: "An `env`
+#: block inside a settings file is an ordinary key and follows the levels
+#: above"; under `--restricted` that is managed settings and
+#: `--settings`, and a template of the user's own without it loads the
+#: user file too), the way an apiKeyHelper is a settings key.
 CLAUDE_CODE_CREDENTIAL_FIX = {
-    "ANTHROPIC_API_KEY": "unset ANTHROPIC_API_KEY",
-    "api_key": "unset ANTHROPIC_API_KEY",
+    "ANTHROPIC_API_KEY": "remove ANTHROPIC_API_KEY from the `env` block of the settings",
+    "api_key": "remove ANTHROPIC_API_KEY from the `env` block of the settings",
     "apiKeyHelper": "remove apiKeyHelper from the settings",
     "api_key_helper": "remove apiKeyHelper from the settings",
-    "oauth_token": "unset CLAUDE_CODE_OAUTH_TOKEN and ANTHROPIC_AUTH_TOKEN",
-    "third_party": "unset CLAUDE_CODE_USE_BEDROCK, CLAUDE_CODE_USE_VERTEX and CLAUDE_CODE_USE_FOUNDRY",
+    "oauth_token": (
+        "remove CLAUDE_CODE_OAUTH_TOKEN and ANTHROPIC_AUTH_TOKEN from the `env` block of the settings"
+    ),
+    "third_party": (
+        "remove CLAUDE_CODE_USE_BEDROCK, CLAUDE_CODE_USE_VERTEX and CLAUDE_CODE_USE_FOUNDRY"
+        " from the `env` block of the settings"
+    ),
     "/login managed key": "that is the Console sign-in (API usage billing), so run `claude auth logout`",
 }
 
@@ -683,7 +697,7 @@ def _claude_code_account(status: subprocess.CompletedProcess) -> Credential:
         ),
         fix=(
             CLAUDE_CODE_CREDENTIAL_FIX.get(key_source) or CLAUDE_CODE_CREDENTIAL_FIX.get(method)
-            or "remove that credential from the environment melampus runs from"
+            or "remove that credential from the settings Claude Code loads"
         ),
     )
 

@@ -4704,10 +4704,15 @@ def test_claude_code_not_installed_with_a_bare_template_says_to_remove_the_flag(
 @pytest.mark.parametrize(
     ("mode", "names"),
     [
-        ("api-key", ("authMethod api_key", "apiKeySource ANTHROPIC_API_KEY", "unset ANTHROPIC_API_KEY")),
-        ("login-and-api-key", ("authMethod claude.ai", "apiKeySource ANTHROPIC_API_KEY", "unset ANTHROPIC_API_KEY")),
-        ("oauth-token", ("authMethod oauth_token", "unset CLAUDE_CODE_OAUTH_TOKEN")),
-        ("third-party", ("authMethod third_party", "unset CLAUDE_CODE_USE_BEDROCK")),
+        ("api-key", ("authMethod api_key", "apiKeySource ANTHROPIC_API_KEY",
+                     "remove ANTHROPIC_API_KEY from the `env` block of the settings")),
+        ("login-and-api-key", ("authMethod claude.ai", "apiKeySource ANTHROPIC_API_KEY",
+                               "remove ANTHROPIC_API_KEY from the `env` block of the settings")),
+        ("oauth-token", ("authMethod oauth_token",
+                         "remove CLAUDE_CODE_OAUTH_TOKEN and ANTHROPIC_AUTH_TOKEN from the `env` block of the settings")),
+        ("third-party", ("authMethod third_party",
+                         "remove CLAUDE_CODE_USE_BEDROCK, CLAUDE_CODE_USE_VERTEX and CLAUDE_CODE_USE_FOUNDRY"
+                         " from the `env` block of the settings")),
         ("console", ("apiKeySource /login managed key", "claude auth logout")),
     ],
 )
@@ -4716,17 +4721,19 @@ def test_detection_claude_code_signed_in_but_not_to_the_subscription_is_refused(
 ):
     """Codex round 1, C1 and S2 (one defect): the engine promises every frame
     bills the subscription, and a print-mode run uses whatever credential
-    Claude Code's precedence puts first, the environment melampus runs
-    from included (authentication § Authentication precedence: "In
-    non-interactive mode (-p), the key is always used when present"). So a
-    status check that passes on another credential (an API key; the
-    subscription login set aside for one, which the real CLI reports as
-    authMethod claude.ai with apiKeySource named and subscriptionType
-    null; an OAuth or bearer token from the environment; a cloud provider;
-    the Console sign-in without a key) is not available: the verdict is a
+    Claude Code's precedence puts first (authentication § Authentication
+    precedence: "In non-interactive mode (-p), the key is always used when
+    present"). So a status check that passes on another credential (an
+    API key; the subscription login set aside for one, which the real CLI
+    reports as authMethod claude.ai with apiKeySource named and
+    subscriptionType null; an OAuth or bearer token; a cloud provider; the
+    Console sign-in without a key) is not available: the verdict is a
     sixth shape, signed in but not to the subscription, naming what the
-    status check said, what to remove, and the sign-in, and never "not
-    signed in", which is another fix."""
+    status check said, what to remove and from where, and the sign-in,
+    and never "not signed in", which is another fix. The place is a
+    settings file's `env` block, never the shell (review round 7, C2):
+    melampus's own environment never reaches the check or the run
+    (`CliEngine.environment`, Codex round 3, S1)."""
     _fake_engine_cli(monkeypatch, tmp_path, providers.CLAUDE_CODE_CLI, mode=mode)
     verdict = _verdict("claude-code")
     assert not verdict.available
@@ -4755,7 +4762,8 @@ def test_the_status_check_runs_under_the_templates_isolation(monkeypatch, tmp_pa
     subcommand (the real CLI processes the global flag there: measured,
     `claude --setting-sources bogus auth status --json` is refused as an
     invalid setting source), so the credential it reports is read under
-    the settings the run loads, and the same inherited environment."""
+    the settings the run loads, and the same environment,
+    `CliEngine.environment`."""
     log = _fake_engine_cli(monkeypatch, tmp_path, providers.CLAUDE_CODE_CLI)
     assert _verdict("claude-code").available
     assert _status_checks(log) == [["--restricted", "auth", "status", "--json"]]
@@ -4846,10 +4854,11 @@ def test_a_bare_template_is_never_signed_in_to_the_subscription(monkeypatch, tmp
     exit 1), and the refusal quotes the check it ran, `--bare` included,
     and says to remove `--bare` from `[model] command`, never to sign in:
     signing in cannot help a template that never reads the login (review
-    round 6, 1). The same under a key in the environment, which bare mode
-    does read (headless: "set ANTHROPIC_API_KEY ... because bare mode
-    doesn't use your subscription login"): the key to unset, and `--bare`
-    to remove."""
+    round 6, 1). The same under a key in its environment (a loaded
+    settings file's `env` block; melampus's own never reaches it), which
+    bare mode does read (headless: "set ANTHROPIC_API_KEY ... because bare
+    mode doesn't use your subscription login"): the key to remove, and
+    `--bare` to remove."""
     log = _fake_engine_cli(monkeypatch, tmp_path, providers.CLAUDE_CODE_CLI)
     template = providers.CLAUDE_CODE_COMMAND
     bare = [*template[:-1], "--bare", template[-1]]
@@ -4866,7 +4875,8 @@ def test_a_bare_template_is_never_signed_in_to_the_subscription(monkeypatch, tmp
         providers.build_primary_backend(_cfg(model={"backend": "claude-code", "command": bare}))
     reason = str(err.value)
     assert "`claude --restricted --bare auth status --json`" in reason, reason
-    assert "unset ANTHROPIC_API_KEY" in reason and "remove `--bare` from `[model] command`" in reason, reason
+    assert providers.CLAUDE_CODE_CREDENTIAL_FIX["api_key"] in reason, reason
+    assert "remove `--bare` from `[model] command`" in reason, reason
     assert providers.CLAUDE_CODE_SIGN_IN not in reason, reason
 
 
@@ -4979,8 +4989,8 @@ def test_claude_code_on_an_api_key_is_refused_before_any_image_is_read(
     """C1 and S2 at analysis time: the subscription login set aside for an
     API key in the environment (the shape a `claude` cloud engine's key
     leaves behind), and the folder's one image a link to nowhere. Exit 3
-    on a refusal naming the key to unset and the sign-in, before any image
-    is read, and never mentioning the file."""
+    on a refusal naming the key to remove, and from where, and the
+    sign-in, before any image is read, and never mentioning the file."""
     from melampus.cli import main
 
     _fake_engine_cli(monkeypatch, tmp_path, providers.CLAUDE_CODE_CLI, mode="login-and-api-key")
@@ -4989,7 +4999,7 @@ def test_claude_code_on_an_api_key_is_refused_before_any_image_is_read(
 
     err = capsys.readouterr().err
     assert code == 3, err
-    assert "not to a Claude subscription" in err and "unset ANTHROPIC_API_KEY" in err
+    assert "not to a Claude subscription" in err and providers.CLAUDE_CODE_CREDENTIAL_FIX["api_key"] in err
     assert providers.CLAUDE_CODE_SIGN_IN in err
     assert_no_image_was_touched(err, "sign-in check")
 
@@ -5033,7 +5043,7 @@ def test_cli_detect_engines_prints_the_not_subscription_verdict(monkeypatch, tmp
     (verdict,) = [v for v in json.loads(capsys.readouterr().out) if v["engine"] == "claude-code"]
     assert verdict["available"] is False
     assert "not to a Claude subscription" in verdict["reason"]
-    assert "unset ANTHROPIC_API_KEY" in verdict["reason"]
+    assert "remove ANTHROPIC_API_KEY from the `env` block of the settings" in verdict["reason"]
 
 
 @posix_only

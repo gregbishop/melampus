@@ -183,9 +183,15 @@ carries of those flags between; every
 verdict quotes the check as it ran), as signed in but not to
 the subscription when that check passes
 on another credential (`authMethod` other than `claude.ai`: an API key, an
-OAuth or bearer token from the environment, a cloud provider; or the login
-set aside for a key, which the check reports as `apiKeySource` with
-`subscriptionType` null), naming what to unset or remove and the sign-in, as
+OAuth or bearer token, a cloud provider; or the login set aside for a key,
+which the check reports as `apiKeySource` with `subscriptionType` null;
+since melampus's own environment never reaches the check, above, such a
+variable can be set only by the `env` block of a settings file the check
+loads (code.claude.com/docs/en/settings: "An `env` block inside a settings
+file is an ordinary key and follows the levels above"; under `--restricted`
+that is managed settings and `--settings`, and a command of your own
+without it loads the user file too), or by an `apiKeyHelper` there),
+naming what to remove, and from where, and the sign-in, as
 failed in the CLI's own words when that check exits some other way (an older
 `claude` with no `auth` subcommand), and otherwise as available, naming the
 account kind (`claude.ai`, and the subscription); a run asked for
