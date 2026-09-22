@@ -670,19 +670,19 @@ def test_docs_describe_the_cli_engines_in_the_picker():
     Lightroom section lists them among what the picker offers; docs/config.md's
     backend row, readme.md and the engine section no longer defer the picker
     to a card yet to come."""
-    plugin_doc = (REPO / "docs" / "plugin.md").read_text(encoding="utf-8")
-    engine = re.search(r"^## The engine\n(.*?)^---", plugin_doc, re.MULTILINE | re.DOTALL)
-    assert engine, "docs/plugin.md has no ## The engine section"
-    prose = " ".join(engine.group(1).split())
+    plugin_doc = PLUGIN_DOC.read_text(encoding="utf-8")
+    engine = _section(plugin_doc, "The engine")
+    assert engine is not None, "docs/plugin.md has no ## The engine section"
+    prose = " ".join(engine.split())
     for named in ("`claude-code`", "`codex`", "subscription", "no API key", "`title`"):
         assert named in prose, f"docs/plugin.md's engine section does not say {named}"
     readme = README.read_text(encoding="utf-8")
-    section = re.search(r"^## Reviewing in Lightroom\n(.*?)^## ", readme, re.MULTILINE | re.DOTALL)
-    assert section, "readme.md has no ## Reviewing in Lightroom section"
+    section = _section(readme, "Reviewing in Lightroom")
+    assert section is not None, "readme.md has no ## Reviewing in Lightroom section"
     for named in ("claude-code", "codex"):
-        assert named in section.group(1), f"readme.md's Lightroom section does not offer {named}"
+        assert named in section, f"readme.md's Lightroom section does not offer {named}"
     config_doc = CONFIG_DOC.read_text(encoding="utf-8")
-    backend_row = next(line for line in config_doc.splitlines() if line.startswith("| `backend` |"))
+    backend_row = _row(config_doc, "backend")
     for text in (backend_row, readme, prose):
         assert "learns" not in text or "#423" not in text, "still defers the picker to card #423"
 
