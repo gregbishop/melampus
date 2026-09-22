@@ -822,6 +822,14 @@ def _sentences(text: str) -> list[str]:
     ]
 
 
+def _states_a_test_count(sentence: str) -> bool:
+    """Whether `sentence` states how many tests there are: a number and a test
+    noun, or a count of a language in a sentence that is about tests."""
+    return bool(TEST_COUNT.search(sentence) or (
+        "test" in sentence.lower() and LANGUAGE_COUNT.search(sentence)
+    ))
+
+
 def test_docs_state_no_test_count():
     """Card #437, Done-when 1: the suite grows with every card, so a count
     written into a doc is wrong the day after, and CI checks no such number.
@@ -832,9 +840,24 @@ def test_docs_state_no_test_count():
     stated = []
     for doc in TEST_COUNT_DOCS:
         for sentence in _sentences(doc.read_text(encoding="utf-8")):
-            counted = TEST_COUNT.search(sentence) or (
-                "test" in sentence.lower() and LANGUAGE_COUNT.search(sentence)
-            )
-            if counted:
+            if _states_a_test_count(sentence):
                 stated.append(f"{doc.relative_to(REPO)}: {sentence}")
     assert not stated, f"docs state a test count that CI does not check: {stated}"
+
+
+def test_the_test_count_gate_reads_every_form_of_a_count():
+    """Round 1, finding 1: the gate above is green today only because no doc
+    states a count, so on its own it would stay green if a narrowing edit to
+    either pattern, or a `_sentences` that stopped joining hard-wrapped lines,
+    took the promise away. Each form the gate names must be caught in the
+    hard-wrapped prose the docs are written in, and a count-free sentence
+    must not be."""
+    wrapped = "The suite is 182\ntests today.\n\nRun them with pytest.\n"
+    assert _sentences(wrapped) == ["The suite is 182 tests today.", "Run them with pytest."]
+    for counted in ("The suite is 182 tests today.", "The 47 rules tests cover every rule.",
+                    "CI reports 410 passed.", "CI reports 26 skipped.", "The run skips 2 on Linux.",
+                    "The tests are 126 Python, 56 Lua.", "The tests are 126 Python.",
+                    "The tests are 56 Lua."):
+        assert _states_a_test_count(counted), f"the gate misses a stated count: {counted!r}"
+    for uncounted in ("Run the tests with pytest before you push.", "The plugin is 126 Python."):
+        assert not _states_a_test_count(uncounted), f"the gate calls this a test count: {uncounted!r}"
