@@ -530,11 +530,6 @@ def test_the_action_pinning_gate_reads_flow_style_steps_too(tmp_path, monkeypatc
 RELEASE_ZIPS = ("Melampus-macOS.zip", "Melampus-Windows.zip")
 
 
-def _steps(job: str) -> list[str]:
-    """That job's steps, each as its text."""
-    return re.split(r"^      - ", job, flags=re.MULTILINE)[1:]
-
-
 def _unpinned_actions(text: str) -> list[str]:
     """The `uses:` lines in that text not pinned to a commit SHA with the
     version in a trailing comment. A `uses:` key counts wherever YAML puts
@@ -564,9 +559,8 @@ def test_ci_packages_a_zip_per_platform_and_a_tag_releases_both():
     Windows zip ships from a script tested on Windows; both zip names are in
     it; a `release` job needs every packaging job, runs only on a tag, and
     alone holds `contents: write`, with no scope beyond contents anywhere in
-    the file; and every action this card adds (the zip uploads and the
-    release job's) is pinned to a commit SHA with the version in a trailing
-    comment. ci.yml's earlier `uses:` lines are card #439's."""
+    the file. That every `uses:` line is pinned is card #439's gate, over
+    every workflow, so it is not asserted again here."""
     ci = CI_WORKFLOW.read_text(encoding="utf-8")
     copies = [w.name for w in _workflows() if w != CI_WORKFLOW and "pytest" in w.read_text(encoding="utf-8")]
     assert not copies, f"a second workflow copies ci.yml's build steps; extend ci.yml instead: {copies}"
@@ -603,13 +597,6 @@ def test_ci_packages_a_zip_per_platform_and_a_tag_releases_both():
     assert not other, f"ci.yml grants more than contents: {other}"
     writes = [line for line in ci.splitlines() if re.search(r"^\s+contents: write$", line)]
     assert len(writes) == 1 and "contents: write" in release, "contents: write must be granted once, on the release job"
-
-    zip_steps = [
-        step for name in packaging for step in _steps(jobs[name]) if any(z in step for z in RELEASE_ZIPS)
-    ]
-    assert zip_steps, "no step uploads a zip"
-    unpinned = _unpinned_actions(release) + [u for step in zip_steps for u in _unpinned_actions(step)]
-    assert not unpinned, f"actions added for the release are not pinned to a SHA with a version comment: {unpinned}"
 
 
 def test_install_docs_name_the_release_zips_and_keep_the_from_source_path():
