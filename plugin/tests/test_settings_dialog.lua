@@ -365,16 +365,14 @@ t.test('another engine\'s reason naming an address gives no link while ollama is
 	-- A link is for something to go and install (Ollama, Done-when 3; the
 	-- subscription CLIs, card #423): a reason from any other engine is shown
 	-- under the picker as text, address and all, never as something to click.
+	-- Every installable engine available and mlx alone greyed, so the whole
+	-- dialog is checked: nothing in it may be clickable.
 	local MLX_ADDRESS = 'https://example.com/apple-silicon'
-	local contents = openSettings({ detection = mock.detectionText({
-		ollama = { available = true, reason = 'Ollama is answering at http://127.0.0.1:11434' },
+	local contents = openSettings({ detection = mock.detectionText(mock.allAvailable({
 		mlx = { available = false, reason = 'needs Apple Silicon; see ' .. MLX_ADDRESS },
-	}) })
+	})) })
 	for _, entry in ipairs(viewsOfKind(contents, 'static_text')) do
-		local title = tostring(entry.view.title)
-		if string.find(title, MLX_ADDRESS, 1, true) or string.find(title, 'Ollama', 1, true) then
-			t.isNil(entry.view.mouse_down, 'a clickable link is shown for an engine with nothing to install: ' .. title)
-		end
+		t.isNil(entry.view.mouse_down, 'a clickable link is shown for an engine with nothing to install: ' .. tostring(entry.view.title))
 	end
 	t.equals(#titlesMatching(contents, MLX_ADDRESS), 1, 'the mlx reason is shown once, as the note under the picker')
 	t.equals(#mock.state.openedUrls, 0)
