@@ -221,6 +221,28 @@ def _section(text: str, heading: str) -> str | None:
     return match.group(1) if match else None
 
 
+def _opening(text: str) -> str:
+    """A doc's opening — everything before its first `## ` heading — as one
+    line, its wraps normalized to single spaces. Every gate that looks for a
+    phrase in an opening reads it through here: round 2's finding was a gate
+    matching "macOS and Windows" against the raw opening, which skipped
+    docs/brief.md because the phrase is wrapped there, so the Linux claim the
+    gate exists to catch would have passed. The gate that reads readme.md's
+    engine table keeps the raw opening, because it matches line-anchored rows.
+    """
+    return " ".join(text.split("\n## ", 1)[0].split())
+
+
+def test_the_opening_reader_joins_the_lines_a_phrase_is_wrapped_across():
+    """Round 2, Codex finding: docs/brief.md's opening wraps "macOS and
+    Windows" across two lines, so a gate that read the raw opening for that
+    phrase skipped the file and the Linux claim below it. The opening reader
+    hands back one line, so a phrase is found however the paragraph happens
+    to be filled, and it still stops at the first `## ` heading."""
+    text = "# Title\n\nruns on macOS and\nWindows.\n\n## Requirements\n\nLinux too.\n"
+    assert _opening(text) == "# Title runs on macOS and Windows."
+
+
 def test_the_section_reader_takes_the_heading_literally():
     """Round 7, finding 1: `_section` promises the body under a literal
     `## heading`, and readme.md has `## Windows (cloud inference)` today, so a
@@ -633,6 +655,7 @@ def test_readme_opening_lists_the_engines_providers_offers_and_names_the_spec():
     CLAUDE.md, as the build specification: CLAUDE.md is two includes now."""
     from melampus import providers
 
+    # The raw opening, not `_opening`: the rows below are matched line by line.
     opening = README.read_text(encoding="utf-8").split("\n## ", 1)[0]
     rows = re.findall(r"^\| `([\w-]+)` \|(.*)$", opening, re.MULTILINE)
     listed = [name for name, _ in rows]
@@ -674,7 +697,7 @@ def test_the_openings_privacy_claim_names_the_setting_that_can_send_the_image_el
     confidentiality the configuration does not enforce."""
     setting = "ollama_url"
     for doc in (README, BRIEF):
-        opening = doc.read_text(encoding="utf-8").split("\n## ", 1)[0]
+        opening = _opening(doc.read_text(encoding="utf-8"))
         if "leaves the machine" not in opening:
             continue
         assert setting in opening, (
@@ -698,7 +721,7 @@ def test_only_the_readme_opening_lists_the_engines_the_other_openings_point_at_i
     names = [*providers.ENGINE_TITLES, providers.CLAUDE_CODE, providers.CODEX]
     words = [*titles, providers.CLAUDE_CODE_CLI.title, providers.CODEX_CLI.title]
     for doc in (BRIEF, ARCHITECTURE_DOC):
-        opening = doc.read_text(encoding="utf-8").split("\n## ", 1)[0]
+        opening = _opening(doc.read_text(encoding="utf-8"))
         assert "readme.md" in opening, (
             f"{doc.name}'s opening does not cite readme.md, which carries the engine list")
         restated = [n for n in names if n in re.findall(r"`([\w-]+)`", opening)]
@@ -719,7 +742,7 @@ def test_a_doc_whose_opening_says_macos_and_windows_does_not_still_offer_linux()
     modules, and is not this gate's business."""
     for doc in (README, BRIEF, ARCHITECTURE_DOC):
         text = doc.read_text(encoding="utf-8")
-        if "macOS and Windows" not in text.split("\n## ", 1)[0]:
+        if "macOS and Windows" not in _opening(text):
             continue
         offers = [line.strip() for line in text.splitlines() if "Linux" in line]
         assert not offers, (
