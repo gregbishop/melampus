@@ -129,10 +129,19 @@ to the subscription (Claude Code's login set aside for a key; an account that
 bills per call, `CliEngine.bills_per_call`: Codex's API-key sign-in; one the
 status check does not name as the subscription, `CliEngine.subscriptions`:
 Codex's is ChatGPT, and the guard fails closed on a wording it has not
-measured, and does not quote it). The one failure that stops a batch rather
-than being recorded on the frame is a command exiting
-non-zero (`CommandFailed`): that is a broken engine, not a bad file, and every
-frame would fail the same way. A CLI's decoder raises the same before the
+measured, and does not quote it). Two failures stop a batch rather than being
+recorded on the frame, stated once as `providers.BATCH_FATAL`: a command
+exiting non-zero (`CommandFailed`), a broken engine rather than a bad file;
+and `BackendUnavailable`, the refusal every check above raises, which staging
+raises too when the staging root lands inside the shared temp directories a
+CLI engine's permission profile grants whole (`images.staging_root`,
+docs/config.md § Codex CLI). Either way every frame would fail the same way,
+so the identification pass (`Identifier.identify`, `run_batch`) and the
+escalation pass (`escalate`) let both past their per-frame handlers, and the
+CLI stops the run at exit 3 with the message that names the fix
+(`cli._fail`). The refusal is never cached: nothing is written for the frame
+it fired on and no results file is written, so the next run, once the fix is
+in, tries that frame again. A CLI's decoder raises `CommandFailed` before the
 exit code is judged, so a plan at its usage limit (Codex fails the turn on
 stdout, naming the reset time) or a lapsed sign-in is explained in the CLI's
 own words rather than as "exited 1"; those words go through
