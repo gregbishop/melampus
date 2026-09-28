@@ -812,22 +812,49 @@ def test_the_action_pinning_gate_reports_a_uses_that_is_not_a_string(tmp_path, m
     assert "ci.yml" not in reported, reported
 
 
+def test_the_action_pinning_gate_ends_on_an_alias_to_itself(tmp_path, monkeypatch):
+    """YAML lets an anchored collection hold an alias to itself, and PyYAML
+    composes that as a node that contains itself, so a walk that went into
+    every node it met never ended: the gate hung instead of judging the
+    workflow. The walk visits each node once. The folder is a stand-in read
+    at call time; ci.yml in it is a pinned step whose `with:` holds such a
+    loop, x.yaml a moving tag beside one, so the gate ends and reports x.yaml
+    alone."""
+    sha = "11d5960a326750d5838078e36cf38b85af677262"
+    (tmp_path / "ci.yml").write_text(
+        f"      - uses: actions/checkout@{sha} # v4.4.0\n        with: &loop [*loop]\n", encoding="utf-8"
+    )
+    (tmp_path / "x.yaml").write_text(
+        "      - {uses: actions/checkout@v4, with: &loop {self: *loop}}\n", encoding="utf-8"
+    )
+    monkeypatch.setitem(globals(), "WORKFLOWS", tmp_path)
+    with pytest.raises(AssertionError) as unpinned:
+        test_every_workflow_pins_every_action_to_a_commit_sha_with_its_version()
+    reported = str(unpinned.value)
+    assert "x.yaml: - {uses: actions/checkout@v4, with: &loop {self: *loop}}" in reported, reported
+    assert "ci.yml" not in reported, reported
+
+
 RELEASE_ZIPS = ("Melampus-macOS.zip", "Melampus-Windows.zip")
 
 
 def _nodes(text: str) -> list[yaml.Node]:
-    """Every node YAML composes from that workflow text, each carrying the
-    marks of where it is written. What is a key, a value or a quoted scalar
-    is the parser's to say, not a guess from the characters around it."""
-    nodes, pending = [], list(yaml.compose_all(text, Loader=yaml.SafeLoader))
+    """Every node YAML composes from that workflow text, once each, carrying
+    the marks of where it is written. What is a key, a value or a quoted
+    scalar is the parser's to say, not a guess from the characters around
+    it. An alias is the very node it names, so a collection holding an alias
+    to itself contains itself, and the walk visits a node it has met once."""
+    nodes, pending = {}, list(yaml.compose_all(text, Loader=yaml.SafeLoader))
     while pending:
         node = pending.pop()
-        nodes.append(node)
+        if id(node) in nodes:
+            continue
+        nodes[id(node)] = node
         if isinstance(node, yaml.MappingNode):
             pending.extend(part for pair in node.value for part in pair)
         elif isinstance(node, yaml.SequenceNode):
             pending.extend(node.value)
-    return nodes
+    return list(nodes.values())
 
 
 def _action_references(text: str) -> list[tuple[str, bool]]:
