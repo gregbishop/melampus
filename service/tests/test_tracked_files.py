@@ -797,13 +797,12 @@ def test_a_fixtures_folder_is_the_same_folder_whatever_its_case(tmp_path):
     assert _fixture_paths(tracked) == [COMMITTED_FRAME, *fixtures, nested]
     assert _stray_fixture_paths(tracked) == stray
 
-    # Through git: the case a commit carries is the case the index lists.
+    # Through git: the case a path is added in is the case the index lists.
     repo = _throwaway_repo(tmp_path)
-    frame = tmp_path / "tagged.jpg"
-    metadata_laden(frame)
-    blob = _git("hash-object", "-w", "--", str(frame), repo=repo).stdout.strip()
-    entry = f"100644,{blob},{fixtures[0]}"
-    _git("update-index", "--add", "--cacheinfo", entry, repo=repo)
+    staged = repo / fixtures[0]
+    staged.parent.mkdir(parents=True)
+    staged.write_bytes(_tagged_frame(tmp_path))
+    _git("add", "--", fixtures[0], repo=repo)
     listed = _fixture_paths(_git("ls-files", "-z", repo=repo).stdout.split("\0"))
     blobs = {path: _index_bytes(path, repo=repo) for path in listed}
     refused = {path: _fixture_problems(path, blob) for path, blob in blobs.items()}
