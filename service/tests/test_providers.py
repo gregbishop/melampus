@@ -612,6 +612,27 @@ def test_default_engine_is_the_first_local_engine_detection_names_available_and_
     assert "key-from-env" not in str(err.value)
 
 
+def test_default_engine_takes_the_cloud_engine_named_for_it_only_after_the_local_ones(
+    monkeypatch, no_ambient_keys, no_ambient_ollama
+):
+    """Card #498, decision (b): `default_engine(cloud=...)` is the cloud
+    engine the user picked by storing its key in the plugin's Settings (the
+    plugin passes it as --default-cloud), taken when nothing local can run;
+    a local engine that can run still comes first. The refusal without one
+    says a key stored there is what lets Melampus choose a cloud engine."""
+    fake_platform(monkeypatch, "linux", "x86_64")
+    assert providers.default_engine(cloud="openai") == "openai"
+    assert providers.default_engine(cloud="claude") == "claude"
+    with pytest.raises(providers.BackendUnavailable) as err:
+        providers.default_engine()
+    assert "API key stored there" in str(err.value), err.value
+
+    monkeypatch.setattr(providers, "ollama_answers", lambda url=None: True)
+    assert providers.default_engine(cloud="openai") == "ollama"
+    fake_platform(monkeypatch, "darwin", "arm64")
+    assert providers.default_engine(cloud="openai") == "mlx"
+
+
 @contextlib.contextmanager
 def _ollama_served_by(monkeypatch, handler: type[QuietHandler], prefix: str = ""):
     """`handler` on 127.0.0.1 at an ephemeral port, standing in for Ollama:
@@ -1522,6 +1543,34 @@ def test_cli_with_nothing_local_refuses_rather_than_bill_a_key_from_the_environm
     settings = Path(__file__).resolve().parents[2] / "plugin" / "Melampus.lrplugin" / "MelampusSettings.lua"
     assert f"title = '{PICKER_GROUP}'" in settings.read_text(encoding="utf-8"), (
         "the refusal names a picker group the Settings dialog does not have")
+
+
+def test_cli_default_takes_the_cloud_engine_the_user_picked_when_nothing_local_runs(
+    monkeypatch, photos, tmp_path, capsys, no_ambient_ollama
+):
+    """Card #498, decision (b): a key the user stored in the plugin's Settings
+    is a choice. The CLI cannot tell it from a key in the environment (both
+    arrive as MELAMPUS_OPENAI_KEY), so the plugin says so on the command
+    line, `--default-cloud <engine>`, which the environment cannot set; with
+    nothing local able to run, that engine is the default, and the log line
+    says so. A local engine that can run still comes first, and an explicit
+    `--backend` is honoured over both, a cloud one included with its key in
+    the environment only (the refusal is for the unchosen default alone)."""
+    argv = [str(photos), "--cache", str(tmp_path / "cache.jsonl")]
+    for variable in ALL_KEY_VARIABLES:
+        monkeypatch.setenv(variable, "key-from-env")
+    fake_platform(monkeypatch, "win32", "AMD64")
+
+    assert _chosen_engine(monkeypatch, [*argv, "--default-cloud", "openai"]) == "openai"
+    assert "engine: openai" in capsys.readouterr().err
+    assert _chosen_engine(monkeypatch, [*argv, "--default-cloud", "claude"]) == "claude"
+    assert _chosen_engine(monkeypatch, [*argv, "--backend", "openai"]) == "openai"
+    assert _chosen_engine(monkeypatch, [*argv, "--default-cloud", "openai", "--backend", "codex"]) == "codex"
+
+    monkeypatch.setattr(providers, "ollama_answers", lambda url=None: True)
+    assert _chosen_engine(monkeypatch, [*argv, "--default-cloud", "openai"]) == "ollama"
+    fake_platform(monkeypatch, "darwin", "arm64")
+    assert _chosen_engine(monkeypatch, [*argv, "--default-cloud", "claude"]) == "mlx"
 
 
 def test_cli_detection_never_overrides_a_chosen_engine(

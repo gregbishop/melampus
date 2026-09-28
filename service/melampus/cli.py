@@ -359,8 +359,15 @@ def main(argv: list[str] | None = None) -> int:
                          "claude-code (Claude Code, signed in to a subscription), "
                          "codex (Codex CLI, signed in to a ChatGPT plan), or "
                          "scripted (a fake that answers nothing; for smoke tests "
-                         "without weights). Default: the first that can run "
-                         "here, per --detect-engines")
+                         "without weights). Default: the first local engine "
+                         "that can run here, per --detect-engines, else "
+                         "--default-cloud; never a cloud engine otherwise")
+    ap.add_argument("--default-cloud", choices=tuple(KEY_VARIABLES), default=None,
+                    help="with no engine chosen, the cloud engine the default may "
+                         "take when no local engine can run here; without it the "
+                         "default takes none, whatever API key the environment "
+                         "holds. The Lightroom plugin passes the one whose key is "
+                         "stored in its Settings")
     ap.add_argument("--detect-engines", action="store_true",
                     help="print, as JSON, which engines can run on this machine "
                          "and why or why not, then exit; needs no folder")
@@ -475,12 +482,13 @@ def main(argv: list[str] | None = None) -> int:
         ap.error("the following arguments are required: folder")
 
     # Nothing named an engine: neither --backend nor [model] backend. The
-    # first local engine that can run here answers (cards #404, #498),
-    # before anything reads the choice: the cloud retuning below, the cache
-    # file, the refusals. With none, the run is refused rather than billed.
+    # first local engine that can run here answers (cards #404, #498), else
+    # the cloud engine --default-cloud names, before anything reads the
+    # choice: the cloud retuning below, the cache file, the refusals. With
+    # neither, the run is refused rather than billed.
     try:
-        _pick_engine(config, functools.partial(default_engine, config.model.ollama_url),
-                     "the first local engine that can run here")
+        _pick_engine(config, functools.partial(default_engine, config.model.ollama_url, args.default_cloud),
+                     "the first local engine that can run here, else --default-cloud")
     except BackendUnavailable as exc:
         return _fail(str(exc))
 
