@@ -857,6 +857,28 @@ def test_the_action_pinning_gate_reports_a_value_that_runs_past_its_first_line(t
     assert "ci.yml" not in reported, reported
 
 
+def test_the_action_pinning_gate_reports_a_uses_key_with_no_value_at_the_end(tmp_path, monkeypatch):
+    """YAML lets a key be written explicitly, `? uses`, with no value after
+    it. PyYAML places that absent value where the next token would begin,
+    and at the end of the file that is past its last line, so the gate
+    looked for a line that is not there and crashed with IndexError instead
+    of naming the file. A value placed past the text is reported on its
+    key's line: it names no action, so it is not pinned. The folder is a
+    stand-in read at call time; ci.yml in it is pinned, so both .yaml files,
+    and only those, must be reported."""
+    sha = "11d5960a326750d5838078e36cf38b85af677262"
+    (tmp_path / "ci.yml").write_text(f"      - uses: actions/checkout@{sha} # v4.4.0\n", encoding="utf-8")
+    (tmp_path / "last.yaml").write_text("      ? uses\n", encoding="utf-8")
+    (tmp_path / "then-comment.yaml").write_text("      ? uses\n      # trailing\n", encoding="utf-8")
+    monkeypatch.setitem(globals(), "WORKFLOWS", tmp_path)
+    with pytest.raises(AssertionError) as unpinned:
+        test_every_workflow_pins_every_action_to_a_commit_sha_with_its_version()
+    reported = str(unpinned.value)
+    for name in ("last.yaml", "then-comment.yaml"):
+        assert f"{name}: ? uses" in reported, reported
+    assert "ci.yml" not in reported, reported
+
+
 RELEASE_ZIPS = ("Melampus-macOS.zip", "Melampus-Windows.zip")
 
 
@@ -894,7 +916,9 @@ def _action_references(text: str) -> list[tuple[str, bool]]:
     block collection ends where the next token begins, past any comment, so
     it does not say where the line's text ends. A value that starts on the
     line and runs on past it leaves nothing ending there, so that line has
-    no comment. One trailing comment cannot name two actions' versions, so
+    no comment; an absent value, `? uses` at the end of the file, is placed
+    past the last line, so it is read on its key's line and names no
+    action. One trailing comment cannot name two actions' versions, so
     a line holding two references is not pinned whatever each names. A
     workflow that does not parse cannot be read for its references, so it is
     one line nothing pins, the parser's error, reported by its name."""
@@ -908,7 +932,8 @@ def _action_references(text: str) -> list[tuple[str, bool]]:
         if isinstance(node, yaml.MappingNode):
             for key, value in node.value:
                 if key.value == "uses":
-                    references.setdefault(value.start_mark.line, []).append(value)
+                    line = value.start_mark.line if value.start_mark.line < len(lines) else key.start_mark.line
+                    references.setdefault(line, []).append(value)
     judged = []
     for line, values in sorted(references.items()):
         written = max(
