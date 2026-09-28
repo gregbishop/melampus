@@ -47,7 +47,7 @@ import logging  # noqa: E402
 import re  # noqa: E402
 import shutil  # noqa: E402
 import signal  # noqa: E402
-from contextlib import AbstractContextManager, ExitStack, closing, contextmanager, nullcontext, suppress  # noqa: E402
+from contextlib import AbstractContextManager, ExitStack, closing, contextmanager, suppress  # noqa: E402
 from dataclasses import asdict, dataclass  # noqa: E402
 from pathlib import Path  # noqa: E402
 from typing import Callable, Iterable, Iterator  # noqa: E402
@@ -86,6 +86,7 @@ from huggingface_hub.utils._http import default_client_factory  # noqa: E402 - t
 
 from .backend import OllamaBackend, ollama_request  # noqa: E402
 from .config import cache_file  # noqa: E402
+from .providers import BackendUnavailable  # noqa: E402
 
 PROGRESS = "progress"
 DONE = "done"
@@ -124,8 +125,9 @@ MODEL_FILE_PATTERNS = ("*.json", "*.safetensors", "*.py", "*.model", "*.tiktoken
 
 RERUN = "re-run melampus-id --download-model; it resumes where it stopped"
 # The refusal when the repo's lock (REPO_LOCK) is held, said once for the
-# download and the removal: whichever of the lock's three takers holds it,
-# the message names all three, since the probe cannot tell them apart.
+# download, the removal and the model's load (`load_lock`): whichever of
+# the lock's three takers holds it, the message names all three, since
+# none of them can tell which holds it.
 HELD = "another run holds {repo}: a download, an identification run loading it or a removal of it is running; " \
        "wait for it to finish"
 NOT_A_HUB = "whatever answers there is not a Hugging Face hub; check HF_ENDPOINT"
@@ -621,33 +623,48 @@ def _cache_paths(repo: str, cache_dir: Path | None) -> tuple[Path, Path, Path]:
     return cache, cache / folder, cache / ".locks" / folder
 
 
-def _repo_lock(lock_dir: Path, timeout: float | None) -> AbstractContextManager:
+def _repo_lock(lock_dir: Path, timeout: float) -> AbstractContextManager:
     """The repo's lock (REPO_LOCK) in its `.locks` folder, made if absent,
-    waited for at most `timeout` seconds (None: without bound): the one
-    `download_model`, `remove_model` and the model's load (`load_lock`)
-    take, said once so all take the same file."""
+    waited for at most `timeout` seconds: the one `download_model`,
+    `remove_model` and the model's load (`load_lock`) take, said once so
+    all take the same file."""
     lock_dir.mkdir(parents=True, exist_ok=True)
     return WeakFileLock(lock_dir / REPO_LOCK, timeout=timeout)
 
 
-def load_lock(repo: str) -> AbstractContextManager:
+@contextmanager
+def load_lock(repo: str) -> Iterator[None]:
     """The repo's lock for the model's load (`MLXBackend._ensure_loaded`):
     mlx-vlm's `load` runs the hub library's `snapshot_download` for what
     the cache (`HF_HUB_CACHE`, the one `_cache_paths` reads) does not hold,
     under the library's per-blob locks alone, so a removal's probe could
     find nothing held for a blob the load had not reached and delete the
     load's files under it. Held for the whole load, the lock makes a
-    removal in that time refuse as running, and a load starting under a
-    removal wait for it, without bound as the library's own download
-    waits at a blob's lock, then fetch from nothing. A `repo` that is a
-    folder on disk (weights mlx-vlm's `get_model_path` loads as they are,
-    fetching nothing) is in no cache: nothing to lock, and no id for the
-    cache to refuse. Said here, beside the lock's other two takers, so the
-    backend names one thing of the cache and none of its layout."""
+    removal in that time refuse as running. A load that finds it held (by
+    a download, most often the one Settings runs, another run's load or a
+    removal) waits LOCK_TIMEOUT for it, as the download does, and is then
+    refused as a machine that cannot run the engine as configured is
+    (BackendUnavailable, which stops the batch at exit 3), naming the
+    holders and the Download in Settings (card #501): waiting without
+    bound, the analysis sat at "loading" until a download of many
+    gigabytes ended, and said nothing. A `repo` that is a folder on
+    disk (weights mlx-vlm's `get_model_path` loads as they are, fetching
+    nothing) is in no cache: nothing to lock, and no id for the cache to
+    refuse. Said here, beside the lock's other two takers, so the backend
+    names one thing of the cache and none of its layout."""
     if Path(repo).exists():
-        return nullcontext()
+        yield
+        return
     _, _, locks = _cache_paths(repo, None)
-    return _repo_lock(locks, None)
+    with ExitStack() as held:
+        try:
+            held.enter_context(_repo_lock(locks, LOCK_TIMEOUT))
+        except Timeout as exc:
+            raise BackendUnavailable(
+                f"{HELD.format(repo=repo)}, then run the analysis again. If the model is being "
+                "downloaded, the Download in Settings shows its progress."
+            ) from exc
+        yield
 
 
 def download_model(

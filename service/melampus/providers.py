@@ -419,8 +419,10 @@ class BackendUnavailable(RuntimeError):
 
     An uninstalled command, a signed-out CLI, an Ollama with no server — and
     `images.staging_root`, which refuses a staging root inside the directories
-    a CLI engine's permission profile grants whole. All of them are settled
-    before a frame is read and none of them changes from frame to frame.
+    a CLI engine's permission profile grants whole, and `download.load_lock`,
+    which refuses the MLX model's load while another run, a download from
+    Settings most often, holds the model. All of them are settled before a
+    frame is read and none of them changes from frame to frame.
     """
 
 
