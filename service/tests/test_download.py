@@ -3682,7 +3682,9 @@ def test_cli_pull_cancelled_by_a_signal_prints_cancelled_exit_4_and_the_next_pul
     """The signal path for ollama: mid-stream against the throttled fake, the
     signal arrives, the command prints `cancelled` and exits 4 with the
     stream closed; run again at full speed the second pull is asked for,
-    starts from what Ollama kept, and completes."""
+    starts from what Ollama kept, and completes. The pull goes on printing
+    progress until the signal lands, so what follows the test's last read
+    is progress lines and then `cancelled`, last and once (card #508)."""
     flags = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if sys.platform == "win32" else {}
     with _slow_ollama().serve() as ollama:
         size = ollama.library[FAKE_MODEL][0]
@@ -3693,6 +3695,9 @@ def test_cli_pull_cancelled_by_a_signal_prints_cancelled_exit_4_and_the_next_pul
         for line in proc.stdout:
             lines.append(Update.parse(line))
             if lines[-1].state == "progress" and lines[-1].bytes_done >= 1024 * 1024:
+                # The signal held back while the pull prints more progress,
+                # so every run has lines between the last read and the signal.
+                time.sleep(0.1)
                 _interrupt(proc)
                 break
         rest = proc.stdout.read()
@@ -3700,7 +3705,8 @@ def test_cli_pull_cancelled_by_a_signal_prints_cancelled_exit_4_and_the_next_pul
         code = proc.wait(timeout=60)
         ollama.throttle = None
         assert code == EXIT_CANCELLED, (code, stderr[-3000:])
-        assert rest.splitlines() == ["cancelled"], rest
+        tail = [Update.parse(line).state for line in rest.splitlines()]
+        assert tail == ["progress"] * (len(tail) - 1) + ["cancelled"], rest
         assert "Traceback" not in stderr, stderr[-3000:]
         kept = lines[-1].bytes_done
         assert 0 < kept < size
