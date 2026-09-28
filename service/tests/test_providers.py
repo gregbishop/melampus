@@ -3314,6 +3314,15 @@ def _script_on_path(monkeypatch, tmp_path, name: str, text: str) -> Path:
     return script
 
 
+#: How long a script `_script_on_path` wrote can take to start the first
+#: time it runs: macOS assesses a freshly written executable before running
+#: it, measured over 40 fresh scripts on a machine at rest at 0.54 to 2.11s
+#: (median 0.83s) against the interpreter's own 0.02s, and longer on a
+#: loaded one. A timeout the script must be up within, or a bound on a call
+#: that runs it, leaves this and SCHEDULING_SLACK beside it (card #506).
+SCRIPT_START = 2.0
+
+
 def _real_detection(monkeypatch, cli: providers.CliEngine) -> None:
     """Run the real detection of `cli` against what this test put on PATH:
     conftest's autouse fixture stubs it out for every test, so one that
@@ -3477,8 +3486,11 @@ def test_command_backend_timeout_stops_the_worker_the_command_started(monkeypatc
     the way a CLI wrapping a daemon does, and neither answers within the
     timeout. Then the run is a TimeoutError as before, and the worker is
     gone too: stopping only the command would leave a worker per timed-out
-    frame running while the batch goes on."""
-    backend = _real_command_backend(monkeypatch, tmp_path, _LAUNCHER_SCRIPT, timeout=1,
+    frame running while the batch goes on. The worker must be running, its
+    pid written, before the timeout stops the tree, so the timeout leaves
+    the command's start SCRIPT_START and SCHEDULING_SLACK."""
+    timeout = SCRIPT_START + SCHEDULING_SLACK
+    backend = _real_command_backend(monkeypatch, tmp_path, _LAUNCHER_SCRIPT, timeout=timeout,
                                     pid_file=str(pid_file), waits=True)
     image = tmp_path / "image.jpg"
     image.write_bytes(b"jpeg")
@@ -3486,7 +3498,7 @@ def test_command_backend_timeout_stops_the_worker_the_command_started(monkeypatc
     with pytest.raises(TimeoutError) as err:
         backend.complete(image, "prompt", 10)
 
-    assert "fake-vlm did not answer within 1s" in str(err.value)
+    assert f"fake-vlm did not answer within {timeout:g}s" in str(err.value)
     worker = int(pid_file.read_text(encoding="utf-8"))
     assert _gone(worker, within=10.0), f"worker {worker} is still running after the timeout"
 
@@ -3542,8 +3554,9 @@ def test_command_backend_uses_the_reply_of_a_command_that_exits_leaving_a_worker
     outcome was a TimeoutError at the whole timeout, advising a longer one
     that could not help, the reply discarded), the worker is gone, and
     the group was stopped by a pid that was still the command's own, its
-    exited process unreaped (a signal 0 still reaches it)."""
-    backend = _real_command_backend(monkeypatch, tmp_path, _LAUNCHER_SCRIPT, timeout=4,
+    exited process unreaped (a signal 0 still reaches it). "Well inside" is
+    the command's start, SCRIPT_START, and SCHEDULING_SLACK, of 10s."""
+    backend = _real_command_backend(monkeypatch, tmp_path, _LAUNCHER_SCRIPT, timeout=10,
                                     pid_file=str(pid_file), waits=False)
     image = tmp_path / "image.jpg"
     image.write_bytes(b"jpeg")
@@ -3561,7 +3574,7 @@ def test_command_backend_uses_the_reply_of_a_command_that_exits_leaving_a_worker
     started = time.monotonic()
     completion = backend.complete(image, "prompt", 10)
 
-    assert time.monotonic() - started < 2, "the reply was held to the timeout"
+    assert time.monotonic() - started < SCRIPT_START + SCHEDULING_SLACK, "the reply was held to the timeout"
     assert completion.text.strip() == ID_OK
     worker = int(pid_file.read_text(encoding="utf-8"))
     assert _gone(worker, within=10.0), f"worker {worker} outlived the command's exit"
