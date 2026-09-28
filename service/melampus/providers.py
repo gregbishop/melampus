@@ -382,7 +382,10 @@ CODEX_PROGRAM = "codex"
 #: unset, PromptLibrary.render reads its prompts from there for every
 #: frame and code is loaded from there, so images.staging_root refuses a
 #: frozen run unpacked inside them, exit 3, saying to set $TMPDIR outside
-#: them (security review round 1 on PR #28); and melampus
+#: them (security review round 1 on PR #28); the executable's own file,
+#: which it reads code from at every import and every launch runs, is
+#: refused the same way when it sits inside them, saying to move it
+#: (security review round 2 on PR #28); and melampus
 #: wraps no CLI engine in a sandbox of its own. It is revisited when
 #: Codex's permission profiles leave beta; the measurement is recorded in
 #: security review round 9 on PR #17. docs/config.md says the same and

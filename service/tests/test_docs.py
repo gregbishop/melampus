@@ -2219,7 +2219,16 @@ def test_config_doc_says_the_codex_profile_leaves_the_shared_temp_directories_wr
     can overwrite what is there) or the grounds given for it (the answer is
     what Codex prints, the staged folder is outside them) left this pin
     green while the doc made an unconditional claim that is false for
-    photographs in /tmp. Both are required inside the decision passage."""
+    photographs in /tmp. Both are required inside the decision passage.
+
+    Security review round 2 on PR #28: the unpack directory is not the only
+    file of the executable's in reach. PyInstaller reads each module from
+    the executable's own file at every import, and every launch runs what
+    is at that path. Measured under this profile, codex-cli 0.158.0, no
+    model call: a command listed /tmp and replaced an executable in a
+    user-owned folder there. `images.staging_root` refuses a frozen run
+    started from inside the grant the same way, so the passage says so,
+    with the fix the refusal names."""
     prose = " ".join(CONFIG_DOC.read_text(encoding="utf-8").split())
     for path in ("`/tmp`", "`/private/tmp`", "`/var/tmp`", "`/private/var/tmp`"):
         assert path in prose, f"docs/config.md does not name {path} under the profile"
@@ -2243,6 +2252,8 @@ def test_config_doc_says_the_codex_profile_leaves_the_shared_temp_directories_wr
         "its prompts",  # what melampus reads there, for every frame
         "a frozen run unpacked inside them refuses",  # enforced, not advised
         "set `$TMPDIR` outside them",  # the fix the refusal names
+        "a frozen run started from inside them is refused",  # the executable file too
+        "move the executable",  # the fix that refusal names
     ):
         assert said in decision.group(0), (
             f"docs/config.md does not say {said!r} where it states the shared temp writes are accepted")
