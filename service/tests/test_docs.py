@@ -2210,7 +2210,16 @@ def test_config_doc_says_the_codex_profile_leaves_the_shared_temp_directories_wr
     inside the grant, exit 3, before any frame is staged, whatever the
     engine (test_pipeline.py and test_binary.py pin the code). So the
     passage says melampus refuses, naming the fix the refusal names, and no
-    longer leaves it to the user as advice."""
+    longer leaves it to the user as advice.
+
+    Review round 1 on PR #28 (Codex code review, finding 1; Claude code
+    review, finding 2): the bare phrase "never reads" is not the decision's
+    ground. Deleting the caveat that keeps it true (the photographs and any
+    file melampus is pointed at kept out of those directories, since a run
+    can overwrite what is there) or the grounds given for it (the answer is
+    what Codex prints, the staged folder is outside them) left this pin
+    green while the doc made an unconditional claim that is false for
+    photographs in /tmp. Both are required inside the decision passage."""
     prose = " ".join(CONFIG_DOC.read_text(encoding="utf-8").split())
     for path in ("`/tmp`", "`/private/tmp`", "`/var/tmp`", "`/private/var/tmp`"):
         assert path in prose, f"docs/config.md does not name {path} under the profile"
@@ -2224,6 +2233,9 @@ def test_config_doc_says_the_codex_profile_leaves_the_shared_temp_directories_wr
         "card #505",  # where it was decided
         "never per call",  # why: the engine bills to the user's own plan
         "never reads",  # why: melampus does not read what a run leaves there
+        # the grounds for "never reads", and the caveat that keeps it true
+        "since it takes the answer from what Codex prints and stages outside them",
+        "keep the photographs, and any file melampus is pointed at, out of them",
         "sandbox of its own",  # why: the same holds of every CLI engine a user installs
         "leave beta",  # when it is revisited
         "security review round 9",  # where the measurement is
