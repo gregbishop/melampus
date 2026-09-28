@@ -335,8 +335,8 @@ next question is sent (measured on a Mac, security review round 1 on PR
 #28), and loads code from there, so a frozen run unpacked inside them refuses
 to stage anything, whatever the engine, and stops at exit 3 naming the
 directory and saying to set `$TMPDIR` outside them (`images.staging_root`);
-the Lightroom plugin sets it to Lightroom's own temp directory on every line
-it runs (docs/plugin.md). The executable's own file is held to it too: it
+on macOS the Lightroom plugin sets it to Lightroom's own temp directory on
+every line it runs (docs/plugin.md). The executable's own file is held to it too: it
 reads its code from that file at every import, and every launch runs
 whatever is there, which a run could replace (measured on a Mac, security
 review round 2 on PR #28), so a frozen run started from inside them is

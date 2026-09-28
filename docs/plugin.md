@@ -139,9 +139,10 @@ never in the preferences, never in `melampus.local.toml` or any other file,
 and never logged. When a run starts, `MelampusAnalyze.lua` sets that variable
 in the executable's environment for the picked engine only (with none picked,
 for the engine `--default-cloud` names, below): `LrTasks.execute`
-takes one shell line and nothing else, so the line begins `VAR='key'` (sh) or
-`set "VAR=key" &&` (cmd.exe) ahead of the executable, and the log carries the
-line with the value blanked. The key is not an argument of the executable, but
+takes one shell line and nothing else, so `VAR='key'` (sh, after the line's
+`TMPDIR='…'`, see above) or `set "VAR=key" &&` (cmd.exe, where the line begins
+with it) goes ahead of the executable, and the log carries the line with the
+value blanked. The key is not an argument of the executable, but
 the shell line is the child's command line for the run's duration. On Windows a
 stored key holding `"`, `%` or a line break is refused before anything runs, the
 way a path holding `%` is: cmd.exe would rewrite any of them inside
