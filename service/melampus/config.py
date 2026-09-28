@@ -447,9 +447,12 @@ def _secrets_from_environment() -> dict[str, Any]:
 def _read(file: Path) -> dict[str, Any]:
     """The settings in `file`, a melampus config (melampus.local.toml or
     --config's), parsed; else a ValueError naming the file as the melampus
-    config, with the parser's words for where it went wrong: TOML it
-    refuses (its line and column) or bytes that are not UTF-8, TOML's one
-    encoding. The CLI refuses it on exit 3, as it refuses a setting."""
+    config: no file there, or, with the parser's words for where it went
+    wrong, TOML it refuses (its line and column) or bytes that are not
+    UTF-8, TOML's one encoding. The CLI refuses it on exit 3, as it
+    refuses a setting."""
+    if not file.is_file():
+        raise ValueError(f"The melampus config {file} was not found")
     try:
         with file.open("rb") as handle:
             return tomllib.load(handle)
@@ -472,10 +475,7 @@ def load_config(
     if use_local and local.is_file():
         data = _deep_merge(data, _read(local))
     if path is not None:
-        file = Path(path).expanduser()
-        if not file.is_file():
-            raise FileNotFoundError(f"Config file not found: {file}")
-        data = _deep_merge(data, _read(file))
+        data = _deep_merge(data, _read(Path(path).expanduser()))
     data = _deep_merge(data, _secrets_from_environment())
     if overrides:
         data = _deep_merge(data, overrides)

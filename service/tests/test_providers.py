@@ -2182,6 +2182,23 @@ def test_config_file_that_cannot_be_read_is_refused_on_exit_3_naming_it(
     assert "Traceback" not in err, err
 
 
+def test_config_path_that_does_not_exist_is_refused_on_exit_3_naming_it(tmp_path, capsys):
+    """Code review, card #503, round 1: every config refusal is exit 3, a
+    --config path with no file there included. It raised FileNotFoundError
+    out of `main`, a traceback. Given a --config path that does not
+    exist, when the config loads, then the refusal is exit 3, naming the
+    path as the melampus config."""
+    from melampus.cli import main
+
+    missing = tmp_path / "no-such-settings.toml"
+    code = main([str(tmp_path), "--config", str(missing), "--no-local-config"])
+
+    err = capsys.readouterr().err
+    assert code == 3, err
+    assert f"melampus config {missing}" in err, err
+    assert "Traceback" not in err, err
+
+
 class _FakeRun:
     """Stands in for subprocess.Popen at the backend's process edge: records
     every call, then returns a started process whose stdout and stderr
