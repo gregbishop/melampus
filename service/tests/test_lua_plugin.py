@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -395,6 +396,7 @@ def _plugin_under_the_mock(
 def _command_the_plugin_builds(
     plugin_dir: Path, previews: Path, results: Path, tmp_path: Path, *, engine: str,
     stored_key: str = "", detect_in: Mapping[str, str] | None = None,
+    lightroom_temp: Path | None = None,
 ) -> str:
     """The shell command MelampusAnalyze.lua builds under the mock SDK to run
     the analysis, with `_PLUGIN.path` at `plugin_dir` and the engine
@@ -406,7 +408,9 @@ def _command_the_plugin_builds(
     stored. With no engine picked the plugin asks --detect-engines first
     (card #498): given `detect_in`, an environment, that detection runs the
     executable beside the plugin through the shell, in it (the rest is only
-    built); without, detection answers nothing and no key is handed over."""
+    built); without, detection answers nothing and no key is handed over.
+    `lightroom_temp`, when given, is the TMPDIR the fake macOS Lightroom's
+    temp folder is made under, in place of tmp_path."""
     return _plugin_under_the_mock(
         plugin_dir, tmp_path,
         "if os.getenv('MELAMPUS_STORED_KEY') ~= '' then\n"
@@ -427,7 +431,8 @@ def _command_the_plugin_builds(
         detect_in if detect_in is not None else os.environ,
         MELAMPUS_PREVIEWS=str(previews), MELAMPUS_RESULTS=str(results),
         MELAMPUS_ENGINE=engine, MELAMPUS_STORED_KEY=stored_key,
-        MELAMPUS_DETECT="1" if detect_in is not None else "0")
+        MELAMPUS_DETECT="1" if detect_in is not None else "0",
+        **({"TMPDIR": str(lightroom_temp)} if lightroom_temp is not None else {}))
 
 
 def _for_the_mocks_shell(env: Mapping[str, str]) -> dict[str, str]:
@@ -562,8 +567,9 @@ def test_the_cli_engine_preference_reaches_the_executable_through_the_command_th
         stored_key=STORED_KEY)
     assert f"--backend {as_the_shell_receives_it(engine)}" in command, command
     # The executable first: on Windows after the quote the whole line is
-    # wrapped in for cmd.exe, on macOS at the very start.
-    line = command[1:] if WINDOWS else command
+    # wrapped in for cmd.exe, on macOS after Lightroom's temp folder as
+    # TMPDIR (PR #28, pinned whole by the suites), which is no key.
+    line = command[1:] if WINDOWS else re.sub(r"^TMPDIR='[^']*' ", "", command, count=1)
     assert line.startswith(as_the_shell_receives_it(plugin_dir / built_executable.name)), (
         f"something is set ahead of the executable for an engine that needs no key:\n{command}")
     assert "MELAMPUS_" not in command and STORED_KEY not in command, command
@@ -739,6 +745,52 @@ def test_the_command_the_plugin_builds_runs_the_executable_beside_it(
 
     command = _command_the_plugin_builds(plugin_dir, previews, results, tmp_path, engine="")
     assert as_the_shell_receives_it(plugin_dir / built_executable.name) in command, command
+
+    proc = run_as_lightroom_would(command, env=env, cwd=tmp_path,
+                                  capture_output=True, text=True, timeout=600)
+
+    assert proc.returncode == 0, (
+        f"exit {proc.returncode}: {proc.stderr[-2000:]}\n{_cli_log_tail(tmp_path)}")
+    assert_scripted_results(results)
+
+
+def test_the_command_the_plugin_builds_runs_where_lightroom_sets_no_tmpdir(
+    built_executable: Path, photos: Path, tmp_path: Path
+):
+    """PR #28 at the real boundary. The one-file executable unpacks itself
+    into $TMPDIR, and into /tmp when that is unset, and a frozen run unpacked
+    under /tmp refuses to stage, exit 3 (images.staging_root). What Lightroom's
+    own environment holds is not the plugin's to know, so on macOS the command
+    it builds hands the executable Lightroom's temp folder as TMPDIR
+    (`LrPathUtils.getStandardFilePath('temp')`, /var/folders/<per-user>/T/ in
+    the plugin's log), through the same environment prefix a key travels in.
+    Run through sh with TMPDIR unset in the parent, as a Lightroom without it
+    would, the executable still analyses the frame and the enriched results
+    land where the command said.
+
+    On Windows the plugin adds nothing: the directories a CLI engine's
+    profile grants are POSIX paths, and the executable unpacks under %TEMP%.
+    The same run there shows the command carries no TMPDIR and still runs."""
+    plugin_dir = _plugin_folder_holding(built_executable, tmp_path)
+    previews = photos
+    results = previews / "results.json"
+    env = per_user_config(tmp_path, "[model]\nbackend = 'scripted'\n")
+    del env["TMPDIR"]
+    # Lightroom's temp folder under a name with a space and an apostrophe,
+    # which sh's quoting has to carry through whole.
+    lightroom_temp = tmp_path / "Light room's temp"
+    lightroom_temp.mkdir()
+
+    command = _command_the_plugin_builds(
+        plugin_dir, previews, results, tmp_path, engine="", lightroom_temp=lightroom_temp)
+    if WINDOWS:
+        assert "TMPDIR" not in command, command
+    else:
+        first = shlex.split(command)[0]
+        assert first.startswith("TMPDIR="), (
+            f"the command does not hand the executable a TMPDIR first:\n{command}")
+        assert Path(first.removeprefix("TMPDIR=")).parent == lightroom_temp, (
+            f"the TMPDIR handed over is not the mock Lightroom's temp folder:\n{command}")
 
     proc = run_as_lightroom_would(command, env=env, cwd=tmp_path,
                                   capture_output=True, text=True, timeout=600)

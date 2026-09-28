@@ -70,7 +70,14 @@ neither names nor lets a plugin choose, so the path shown could only have been
 a guess. Settings → **Show log file** opens that folder with the log selected,
 making both if nothing has been logged yet. The executable's own output from a
 run goes to `melampus-cli.log` in the OS temp directory; a failed run's message
-names both files.
+names both files. On macOS every line the plugin runs begins
+`TMPDIR='<that temp directory>'`, set the way a key is (*The engine*, below):
+the one-file executable unpacks itself into `$TMPDIR`, into `/tmp` when it is
+unset, and refuses to run unpacked in `/tmp` or its kin, where a CLI engine's
+run can write (docs/config.md § Codex CLI). What Lightroom's own environment
+holds is not the plugin's to know; Lightroom's temp directory,
+`/var/folders/<per-user>/T/` in the plugin's log, is outside them. On Windows
+nothing is set: the executable unpacks under `%TEMP%`.
 
 ---
 

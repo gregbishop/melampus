@@ -146,13 +146,31 @@ local function quote(text)
 	return "'" .. string.gsub(text, "'", "'\\''") .. "'"
 end
 
+--- A variable set in the child's environment, ahead of the command. LrTasks
+-- .execute takes one string and nothing else, so the shell sets it: `VAR=
+-- 'value' command` for sh, `set "VAR=value" && command` for cmd.exe. That
+-- string is the child's command line for the run's duration, which is why
+-- the caller logs the line with a key's value replaced, never this one.
+local function environmentPrefix(name, value)
+	if WIN_ENV then return 'set "' .. name .. '=' .. value .. '" && ' end
+	return name .. '=' .. quote(value) .. ' '
+end
+
 --- The whole line, as the platform's shell needs to receive it.
 -- cmd.exe /c, given a line that starts with a quote and holds more than two,
 -- strips the first and the last one (see `cmd /?`); wrapped in a pair of its
 -- own, the line loses only those and the quotes around each path survive.
+-- sh gets Lightroom's own temp folder ahead of the line as TMPDIR: the
+-- one-file executable unpacks itself into $TMPDIR, into /tmp when that is
+-- unset, and a frozen run unpacked under /tmp refuses to stage, since a CLI
+-- engine's run can write there (images.staging_root, PR #28). What
+-- Lightroom's environment holds is not the plugin's to know; its temp folder
+-- (/var/folders/<per-user>/T/ in the plugin's log) is outside those
+-- directories. cmd.exe gets nothing more: they are POSIX paths, and the
+-- executable unpacks under %TEMP% on Windows.
 local function shellLine(command)
 	if WIN_ENV then return '"' .. command .. '"' end
-	return command
+	return environmentPrefix('TMPDIR', LrPathUtils.getStandardFilePath('temp')) .. command
 end
 
 --- Why the command must not run on Windows, or nil when it may.
@@ -176,16 +194,6 @@ local function windowsPathRefusal(checked)
 		end
 	end
 	return nil
-end
-
---- A variable set in the child's environment, ahead of the command. LrTasks
--- .execute takes one string and nothing else, so the shell sets it: `VAR=
--- 'value' command` for sh, `set "VAR=value" && command` for cmd.exe. That
--- string is the child's command line for the run's duration, which is why
--- the caller logs the line with the value replaced, never this one.
-local function environmentPrefix(name, value)
-	if WIN_ENV then return 'set "' .. name .. '=' .. value .. '" && ' end
-	return name .. '=' .. quote(value) .. ' '
 end
 
 --- Why the key must not go to cmd.exe, or nil when it may. Inside

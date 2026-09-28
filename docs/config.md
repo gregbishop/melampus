@@ -334,8 +334,9 @@ prompts from there for every frame, so a run could rewrite the prompt the
 next question is sent (measured on a Mac, security review round 1 on PR
 #28), and loads code from there, so a frozen run unpacked inside them refuses
 to stage anything, whatever the engine, and stops at exit 3 naming the
-directory and saying to set `$TMPDIR` outside them (`images.staging_root`).
-Nor is it different for any CLI engine a user installs: melampus wraps none
+directory and saying to set `$TMPDIR` outside them (`images.staging_root`);
+the Lightroom plugin sets it to Lightroom's own temp directory on every line
+it runs (docs/plugin.md). Nor is it different for any CLI engine a user installs: melampus wraps none
 of them in a sandbox of its own, so each reaches as far as that CLI's own
 mechanism lets it. It is revisited when
 Codex's permission profiles leave beta. The measurement is recorded in

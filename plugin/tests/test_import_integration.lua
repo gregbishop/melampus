@@ -435,12 +435,15 @@ end
 --- the cloud engine's key variable and the key LrPasswords holds for it: set
 --- ahead of the executable in its environment (`VAR='key' command`, as sh
 --- sets one) when given, nothing when not. `defaultCloud` is the engine
---- --default-cloud names with no engine set (engineOption).
+--- --default-cloud names with no engine set (engineOption). First of all,
+--- Lightroom's temp folder as TMPDIR (mock.macTemp), ahead of any key: the
+--- executable unpacks there, never under /tmp, whatever Lightroom's own
+--- environment holds.
 local function macCommand(engine, variable, key, defaultCloud)
 	local temp = mock.state.tempDir
 	local previews = temp .. '/melampus-previews-1'
 	local environment = variable and (variable .. '=' .. mock.sh(key) .. ' ') or ''
-	return environment .. table.concat({
+	return mock.macTemp() .. environment .. table.concat({
 		mock.sh(MAC_EXECUTABLE), mock.sh(previews),
 		'--profile', mock.sh('wildlife') .. engineOption(engine, mock.sh, defaultCloud),
 		'--plugin-out', mock.sh(previews .. '/results.json'),
@@ -742,6 +745,19 @@ t.test('with no engine picked and nothing local, the first cloud engine whose ke
 		'not the command with the Claude key and --default-cloud claude, an emptied OpenAI key being no key')
 end)
 
+t.test('on macOS the detection a run with no engine picked asks for, and the run, hand the executable Lightroom\'s temp folder as TMPDIR', function()
+	-- PR #28: a frozen run unpacked under /tmp refuses to stage, and what
+	-- Lightroom's environment holds is not the plugin's to know, so the
+	-- detection line card #498 added carries it too; the run line's order,
+	-- TMPDIR then the key, is macCommand's, pinned above.
+	commandWithKeys('', { MELAMPUS_OPENAI_KEY = KEY }, NOTHING_LOCAL)
+	t.equals(#mock.state.executed, 2, 'expected detection, then the run')
+	for _, command in ipairs(mock.state.executed) do
+		t.equals(string.sub(command, 1, #mock.macTemp()), mock.macTemp(),
+			'a command without Lightroom\'s temp folder as TMPDIR: ' .. command)
+	end
+end)
+
 t.test('with no engine picked and no key stored, the command names no cloud engine and carries no key', function()
 	t.equals(commandWithKeys('', {}, NOTHING_LOCAL), macCommand(''), 'a cloud engine was named with no key stored')
 end)
@@ -883,10 +899,12 @@ end
 
 --- The one line detection runs on macOS: the executable beside the plugin
 --- asked for its verdicts, its stdout to a file in the mock's temp directory
---- and its stderr to the CLI log there, every path single-quoted for sh.
+--- and its stderr to the CLI log there, every path single-quoted for sh,
+--- with Lightroom's temp folder as TMPDIR ahead of it all (mock.macTemp).
 local function macDetectionCommand()
 	local temp = mock.state.tempDir
-	return string.format("'%s' --detect-engines >'%s/melampus-engines.json' 2>'%s/melampus-cli.log'",
+	return mock.macTemp() .. string.format(
+		"'%s' --detect-engines >'%s/melampus-engines.json' 2>'%s/melampus-cli.log'",
 		MAC_EXECUTABLE, temp, temp)
 end
 
