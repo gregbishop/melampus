@@ -684,6 +684,54 @@ def test_a_chunk_that_draws_no_picture_is_refused(tmp_path):
         ], chunk
 
 
+def test_a_chunk_after_the_pixels_is_refused(tmp_path):
+    """Claude round 9, finding 2: the walks name every chunk on the way to the
+    image's end, and every chunk the tests refused sat before the first scan
+    or IDAT, so a walk that stopped naming chunks once the pixels began left
+    the suite green. Pillow reads a JPEG's markers only up to its first scan,
+    and a PNG's text after IDAT into `info` without raising, so only the walk
+    refuses these: a comment after a JPEG's scan, an Exif APP1 between a
+    progressive JPEG's scans, and a text chunk after a PNG's IDAT."""
+    tagged = _tagged_frame(tmp_path)
+    payload = base64.b64encode(tagged)
+    with Image.open(io.BytesIO(tagged)) as image:
+        exif = image.info["exif"]
+    jpeg, png = _frame(), _frame(format="PNG")
+    progressive = _frame(progressive=True)
+    second_scan = progressive.index(b"\xff\xda", progressive.index(b"\xff\xda") + 2)
+    frames = [
+        # EOI, a JPEG's last 2 bytes, follows its scan; IEND is a PNG's last 12.
+        ("COM", jpeg[:-2] + _jpeg_segment(0xFE, payload) + jpeg[-2:]),
+        (
+            "APP1",
+            progressive[:second_scan]
+            + _jpeg_segment(0xE1, exif)
+            + progressive[second_scan:],
+        ),
+        ("tEXt", png[:-12] + _png_chunk(b"tEXt", b"frame\0" + payload) + png[-12:]),
+    ]
+    for chunk, frame in frames:
+        assert _frame_problems(frame) == [
+            f"carries chunks that draw no picture: {chunk}"
+        ], chunk
+
+
+def test_a_frame_with_restart_markers_or_fill_bytes_passes():
+    """Claude round 9, finding 2: inside a scan, 0xFF is followed by a stuffed
+    0x00 or by a restart marker, RST0-RST7, which the walk steps over; before
+    a marker, 0xFF may be a fill byte, which it skips. No test had a frame
+    with either, so narrowing the one or dropping the other left the suite
+    green. Pillow writes restart markers every MCU with restart_marker_blocks
+    (a 64 x 64 frame has 15); a fill byte goes before the DQT."""
+    restarts = _frame(Image.new("RGB", (64, 64)), restart_marker_blocks=1)
+    assert b"\xff\xd0" in restarts
+    jpeg = _frame()
+    tables = jpeg.index(b"\xff\xdb")
+    filled = jpeg[:tables] + b"\xff" + jpeg[tables:]
+    for frame in (restarts, filled):
+        assert _frame_problems(frame) == []
+
+
 def test_a_fixture_is_judged_as_a_frame_whatever_it_is_called():
     # A fixture listed as an image is judged as a frame, never by an allowlist
     # of image suffixes: a frame under any other suffix is still a frame, and
