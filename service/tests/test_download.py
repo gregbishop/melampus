@@ -564,6 +564,37 @@ def test_download_refuses_a_content_range_whose_length_is_not_a_number(fake_hub:
     assert all(p.stat().st_size == 0 for p in _incomplete(tmp_path / "hub")), "bytes were written"
 
 
+# A file name a hostile hub may list: the library's path checks take it (no
+# `..`, not absolute), and it carries an escape that retitles the terminal,
+# one that erases the line, a bell and a line break.
+ESCAPING_NAME = "model\x1b]0;hub\x07\x1b[2K\n.safetensors"
+
+
+@pytest.mark.parametrize("size", [
+    pytest.param("-1", id="not a count"),
+    pytest.param("60000000000", id="above the hub library's download limit"),
+    pytest.param("1.5", id="no size"),
+])
+def test_download_refusal_of_a_size_prints_no_control_character_from_the_file_name(tmp_path: Path, size: str):
+    """Security, card #500 (security round 1): the refusal of a size names
+    the file, and the name is the hub's text. It reached stderr as the hub
+    gave it, and from there the terminal, the plugin's download log and its
+    failure dialog: an escape sequence in it retitled the terminal or erased
+    the line, and a line break faked a line of its own. Given a hub listing
+    a file whose name carries them, each of the plan's size refusals is one
+    printable line that still names the file."""
+    files = {"config.json": FAKE_FILES["config.json"], ESCAPING_NAME: FAKE_FILES["model.safetensors"]}
+    with FakeHub(files=files).serve() as hub, FakeHub().serve() as cdn:
+        hub.bytes_host = cdn.endpoint
+        hub.sizes[ESCAPING_NAME] = size
+        with pytest.raises(DownloadError) as failure:
+            _fetch(hub, tmp_path / "hub")
+
+    message = str(failure.value)
+    assert message.isprintable(), repr(message)
+    assert "model ]0;hub [2K .safetensors" in message, message
+
+
 def test_download_lays_out_the_snapshot_from_the_verified_blobs_and_asks_the_hub_nothing_more(
     fake_hub: FakeHub, tmp_path: Path
 ):

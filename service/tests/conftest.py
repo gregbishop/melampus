@@ -52,6 +52,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.parse
 import urllib.request
 from collections.abc import Callable, Iterator
 from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
@@ -610,12 +611,14 @@ class FakeHub:
                 """The file a /<repo>/resolve/<revision>/<file> path names, else
                 None; `commit` is what the revision resolves to, as the real
                 hub answers X-Repo-Commit: the commit hash itself, or what the
-                branch points at now."""
+                branch points at now. The file's name is percent-decoded, as
+                the hub library quotes it in the URL and the real hub reads it."""
                 prefix = f"/{hub.repo}/resolve/"
                 path = self.path.partition("?")[0]
                 if not path.startswith(prefix):
                     return None
                 revision, _, name = path[len(prefix):].partition("/")
+                name = urllib.parse.unquote(name)
                 self.commit = revision if REGEX_COMMIT_HASH.match(revision) else hub.commit
                 return name if name in hub.files else None
 

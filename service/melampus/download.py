@@ -86,7 +86,7 @@ from huggingface_hub.utils import WeakFileLock, build_hf_headers, filter_repo_ob
 from huggingface_hub.utils import logging as hub_logging  # noqa: E402 - the library's own logger, where its warnings go
 from huggingface_hub.utils._http import default_client_factory  # noqa: E402 - the library's own client, not a copy of it
 
-from .backend import OllamaBackend, ollama_request  # noqa: E402
+from .backend import OllamaBackend, VLMBackend, ollama_request  # noqa: E402
 from .config import cache_file  # noqa: E402
 from .providers import BackendUnavailable  # noqa: E402
 
@@ -281,10 +281,15 @@ class Status:
 class DownloadError(Exception):
     """The download failed; the message names what to fix. A URL in it is
     named by its path alone: the hub library's exceptions carry the URL they
-    failed at, an LFS file's being the CDN's signed one."""
+    failed at, an LFS file's being the CDN's signed one. And it is one line
+    of printable text (`VLMBackend.plain`, the one rule for text another
+    side wrote): it carries the hub's words, a file's name among them, to
+    the terminal, the plugin's download log and its failure dialog, where
+    an escape sequence would retitle the terminal or erase the line and a
+    line break would fake a line of its own."""
 
     def __init__(self, message: str) -> None:
-        super().__init__(_without_query(message))
+        super().__init__(VLMBackend.plain(_without_query(message)))
 
 
 class DownloadCancelled(BaseException):
