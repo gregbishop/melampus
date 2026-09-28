@@ -437,7 +437,9 @@ message names the file and both sizes, never the hub library's own wording, whic
 after its own retry of a dropped connection names the file by the tail of its
 URL); a hub whose answers are not a hub's,
 an etag that is not a checksum or a commit that is not a hash, neither of which
-is let become a path in the cache, so check `HF_ENDPOINT`; another run holding
+is let become a path in the cache, or a file size that is not a non-negative
+integer of at most 2^53 (`download.MAX_SIZE`, the status's own ceiling), refused
+before any byte moves with the file and the size named, so check `HF_ENDPOINT`; another run holding
 the model, a download of it, an identification run loading it or a removal,
 whose lock this run waits five seconds
 for, so wait for it to finish and re-run; a cancel marker, below,
