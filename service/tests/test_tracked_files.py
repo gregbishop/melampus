@@ -213,6 +213,10 @@ CORPUS_DIRS = {"fixtures", "fixtures_full"}
 # A run of the base64 alphabet long enough to hold an image header, unbroken
 # (a data URI, a JSON string) or wrapped across lines (a 76-column dump).
 BASE64_RUN = re.compile(rb"[A-Za-z0-9+/\r\n]{64,}")
+# A wrapped dump's first full line. A run spans line breaks, so it also takes
+# the tail of the line above the dump (uuencode's `begin-base64 644 x.jpg`, a
+# MIME header, a heading); the dump, and the image, start at this line.
+DUMP_LINE = re.compile(rb"^[A-Za-z0-9+/]{64,}", re.MULTILINE)
 
 
 def _opened(blob: bytes) -> tuple[Image.Image | None, bool]:
@@ -292,9 +296,12 @@ def _embeds_image(blob: bytes) -> bool:
     image format, readable or not. A JSON string's `\\n` escapes end a run,
     so a wrapped dump's first run is an image cut short, which Pillow cannot
     read: it counts, and so does random base64 that opens with a BMP, PCX or
-    SGI signature. The gate fails closed on what it cannot read."""
+    SGI signature. The gate fails closed on what it cannot read. A run is
+    decoded from its first full line, so the line above a dump is not read
+    as the front of the image."""
     for run in BASE64_RUN.findall(blob):
-        data = run.translate(None, b"\r\n")
+        line = DUMP_LINE.search(run)
+        data = run[line.start() if line else 0 :].translate(None, b"\r\n")
         decoded = base64.b64decode(data[: len(data) // 4 * 4])
         if _is_image(decoded, recognised=True):
             return True
@@ -462,11 +469,18 @@ def test_an_image_carried_as_base64_text_is_gated(tmp_path):
     string. Each decodes as text Pillow reads no image in, so each let a
     tagged frame past both checks. The last one's `\\n` escapes end each run,
     so its first run is the frame cut short, which Pillow recognises and
-    raises on: a crash that named no file, and no image once caught."""
+    raises on: a crash that named no file, and no image once caught.
+
+    A dump under a line of text is the same frame: `uuencode -m` writes one
+    under `begin-base64 644 <name>`, a MIME part under its headers, a note
+    under a heading. A run of the alphabet spans line breaks, so it took the
+    tail of the line above (`jpg`, `base64`, `Frame`) and decoded that in
+    front of the image, which Pillow then did not recognise."""
     tagged = _tagged_frame(tmp_path)
     inline = base64.b64encode(tagged)
+    dump = base64.encodebytes(tagged)
     # A JSON writer escapes each of the dump's line breaks as `\n`.
-    escaped = base64.encodebytes(tagged).replace(b"\n", rb"\n")
+    escaped = dump.replace(b"\n", rb"\n")
     carriers = {
         "service/tests/fixtures/second.svg": (
             b'<svg xmlns="http://www.w3.org/2000/svg">'
@@ -476,11 +490,20 @@ def test_an_image_carried_as_base64_text_is_gated(tmp_path):
             b'{"source": {"type": "base64", "media_type": "image/jpeg", '
             b'"data": "' + inline + b'"}}\n'
         ),
-        "service/tests/fixtures/second.b64": base64.encodebytes(tagged),
+        "service/tests/fixtures/second.b64": dump,
         "service/tests/fixtures/wrapped.json": (
             b'{"source": {"type": "base64", "media_type": "image/jpeg", '
             b'"data": "' + escaped + b'"}}\n'
         ),
+        "service/tests/fixtures/second.uu": (
+            b"begin-base64 644 second.jpg\n" + dump + b"====\n"
+        ),
+        "service/tests/fixtures/second.eml": (
+            b"Content-Type: image/jpeg\r\n"
+            b"Content-Transfer-Encoding: base64\r\n\r\n"
+            + dump.replace(b"\n", b"\r\n")
+        ),
+        "service/tests/fixtures/notes.md": b"# Frame\n\n" + dump,
     }
     blobs = {
         "service/tests/fixtures/download-lines.txt": b"one\ntwo\n",
