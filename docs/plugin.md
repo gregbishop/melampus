@@ -149,16 +149,26 @@ Ollama server answering (card #406), `openai` and `claude` need their key
 the command carries no `--backend` and the executable decides:
 `[model] backend` in `melampus.local.toml`, else the first local engine that
 can run on this machine, `mlx` then `ollama` (docs/config.md § `[model]`).
-A cloud engine's key stored here is a choice (card #498): with the
-preference unset, the command carries the key of the first cloud engine, in
-the picker's order, whose key is stored, in the executable's environment as
-for a picked engine, and `--default-cloud <engine>`, so with nothing local
-able to run the executable takes that engine. With no key stored it names
-none, and with nothing local the run is refused, exit 3, the message naming
-the picker; an API key set in the environment Lightroom was started with
-never makes a cloud engine the default. A value that is not one of the six is
-refused before anything runs, with the six named, so a stale preference
-never reaches the shell.
+A cloud engine's key stored here is a choice (card #498). With the
+preference unset, `MelampusAnalyze.lua` first asks the executable which
+engines can run here, the dialog's own `--detect-engines`: one more start of
+the executable per batch. Where a local engine can run, the command carries
+no key and no `--default-cloud`, and no key is looked up: a key on the
+shell line is readable by any account on the machine while the run lasts,
+so a run that goes to `mlx` or `ollama` carries none, and a stored key
+cmd.exe would rewrite cannot stop it. The key goes with the run only when
+detection says nothing local can run: the key of the first cloud engine, in
+the picker's order, whose key is stored, in the executable's environment
+as for a picked engine, with `--default-cloud <engine>`, so the executable
+takes that engine. Detection that fails, or does not say of both local
+engines that they cannot run, hands no key over. Should a local engine stop
+answering between detection and the run (Ollama quit), the executable,
+told of no cloud engine, refuses, exit 3, the message naming the picker, and
+nothing bills. With no key stored the command names none, and with nothing
+local the run is refused the same way; an API key set in the environment
+Lightroom was started with never makes a cloud engine the default. A value
+that is not one of the six is refused before anything runs, with the six
+named, so a stale preference never reaches the shell.
 
 ### The Download row
 

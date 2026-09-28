@@ -224,6 +224,24 @@ function Rules.canRun(verdicts, engine)
 	return false
 end
 
+--- Whether detection says no local engine (Rules.MODEL_ENGINES, the
+-- executable's LOCAL_ENGINES) can run here: each named, and each said to
+-- be unavailable. Only then does a run with no engine picked hand a stored
+-- key over (card #498, security round 1, S1). Any doubt is false: no
+-- detection, output that is not the list, a local engine it did not name
+-- or did not say is unavailable. The cloud engines and the subscription
+-- CLIs are not local.
+function Rules.nothingLocalCanRun(verdicts)
+	local named = {}
+	for _, verdict in ipairs(type(verdicts) == 'table' and verdicts or {}) do
+		if type(verdict) == 'table' and type(verdict.engine) == 'string' then named[verdict.engine] = verdict end
+	end
+	for _, engine in ipairs(Rules.MODEL_ENGINES) do
+		if not named[engine] or named[engine].available ~= false then return false end
+	end
+	return true
+end
+
 --- What to say under the picker about the picked engine: its item's reason
 -- (card #423: a signed-in subscription CLI's says what every frame bills
 -- to, before a run; a cloud engine's names the key it needs), or '' when

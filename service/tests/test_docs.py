@@ -1837,6 +1837,12 @@ def test_docs_say_the_unchosen_default_takes_a_cloud_engine_only_for_a_key_store
                       "else the first engine that can run on this machine"):
             assert stale not in prose, f"{doc} still says the default falls through to openai: {stale!r}"
     assert "Where identification runs" in backend_row, "docs/config.md's backend row does not name the picker"
+    # Security round 1, S1: the plugin hands a stored key over only once
+    # detection says nothing local can run, and a local engine that vanishes
+    # before the run leaves the executable refusing, not billing.
+    for said in ("only when detection says nothing local can run", "no key is looked up",
+                 "refuses, exit 3", "nothing bills"):
+        assert said in engine, f"docs/plugin.md § The engine does not say {said!r}"
     assert "an API key set in the environment alone never" in backend_row, (
         "docs/config.md's backend row does not say an environment key never picks a cloud engine")
 

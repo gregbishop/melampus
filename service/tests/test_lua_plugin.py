@@ -394,16 +394,19 @@ def _plugin_under_the_mock(
 
 def _command_the_plugin_builds(
     plugin_dir: Path, previews: Path, results: Path, tmp_path: Path, *, engine: str,
-    stored_key: str = "",
+    stored_key: str = "", detect_in: Mapping[str, str] | None = None,
 ) -> str:
-    """The one shell command MelampusAnalyze.lua builds under the mock SDK
-    with `_PLUGIN.path` at `plugin_dir` and the engine preference set to
-    `engine` ("" is the default: no preference). `stored_key` is what
-    LrPasswords holds under every key variable, `Rules.KEY_VARIABLES` (as
-    test_import_integration.lua stores both), so a run for openai finds its
-    key (card #405) and a run for an engine that needs none is checked
+    """The shell command MelampusAnalyze.lua builds under the mock SDK to run
+    the analysis, with `_PLUGIN.path` at `plugin_dir` and the engine
+    preference set to `engine` ("" is the default: no preference). `stored_key`
+    is what LrPasswords holds under every key variable, `Rules.KEY_VARIABLES`
+    (as test_import_integration.lua stores both), so a run for openai finds
+    its key (card #405) and a run for an engine that needs none is checked
     against keys that are there to leak (card #423); "" means nothing
-    stored."""
+    stored. With no engine picked the plugin asks --detect-engines first
+    (card #498): given `detect_in`, an environment, that detection runs the
+    executable beside the plugin through the shell, in it (the rest is only
+    built); without, detection answers nothing and no key is handed over."""
     return _plugin_under_the_mock(
         plugin_dir, tmp_path,
         "if os.getenv('MELAMPUS_STORED_KEY') ~= '' then\n"
@@ -411,12 +414,39 @@ def _command_the_plugin_builds(
         "    mock.state.passwords[variable] = os.getenv('MELAMPUS_STORED_KEY')\n"
         "  end\n"
         "end\n"
+        "if os.getenv('MELAMPUS_DETECT') == '1' then\n"
+        "  mock.state.onExecute = function(command)\n"
+        "    if string.find(command, '--detect-engines', 1, true) then return mock.runThroughTheShell(command) end\n"
+        "    return 0\n"
+        "  end\n"
+        "end\n"
         "local ok, message = Analyze.run(os.getenv('MELAMPUS_PREVIEWS'),"
         " os.getenv('MELAMPUS_RESULTS'), 'wildlife', os.getenv('MELAMPUS_ENGINE'))\n"
         "assert(ok, message)\n"
-        "io.write(mock.state.executed[1])\n",
+        "io.write(mock.state.executed[#mock.state.executed])\n",
+        detect_in if detect_in is not None else os.environ,
         MELAMPUS_PREVIEWS=str(previews), MELAMPUS_RESULTS=str(results),
-        MELAMPUS_ENGINE=engine, MELAMPUS_STORED_KEY=stored_key)
+        MELAMPUS_ENGINE=engine, MELAMPUS_STORED_KEY=stored_key,
+        MELAMPUS_DETECT="1" if detect_in is not None else "0")
+
+
+def _for_the_mocks_shell(env: Mapping[str, str]) -> dict[str, str]:
+    """`env`, a no_python_environment, with its empty PATH replaced by what the
+    mock's shell needs and nothing more: the system's own folders (sh,
+    mktemp, mkdir, ls and rm on a Mac; cmd.exe, named by COMSPEC as the C
+    runtime's system() finds it, on Windows). Nowhere on it is a claude or
+    codex a developer installed, so detection run in it never runs one;
+    that the executable needs no python on it is test_binary.py's to show."""
+    env = dict(env)
+    if WINDOWS:
+        env["COMSPEC"] = os.environ["COMSPEC"]
+        env["PATH"] = str(Path(env["COMSPEC"]).parent)
+    else:
+        env["PATH"] = os.defpath
+    for cli in (providers.CLAUDE_CODE_CLI, providers.CODEX_CLI):
+        assert shutil.which(cli.program, path=env["PATH"]) is None, (
+            f"a real {cli.program} is on the PATH the executable would run it from")
+    return env
 
 
 def _cli_log_tail(tmp_path: Path) -> str:
@@ -590,17 +620,20 @@ def test_with_no_engine_picked_the_executable_takes_a_local_engine_else_the_one_
     built_executable: Path, tmp_path: Path, stored_key: str
 ):
     """Card #498, decision (b), at the real boundary. With the engine
-    preference unset and a key in LrPasswords, the command the plugin builds
-    carries `--default-cloud openai` (the first cloud engine with a stored
-    key) and nothing else names an engine; with no key stored it names no
-    cloud engine and sets no key. Run through the shell LrTasks.execute hands
-    it to, against dist/melampus (dist/melampus.exe on Windows) with no key
-    variable in its environment and no Ollama answering (the per-user config
-    points it at a closed port), the executable takes mlx where mlx can run,
-    else openai when the key was stored, else refuses, exit 3, naming the
-    plugin's picker. The previews folder is empty, so a picked engine stops
-    there, exit 2, before any backend is built: nothing loads and nothing is
-    sent, on the Mac runner (mlx) as on the Windows one (the other two)."""
+    preference unset, the plugin first asks the executable beside it which
+    engines can run (--detect-engines, through the shell, in the executable's
+    own environment: no key variable, no Ollama answering, since the
+    per-user config points it at a closed port, and no claude or codex on
+    PATH). Where a local engine can run (mlx, on the Mac runner) the command
+    it builds carries no key and no --default-cloud, whatever LrPasswords
+    holds (security round 1, S1). Where none can (the Windows runner) it
+    carries `--default-cloud openai` and the key when one is stored, and
+    neither when none is. Run through the shell LrTasks.execute hands it to,
+    against dist/melampus (dist/melampus.exe on Windows), the executable
+    takes mlx where mlx can run, else openai when the key was stored, else
+    refuses, exit 3, naming the plugin's picker. The previews folder is
+    empty, so a picked engine stops there, exit 2, before any backend is
+    built: nothing loads and nothing is sent."""
     plugin_dir = _plugin_folder_holding(built_executable, tmp_path)
     previews = tmp_path / "previews"
     previews.mkdir()
@@ -609,9 +642,10 @@ def test_with_no_engine_picked_the_executable_takes_a_local_engine_else_the_one_
     assert not ambient & set(env), f"a key variable is in the executable's environment: {ambient & set(env)}"
 
     command = _command_the_plugin_builds(
-        plugin_dir, previews, previews / "results.json", tmp_path, engine="", stored_key=stored_key)
-    assert "--backend" not in command, command
-    if stored_key:
+        plugin_dir, previews, previews / "results.json", tmp_path, engine="", stored_key=stored_key,
+        detect_in=_for_the_mocks_shell(env))
+    assert "--backend" not in command and "--detect-engines" not in command, command
+    if stored_key and not providers.on_apple_silicon():
         assert f"--default-cloud {as_the_shell_receives_it('openai')}" in command, command
     else:
         assert "--default-cloud" not in command and "MELAMPUS_" not in command, command
@@ -653,21 +687,9 @@ def test_the_detection_the_plugin_runs_reaches_the_executable_and_fills_the_pick
     path, is test_binary.py's."""
     plugin_dir = _plugin_folder_holding(built_executable, tmp_path)
     # The run's environment: the home of its own (and, on Windows, the
-    # system root and temp folder) no_python_environment gives, its empty
-    # PATH replaced by what the mock's shell needs and nothing more: the
-    # system's own folders (sh, mktemp, mkdir, ls and rm on a Mac; cmd.exe,
-    # named by COMSPEC as the C runtime's system() finds it, on Windows).
-    # Nowhere on it is a claude or codex a developer installed; that the
-    # executable needs no python on it is test_binary.py's to show.
-    env = no_python_environment(tmp_path)
-    if WINDOWS:
-        env["COMSPEC"] = os.environ["COMSPEC"]
-        env["PATH"] = str(Path(env["COMSPEC"]).parent)
-    else:
-        env["PATH"] = os.defpath
-    for cli in (providers.CLAUDE_CODE_CLI, providers.CODEX_CLI):
-        assert shutil.which(cli.program, path=env["PATH"]) is None, (
-            f"a real {cli.program} is on the PATH the executable would run it from")
+    # system root and temp folder) no_python_environment gives, with the
+    # PATH the mock's shell needs and no claude or codex on it.
+    env = _for_the_mocks_shell(no_python_environment(tmp_path))
 
     listing = _plugin_under_the_mock(
         plugin_dir, tmp_path,

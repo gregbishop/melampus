@@ -485,7 +485,8 @@ end
 -- stored; with no engine picked, the first engine, in the owner's order,
 -- whose key the user stored in Settings (card #498: a key typed there is a
 -- choice, so the executable's default may take that engine when nothing
--- local can run). nil when there is none.
+-- local can run; Analyze.run asks only once detection has said so). nil
+-- when there is none.
 local function storedKey(chosen)
 	for _, engine in ipairs(chosen and { chosen } or Rules.ENGINES) do
 		local variable = Rules.keyVariable(engine)
@@ -499,7 +500,8 @@ end
 -- enriched results (quality and its rank, burst agreement, range flag,
 -- encounter) to `resultsPath` in the same run. `engine` is the engine
 -- preference (Rules.ENGINES); nil or empty leaves the choice to the CLI,
--- told of the cloud engine whose key is stored, if any (storedKey).
+-- told of the cloud engine whose key is stored, if any (storedKey), when
+-- detection says nothing local can run.
 -- Returns true plus the results path, or false plus a message.
 function Analyze.run(previewFolder, resultsPath, profile, engine)
 	local folder = pluginDir()
@@ -508,18 +510,12 @@ function Analyze.run(previewFolder, resultsPath, profile, engine)
 
 	-- Identification and enrichment, one process. --backend only when the
 	-- user chose an engine; otherwise the CLI decides, among the local
-	-- engines, and --default-cloud names the cloud engine it may fall back
-	-- to when the user stored that engine's key in Settings (card #498).
+	-- engines (card #498).
 	local parts, chosen = engineArguments({
 		quote(executable), quote(previewFolder),
 		'--profile', quote(profile or 'wildlife'),
 	}, engine)
 	if not parts then return false, chosen end
-	local keyed, variable, key = storedKey(chosen)
-	if keyed and not chosen then
-		parts[#parts + 1] = '--default-cloud'
-		parts[#parts + 1] = quote(keyed)
-	end
 
 	local cliLog = cliLogPath()
 	local refusal = windowsPathRefusal({
@@ -529,6 +525,29 @@ function Analyze.run(previewFolder, resultsPath, profile, engine)
 		{ 'log file', cliLog, IN_TEMP },
 	})
 	if refusal then return false, refusal end
+
+	-- The key a run carries (storedKey): the picked engine's, or with none
+	-- picked the first stored one, with --default-cloud naming its engine,
+	-- and then only when detection, asked first, says nothing local can run
+	-- (card #498, security round 1, S1). A key on the shell line is readable
+	-- by any account while the run lasts, so a run that the executable will
+	-- give to mlx or Ollama carries none, and its key is neither looked up
+	-- nor refused. Should a local engine vanish between detection and the
+	-- run, the executable, with no --default-cloud, refuses: nothing bills.
+	local keyed, variable, key
+	if chosen then
+		keyed, variable, key = storedKey(chosen)
+	else
+		local verdicts, problem = Analyze.detectEngines()
+		if problem then Log.warn('no key handed over; detection said: ' .. problem) end
+		if Rules.nothingLocalCanRun(verdicts) then
+			keyed, variable, key = storedKey(nil)
+			if keyed then
+				parts[#parts + 1] = '--default-cloud'
+				parts[#parts + 1] = quote(keyed)
+			end
+		end
+	end
 
 	-- Long-running, so it must not be inside any write gate.
 	-- --yes: this is a non-interactive caller, so the cloud-primary cost gate

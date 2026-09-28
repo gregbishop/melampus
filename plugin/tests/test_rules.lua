@@ -657,6 +657,25 @@ t.test('whether an engine can run here is detection\'s verdict on it, and nothin
 	t.isFalse(Rules.canRun(verdicts(), 'scripted'), 'an engine detection never names')
 end)
 
+t.test('nothing local can run only when detection says so of every local engine', function()
+	-- Security round 1, S1 (card #498): with no engine picked the plugin
+	-- hands a stored key over only when detection says no local engine
+	-- (mlx, ollama) can run here. Any doubt is "a local engine may run":
+	-- no detection, output that is not the list, a local engine it did not
+	-- name. Neither the cloud engines nor the subscription CLIs count.
+	local noMlx = { available = false, reason = 'needs Apple Silicon' }
+	t.isFalse(Rules.nothingLocalCanRun(verdicts()), 'mlx runs on this Mac')
+	t.isFalse(Rules.nothingLocalCanRun(verdicts(mock.allAvailable({ mlx = noMlx }))), 'Ollama is answering')
+	t.isTrue(Rules.nothingLocalCanRun(verdicts({ mlx = noMlx })), 'no Apple Silicon, no Ollama')
+	t.isTrue(Rules.nothingLocalCanRun(verdicts(mock.allAvailable({ mlx = noMlx, ollama = mock.canned.ollama }))),
+		'the cloud engines and the signed-in CLIs are not local')
+	t.isFalse(Rules.nothingLocalCanRun(nil), 'without detection nothing is known')
+	t.isFalse(Rules.nothingLocalCanRun({ 'not', 'verdicts' }), 'output that is not the list')
+	t.isFalse(Rules.nothingLocalCanRun({ { engine = 'mlx', available = false } }), 'ollama was not named')
+	t.isFalse(Rules.nothingLocalCanRun({ { engine = 'mlx', available = false }, { engine = 'ollama' } }),
+		'an ollama verdict that does not say it is unavailable')
+end)
+
 -- ── colour labels ──────────────────────────────────────────────────────────
 t.test('colour labels mean something specific', function()
 	local s = settings({ writeLabel = true })
