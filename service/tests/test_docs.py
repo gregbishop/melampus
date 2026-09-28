@@ -1578,6 +1578,29 @@ def test_the_openings_privacy_claim_names_the_settings_that_can_send_the_image_e
                 f"`{setting}`, {why}")
 
 
+def test_the_privacy_gate_reads_the_sentence_that_makes_the_promise(monkeypatch, tmp_path):
+    """Security review, round 5: the gate above looked for each setting
+    anywhere in the opening, and since review round 4 (finding 2) the
+    `ollama` row of readme.md's engine table names `ollama_model` in its
+    What it bills cell. So a promise that named `ollama_url` alone, round
+    3's hole, stayed green: the table answered for the promise. Given an
+    opening whose table names `ollama_model` and whose promise names only
+    `ollama_url`, the gate fails on `ollama_model`."""
+    readme = tmp_path / "readme.md"
+    readme.write_text(
+        "# Melampus\n\n"
+        "| Engine | Where it runs | What it bills |\n"
+        "|---|---|---|\n"
+        "| `ollama` | on this machine | nothing, unless `ollama_model` names a cloud model |\n\n"
+        "On the local engines no image leaves the machine, unless\n"
+        "`ollama_url` is pointed at another host.\n\n"
+        "## Status\n",
+        encoding="utf-8")
+    monkeypatch.setitem(globals(), "README", readme)
+    with pytest.raises(AssertionError, match=r"^readme\.md's opening promises no image leaves the machine.*`ollama_model`"):
+        test_the_openings_privacy_claim_names_the_settings_that_can_send_the_image_elsewhere()
+
+
 def test_only_the_readme_opening_lists_the_engines_the_other_openings_point_at_it():
     """Review round 1, finding 3: readme.md's opening carries the engine
     table, and the gate above holds it to providers.py. The brief's and
