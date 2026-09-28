@@ -249,7 +249,7 @@ UNLISTED = (
 # not parse (`P6` and garbage, a frame cut short); SyntaxError where an
 # EXIF block is no TIFF structure. The gate's own walk of a JPEG or PNG raises
 # ValueError where it breaks off. DecompressionBombError is none of these, and
-# propagates.
+# propagates, with the fixture's path noted on it.
 READ_ERRORS = (ValueError, OSError, SyntaxError)
 
 
@@ -343,6 +343,14 @@ def _frame_problems(data: bytes) -> list[str]:
         return [UNREADABLE]
     problems = []
     with image:
+        # The format first, found at open: a format the gate cannot walk is
+        # refused before Pillow reads anything more of it.
+        walk = FRAME_WALKS.get(image.format)
+        if walk is None:
+            return [
+                f"a {image.format} frame, whose end the gate cannot find: "
+                "save it as JPEG or PNG"
+            ]
         try:
             frames = getattr(image, "n_frames", 1)
             if frames > 1:
@@ -350,19 +358,12 @@ def _frame_problems(data: bytes) -> list[str]:
             # An EXIF block found at open is EXIF, whether or not it parses.
             if "exif" in image.info or image.getexif():
                 problems.append("carries EXIF")
-            walk = FRAME_WALKS.get(image.format)
-            if walk is None:
-                problems.append(
-                    f"a {image.format} frame, whose end the gate cannot find: "
-                    "save it as JPEG or PNG"
-                )
-            else:
-                extras, end = walk(data)
-                if extras:
-                    names = ", ".join(dict.fromkeys(extras))
-                    problems.append(f"carries chunks that draw no picture: {names}")
-                if after := len(data) - end:
-                    problems.append(f"{after} bytes after the image ends")
+            extras, end = walk(data)
+            if extras:
+                names = ", ".join(dict.fromkeys(extras))
+                problems.append(f"carries chunks that draw no picture: {names}")
+            if after := len(data) - end:
+                problems.append(f"{after} bytes after the image ends")
         except READ_ERRORS:
             return [UNREADABLE]
     return problems
@@ -383,7 +384,12 @@ def _fixture_problems(
     if size > FRAME_CEILING:
         problems.append(f"{size} bytes, over the {FRAME_CEILING} byte ceiling")
     if kind != "text":
-        problems += _frame_problems(blob)
+        try:
+            problems += _frame_problems(blob)
+        except Exception as exc:
+            # Raised on, not refused (a decompression bomb): named all the same.
+            exc.add_note(path)
+            raise
     return problems
 
 
@@ -563,12 +569,15 @@ def test_a_metadata_read_that_raises_is_refused_by_name():
     8, finding 3). Each was a traceback that named no file. An EXIF block
     Pillow found at open is EXIF, whatever is in it, so it is refused as EXIF
     unparsed; one past the pixels is found only by that read, and a read that
-    raises refuses the frame as unreadable."""
+    raises refuses the frame as unreadable. A WebP's EXIF is not read at all:
+    the gate cannot walk a WebP, so it refuses one before any other read."""
     garbage = b"garbage!" * 4
     png = _frame(format="PNG")
     assert _frame_problems(png[:41]) == [UNREADABLE]
-    for format in ("PNG", "WEBP"):
-        assert "carries EXIF" in _frame_problems(_frame(format=format, exif=garbage))
+    assert "carries EXIF" in _frame_problems(_frame(format="PNG", exif=garbage))
+    assert _frame_problems(_frame(format="WEBP", exif=garbage)) == [
+        "a WEBP frame, whose end the gate cannot find: save it as JPEG or PNG"
+    ]
     # IEND, the last 12 bytes, closes a PNG; an eXIf chunk just before it
     # sits past the pixels.
     past_the_pixels = png[:-12] + _png_chunk(b"eXIf", garbage) + png[-12:]
@@ -580,13 +589,38 @@ def test_a_frame_that_holds_more_frames_is_refused(tmp_path):
     MPO -- a JPEG that carries more frames after its first, the way a camera
     stores a stereo pair or a large preview -- with a clean first frame and a
     tagged second passed. A fixture is one frame, so a blob that holds more is
-    refused whole, whichever of its frames carries what."""
+    refused whole, whichever of its frames carries what: an MPO before its
+    frames are counted, as a format the gate cannot walk (Claude round 9,
+    finding 1), and an APNG, which is a PNG, for the frames it holds."""
     with Image.open(io.BytesIO(_tagged_frame(tmp_path))) as tagged:
         later = Image.new("RGB", (8, 8))
         # Pillow saves each appended frame with its own encoderinfo.
         later.encoderinfo = {"exif": tagged.info["exif"]}
     mpo = _frame(format="MPO", save_all=True, append_images=[later])
-    assert "holds 2 frames" in _frame_problems(mpo)
+    assert _frame_problems(mpo) == [
+        "a MPO frame, whose end the gate cannot find: save it as JPEG or PNG"
+    ]
+    apng = _frame(format="PNG", save_all=True, append_images=[later])
+    assert "holds 2 frames" in _frame_problems(apng)
+
+
+def test_a_listed_image_pillow_raises_on_is_named(tmp_path):
+    """Claude round 9, finding 1: listed as images, some blobs crashed the gate
+    with a traceback that named no file. The gate read a frame's count before
+    its format, and on a TIFF shaped like a CR2 or ARW raw the count raises
+    TypeError; it now looks the format up first, and refuses a format it cannot
+    walk to its end before reading anything more of it. A PNG that declares
+    more pixels than Pillow's limit raises DecompressionBombError at open,
+    which the gate lets propagate, now with the fixture's path noted on it."""
+    raw, bomb = _raw_tiff(), _bomb()
+    path = "service/tests/fixtures/second.cr2"
+    assert _fixture_problems(path, raw, _listed("image", {path: raw})) == [
+        "a TIFF frame, whose end the gate cannot find: save it as JPEG or PNG"
+    ]
+    path = "service/tests/fixtures/second.png"
+    with pytest.raises(Image.DecompressionBombError) as raised:
+        _fixture_problems(path, bomb, _listed("image", {path: bomb}))
+    assert path in getattr(raised.value, "__notes__", [])
 
 
 def test_bytes_after_the_image_ends_are_refused(tmp_path):
