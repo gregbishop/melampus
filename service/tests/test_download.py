@@ -3815,6 +3815,93 @@ def test_cli_pull_cancelled_by_a_signal_prints_cancelled_exit_4_and_the_next_pul
         assert updates[-1] == Update.done(FAKE_MODEL) and ollama.models == {FAKE_MODEL: size}
 
 
+# Run in a fresh interpreter, so a SIGINT that lands outside the pull's
+# handler, or a thread left stuck on a lock, is that process's, not the
+# suite's. `--download-model` through `main` as it is, counting the lock
+# releases the main thread makes inside `pull_model`; then once per
+# release, SIGINT delivered as that release returns (os.kill runs the
+# handler before it returns). Each pull's exit code and last protocol line.
+SIGNAL_AT_EACH_RELEASE = """\
+import contextlib, io, json, os, signal, sys, _thread
+from pathlib import Path
+from melampus.cli import main
+from melampus.download import pull_model
+
+LOCKS = (type(_thread.allocate_lock()), type(_thread.RLock()))
+
+
+def in_the_pull(frame):
+    while frame is not None:
+        if frame.f_code is pull_model.__code__:
+            return True
+        frame = frame.f_back
+    return False
+
+
+def pull(signal_at):
+    releases = []
+
+    def on_return(frame, event, arg):
+        if (event == "c_return" and isinstance(getattr(arg, "__self__", None), LOCKS)
+                and arg.__name__ in ("release", "__exit__") and in_the_pull(frame)):
+            releases.append(f"{Path(frame.f_code.co_filename).name}:{frame.f_code.co_name}:{frame.f_lineno}")
+            if len(releases) == signal_at:
+                sys.setprofile(None)
+                os.kill(os.getpid(), signal.SIGINT)
+
+    out = io.StringIO()
+    sys.setprofile(on_return)
+    try:
+        with contextlib.redirect_stdout(out):
+            code = main(sys.argv[1:])
+    finally:
+        sys.setprofile(None)
+    return releases, [code, out.getvalue().splitlines()[-1:]]
+
+
+def ended_with_the_signal_at(signal_at):
+    releases, ended = pull(signal_at)
+    return ended if len(releases) == signal_at else "the pull ended before the signal was delivered"
+
+
+pull(signal_at=0)  # the first imports what the pull imports on first use: module locks the next do not take
+releases, uninterrupted = pull(signal_at=0)
+ended = {f"{signal_at} {where}": ended_with_the_signal_at(signal_at) for signal_at, where in enumerate(releases, 1)}
+print(json.dumps({"uninterrupted": uninterrupted, "releases": len(releases), "ended": ended}))
+"""
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="os.kill cannot send SIGINT to this process on Windows")
+def test_cli_pull_cancelled_by_a_signal_inside_any_lock_release_prints_cancelled_and_exits_4(
+    fake_ollama: FakeOllama, tmp_path: Path
+):
+    """Card #502: the signal test above died once on "release unlocked
+    lock", the SIGINT landing inside a lock release on the pull's path.
+    The handler raises wherever the main thread is, and the pull's
+    deadline starts its timer and watcher threads there; inside
+    threading's Thread.start(), Condition.wait releases the start event's
+    lock before its `try`, so a cancel landing on that release leaves it
+    released, and the `with` around the wait releases it again:
+    RuntimeError, named as Ollama's failure, exit 3, the cancel lost.
+    Given the pull through the entry point, and SIGINT delivered as each
+    lock release the main thread makes in the pull returns, one pull per
+    release: every pull prints `cancelled` and exits 4, and nothing is
+    written on stderr."""
+    settings = _ollama_settings(tmp_path, fake_ollama.endpoint)
+    proc = subprocess.run(
+        [sys.executable, "-c", SIGNAL_AT_EACH_RELEASE, "--download-model", "--backend", "ollama",
+         "--config", str(settings)],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert proc.returncode == 0, f"exit {proc.returncode}:\n{proc.stderr[-3000:]}"
+    report = json.loads(proc.stdout)
+    assert report["uninterrupted"] == [0, [f"done {FAKE_MODEL}"]]
+    assert report["releases"] > 0, "the pull released no lock on the main thread: nothing was delivered"
+    broken = {where: ended for where, ended in report["ended"].items() if ended != [EXIT_CANCELLED, ["cancelled"]]}
+    assert not broken, (broken, proc.stderr[-3000:])
+    assert proc.stderr == "", f"the process wrote on stderr:\n{proc.stderr[-3000:]}"
+
+
 def test_cli_pull_cancelled_by_the_marker_while_its_stream_has_stalled_prints_cancelled_and_exits_4(
     monkeypatch: pytest.MonkeyPatch, capsys, tmp_path: Path
 ):
