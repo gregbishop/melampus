@@ -156,8 +156,10 @@ function Rules.engineItems(verdicts, problem)
 			end
 		end
 	end
+	-- The unset preference: the executable's default (card #498), a local
+	-- engine that can run here, else a cloud engine whose key is stored.
 	local items = {
-		{ title = 'Let Melampus choose — the first engine that can run here',
+		{ title = 'Let Melampus choose — a local engine, else one whose API key is stored',
 			value = '', enabled = true },
 	}
 	local lines = {}
