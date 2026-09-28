@@ -879,6 +879,25 @@ def test_the_action_pinning_gate_reports_a_uses_key_with_no_value_at_the_end(tmp
     assert "ci.yml" not in reported, reported
 
 
+def test_the_action_pinning_gate_reports_a_workflow_nested_too_deep_to_parse(tmp_path, monkeypatch):
+    """PyYAML composes a collection by recursing into it, so a workflow
+    nested deeper than Python's recursion limit, a thousand flow sequences
+    one inside another, cannot be composed: it raised RecursionError, which
+    is not a YAMLError, so it escaped the gate instead of naming the file.
+    A workflow the parser cannot read to the end is one that does not parse,
+    reported by its name. The folder is a stand-in read at call time;
+    ci.yml in it is pinned, so deep.yaml, and only it, must be reported."""
+    sha = "11d5960a326750d5838078e36cf38b85af677262"
+    (tmp_path / "ci.yml").write_text(f"      - uses: actions/checkout@{sha} # v4.4.0\n", encoding="utf-8")
+    (tmp_path / "deep.yaml").write_text("on: " + "[" * 1000 + "]" * 1000 + "\n", encoding="utf-8")
+    monkeypatch.setitem(globals(), "WORKFLOWS", tmp_path)
+    with pytest.raises(AssertionError) as unpinned:
+        test_every_workflow_pins_every_action_to_a_commit_sha_with_its_version()
+    reported = str(unpinned.value)
+    assert "deep.yaml: does not parse as YAML" in reported, reported
+    assert "ci.yml" not in reported, reported
+
+
 RELEASE_ZIPS = ("Melampus-macOS.zip", "Melampus-Windows.zip")
 
 
@@ -920,11 +939,12 @@ def _action_references(text: str) -> list[tuple[str, bool]]:
     past the last line, so it is read on its key's line and names no
     action. One trailing comment cannot name two actions' versions, so
     a line holding two references is not pinned whatever each names. A
-    workflow that does not parse cannot be read for its references, so it is
-    one line nothing pins, the parser's error, reported by its name."""
+    workflow that does not parse, or nests deeper than the parser can recurse,
+    cannot be read for its references, so it is one line nothing pins, the
+    parser's error, reported by its name."""
     try:
         nodes = _nodes(text)
-    except yaml.YAMLError as error:
+    except (yaml.YAMLError, RecursionError) as error:
         return [(f"does not parse as YAML: {' '.join(str(error).split())}", False)]
     lines = text.splitlines()
     references = {}
