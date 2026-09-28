@@ -376,10 +376,13 @@ CODEX_PROGRAM = "codex"
 #: own plan, never per call; melampus never reads what a run leaves in
 #: those directories (the answer is what Codex prints, and
 #: images.staging_root keeps the staged folder out of them) so long as
-#: nothing else it reads is in them: the executable unpacks itself into
-#: $TMPDIR, /tmp when that is unset, and PromptLibrary.render reads its
-#: prompts from there for every frame, so it must run with $TMPDIR set
-#: outside them (security review round 1 on PR #28); and melampus
+#: nothing else it reads is in them: the photographs and any file melampus
+#: is pointed at are the user's to keep out, and the executable is refused
+#: rather than trusted: it unpacks itself into $TMPDIR, /tmp when that is
+#: unset, PromptLibrary.render reads its prompts from there for every
+#: frame and code is loaded from there, so images.staging_root refuses a
+#: frozen run unpacked inside them, exit 3, saying to set $TMPDIR outside
+#: them (security review round 1 on PR #28); and melampus
 #: wraps no CLI engine in a sandbox of its own. It is revisited when
 #: Codex's permission profiles leave beta; the measurement is recorded in
 #: security review round 9 on PR #17. docs/config.md says the same and
@@ -428,10 +431,11 @@ class BackendUnavailable(RuntimeError):
 
     An uninstalled command, a signed-out CLI, an Ollama with no server — and
     `images.staging_root`, which refuses a staging root inside the directories
-    a CLI engine's permission profile grants whole, and `download.load_lock`,
-    which refuses the MLX model's load while another run, a download from
-    Settings most often, holds the model. All of them are settled before a
-    frame is read and none of them changes from frame to frame.
+    a CLI engine's permission profile grants whole, and a frozen run unpacked
+    there, and `download.load_lock`, which refuses the MLX model's load while
+    another run, a download from Settings most often, holds the model. All of
+    them are settled before a frame is read and none of them changes from frame
+    to frame.
     """
 
 

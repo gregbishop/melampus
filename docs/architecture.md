@@ -141,12 +141,12 @@ measured, and does not quote it). Two failures stop a batch rather than being
 recorded on the frame, stated once as `providers.BATCH_FATAL`: a command
 exiting non-zero (`CommandFailed`), a broken engine rather than a bad file;
 and `BackendUnavailable`, the refusal every check above raises, which staging
-raises too when the staging root lands inside the shared temp directories a
-CLI engine's permission profile grants whole (`images.staging_root`,
-docs/config.md § Codex CLI), and the MLX model's load raises while another
-run, a download from Settings most often, holds the model
-(`download.load_lock`, docs/config.md § Downloading the model). Either way
-every frame would fail the same way,
+raises too when the staging root, or a frozen run's unpack directory, lands
+inside the shared temp directories a CLI engine's permission profile grants
+whole (`images.staging_root`, docs/config.md § Codex CLI), and the MLX model's
+load raises while another run, a download from Settings most often, holds the
+model (`download.load_lock`, docs/config.md § Downloading the model). Either
+way every frame would fail the same way,
 so the identification pass (`Identifier.identify`, `run_batch`) and the
 escalation pass (`escalate`) let both past their per-frame handlers, and the
 CLI stops the run at exit 3 with the message that names the fix

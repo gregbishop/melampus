@@ -2203,7 +2203,14 @@ def test_config_doc_says_the_codex_profile_leaves_the_shared_temp_directories_wr
     user-owned 0700 folder under /tmp made outside the sandbox. So a run
     could rewrite the prompt melampus sends next, the same frame's
     identification call included. The passage must say that the claim
-    depends on where the executable unpacks, and what to set."""
+    depends on where the executable unpacks, and what to set.
+
+    The owner's call on that finding was to enforce it, not only document
+    it: `images.staging_root` refuses a frozen run whose unpack directory is
+    inside the grant, exit 3, before any frame is staged, whatever the
+    engine (test_pipeline.py and test_binary.py pin the code). So the
+    passage says melampus refuses, naming the fix the refusal names, and no
+    longer leaves it to the user as advice."""
     prose = " ".join(CONFIG_DOC.read_text(encoding="utf-8").split())
     for path in ("`/tmp`", "`/private/tmp`", "`/var/tmp`", "`/private/var/tmp`"):
         assert path in prose, f"docs/config.md does not name {path} under the profile"
@@ -2222,10 +2229,13 @@ def test_config_doc_says_the_codex_profile_leaves_the_shared_temp_directories_wr
         "security review round 9",  # where the measurement is
         "unpacks itself",  # the executable's own files are read from $TMPDIR
         "its prompts",  # what melampus reads there, for every frame
-        "`$TMPDIR` set outside them",  # what keeps "never reads" true
+        "a frozen run unpacked inside them refuses",  # enforced, not advised
+        "set `$TMPDIR` outside them",  # the fix the refusal names
     ):
         assert said in decision.group(0), (
             f"docs/config.md does not say {said!r} where it states the shared temp writes are accepted")
+    assert "run the executable with `$TMPDIR`" not in prose, (
+        "docs/config.md leaves the unpack directory to the user; melampus refuses it")
     for undecided in ("the owner's call", "leaves open", "own card"):
         assert undecided not in prose, (
             f"docs/config.md still says {undecided!r}; card #505 decided the shared temp writes")
