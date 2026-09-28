@@ -773,6 +773,21 @@ def test_the_action_pinning_gate_reports_a_workflow_that_does_not_parse(tmp_path
         assert f"{name}: does not parse as YAML" in reported, reported
 
 
+def test_the_action_pinning_gate_reads_the_last_line_without_a_newline(tmp_path, monkeypatch):
+    """The version comment is the text after the last node that ends on the
+    line, but a block collection does not end where its text does: its end
+    mark is where the parser found the next token, past any comment. On a
+    file's last line with no newline after it, the step's block mapping and
+    sequence end after its `# v4.4.0`, and a gate that counted them found no
+    comment and reported a pinned step. Only a scalar or a flow collection
+    ends where its text does. ci.yml here is one pinned step with no
+    trailing newline, so the gate passes on it."""
+    sha = "11d5960a326750d5838078e36cf38b85af677262"
+    (tmp_path / "ci.yml").write_text(f"      - uses: actions/checkout@{sha} # v4.4.0", encoding="utf-8")
+    monkeypatch.setitem(globals(), "WORKFLOWS", tmp_path)
+    test_every_workflow_pins_every_action_to_a_commit_sha_with_its_version()
+
+
 RELEASE_ZIPS = ("Melampus-macOS.zip", "Melampus-Windows.zip")
 
 
@@ -800,8 +815,10 @@ def _action_references(text: str) -> list[tuple[str, bool]]:
     be the action and a commit SHA: a ref that merely begins with a SHA,
     `<sha>-moving`, can be moved. The version is what the line's trailing
     comment says. PyYAML drops comments, so the comment is the text after
-    the last node that ends on the line, which leaves a `#` inside a quoted
-    scalar, or a flow mapping's closing brace, where it belongs. One trailing
+    the last scalar or flow collection that ends on the line, which leaves a
+    `#` inside a quoted scalar, or a flow mapping's closing brace, where it
+    belongs; a block collection ends where the next token begins, past any
+    comment, so it does not say where the line's text ends. One trailing
     comment cannot name two actions' versions, so a line holding two
     references is not pinned whatever each names. A workflow that does not
     parse cannot be read for its references, so it is one line nothing pins,
@@ -819,7 +836,11 @@ def _action_references(text: str) -> list[tuple[str, bool]]:
                     references.setdefault(value.start_mark.line, []).append(value)
     judged = []
     for line, values in sorted(references.items()):
-        written = max(node.end_mark.column for node in nodes if node.end_mark.line == line)
+        written = max(
+            node.end_mark.column
+            for node in nodes
+            if node.end_mark.line == line and (isinstance(node, yaml.ScalarNode) or node.flow_style)
+        )
         pinned = (
             len(values) == 1
             and re.fullmatch(r"\S+@[0-9a-f]{40}", values[0].value)
