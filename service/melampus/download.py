@@ -155,7 +155,8 @@ LOCK_TIMEOUT: float = 5
 PROBE_TIMEOUT: float = 0.1
 
 # The largest size, of a file or of the model, the status takes from the
-# hub's listing: the largest integer a double carries exactly, so the
+# hub's listing, and of a file the download's plan takes from the hub's
+# metadata call: the largest integer a double carries exactly, so the
 # plugin's JSON decoder (MelampusJson.lua, `tonumber`) reads it as the hub
 # gave it; a real file is far below it (nine petabytes). Above it, or with
 # a total above it, the listing is not a hub's: `json.dumps` cannot print
@@ -172,7 +173,8 @@ def _is_count(value: object) -> bool:
     refuses with an OverflowError, not a ValueError, and which the plugin's
     JSON decoder rejects as `Infinity`; above MAX_SIZE a count is one
     `json.dumps` or the plugin's decoder cannot carry. One rule for the
-    hub's file sizes, Ollama's pull counts and its list's sizes."""
+    hub's file sizes (the status's listing and the download's plan alike),
+    Ollama's pull counts and its list's sizes."""
     return type(value) is int and 0 <= value <= MAX_SIZE
 
 # The query string of any URL in a piece of text: an LFS file's bytes come
@@ -480,6 +482,11 @@ def _plan(repo: str, endpoint: str | None, cache: Path, storage: Path) -> tuple[
             raise DownloadError(
                 f"the hub at {endpoint} gave {entry.path} the etag {meta.etag!r}, "
                 f"not a sha256 or git blob checksum; {NOT_A_HUB}"
+            )
+        if not _is_count(meta.size):
+            raise DownloadError(
+                f"the hub at {endpoint} gave {entry.path} the size {meta.size}, "
+                f"not a non-negative integer of at most {MAX_SIZE}; {NOT_A_HUB}"
             )
         blobs.append(_Blob(entry.path, meta.location, meta.etag, meta.size,
                            storage / "blobs" / meta.etag, Path(pointer)))

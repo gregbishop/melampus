@@ -491,6 +491,9 @@ def built_executable(request: pytest.FixtureRequest) -> Path:
 # etags are the real hub's: the sha256 of an LFS file (the weights), git's blob
 # sha1 of a regular file; `later_etag` is what every HEAD after a file's first
 # answers instead, a hub that changes its story once the run has planned.
+# `sizes` is the text each LFS file's HEAD names as its X-Linked-Size, the
+# size the hub library's metadata call reads before Content-Length: the
+# file's length, unless a test names another.
 # `next_page` is a URL the tree listing names in its `Link: rel="next"`
 # header, as the real hub paginates a long listing and huggingface_hub
 # follows. `/api/agent-harnesses` is the hub's registry of AI coding agents,
@@ -580,6 +583,7 @@ class FakeHub:
             else hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
             for name, data in files.items()
         }
+        self.sizes = {name: str(len(data)) for name, data in files.items()}
 
         class Handler(QuietHandler):
             protocol_version = "HTTP/1.1"
@@ -699,7 +703,7 @@ class FakeHub:
                     self.send_response(302)
                     self.send_header("Location", f"{hub.bytes_host}{self.path}" + (f"?{hub.cdn_query}" if hub.cdn_query else ""))
                     self.send_header("X-Linked-Etag", f'"{etag}"')
-                    self.send_header("X-Linked-Size", str(len(hub.files[name])))
+                    self.send_header("X-Linked-Size", hub.sizes[name])
                 else:
                     self.send_response(200)
                     self.send_header("ETag", f'"{etag}"')

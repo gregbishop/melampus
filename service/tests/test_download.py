@@ -467,6 +467,33 @@ def test_download_rejects_a_commit_that_is_not_a_hash_before_it_becomes_a_path(f
     assert not [r for r in fake_hub.requests if "/resolve/" in r.path], "files were asked for at a commit that is not one"
 
 
+@pytest.mark.parametrize("size", [
+    pytest.param(str(download.MAX_SIZE + 1), id="above MAX_SIZE"),
+    pytest.param("-1", id="negative"),
+])
+def test_cli_refuses_a_file_size_that_is_not_a_count_before_any_byte_moves(
+    fake_hub: FakeHub, hub_env: dict[str, str], size: str
+):
+    """Card #500. The plan took the size the hub names for each LFS file
+    (X-Linked-Size) unchecked: one above MAX_SIZE ended `--download-model`
+    in the hub library's ValueError, a traceback, once another file's bytes
+    had moved, and a negative one had the file fetched whole before its size
+    failed. Given a hub naming model.safetensors a size above MAX_SIZE, the
+    ceiling the status holds the listing to (Done-when 1), or a size that is
+    not a non-negative integer (Done-when 2), the run exits 3 naming the
+    file and the size, nothing on stdout, before any byte is asked for from
+    the hub or the host serving the bytes."""
+    with FakeHub().serve() as cdn:
+        fake_hub.bytes_host = cdn.endpoint
+        fake_hub.sizes["model.safetensors"] = size
+        proc = _cli(["--download-model", "--model", FAKE_REPO], hub_env)
+
+    assert proc.returncode == 3, proc.stderr[-3000:]
+    assert "Traceback" not in proc.stderr and f"model.safetensors the size {size}" in proc.stderr, proc.stderr
+    assert proc.stdout == "", "the refusal came after the run had started"
+    assert not fake_hub.gets() and not cdn.gets(), "bytes moved before the refusal"
+
+
 def test_download_lays_out_the_snapshot_from_the_verified_blobs_and_asks_the_hub_nothing_more(
     fake_hub: FakeHub, tmp_path: Path
 ):
