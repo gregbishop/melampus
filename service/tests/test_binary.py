@@ -710,7 +710,11 @@ def test_executable_detects_engines_as_json_with_no_python_on_the_path(
     come from `providers.CLI_ENGINES`, as
     test_executable_refuses_a_cli_engine_that_is_not_installed's cases do,
     so a third CLI is not silently unchecked here (review round 9, C2;
-    rounds 4 and 8, C2)."""
+    rounds 4 and 8, C2). Every verdict carries the title the
+    plugin's picker shows (card #423), so the dialog holds no title table of
+    its own, and, where going and installing it is the fix, the install page
+    the picker links to (review round 9, finding 1), so the dialog scrapes no
+    address out of prose."""
     proc = subprocess.run(
         [str(built_executable), "--detect-engines"],
         env=no_python_environment(tmp_path), capture_output=True, text=True, timeout=600,
@@ -719,12 +723,17 @@ def test_executable_detects_engines_as_json_with_no_python_on_the_path(
     verdicts = json.loads(proc.stdout)
     assert [v["engine"] for v in verdicts] == [
         "mlx", "ollama", "openai", "claude", "claude-code", "codex"]
+    assert all(
+        set(v) == {"engine", "title", "available", "reason", "install"} for v in verdicts), verdicts
+    assert all(v["title"] for v in verdicts), "a verdict with no title for the picker"
     by_engine = {v["engine"]: v for v in verdicts}
     for cli in providers.CLI_ENGINES:
         verdict = by_engine[cli.engine]
+        assert verdict["title"].startswith(cli.title), verdict["title"]
         assert verdict["available"] is False, f"a {cli.program} on the empty PATH?"
         assert "not installed" in verdict["reason"], verdict["reason"]
         assert cli.install in verdict["reason"], verdict["reason"]
+        assert verdict["install"] == cli.install, verdict
     assert by_engine["mlx"]["available"] is on_apple_silicon()
     if not on_apple_silicon():
         assert by_engine["mlx"]["reason"] == "needs Apple Silicon"
@@ -732,10 +741,15 @@ def test_executable_detects_engines_as_json_with_no_python_on_the_path(
     assert by_engine["ollama"]["available"] is ollama_here
     if not ollama_here:
         assert providers.OLLAMA_INSTALL in by_engine["ollama"]["reason"]
+        assert by_engine["ollama"]["install"] == providers.OLLAMA_INSTALL
     for engine in ("openai", "claude"):
         assert by_engine[engine]["available"] is True
         assert "API key required" in by_engine[engine]["reason"]
         assert providers.KEY_VARIABLES[engine][0] in by_engine[engine]["reason"]
+    # Nothing to go and install: the picker offers no link for these, whatever
+    # address their reason happens to name (review round 9, finding 1).
+    for engine in ("mlx", "openai", "claude"):
+        assert by_engine[engine]["install"] == ""
 
 
 def test_executable_downloads_the_model_from_the_hub_with_no_python_on_the_path(
