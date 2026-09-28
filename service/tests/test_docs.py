@@ -1563,19 +1563,21 @@ def test_the_openings_privacy_claim_names_the_settings_that_can_send_the_image_e
     Ollama's cloud models, which the server on this machine runs on Ollama's
     own under the account it is signed in to (round 3). Naming one and not
     the other reads as the whole list, so the first screen still promises a
-    confidentiality the configuration does not enforce."""
+    confidentiality the configuration does not enforce. The breath is the
+    sentence that makes the promise (`_sentences`): elsewhere in the
+    opening, readme.md's engine table names `ollama_model` too (round 5)."""
     settings = {
         "ollama_url": "the setting that can point the ollama engine at another host",
         "ollama_model": "the setting that can name one of Ollama's cloud models",
     }
     for doc in (README, BRIEF):
-        opening = _opening(doc.read_text(encoding="utf-8"))
-        if "leaves the machine" not in opening:
-            continue
-        for setting, why in settings.items():
-            assert setting in opening, (
-                f"{doc.name}'s opening promises no image leaves the machine without naming "
-                f"`{setting}`, {why}")
+        for promise in _sentences(_raw_opening(doc.read_text(encoding="utf-8"))):
+            if "leaves the machine" not in promise:
+                continue
+            for setting, why in settings.items():
+                assert setting in promise, (
+                    f"{doc.name}'s opening promises no image leaves the machine without naming "
+                    f"`{setting}` in the same sentence, {why}")
 
 
 def test_the_privacy_gate_reads_the_sentence_that_makes_the_promise(monkeypatch, tmp_path):
