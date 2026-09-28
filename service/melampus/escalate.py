@@ -34,7 +34,7 @@ from .cache import ResultCache
 from .config import EscalationConfig, MelampusConfig
 from .images import content_hash
 from .providers import DEFAULT_MODELS as PROVIDER_DEFAULT_MODELS
-from .providers import KEY_VARIABLES, resolve_provider_key
+from .providers import BATCH_FATAL, KEY_VARIABLES, resolve_provider_key
 from .schema import ImageResult, Taxon
 
 #: Rough token usage per image, for the estimate printed before spending anything.
@@ -322,6 +322,11 @@ def escalate(
             continue
         try:
             result = identifier.identify(path)
+        except BATCH_FATAL:
+            # The engine or the configuration, not the frame: every frame
+            # would fail the same way, so the pass stops (cli._fail, exit 3)
+            # rather than counting it once per frame as worth a retry.
+            raise
         except Exception as exc:  # noqa: BLE001 - one bad frame must not end the run
             run.errors += 1
             run.notes.append(f"{record.file}: {type(exc).__name__}: {exc}")

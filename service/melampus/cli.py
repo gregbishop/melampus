@@ -165,7 +165,7 @@ def _run_escalation(paths, local_cache: ResultCache, config, *,
             identifier=identifier, config=config,
             range_flagged=range_flagged, dry_run=False, on_result=progress,
         )
-    except EscalationRefused as exc:
+    except (EscalationRefused, *BATCH_FATAL) as exc:
         return _fail(str(exc))
 
     print(

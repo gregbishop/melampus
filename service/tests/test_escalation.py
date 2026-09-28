@@ -39,6 +39,7 @@ from melampus.escalate import (
 )
 from melampus.identify import Identifier
 from melampus.images import NEUTRAL_NAME
+from melampus.providers import BATCH_FATAL
 from melampus.schema import Candidate, Identification, ImageResult, Taxon, TaxonRouting
 
 REPO = Path(__file__).resolve().parents[2]
@@ -516,6 +517,23 @@ def test_transient_failure_is_not_cached_and_is_retried(tmp_path, photo, monkeyp
     assert second.selected == 1, "frame was not retried after the outage cleared"
     assert second.processed == 1
     assert cloud.get(content_hash(photo)).identification.top().common_name == "Tricolored Heron"
+
+
+@pytest.mark.parametrize("fatal", BATCH_FATAL)
+def test_a_batch_fatal_failure_stops_the_pass_rather_than_counting_as_transient(
+    fatal, tmp_path, photo, monkeypatch
+):
+    """Codex review round 11, C1: `identify` lets providers.BATCH_FATAL past
+    its per-frame handler because every frame would fail the same way, and
+    the pass must not catch it again and count it as a transient error
+    worth a retry. It propagates to the caller, which stops at exit 3."""
+    monkeypatch.setenv("MELAMPUS_ANTHROPIC_KEY", "sk-test")
+    backend = _FailingBackend(fatal("this machine cannot run as configured"))
+    local, cloud, identifier, config = _prepare(tmp_path, photo, backend)
+
+    with pytest.raises(fatal, match="cannot run as configured"):
+        escalate([photo], local, cloud, identifier=identifier, config=config)
+    assert cloud.results() == [], "a refusal of the whole pass was cached on a frame"
 
 
 def test_a_refusal_is_permanent_and_is_not_retried(tmp_path, photo, monkeypatch):

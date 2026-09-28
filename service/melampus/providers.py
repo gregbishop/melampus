@@ -413,11 +413,11 @@ class BackendUnavailable(RuntimeError):
 
 #: The failures that stop a batch instead of being recorded on the frame in
 #: flight: every frame would fail the same way, so recording them one per
-#: photograph buries the one message that says what to fix. `identify` and
-#: `run_batch` re-raise these past their per-frame handlers and the CLI turns
-#: them into exit 3 (cli._fail). Stated here because this is the one module
-#: that sees both: CommandFailed is backend's, BackendUnavailable is this
-#: one's.
+#: photograph buries the one message that says what to fix. `identify`,
+#: `run_batch` and `escalate` re-raise these past their per-frame handlers and
+#: the CLI turns them into exit 3 (cli._fail). Stated here because this is the
+#: one module that sees both: CommandFailed is backend's, BackendUnavailable is
+#: this one's.
 BATCH_FATAL = (CommandFailed, BackendUnavailable)
 
 

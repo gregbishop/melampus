@@ -10,6 +10,7 @@ import json
 import os
 import sys
 import tempfile
+import types
 from pathlib import Path
 
 import pytest
@@ -360,6 +361,66 @@ def test_cli_stops_the_run_at_exit_3_when_the_staging_root_is_inside_the_grant(
     assert not cache.exists(), (
         "the refusal was recorded on the frames instead of stopping the run")
     assert not out.exists(), "a results file was written for a run that never ran"
+
+
+def test_cli_stops_escalation_at_exit_3_when_the_staging_root_is_inside_the_grant(
+    tmp_path: Path, monkeypatch, capsys
+):
+    """Codex review round 11, C1: the escalation pass refuses the same way.
+
+    `--report-only --escalate` never reaches `run_batch`: it sends the frames
+    the local pass left uncertain through `escalate`, which stages each one
+    through the same `staged_pixels`. `escalate` had a per-frame handler of
+    its own, and a staging root inside the grant went into it: counted as
+    a transient error, "re-run to retry them", the next frame refused the
+    same way, and exit 0.
+
+    Two frames the local pass could not settle are waiting in the local
+    cache. The run must stop at exit 3 on the first refusal, with the
+    message said once, nothing in the cloud cache and no results file. The
+    provider's SDK is a module with no client in it, so this holds with or
+    without the SDK installed and nothing here can reach the network.
+    """
+    from melampus.cli import main
+    from melampus.schema import ImageResult
+
+    folder = tmp_path / "frames"
+    folder.mkdir()
+    local = ResultCache(tmp_path / "cache.jsonl")
+    for index, tint in enumerate(((70, 100, 60), (60, 70, 110))):
+        frame = folder / f"SECRET_SPECIES_NAME_{index}.jpg"
+        Image.new("RGB", (1200, 800), tint).save(frame, format="JPEG")
+        local.put(ImageResult(
+            file=frame.name, content_hash=content_hash(frame), status="unprocessed"))
+
+    cloud = tmp_path / "escalations.jsonl"
+    settings = tmp_path / "melampus.toml"
+    settings.write_text(
+        f"[run]\nprompts_dir = '{(REPO / 'prompts').as_posix()}'\n"
+        f"[escalation]\ncache_path = '{cloud.as_posix()}'\n", encoding="utf-8")
+    out = tmp_path / "results.json"
+    monkeypatch.setenv("MELAMPUS_ANTHROPIC_KEY", "sk-test")
+    monkeypatch.setitem(sys.modules, "anthropic", types.ModuleType("anthropic"))
+
+    with _granted_temp_directory() as granted:
+        monkeypatch.setattr(melampus_config, "_CHECKOUT", Path(granted))
+        staging = cache_file(STAGING_ROOT).resolve()
+        assert any(staging.is_relative_to(d) for d in MINIMAL_GRANTED_TEMP), (
+            "the layout under test does not put the staging root in the grant")
+
+        code = main([str(folder), "--report-only", "--escalate", "--escalate-yes",
+                     "--backend", "scripted", "--config", str(settings),
+                     "--no-local-config", "--cache", str(local.path),
+                     "--json-out", str(out)])
+
+    err = capsys.readouterr().err
+    assert code == 3, f"the escalation pass did not refuse: {err}"
+    assert err.count(str(staging)) == 1, (
+        f"the refusal was not said once, at the first frame: {err}")
+    assert "run again" in err, f"the refusal does not say what to fix: {err}"
+    assert not cloud.exists(), (
+        "the refusal was recorded on the frames instead of stopping the pass")
+    assert not out.exists(), "a results file was written for a pass that never ran"
 
 
 def test_backend_never_receives_original_filename(photo: Path, config):
