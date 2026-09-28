@@ -258,6 +258,9 @@ def _frame_problems(data: bytes) -> list[str]:
     problems = []
     with image:
         try:
+            frames = getattr(image, "n_frames", 1)
+            if frames > 1:
+                problems.append(f"holds {frames} frames")
             # An EXIF block found at open is EXIF, whether or not it parses.
             if "exif" in image.info or image.getexif():
                 problems.append("carries EXIF")
@@ -403,6 +406,20 @@ def test_a_metadata_read_that_raises_is_refused_by_name():
     # sits past the pixels.
     past_the_pixels = png[:-12] + _png_chunk(b"eXIf", garbage) + png[-12:]
     assert _frame_problems(past_the_pixels) == [UNREADABLE]
+
+
+def test_a_frame_that_holds_more_frames_is_refused(tmp_path):
+    """Codex round 4, finding 2: EXIF was read from the first frame only. An
+    MPO -- a JPEG that carries more frames after its first, the way a camera
+    stores a stereo pair or a large preview -- with a clean first frame and a
+    tagged second passed. A fixture is one frame, so a blob that holds more is
+    refused whole, whichever of its frames carries what."""
+    with Image.open(io.BytesIO(_tagged_frame(tmp_path))) as tagged:
+        later = Image.new("RGB", (8, 8))
+        # Pillow saves each appended frame with its own encoderinfo.
+        later.encoderinfo = {"exif": tagged.info["exif"]}
+    mpo = _frame(format="MPO", save_all=True, append_images=[later])
+    assert "holds 2 frames" in _frame_problems(mpo)
 
 
 def test_a_fixture_is_judged_as_a_frame_whatever_it_is_called():
