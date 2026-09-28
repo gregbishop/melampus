@@ -64,8 +64,20 @@ def cache_file(name: str) -> Path:
     return _data_root() / (".melampus_cache" if _bundle() is None else "cache") / name
 
 
+#: The most `[model] timeout_seconds` may be: an hour, past any one
+#: request's real wait (a thinking model on a hard frame, Ollama loading a
+#: model), and far inside the largest timeout the socket and thread waits
+#: under it hold on every platform. Past it, or not above zero, the value
+#: is refused when the config loads (card #503).
+MAX_TIMEOUT_SECONDS = 3600
+
+
 class _Base(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    # A refusal names the field and the rule it broke, never the value:
+    # pydantic's message otherwise quotes it (`input_value=`), and the CLI
+    # prints a refusal on exit 3 to stderr, the plugin's CLI log and its
+    # dialogs, where a key under a name the config lacks would be quoted.
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
 
 
 class ModelConfig(_Base):
@@ -118,8 +130,9 @@ class ModelConfig(_Base):
     api_key: SecretStr | None = None
     # Anthropic-only; ignored elsewhere.
     effort: str = "high"
-    # Per-request ceiling for a cloud primary, for ollama and for command.
-    timeout_seconds: float = 180.0
+    # Per-request ceiling for a cloud primary, for ollama and for command,
+    # within (0, MAX_TIMEOUT_SECONDS]: `inf`, `nan` and a negative are out.
+    timeout_seconds: float = Field(default=180.0, gt=0, le=MAX_TIMEOUT_SECONDS)
     # Cloud primary only; the mlx backend ignores it. Same rationale as
     # escalation.max_images: a cloud primary bills every frame, and a mistyped
     # flag or an over-broad selection must not turn into an unexpected invoice
@@ -431,6 +444,22 @@ def _secrets_from_environment() -> dict[str, Any]:
     return secrets
 
 
+def _read(file: Path) -> dict[str, Any]:
+    """The settings in `file`, a melampus config (melampus.local.toml or
+    --config's), parsed; else a ValueError naming the file as the melampus
+    config: no file there, or, with the parser's words for where it went
+    wrong, TOML it refuses (its line and column) or bytes that are not
+    UTF-8, TOML's one encoding. The CLI refuses it on exit 3, as it
+    refuses a setting."""
+    if not file.is_file():
+        raise ValueError(f"The melampus config {file} was not found")
+    try:
+        with file.open("rb") as handle:
+            return tomllib.load(handle)
+    except (tomllib.TOMLDecodeError, UnicodeDecodeError) as exc:
+        raise ValueError(f"The melampus config {file} is not valid TOML: {exc}") from exc
+
+
 def load_config(
     path: str | Path | None = None, *, use_local: bool = True, **overrides: Any
 ) -> MelampusConfig:
@@ -444,14 +473,9 @@ def load_config(
     data: dict[str, Any] = {}
     local = _local_config()
     if use_local and local.is_file():
-        with local.open("rb") as handle:
-            data = _deep_merge(data, tomllib.load(handle))
+        data = _deep_merge(data, _read(local))
     if path is not None:
-        file = Path(path).expanduser()
-        if not file.is_file():
-            raise FileNotFoundError(f"Config file not found: {file}")
-        with file.open("rb") as handle:
-            data = _deep_merge(data, tomllib.load(handle))
+        data = _deep_merge(data, _read(Path(path).expanduser()))
     data = _deep_merge(data, _secrets_from_environment())
     if overrides:
         data = _deep_merge(data, overrides)

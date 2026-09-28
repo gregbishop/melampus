@@ -40,6 +40,8 @@ from conftest import (
     PHOTO,
     REAL_CLAUDE_CODE_VERDICT,
     REAL_CODEX_VERDICT,
+    THE_DECODER_REFUSES,
+    THE_DECODER_REFUSES_IDS,
     BadStatusLine,
     FakeOllama,
     QuietHandler,
@@ -1643,17 +1645,21 @@ def test_ollama_backend_maps_each_failure_to_a_plain_error(tmp_path, error, expe
     "body, said",
     [
         (b"<html>proxy error</html>", "not JSON"),
+        *((body, "not JSON") for body in THE_DECODER_REFUSES),
         (b"[]", "not a JSON object"),
         (b'"text"', "not a JSON object"),
         (b'{"message": "just a string"}', "not a JSON object"),
     ],
-    ids=["html", "list", "string", "message-not-an-object"],
+    ids=["html", *THE_DECODER_REFUSES_IDS, "list", "string", "message-not-an-object"],
 )
 def test_ollama_backend_reports_a_malformed_reply(tmp_path, body, said):
     """A 200 whose body is not JSON, is JSON but not an object, or whose
     `message` is not one, is a plain message naming the address and what
     came back, never an AttributeError out of `.get`; identify() records it
-    on the frame and the batch continues."""
+    on the frame and the batch continues. Card #503: not JSON in every way
+    the pull's decoder names (a JSONDecodeError, bytes that are not UTF-8,
+    an integer past Python's digit limit, arrays nested past the recursion
+    limit), each in the same bounded words, not the decoder's own error."""
     image = tmp_path / "image.jpg"
     image.write_bytes(b"jpeg")
     backend = _ollama_backend(_FakeUrlopen(body))
@@ -1661,6 +1667,35 @@ def test_ollama_backend_reports_a_malformed_reply(tmp_path, body, said):
         backend.complete(image, "prompt", 10)
     assert said in str(err.value), str(err.value)
     assert backend.url in str(err.value), str(err.value)
+    assert len(str(err.value)) < 400, "the message is not bounded"
+
+
+@pytest.mark.parametrize("body", THE_DECODER_REFUSES, ids=THE_DECODER_REFUSES_IDS)
+def test_cli_records_a_chat_reply_the_decoder_refuses_as_not_json_on_the_frame(
+    monkeypatch, photos, tmp_path, capsys, body
+):
+    """Card #503, Done-when 2, at the real boundary: Ollama on loopback
+    answers the chat with bytes Python's JSON decoder refuses with
+    something other than its JSONDecodeError. The frame is recorded as an
+    error in the words the one decoder writes for every Ollama reply (the
+    pull's lines, the list's, the delete's): the reply named, "was not
+    JSON", its first 120 bytes; not a UnicodeDecodeError, a ValueError or
+    a RecursionError of the decoder's own. The run goes on to exit 0."""
+    from melampus.cli import main
+
+    out = tmp_path / "results.json"
+    with _fake_ollama(monkeypatch, replies=[body]) as server:
+        settings = _settings_naming_the_fake(monkeypatch, tmp_path)
+        code = main([
+            str(photos), "--backend", "ollama", "--config", str(settings),
+            "--no-local-config", "--cache", str(tmp_path / "cache.jsonl"), "--json-out", str(out),
+        ])
+
+    err = capsys.readouterr().err
+    assert code == 0, err
+    (result,) = json.loads(out.read_text(encoding="utf-8"))
+    assert result["status"] == "error", result
+    assert f"Ollama's reply from {server.endpoint} was not JSON: {body[:120]!r}" in result["error"], result["error"]
 
 
 def test_ollama_backend_stays_at_the_address_whatever_proxy_the_environment_names(
@@ -2040,6 +2075,168 @@ def test_command_template_with_a_control_character_is_refused_at_config_load(
     assert f"[model] command element {position} carries a character that is not printable ({codepoint})" in clause, clause
     assert "escape sequence" in clause and "line break" in clause, clause
     assert all(c.isprintable() for c in clause), clause
+
+
+@pytest.mark.parametrize(
+    ("value", "bound"),
+    [
+        ("inf", "less than or equal to {ceiling}"),
+        ("-inf", "greater than 0"),
+        ("nan", "less than or equal to {ceiling}"),
+        ("1e12", "less than or equal to {ceiling}"),
+        ("-5", "greater than 0"),
+        ("0", "greater than 0"),
+    ],
+    ids=["inf", "minus-inf", "nan", "huge", "negative", "zero"],
+)
+def test_timeout_outside_its_bound_is_refused_at_config_load_exit_3(
+    monkeypatch, photos, tmp_path, capsys, value, bound
+):
+    """Card #503, Done-when 1: `[model] timeout_seconds` is the one wait
+    every request of a cloud primary, `ollama` and `command` is bounded by,
+    and the socket and thread timeouts under it hold a finite positive
+    number of seconds only: `inf` or a huge value raised OverflowError out
+    of them, `nan` ValueError, a traceback (on stderr from the deadline's
+    thread, or out of --download-model), and zero or a negative timed out
+    every frame. Given a value outside a finite positive range, when the
+    config loads, then the run is refused there, exit 3, naming the field
+    and the bound it broke, before Ollama is asked anything."""
+    from melampus.cli import main
+    from melampus.config import MAX_TIMEOUT_SECONDS
+
+    with _fake_ollama(monkeypatch) as server:
+        settings = _settings_naming_the_fake(monkeypatch, tmp_path)
+        with settings.open("a", encoding="utf-8") as handle:
+            handle.write(f"timeout_seconds = {value}\n")
+        code = main([
+            str(photos), "--backend", "ollama", "--config", str(settings),
+            "--no-local-config", "--cache", str(tmp_path / "cache.jsonl"),
+        ])
+
+    err = capsys.readouterr().err
+    assert code == 3, err
+    assert "timeout_seconds" in err, err
+    assert bound.format(ceiling=MAX_TIMEOUT_SECONDS) in err, err
+    assert "Traceback" not in err, err
+    assert server.requests == [], "Ollama was asked before the config was refused"
+
+
+def test_timeout_bound_admits_its_ceiling_and_refuses_past_it():
+    """Card #503: the ceiling is the most `timeout_seconds` may be, itself
+    allowed; a fraction of a second past it is refused, naming the field."""
+    from melampus.config import MAX_TIMEOUT_SECONDS
+
+    assert _cfg(model={"timeout_seconds": MAX_TIMEOUT_SECONDS}).model.timeout_seconds == MAX_TIMEOUT_SECONDS
+    with pytest.raises(ValueError, match="timeout_seconds"):
+        _cfg(model={"timeout_seconds": MAX_TIMEOUT_SECONDS + 0.5})
+
+
+# A value a config refusal must never carry, synthetic and plainly not a
+# credential: 80 characters, so pydantic's own message, which quotes a
+# refused value cut to its first and last 24 characters, carries some of
+# it wherever it sits in a string. Any four characters of it are one of
+# REFUSED_PIECES, which no message holds else.
+REFUSED_VALUE = "zq" * 40
+REFUSED_PIECES = ("zqzq", "qzqz")
+
+
+def test_config_refusal_names_the_field_never_the_value():
+    """Security review, card #503, round 1: a refusal names the field and
+    the rule it broke, never the value refused, since that value can be a
+    key the config was given under a name it does not have."""
+    with pytest.raises(ValueError) as err:
+        _cfg(model={"anthropic_api_key": REFUSED_VALUE})
+    assert "model.anthropic_api_key" in str(err.value), str(err.value)
+    assert not any(piece in str(err.value) for piece in REFUSED_PIECES), str(err.value)
+
+
+@pytest.mark.parametrize(
+    ("setting", "field"),
+    [
+        (f'api_key = "{REFUSED_VALUE}"\n', "api_key"),
+        (f'[model]\nanthropic_api_key = "{REFUSED_VALUE}"\n', "model.anthropic_api_key"),
+        ('[model]\nollama_host = "http://reader:' + REFUSED_VALUE + '@127.0.0.1:11434"\n',
+         "model.ollama_host"),
+    ],
+    ids=["key-above-the-first-table", "key-under-a-name-the-config-lacks",
+         "url-with-credentials-under-a-name-the-config-lacks"],
+)
+def test_config_refusal_on_exit_3_never_echoes_the_value_refused(tmp_path, capsys, setting, field):
+    """Security review, card #503, round 1. `main` prints a config refusal
+    on exit 3, to stderr, which the plugin writes to its CLI log and shows
+    the tail of in its dialogs. pydantic's own message quotes the value it
+    refused, and the realistic refusals of a secret are its mistakes: a key
+    above the first table header or under a name the config lacks, a URL
+    carrying a password under one. Given one, when the config loads, then
+    the refusal is exit 3, naming the field, with no part of the value in
+    it."""
+    from melampus.cli import main
+
+    settings = tmp_path / "settings.toml"
+    settings.write_text(setting, encoding="utf-8")
+    code = main([str(tmp_path), "--config", str(settings), "--no-local-config"])
+
+    printed = capsys.readouterr()
+    assert code == 3, printed.err
+    assert field in printed.err, printed.err
+    assert "Traceback" not in printed.err, printed.err
+    for piece in REFUSED_PIECES:
+        assert piece not in printed.err + printed.out, printed.err
+
+
+@pytest.mark.parametrize(
+    ("content", "said"),
+    [
+        (b'[model]\nbackend = "ollama"\ntimeout_seconds = 3 0\n', "(at line 3,"),
+        (b'[model]\nbackend = "\xff"\n', "'utf-8' codec can't decode byte 0xff"),
+    ],
+    ids=["not-toml", "not-utf-8"],
+)
+@pytest.mark.parametrize("given", ["--config", "melampus.local.toml"])
+def test_config_file_that_cannot_be_read_is_refused_on_exit_3_naming_it(
+    monkeypatch, tmp_path, capsys, content, said, given
+):
+    """Code review, card #503, round 1: a config file that is not TOML, or
+    not UTF-8 (TOML's one encoding), was refused on exit 3 with the
+    parser's words alone (`Expected newline ... (at line 3, column 21)`), naming
+    neither the file nor that it is the configuration. Given either, as
+    --config's file or as melampus.local.toml, when the config loads, then
+    the refusal is exit 3, naming the file as the melampus config and
+    keeping the parser's words for where it went wrong."""
+    from melampus import config
+    from melampus.cli import main
+
+    settings = tmp_path / "settings.toml"
+    settings.write_bytes(content)
+    if given == "--config":
+        flags = ["--config", str(settings), "--no-local-config"]
+    else:
+        monkeypatch.setattr(config, "_local_config", lambda: settings)
+        flags = []
+    code = main([str(tmp_path), *flags])
+
+    err = capsys.readouterr().err
+    assert code == 3, err
+    assert f"melampus config {settings}" in err, err
+    assert said in err, err
+    assert "Traceback" not in err, err
+
+
+def test_config_path_that_does_not_exist_is_refused_on_exit_3_naming_it(tmp_path, capsys):
+    """Code review, card #503, round 1: every config refusal is exit 3, a
+    --config path with no file there included. It raised FileNotFoundError
+    out of `main`, a traceback. Given a --config path that does not
+    exist, when the config loads, then the refusal is exit 3, naming the
+    path as the melampus config."""
+    from melampus.cli import main
+
+    missing = tmp_path / "no-such-settings.toml"
+    code = main([str(tmp_path), "--config", str(missing), "--no-local-config"])
+
+    err = capsys.readouterr().err
+    assert code == 3, err
+    assert f"melampus config {missing}" in err, err
+    assert "Traceback" not in err, err
 
 
 class _FakeRun:

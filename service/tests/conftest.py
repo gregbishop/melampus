@@ -799,13 +799,32 @@ def ollama_chat_reply(model: str, text: str) -> dict:
     }
 
 
+# Two replies Python's JSON decoder refuses with something other than its
+# JSONDecodeError (Codex review, opposing vendor, round 1, security finding
+# 2, download.py:1153): bytes that are not UTF-8 (a UnicodeDecodeError from
+# the bytes' decoding) and an integer literal past its int-to-str limit of
+# 4300 digits (a plain ValueError, `Exceeds the limit`). Both are the
+# server's to write, in any reply: a pull line, the list's or the delete's,
+# or a chat's (card #503).
+NOT_UTF8 = b"\xff\xfe{"
+PAST_THE_DIGIT_LIMIT = b'{"status": "pulling manifest", "total": ' + b"9" * 5000 + b"}"
+# Codex review (opposing vendor) round 2, security finding (download.py:1179):
+# 20 KB, well under the reply bound, that the decoder refuses with a
+# RecursionError, a RuntimeError and not a ValueError.
+DEEPLY_NESTED = b"[" * 10_000 + b"]" * 10_000
+THE_DECODER_REFUSES = [NOT_UTF8, PAST_THE_DIGIT_LIMIT, DEEPLY_NESTED]
+THE_DECODER_REFUSES_IDS = ["not-utf-8", "an-integer-past-the-digit-limit", "arrays-nested-past-the-recursion-limit"]
+
+
 class FakeOllama:
     """The fake Ollama's state and its handler; `serve` puts it on loopback.
     `prefix` mounts the endpoints under a path, the way a reverse proxy
-    does; any other path is Ollama's own 404."""
+    does; any other path is Ollama's own 404. A chat reply given as text is
+    that text in Ollama's reply object; given as bytes, it is the whole
+    body, as it is, for a reply that is not Ollama's shape."""
 
     def __init__(
-        self, *, status: int = 200, delay: float = 0.0, replies: list[str] = (), prefix: str = "",
+        self, *, status: int = 200, delay: float = 0.0, replies: list[str | bytes] = (), prefix: str = "",
         library: dict[str, list[int]] | None = None,
     ) -> None:
         self.chats: list[dict] = []
@@ -870,7 +889,8 @@ class FakeOllama:
                 if not pending:
                     self._answer(404, {"error": f"model '{body.get('model')}' not found"})
                     return
-                self._answer(200, ollama_chat_reply(body["model"], pending.pop(0)))
+                reply = pending.pop(0)
+                self._answer(200, reply if isinstance(reply, bytes) else ollama_chat_reply(body["model"], reply))
 
             def _pull(self, body: dict) -> None:
                 ollama.pulls.append(body)
@@ -917,11 +937,11 @@ class FakeOllama:
                 self.wfile.write(json.dumps(item).encode("utf-8") + b"\n")
                 self.wfile.flush()
 
-            def _answer(self, code: int, payload: dict) -> None:
+            def _answer(self, code: int, payload: dict | bytes) -> None:
                 self.send_response(code)
                 self.send_header("Content-Type", "application/json")
                 self.end_headers()
-                self.wfile.write(json.dumps(payload).encode("utf-8"))
+                self.wfile.write(payload if isinstance(payload, bytes) else json.dumps(payload).encode("utf-8"))
 
         self.handler = Handler
 

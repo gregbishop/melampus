@@ -1039,24 +1039,14 @@ def _pull_error(model: str, error: object) -> DownloadError:
 
 def _json_object(raw: bytes | str, named: str) -> dict:
     """`raw`, a JSON object the server wrote (one line of the pull's stream,
-    the list's or the delete's reply), decoded; else a DownloadError naming
-    it as `named`, bounded to its first 120 bytes: "was not JSON" for what
-    the decoder refuses, whatever it raises for it, "was not a JSON object"
-    for JSON of another shape (`[1]`, `"text"`, `5`), the words the chat's
-    `complete` uses for its reply. The decoder raises a JSONDecodeError, a
-    UnicodeDecodeError for bytes that are not UTF-8 (or the UTF-16 or -32
-    a leading byte order mark names) and a plain ValueError for an integer
-    literal past Python's 4300-digit limit, all three ValueErrors; and a
-    RecursionError, a RuntimeError, for arrays or objects nested past the
-    interpreter's recursion limit (some 20 KB of `[`, well under the reply
-    bound). All four mean the reply is not JSON."""
+    the list's or the delete's reply), decoded by the one decoder of an
+    Ollama reply, the chat's too (`OllamaBackend.json_object`); its refusal,
+    "was not JSON" or "was not a JSON object" naming the reply as `named`,
+    a DownloadError here."""
     try:
-        item = json.loads(raw)
-    except (ValueError, RecursionError) as exc:
-        raise DownloadError(f"{named} was not JSON: {raw[:120]!r}") from exc
-    if not isinstance(item, dict):
-        raise DownloadError(f"{named} was not a JSON object: {raw[:120]!r}")
-    return item
+        return OllamaBackend.json_object(raw, named)
+    except RuntimeError as exc:
+        raise DownloadError(str(exc)) from exc
 
 
 def pull_updates(model: str, lines: Iterable[bytes | str]) -> Iterator[Update]:
