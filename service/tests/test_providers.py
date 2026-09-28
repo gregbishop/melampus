@@ -2144,6 +2144,44 @@ def test_config_refusal_on_exit_3_never_echoes_the_value_refused(tmp_path, capsy
         assert piece not in printed.err + printed.out, printed.err
 
 
+@pytest.mark.parametrize(
+    ("content", "said"),
+    [
+        (b'[model]\nbackend = "ollama"\ntimeout_seconds = 3 0\n', "(at line 3,"),
+        (b'[model]\nbackend = "\xff"\n', "'utf-8' codec can't decode byte 0xff"),
+    ],
+    ids=["not-toml", "not-utf-8"],
+)
+@pytest.mark.parametrize("given", ["--config", "melampus.local.toml"])
+def test_config_file_that_cannot_be_read_is_refused_on_exit_3_naming_it(
+    monkeypatch, tmp_path, capsys, content, said, given
+):
+    """Code review, card #503, round 1: a config file that is not TOML, or
+    not UTF-8 (TOML's one encoding), was refused on exit 3 with the
+    parser's words alone (`Expected newline ... (at line 3, column 21)`), naming
+    neither the file nor that it is the configuration. Given either, as
+    --config's file or as melampus.local.toml, when the config loads, then
+    the refusal is exit 3, naming the file as the melampus config and
+    keeping the parser's words for where it went wrong."""
+    from melampus import config
+    from melampus.cli import main
+
+    settings = tmp_path / "settings.toml"
+    settings.write_bytes(content)
+    if given == "--config":
+        flags = ["--config", str(settings), "--no-local-config"]
+    else:
+        monkeypatch.setattr(config, "_local_config", lambda: settings)
+        flags = []
+    code = main([str(tmp_path), *flags])
+
+    err = capsys.readouterr().err
+    assert code == 3, err
+    assert f"melampus config {settings}" in err, err
+    assert said in err, err
+    assert "Traceback" not in err, err
+
+
 class _FakeRun:
     """Stands in for subprocess.Popen at the backend's process edge: records
     every call, then returns a started process whose stdout and stderr
