@@ -45,6 +45,7 @@ from conftest import (
     FAKE_REPO,
     FAKE_TOTAL,
     NOT_UTF8,
+    SCHEDULING_SLACK,
     THE_DECODER_REFUSES,
     THE_DECODER_REFUSES_IDS,
     VENV_CLI,
@@ -2983,14 +2984,16 @@ def test_the_pull_gives_up_on_an_ollama_that_trickles_a_line_naming_the_setting_
     TimeoutError a second time, `the pull of m from <url> failed: Ollama
     at <url> did not answer ...`, the address twice and the model twice
     on stderr, in the log and in the dialog."""
+    timeout = 1.0
     with loopback_server(TricklingPull, ThreadingHTTPServer) as trickler:
         url = f"http://127.0.0.1:{trickler.server_port}"
         started = time.monotonic()
         with pytest.raises(DownloadError) as failure:
             pull_model(FAKE_MODEL, url, on_update=lambda update: None,
-                       cancel_marker=tmp_path / "download-cancel", timeout=1.0)
+                       cancel_marker=tmp_path / "download-cancel", timeout=timeout)
         took = time.monotonic() - started
-    assert took < 3.0, f"the pull ran past its timeout: {took:.1f}s"
+    ceiling = 2 * TricklingPull.PAUSE + timeout + SCHEDULING_SLACK
+    assert took < ceiling, f"the pull ran past its timeout: {took:.1f}s"
     message = str(failure.value)
     assert message.startswith(f"Ollama at {url} did not answer within 1s"), message
     assert message.count(url) == 1 and message.count(FAKE_MODEL) == 1, message

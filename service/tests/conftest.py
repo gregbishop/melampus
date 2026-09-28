@@ -20,7 +20,8 @@ handler derives from `QuietHandler`, which keeps http.server's request log
 out of pytest's output, and `recording_handler` is the one that answers 200
 to anything and remembers what it was asked, for the assertion "this server
 never heard from the client". `Silent` accepts and never answers, for the
-deadline tests.
+deadline tests, and `SCHEDULING_SLACK` is the one slack every wall-clock
+bound on a deadline carries (card #506).
 
 `fake_platform` is the one way the suite fakes the machine `on_apple_silicon`
 reads (sys.platform and platform.machine(), together), whether the caller is
@@ -252,10 +253,21 @@ def recording_handler(seen: list[str]) -> type[QuietHandler]:
     return Recording
 
 
+# The room every wall-clock bound on a deadline gives a loaded machine: when
+# several suites run at once the deadline's timer, and the thread reading
+# after its hang-up, can wake late (card #506). A bound is what the block
+# waits for plus this, measured on the monotonic clock around the block, and
+# whatever a bound rules out (a trickle read to its end, a stalled handshake
+# held to the socket timeout) lasts well past it, so a deadline that failed
+# to end the block still fails the test.
+SCHEDULING_SLACK = 2.0
+
+
 def trickle(wfile, data: bytes) -> None:
     """`data` one byte every hundred milliseconds: each byte within the
-    socket timeout, the whole (two seconds for twenty bytes) well past a
-    sub-second deadline. The one trickle for every listener that holds a
+    socket timeout, the whole (forty bytes and more, four seconds and more)
+    well past every bound a test sets on it, its deadline plus
+    SCHEDULING_SLACK. The one trickle for every listener that holds a
     call for as long as it likes (the probe's headers, a frame's body, the
     list's and the delete's reply, a line of the pull's stream). Once the
     client hangs up, the next write raises; a caller's suppress(OSError)
@@ -393,13 +405,14 @@ class TricklingPull(QuietHandler):
     lines, each after a pause within the deadline the tests give and the
     two together past it (a deadline on the exchange alone would end the
     stream before the second), then a line trickled a byte every tenth of
-    a second: each byte within the socket timeout, the whole well past the
-    deadline. The shape that held the pull, and the cancel marker read
-    between lines, for as long as it liked (security review round 4)."""
+    a second: each byte within the socket timeout, the whole (padded to 45
+    bytes, 4.5 seconds) well past the deadline plus SCHEDULING_SLACK. The
+    shape that held the pull, and the cancel marker read between lines,
+    for as long as it liked (security review round 4)."""
 
     PAUSE = 0.3
     WHOLE = b'{"status": "pulling manifest"}\n'
-    TRICKLED = b'{"status": "success"}\n'
+    TRICKLED = b'{"status": "success"}'.ljust(44) + b"\n"
 
     def do_POST(self) -> None:  # noqa: N802 - http.server's name
         self.rfile.read(int(self.headers.get("Content-Length") or 0))

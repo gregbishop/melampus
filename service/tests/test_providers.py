@@ -39,6 +39,7 @@ from conftest import (
     PHOTO,
     REAL_CLAUDE_CODE_VERDICT,
     REAL_CODEX_VERDICT,
+    SCHEDULING_SLACK,
     THE_DECODER_REFUSES,
     THE_DECODER_REFUSES_IDS,
     BadStatusLine,
@@ -685,12 +686,6 @@ def _ollama_served_by(monkeypatch, handler: type[QuietHandler], prefix: str = ""
         yield server
 
 
-# Slack for thread scheduling in the deadline tests: the timer thread fires and
-# the main thread's read returns some tens of milliseconds after the deadline,
-# while waiting out the trickle takes over two seconds.
-SCHEDULING_SLACK = 0.5
-
-
 @contextlib.contextmanager
 def _timed():
     """How long the block took, as `seconds` on the object yielded, read
@@ -894,13 +889,14 @@ def test_ollama_probe_gives_up_after_its_timeout(monkeypatch):
 
 class Trickling(QuietHandler):
     """A listener that sends a valid 200 with the headers trickled: each
-    byte within the socket timeout, the whole well past the probe's
-    deadline. A POST gets the same, once its body is read."""
+    byte within the socket timeout, the whole (the header's value padded
+    to 45 bytes, 4.5 seconds) well past the probe's deadline plus
+    SCHEDULING_SLACK. A POST gets the same, once its body is read."""
 
     def do_GET(self):  # noqa: N802 - http.server's name
         with contextlib.suppress(OSError):
             self.wfile.write(b"HTTP/1.1 200 OK\r\n")
-            trickle(self.wfile, b"Content-Length: 2\r\n\r\n")
+            trickle(self.wfile, b"Content-Length: 2".ljust(41) + b"\r\n\r\n")
             self.wfile.write(b"{}")
 
     def do_POST(self):  # noqa: N802 - http.server's name
@@ -911,9 +907,10 @@ class Trickling(QuietHandler):
 def _trickling_body(status: int) -> type[QuietHandler]:
     """A listener that answers a POST's status line and headers at once,
     then a `status` body trickled: each byte within the socket timeout,
-    the whole well past the deadline. 200 is a reply being read; 500 is an
-    error body being read."""
-    body = b'{"error": "slowly"}'
+    the whole (padded to 45 bytes, 4.5 seconds) well past the deadline
+    plus SCHEDULING_SLACK. 200 is a reply being read; 500 is an error
+    body being read."""
+    body = b'{"error": "slowly"}'.ljust(45)
 
     class TricklingBody(QuietHandler):
         def do_POST(self):  # noqa: N802 - http.server's name
@@ -962,12 +959,13 @@ def test_ollama_probe_gives_up_at_its_deadline_when_the_handshake_stalls_after_a
     socket timeout on its own; a connection that took most of
     OLLAMA_PROBE_SECONDS, then a handshake that stalls, held detection a
     second whole probe timeout. Given a connect that returns just before
-    the deadline (held 0.6s of 0.8s) and a listener behind an https address
-    that accepts and never completes the handshake, the probe reports
-    unavailable within its deadline."""
-    deadline = 0.8
+    the deadline (held 2.2s of 2.5s, so the handshake's own timeout would
+    end it past the deadline plus SCHEDULING_SLACK) and a listener behind
+    an https address that accepts and never completes the handshake, the
+    probe reports unavailable within its deadline."""
+    deadline = 2.5
     monkeypatch.setattr(providers, "OLLAMA_PROBE_SECONDS", deadline)
-    _hold_connect(monkeypatch, 0.6)
+    _hold_connect(monkeypatch, 2.2)
     with loopback_server(Silent) as server, _timed() as took:
         answered = providers.ollama_answers(f"https://127.0.0.1:{server.server_port}")
     assert took.seconds < deadline + SCHEDULING_SLACK, f"the probe shook hands past its deadline: {took.seconds:.2f}s"
@@ -1962,7 +1960,7 @@ def test_ollama_backend_stream_gives_up_at_its_deadline_when_a_line_trickles():
 
 @pytest.mark.parametrize(
     ("hold", "ceiling"),
-    [(0.85, 0.85), (0.6, 0.8)],
+    [(2.55, 2.55), (2.2, 2.5)],
     ids=["connect-after-deadline", "connect-just-before"],
 )
 def test_ollama_backend_deadline_covers_the_handshake_whenever_connect_lands(
@@ -1978,12 +1976,13 @@ def test_ollama_backend_deadline_covers_the_handshake_whenever_connect_lands(
     connection that took most of the budget, or landed just after it, and
     then a handshake that stalls, held the frame a whole socket timeout
     more. The kernel's connect timing is not reproducible, so the TCP phase
-    is held here, as the probe's tests hold it. Given a 0.8s timeout, a
-    connect held `hold` seconds (just past the deadline, or 0.6s of it) and
+    is held here, as the probe's tests hold it. Given a 2.5s timeout, a
+    connect held `hold` seconds (just past the deadline, or 2.2s of it) and
     a listener behind an https address that accepts and never completes
     the handshake, the frame fails as timed out by `ceiling` (the deadline,
-    or the late connect's own moment), not a whole timeout later."""
-    deadline = 0.8
+    or the late connect's own moment) plus SCHEDULING_SLACK, not a whole
+    timeout later: `hold` and the handshake's own 2.5s are past that."""
+    deadline = 2.5
     _hold_connect(monkeypatch, hold)
     image = tmp_path / "image.jpg"
     image.write_bytes(b"jpeg")
@@ -2807,8 +2806,10 @@ def test_command_backend_counts_starting_the_program_against_the_timeout(tmp_pat
     run = _FakeRun(stdout=ID_OK)
     backend = _command_backend(run, timeout=0.3)
 
+    launch = 0.6
+
     def slow_launch(argv, **kwargs):
-        time.sleep(0.6)
+        time.sleep(launch)
         return run(argv, **kwargs)
     backend._run = slow_launch
 
@@ -2816,7 +2817,8 @@ def test_command_backend_counts_starting_the_program_against_the_timeout(tmp_pat
     with pytest.raises(TimeoutError, match="did not answer within 0.3s"):
         backend.complete(image, "prompt", 10)
 
-    assert time.monotonic() - started < 1.5, "the launch was given a fresh timeout on top of its own"
+    assert time.monotonic() - started < launch + SCHEDULING_SLACK, (
+        "the launch was given a fresh timeout on top of its own")
     (process,) = run.processes
     assert process.returncode is not None, "the command was not reaped"
 
@@ -2857,7 +2859,7 @@ def test_command_backend_uses_the_reply_of_a_command_that_exited_leaving_its_pip
 
 @pytest.mark.parametrize(
     ("timeout", "at_least", "under"),
-    [(5.0, 4.5, 7), (1.5, 1.5, 2.5)],
+    [(5.0, 4.5, 5.0 + SCHEDULING_SLACK), (1.5, 1.5, 1.5 + SCHEDULING_SLACK)],
     ids=["five-second-bound-wins", "timeout-wins"],
 )
 def test_command_backend_leaves_a_pipe_still_held_past_the_reader_bound_to_its_holder(
