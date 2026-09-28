@@ -708,6 +708,34 @@ def test_the_action_pinning_gate_finds_a_step_whatever_its_scalars_hold(tmp_path
     assert "ci.yml" not in reported, reported
 
 
+def test_the_action_pinning_gate_takes_only_a_whole_sha_as_a_pin(tmp_path, monkeypatch):
+    """Open finding 2 at b275279 (Codex round 2, 2, and its security review;
+    Claude round 4, 2): the pin was forty hex digits followed by a word
+    boundary, and every non-word character is one, so a ref whose name
+    merely begins with a SHA -- a branch or tag `<sha>-moving`, `<sha>.1`,
+    `<sha>/x`, each of which can be moved to different code -- passed as a
+    commit pin. Done-when 1 is a full commit SHA, so the whole reference must
+    be the action and the SHA, nothing after it. The folder is a stand-in
+    read at call time; ci.yml in it is pinned, so every .yaml file, and
+    only those, must be reported."""
+    sha = "11d5960a326750d5838078e36cf38b85af677262"
+    (tmp_path / "ci.yml").write_text(f"      - uses: actions/checkout@{sha} # v4.4.0\n", encoding="utf-8")
+    steps = {
+        "hyphen.yaml": f"- uses: actions/checkout@{sha}-moving # v4.4.0",
+        "dot.yaml": f"- uses: actions/checkout@{sha}.1 # v4.4.0",
+        "slash.yaml": f"- uses: actions/checkout@{sha}/x # v4.4.0",
+    }
+    for name, step in steps.items():
+        (tmp_path / name).write_text(f"      {step}\n", encoding="utf-8")
+    monkeypatch.setitem(globals(), "WORKFLOWS", tmp_path)
+    with pytest.raises(AssertionError) as unpinned:
+        test_every_workflow_pins_every_action_to_a_commit_sha_with_its_version()
+    reported = str(unpinned.value)
+    for name, step in steps.items():
+        assert f"{name}: {step}" in reported, reported
+    assert "ci.yml" not in reported, reported
+
+
 RELEASE_ZIPS = ("Melampus-macOS.zip", "Melampus-Windows.zip")
 
 
@@ -764,8 +792,10 @@ def _action_references(text: str) -> list[tuple[str, bool]]:
     stripped, and whether it is pinned. A reference is the value of a `uses`
     key as YAML parses it: a key counts by its value, however it is quoted,
     and the text of a quoted scalar is never a key. What the workflow runs is
-    that value, so a SHA quoted in a comment pins nothing, and the version is
-    what the line's trailing comment says. PyYAML drops comments, so the
+    that value, so a SHA quoted in a comment pins nothing, and all of it must
+    be the action and a commit SHA: a ref that merely begins with a SHA,
+    `<sha>-moving`, can be moved. The version is what the line's trailing
+    comment says. PyYAML drops comments, so the
     comment is the text after the last node that ends on the line, which
     leaves a `#` inside a quoted scalar, or a flow mapping's closing brace,
     where it belongs. One trailing comment cannot name two actions' versions,
@@ -783,7 +813,7 @@ def _action_references(text: str) -> list[tuple[str, bool]]:
         written = max(node.end_mark.column for node in nodes if node.end_mark.line == line)
         pinned = (
             len(values) == 1
-            and re.match(r"\s*\S+@[0-9a-f]{40}\b", values[0].value)
+            and re.fullmatch(r"\S+@[0-9a-f]{40}", values[0].value)
             and re.search(r"#\s*v\d", lines[line][written:])
         )
         judged.append((lines[line].strip(), bool(pinned)))
