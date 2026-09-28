@@ -72,6 +72,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import tomllib
 import types
 from collections.abc import Callable, Iterator
@@ -832,6 +833,34 @@ def test_executable_refuses_to_run_unpacked_inside_the_shared_temp_directories(
     assert re.search(r"/(private/)?tmp/_MEI\w+", tail), (
         f"the refusal does not name the unpack directory under /tmp:\n{tail}")
     assert "$TMPDIR" in tail, f"the refusal does not say to set $TMPDIR:\n{tail}"
+    assert not (tmp_path / "cache.jsonl").exists(), (
+        "the refusal was recorded on the frames instead of stopping the run")
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="the shared temp directories a CLI engine's profile grants are /tmp and its "
+           "kin, POSIX paths a Windows build is never started from",
+)
+def test_executable_refuses_to_run_started_from_inside_the_shared_temp_directories(
+    built_executable: Path, photos: Path, tmp_path: Path
+):
+    """Security review round 2 on PR #28, in the frozen build: copied into a
+    folder under /tmp and launched with $TMPDIR outside the grant, as the
+    plugin launches it, the executable ran a frame at exit 0, and a command
+    under the Codex profile could replace that file for the next launch and
+    for every module this one still imports from it. So it exits 3 on the
+    refusal before any frame is staged, naming itself, with nothing cached.
+    The engine is the scripted one: the refusal is not Codex's, it is where
+    the executable runs from."""
+    with tempfile.TemporaryDirectory(prefix="melampus-granted-", dir="/tmp") as granted:
+        executable = Path(granted).resolve() / built_executable.name
+        shutil.copy2(built_executable, executable)
+        proc = _request_backend(executable, photos, tmp_path, "scripted")
+    tail = proc.stderr[-3000:]
+    assert proc.returncode == 3, f"exit {proc.returncode}:\n{tail}"
+    assert str(executable) in tail, f"the refusal does not name the executable:\n{tail}"
+    assert "Move the executable" in tail, f"the refusal does not say to move it:\n{tail}"
     assert not (tmp_path / "cache.jsonl").exists(), (
         "the refusal was recorded on the frames instead of stopping the run")
 

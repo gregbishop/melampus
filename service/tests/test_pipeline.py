@@ -399,27 +399,55 @@ def test_cli_stops_escalation_at_exit_3_when_the_staging_root_is_inside_the_gran
     assert not out.exists(), "a results file was written for a pass that never ran"
 
 
-def _unpacked_inside_the_grant(granted: str, home: Path, monkeypatch) -> Path:
-    """The executable's layout, unpacked where a run can write: return the bundle.
+def _frozen_layout(bundle: Path, executable: Path, home: Path, monkeypatch) -> None:
+    """What the bootloader sets before the package runs, with the build's layout.
 
-    The one-file executable unpacks itself into $TMPDIR at every launch, and
-    into /tmp when that is unset (measured on a Mac: /private/tmp/_MEI…), and
-    `sys._MEIPASS` names that directory. `prompts/` is at its top level, as
-    the build lays it out, so the prompts melampus reads for every frame come
-    from there. The per-user data directory is under `home`, outside the
-    grant, so the staging root is outside it and the unpack directory is the
-    only thing here that can be refused.
+    `sys._MEIPASS` names the unpack directory, with `prompts/` at its top
+    level as the build lays it out, so the prompts melampus reads for every
+    frame come from there; `sys.executable` names the executable itself. The
+    per-user data directory is under `home`, outside the grant, so the
+    staging root is outside it and only `bundle` or `executable` can be
+    refused.
     """
-    bundle = Path(granted).resolve() / "_MEI000000"
     shutil.copytree(REPO / "prompts", bundle / "prompts")
     monkeypatch.setattr(sys, "_MEIPASS", str(bundle), raising=False)
+    monkeypatch.setattr(sys, "executable", str(executable))
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.delenv("XDG_DATA_HOME", raising=False)
     staging = cache_file(STAGING_ROOT).resolve()
     if any(staging.is_relative_to(d) for d in MINIMAL_GRANTED_TEMP):
         pytest.skip(f"the per-user data directory under {home} is itself inside the grant; "
                     "the staging-root tests cover that")
+
+
+def _unpacked_inside_the_grant(granted: str, home: Path, monkeypatch) -> Path:
+    """The executable's layout, unpacked where a run can write: return the bundle.
+
+    The one-file executable unpacks itself into $TMPDIR at every launch, and
+    into /tmp when that is unset (measured on a Mac: /private/tmp/_MEI…), and
+    `sys._MEIPASS` names that directory. The executable itself stays where
+    this interpreter is, outside the grant, so the unpack directory is the
+    only thing here that can be refused.
+    """
+    bundle = Path(granted).resolve() / "_MEI000000"
+    _frozen_layout(bundle, Path(sys.executable), home, monkeypatch)
     return bundle
+
+
+def _started_inside_the_grant(granted: str, tmp_path: Path, monkeypatch) -> Path:
+    """The executable's layout, started from where a run can write: return the
+    executable.
+
+    The executable sits in a folder under `granted`, as it does when the
+    Lightroom plugin folder that holds it, or a download, is in /tmp. It
+    unpacks outside the grant, under `tmp_path`, as it does with the plugin's
+    TMPDIR, so the executable is the only thing here that can be refused.
+    """
+    executable = Path(granted).resolve() / "Melampus.lrplugin" / "melampus"
+    executable.parent.mkdir()
+    executable.write_bytes(b"")
+    _frozen_layout(tmp_path / "_MEI000000", executable, tmp_path / "home", monkeypatch)
+    return executable
 
 
 def test_staging_refuses_a_frozen_run_unpacked_inside_the_shared_temp_directories(
@@ -491,6 +519,81 @@ def test_cli_stops_a_frozen_run_at_exit_3_when_it_is_unpacked_inside_the_grant(
     assert err.count(str(bundle)) == 1, (
         f"the refusal does not name the unpack directory once, at the first frame: {err}")
     assert "$TMPDIR" in err and "run again" in err, f"the refusal does not say what to fix: {err}"
+    assert not cache.exists(), (
+        "the refusal was recorded on the frames instead of stopping the run")
+    assert not out.exists(), "a results file was written for a run that never ran"
+
+
+def test_staging_refuses_a_frozen_run_started_from_inside_the_shared_temp_directories(
+    tmp_path: Path, monkeypatch
+):
+    """Security review round 2 on PR #28: the unpack directory is not the
+    only file of the executable's that a run can write to. The executable
+    itself is another. PyInstaller reads each Python module from the
+    executable's own file, re-opened by path at every import
+    (`pyimod01_archive.ZlibArchiveReader.extract`), and every launch runs
+    whatever file is at that path.
+
+    Measured with `codex sandbox -P` under the Codex profile, codex-cli
+    0.158.0, no model call. A command listed /tmp, found an executable copied
+    into a user-owned 0700 folder there, and replaced it; the next launch ran
+    what the command left. Launched from that folder with $TMPDIR outside the
+    grant, as the plugin launches it, the real executable was not refused:
+    it ran a frame at exit 0.
+
+    So a frozen run started from inside the grant refuses before it stages
+    anything, whichever engine it runs. The refusal names the executable and
+    the fix, moving it outside the grant, and nothing is made in the staging
+    root.
+    """
+    source = tmp_path / "SECRET_SPECIES_NAME.jpg"
+    Image.new("RGB", (1200, 800), (70, 100, 60)).save(source, format="JPEG")
+
+    with _granted_temp_directory() as granted:
+        executable = _started_inside_the_grant(granted, tmp_path, monkeypatch)
+        staging = cache_file(STAGING_ROOT).resolve()
+
+        with pytest.raises(BackendUnavailable) as refusal:
+            with staged_pixels(source, max_edge=800):
+                pass
+
+    message = str(refusal.value)
+    assert str(executable) in message, (
+        f"the refusal does not name the executable it refused: {message}")
+    assert any(d in message for d in MINIMAL_GRANTED_TEMP), (
+        f"the refusal does not name the granted directory it sits in: {message}")
+    assert "Move the executable" in message, f"the refusal does not say to move it: {message}"
+    assert not staging.exists(), f"staging made {staging} before refusing"
+
+
+def test_cli_stops_a_frozen_run_at_exit_3_when_it_is_started_from_inside_the_grant(
+    tmp_path: Path, monkeypatch, capsys
+):
+    """The same refusal, through the real CLI: the run stops at exit 3 on the
+    message that names the fix, with nothing cached and no results file, as
+    an unpack directory inside the grant does. Two frames, so a refusal
+    recorded per frame would show."""
+    from melampus.cli import main
+
+    folder = tmp_path / "frames"
+    folder.mkdir()
+    for index, tint in enumerate(((70, 100, 60), (60, 70, 110))):
+        Image.new("RGB", (1200, 800), tint).save(
+            folder / f"SECRET_SPECIES_NAME_{index}.jpg", format="JPEG")
+    cache = tmp_path / "cache.jsonl"
+    out = tmp_path / "results.json"
+
+    with _granted_temp_directory() as granted:
+        executable = _started_inside_the_grant(granted, tmp_path, monkeypatch)
+        code = main([str(folder), "--backend", "scripted", "--no-local-config",
+                     "--cache", str(cache), "--json-out", str(out)])
+
+    err = capsys.readouterr().err
+    assert code == 3, f"the run did not refuse: {err}"
+    assert err.count(str(executable)) == 1, (
+        f"the refusal does not name the executable once, at the first frame: {err}")
+    assert "Move the executable" in err and "run again" in err, (
+        f"the refusal does not say what to fix: {err}")
     assert not cache.exists(), (
         "the refusal was recorded on the frames instead of stopping the run")
     assert not out.exists(), "a results file was written for a run that never ran"

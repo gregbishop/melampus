@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import sys
 import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -96,9 +97,10 @@ def _granted_containing(root: Path) -> str | None:
 def _refuse_inside_grant(root: Path, where: str, harm: str, fix: str) -> None:
     """Refuse `root`, resolved, when `_granted_containing` places it in the grant.
 
-    The one refusal both of `staging_root`'s roots get: it names the root and
-    the granted directory, says what a run could do there (`harm`) and what
-    moves the root out (`fix`, finished by the granted directories' names).
+    The one refusal every root `staging_root` judges gets: it names the root
+    and the granted directory, says what a run could do there (`harm`) and
+    what moves the root out (`fix`, finished by the granted directories'
+    names).
     """
     granted = _granted_containing(root)
     if granted is not None:
@@ -157,6 +159,15 @@ def staging_root() -> Path:
     data directory — so it is judged here too, before any frame is staged,
     whatever the engine; in a checkout the code sits under the checkout
     root, which the staging root's check already covers.
+
+    The executable itself (`sys.executable`) is judged the same way, for
+    the same reason: PyInstaller reads each Python module from that file,
+    re-opened by path at every import, so a lazy import reads it after a
+    run has been, and every later launch runs whatever file is at that
+    path. It sits where the user put it, in the Lightroom plugin folder or
+    wherever they saved it; a command under the Codex profile listed /tmp,
+    found an executable in a folder there and replaced it (security review
+    round 2 on PR #28).
     """
     root = cache_file(STAGING_ROOT).resolve()
     _refuse_inside_grant(
@@ -175,6 +186,13 @@ def staging_root() -> Path:
             "there for the next, or the code it loads",
             "The executable unpacks itself into $TMPDIR, and into /tmp when that is unset, "
             "so set $TMPDIR to a directory",
+        )
+        _refuse_inside_grant(
+            Path(sys.executable).resolve(), "melampus was started from",
+            "the run analysing one frame could replace the program every later launch "
+            "starts, and the code this one still loads from it",
+            "Move the executable, and the Lightroom plugin folder when it sits in one, "
+            "to a directory",
         )
     return root
 
