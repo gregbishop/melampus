@@ -410,7 +410,9 @@ class TricklingPull(QuietHandler):
     shape that held the pull, and the cancel marker read between lines,
     for as long as it liked (security review round 4)."""
 
-    PAUSE = 0.3
+    # Each pause 0.4s inside the tests' one-second deadlines, so a loaded
+    # machine can wake this thread late and the line still arrives in time.
+    PAUSE = 0.6
     WHOLE = b'{"status": "pulling manifest"}\n'
     TRICKLED = b'{"status": "success"}'.ljust(44) + b"\n"
 

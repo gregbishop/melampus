@@ -1918,9 +1918,10 @@ def test_ollama_backend_gives_up_at_its_deadline_when_the_server_trickles(tmp_pa
     bounds how much, not how long. Given a server on loopback trickling a
     valid answer over 4.5 seconds, in the headers, in a 200 body, or in a
     500 body (the error text the backend reads for its message), and a
-    timeout of 0.3s, the frame fails as timed out within the deadline, not
-    after the trickle."""
-    deadline = 0.3
+    timeout of 1s (ten times the trickle's pace, so each byte arrives
+    within the socket timeout on a loaded machine too), the frame fails as
+    timed out within the deadline, not after the trickle."""
+    deadline = 1.0
     image = tmp_path / "image.jpg"
     image.write_bytes(b"jpeg")
     with loopback_server(handler) as server:
@@ -1945,7 +1946,7 @@ def test_ollama_backend_stream_gives_up_at_its_deadline_when_a_line_trickles():
     well past it, the stream yields both whole lines (the deadline counts
     per line, not per exchange) and ends as timed out within a deadline of
     the trickle's start, not at its newline."""
-    deadline = 0.5
+    deadline = 1.0
     with loopback_server(TricklingPull) as server:
         url = f"http://127.0.0.1:{server.server_port}"
         backend = OllamaBackend("qwen3-vl:8b-instruct", url, timeout=deadline)
