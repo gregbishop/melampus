@@ -633,6 +633,46 @@ def test_default_engine_takes_the_cloud_engine_named_for_it_only_after_the_local
     assert providers.default_engine(cloud="openai") == "mlx"
 
 
+def test_the_unchosen_default_never_takes_a_signed_in_subscription_cli(
+    monkeypatch, photos, tmp_path, capsys, no_ambient_keys, no_ambient_ollama
+):
+    """Code review round 1, finding 1 (card #498): claude-code and codex
+    bill to a subscription, and they stay out of the unchosen default, as
+    on main, where openai (always available) came ahead of them. The only
+    thing keeping them out is `default_engine`'s eligible engines, and the
+    autouse no_ambient_subscription_cli fixture reports both not installed
+    in every other test. So this test puts both back, signed in and
+    available, on a machine with nothing local and no stored key: the run is
+    refused, exit 3, before any backend is built, and never handed to a CLI.
+    With --default-cloud the default is the cloud engine named, not a CLI."""
+    import melampus.cli
+
+    for cli in providers.CLI_ENGINES:
+        signed_in = providers.EngineVerdict(cli.engine, cli.title, True, f"{cli.title} is signed in")
+        monkeypatch.setattr(providers, f"{cli.engine.replace('-', '_')}_verdict",
+                            lambda command=None, verdict=signed_in: verdict)
+    fake_platform(monkeypatch, "win32", "AMD64")
+    available = [v.engine for v in providers.detect_engines() if v.available]
+    assert available == ["openai", "claude", providers.CLAUDE_CODE, providers.CODEX], available
+
+    with pytest.raises(providers.BackendUnavailable):
+        providers.default_engine()
+    assert providers.default_engine(cloud="claude") == "claude"
+
+    built: list[str] = []
+
+    def build(config):
+        built.append(config.model.backend)
+        raise providers.BackendUnavailable("stopped at the seam")
+
+    monkeypatch.setattr(melampus.cli, "build_primary_backend", build)
+    code = melampus.cli.main(
+        [str(photos), "--cache", str(tmp_path / "cache.jsonl"), "--yes", "--no-local-config"])
+    err = capsys.readouterr().err
+    assert built == [], f"the unchosen default built {built}"
+    assert code == 3 and "Where identification runs" in err, err
+
+
 @contextlib.contextmanager
 def _ollama_served_by(monkeypatch, handler: type[QuietHandler], prefix: str = ""):
     """`handler` on 127.0.0.1 at an ephemeral port, standing in for Ollama:
