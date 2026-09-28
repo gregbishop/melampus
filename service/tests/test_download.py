@@ -3815,6 +3815,116 @@ def test_cli_pull_cancelled_by_a_signal_prints_cancelled_exit_4_and_the_next_pul
         assert updates[-1] == Update.done(FAKE_MODEL) and ollama.models == {FAKE_MODEL: size}
 
 
+# Run in a fresh interpreter, so a SIGINT that lands outside the pull's
+# handler, or a thread left stuck on a lock, is that process's, not the
+# suite's. `--download-model` through `main` as it is, naming each lock
+# release the main thread makes inside `pull_model` by its site: the
+# melampus line that led to it, the line it returns into, and which
+# occurrence of that pair it is. Then one pull per site, SIGINT delivered
+# as that release returns (os.kill runs the handler before it returns):
+# the site the signal was delivered at, and the pull's exit code and last
+# protocol line. Targeted by site, not by count, since a pull need not
+# make the same releases in the same order: a thread that runs before
+# Thread.start() waits for it leaves the wait, and its release, out
+# (Codex review, round 1). A long switch interval keeps a started thread
+# from running before the main thread waits for it, so every pull makes
+# the waits the test is for.
+SIGNAL_AT_EACH_RELEASE = """\
+import collections, contextlib, io, json, os, signal, sys, _thread
+from pathlib import Path
+from melampus.cli import main
+from melampus.download import pull_model
+
+LOCKS = (type(_thread.allocate_lock()), type(_thread.RLock()))
+MELAMPUS = str(Path(pull_model.__code__.co_filename).parent)
+
+
+def line(frame):
+    return f"{Path(frame.f_code.co_filename).name}:{frame.f_code.co_name}:{frame.f_lineno}"
+
+
+def site(frame):
+    release, caller = line(frame), None
+    while frame is not None:
+        if caller is None and frame.f_code.co_filename.startswith(MELAMPUS):
+            caller = line(frame)
+        if frame.f_code is pull_model.__code__:
+            return f"{caller} > {release}"
+        frame = frame.f_back
+    return None
+
+
+def pull(target=None):
+    made, signalled = collections.Counter(), []
+
+    def on_return(frame, event, arg):
+        if (event == "c_return" and isinstance(getattr(arg, "__self__", None), LOCKS)
+                and arg.__name__ in ("release", "__exit__")):
+            at = site(frame)
+            if at is not None:
+                made[at] += 1
+                at = f"{at} #{made[at]}"
+                if at == target:
+                    sys.setprofile(None)
+                    signalled.append(at)
+                    os.kill(os.getpid(), signal.SIGINT)
+
+    out = io.StringIO()
+    sys.setprofile(on_return)
+    try:
+        with contextlib.redirect_stdout(out):
+            code = main(sys.argv[1:])
+    finally:
+        sys.setprofile(None)
+    sites = [f"{at} #{n}" for at, count in made.items() for n in range(1, count + 1)]
+    return sites, {"signalled": signalled, "ended": [code, out.getvalue().splitlines()[-1:]]}
+
+
+sys.setswitchinterval(10.0)
+pull()  # the first imports what the pull imports on first use: module locks the next do not take
+sites, uninterrupted = pull()
+print(json.dumps({"uninterrupted": uninterrupted["ended"], "at": {target: pull(target)[1] for target in sites}}))
+"""
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="os.kill cannot send SIGINT to this process on Windows")
+def test_cli_pull_cancelled_by_a_signal_inside_any_lock_release_prints_cancelled_and_exits_4(
+    fake_ollama: FakeOllama, tmp_path: Path
+):
+    """Card #502: the signal test above died once on "release unlocked
+    lock", the SIGINT landing inside a lock release on the pull's path.
+    The handler raises wherever the main thread is, and the pull's
+    deadline starts its timer and watcher threads there; inside
+    threading's Thread.start(), Condition.wait releases the start event's
+    lock before its `try`, so a cancel landing on that release leaves it
+    released, and the `with` around the wait releases it again:
+    RuntimeError, named as Ollama's failure, exit 3, the cancel lost.
+    Given the pull through the entry point, and SIGINT delivered as each
+    lock release the main thread makes in the pull returns, one pull per
+    release, targeted by its site: the signal is delivered at each site,
+    the two thread starts' `_release_save` in `_Deadline.__enter__` among
+    them, every pull prints `cancelled` and exits 4, and nothing is written
+    on stderr."""
+    settings = _ollama_settings(tmp_path, fake_ollama.endpoint)
+    proc = subprocess.run(
+        [sys.executable, "-c", SIGNAL_AT_EACH_RELEASE, "--download-model", "--backend", "ollama",
+         "--config", str(settings)],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert proc.returncode == 0, f"exit {proc.returncode}:\n{proc.stderr[-3000:]}"
+    report = json.loads(proc.stdout)
+    assert report["uninterrupted"] == [0, [f"done {FAKE_MODEL}"]]
+    starts = [target for target in report["at"]
+              if "backend.py:__enter__" in target and "threading.py:_release_save" in target]
+    assert len(starts) == 2, f"the timer's and the watcher's start were not both among the sites: {list(report['at'])}"
+    missed = {target: pull["signalled"] for target, pull in report["at"].items() if pull["signalled"] != [target]}
+    assert not missed, f"the signal was not delivered at the site aimed at: {missed}"
+    broken = {target: pull["ended"] for target, pull in report["at"].items()
+              if pull["ended"] != [EXIT_CANCELLED, ["cancelled"]]}
+    assert not broken, (broken, proc.stderr[-3000:])
+    assert proc.stderr == "", f"the process wrote on stderr:\n{proc.stderr[-3000:]}"
+
+
 def test_cli_pull_cancelled_by_the_marker_while_its_stream_has_stalled_prints_cancelled_and_exits_4(
     monkeypatch: pytest.MonkeyPatch, capsys, tmp_path: Path
 ):

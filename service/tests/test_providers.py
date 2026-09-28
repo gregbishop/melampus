@@ -69,6 +69,7 @@ from melampus.backend import (
     _Deadline,
     _NotedHTTPS,
     _hang_up,
+    _signals_held,
 )
 from melampus.config import load_config
 
@@ -1037,6 +1038,45 @@ def test_deadline_again_under_a_signal_handlers_exception_leaves_that_exception_
     assert proc.returncode == 0, f"exit {proc.returncode}"
     ended_with = json.loads(proc.stdout)
     assert ended_with == ["Interrupted"] * rounds, [e for e in ended_with if e != "Interrupted"]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="os.kill cannot send SIGINT to this process on Windows")
+def test_a_signal_inside_signals_held_is_handled_by_its_own_handler_once_the_block_ends():
+    """Card #502: the hold the deadline starts its threads under. Given a
+    SIGINT handler that notes the signal, and SIGINT sent inside the
+    block, the handler runs once, after the block's last statement, and
+    is the handler again after it."""
+    noted = []
+
+    def note(signum, frame):
+        noted.append(signum)
+
+    previous = signal.signal(signal.SIGINT, note)
+    try:
+        with _signals_held():
+            os.kill(os.getpid(), signal.SIGINT)
+            noted.append("the block's last statement")
+        after = signal.getsignal(signal.SIGINT)
+    finally:
+        signal.signal(signal.SIGINT, previous)
+    assert noted == ["the block's last statement", signal.SIGINT]
+    assert after is note
+
+
+def test_a_deadline_entered_off_the_main_thread_runs_its_block_as_on_it():
+    """Card #502: Python runs signal handlers on the main thread alone, and
+    sets them there alone, so the hold holds nothing elsewhere: a deadline
+    entered in a worker thread starts its threads and runs its block."""
+    ran = []
+
+    def block():
+        with _Deadline(5.0, cancel=lambda: False) as deadline:
+            ran.append(deadline._timer.is_alive() and deadline._watcher.is_alive())
+
+    worker = threading.Thread(target=block)
+    worker.start()
+    worker.join(5.0)
+    assert ran == [True]
 
 
 def test_deadline_watcher_runs_for_the_block_alone():

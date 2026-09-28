@@ -7,6 +7,7 @@ one class here and changing nothing else.
 
 from __future__ import annotations
 
+import _thread
 import base64
 import contextlib
 import errno
@@ -391,6 +392,44 @@ def _hang_up(line, event: threading.Event) -> None:
             sock.shutdown(socket.SHUT_RDWR)
 
 
+@contextlib.contextmanager
+def _signals_held() -> Iterator[None]:
+    """The block with every signal Python handles held to its end: each
+    handler set in Python is swapped for one that notes the signal, and on
+    leaving the block the handlers are put back and each signal noted is
+    handed back to the interpreter (`_thread.interrupt_main`), which runs
+    its handler as it runs one for a signal that has just arrived. For code
+    a handler's exception must not land in (card #502): threading's own
+    Thread.start() waits on its start event in Condition.wait, which
+    releases the event's lock before the `try` that takes it back, so an
+    exception landing on that release leaves the lock released, and the
+    `with` around the wait releases it again, "release unlocked lock". A
+    signal left to the operating system (SIG_DFL, SIG_IGN) is not held, and
+    nothing is held off the main thread: Python runs and sets handlers on
+    the main thread alone."""
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    noted: dict[int, None] = {}
+    handlers: dict[int, Callable] = {}
+
+    def note(signum: int, _frame) -> None:
+        noted.setdefault(signum)
+
+    try:
+        for signum in signal.valid_signals():
+            handler = signal.getsignal(signum)
+            if callable(handler):
+                handlers[signum] = handler
+                signal.signal(signum, note)
+        yield
+    finally:
+        for signum, handler in handlers.items():
+            signal.signal(signum, handler)
+        for signum in list(noted):
+            _thread.interrupt_main(signum)
+
+
 class _Deadline:
     """A wall-clock bound on one HTTP exchange, as a context manager. A
     socket timeout bounds each operation, not the exchange, so a server
@@ -408,7 +447,9 @@ class _Deadline:
     handler that raises wherever the main thread is, and an exception
     raised inside `Thread.start()` leaves the thread module's tables and
     locks half-changed (review round 12, backend.py:419), so the block
-    starts its threads once, on entry, not once a line.
+    starts its threads once, on entry, not once a line, and with the
+    signals held (`_signals_held`, card #502), so the handler's exception
+    lands after the starts, never inside one.
 
     `cancel`, when given, is a predicate looked at every WATCH seconds from
     a thread of the timer's kind, for a stream whose caller may need it
@@ -445,9 +486,10 @@ class _Deadline:
 
     def __enter__(self) -> _Deadline:
         self.again()
-        self._timer.start()
-        if self._watcher is not None:
-            self._watcher.start()
+        with _signals_held():
+            self._timer.start()
+            if self._watcher is not None:
+                self._watcher.start()
         return self
 
     def __exit__(self, *_exc) -> None:
