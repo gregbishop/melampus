@@ -68,6 +68,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -103,12 +104,15 @@ def no_python_environment(tmp_path: Path) -> dict[str, str]:
     empty = tmp_path / "empty-bin"
     empty.mkdir()
     (tmp_path / "home").mkdir()
-    env = {"PATH": str(empty), "HOME": str(tmp_path / "home")}
+    # The one-file executable unpacks itself into the temp directory, and a
+    # frozen run unpacked inside the shared temp directories a CLI engine's
+    # permission profile grants is refused (images.staging_root): /tmp is
+    # where it lands on macOS and Linux with $TMPDIR unset. So every run here
+    # names a temp directory of its own. None gives a python back.
+    (tmp_path / "tmp").mkdir()
+    env = {"PATH": str(empty), "HOME": str(tmp_path / "home"), "TMPDIR": str(tmp_path / "tmp")}
     if sys.platform == "win32":
-        # A Windows process needs the system root to load system DLLs, and the
-        # one-file executable unpacks itself into the temp directory. Neither
-        # gives a python back.
-        (tmp_path / "tmp").mkdir()
+        # A Windows process needs the system root to load system DLLs.
         env |= {
             "SYSTEMROOT": os.environ["SYSTEMROOT"],
             "USERPROFILE": env["HOME"],
@@ -803,6 +807,33 @@ def test_executable_refuses_a_cli_engine_that_is_not_installed(
     assert cli.install in tail and cli.sign_in in tail, tail
     for works_here in ("claude", "openai", "scripted"):
         assert works_here in tail, f"{works_here!r} is not named as working here:\n{tail}"
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="the shared temp directories a CLI engine's profile grants are /tmp and its "
+           "kin; a Windows build unpacks under %TEMP%, never there",
+)
+def test_executable_refuses_to_run_unpacked_inside_the_shared_temp_directories(
+    built_executable: Path, photos: Path, tmp_path: Path
+):
+    """Security review round 1 on PR #28, in the frozen build: launched with
+    $TMPDIR unset, the executable unpacks itself under /tmp, where a Codex
+    run can write, and would read its prompts, and load code, from there
+    after a run had been. So it exits 3 on the refusal before any frame is
+    staged, naming the unpack directory and $TMPDIR, the fix, with nothing
+    cached. The engine is the scripted one: the refusal is not Codex's, it
+    is where the executable runs from."""
+    env = no_python_environment(tmp_path)
+    del env["TMPDIR"]
+    proc = _request_backend(built_executable, photos, tmp_path, "scripted", env=env)
+    tail = proc.stderr[-3000:]
+    assert proc.returncode == 3, f"exit {proc.returncode}:\n{tail}"
+    assert re.search(r"/(private/)?tmp/_MEI\w+", tail), (
+        f"the refusal does not name the unpack directory under /tmp:\n{tail}")
+    assert "$TMPDIR" in tail, f"the refusal does not say to set $TMPDIR:\n{tail}"
+    assert not (tmp_path / "cache.jsonl").exists(), (
+        "the refusal was recorded on the frames instead of stopping the run")
 
 
 def test_executable_prints_the_same_json_as_the_cli_with_no_python_on_the_path(

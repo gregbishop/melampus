@@ -18,7 +18,7 @@ from pathlib import Path
 
 from PIL import Image, ImageOps
 
-from .config import cache_file
+from .config import _bundle, cache_file
 from .providers import BackendUnavailable
 
 # Fixed name for every staged file: carries zero information about the original.
@@ -93,6 +93,23 @@ def _granted_containing(root: Path) -> str | None:
     return None
 
 
+def _refuse_inside_grant(root: Path, where: str, harm: str, fix: str) -> None:
+    """Refuse `root`, resolved, when `_granted_containing` places it in the grant.
+
+    The one refusal both of `staging_root`'s roots get: it names the root and
+    the granted directory, says what a run could do there (`harm`) and what
+    moves the root out (`fix`, finished by the granted directories' names).
+    """
+    granted = _granted_containing(root)
+    if granted is not None:
+        raise BackendUnavailable(
+            f"{where} {root}, which is inside {granted}: one of the shared temp "
+            "directories a CLI engine's permission profile grants whole and writable "
+            f"(providers.CODEX_COMMAND), so {harm}. {fix} outside "
+            f"{', '.join(MINIMAL_GRANTED_TEMP)} and run again."
+        )
+
+
 def staging_root() -> Path:
     """The directory staged folders are made in, resolved and checked first.
 
@@ -127,19 +144,37 @@ def staging_root() -> Path:
     frame's error — the root is the same on every frame, so a per-frame error
     would be written once per photograph with the fix scrolling past above the
     table (Codex review round 10, C1).
+
+    Inside the executable there is a second root to judge, the unpack
+    directory (`config._bundle`, `sys._MEIPASS`): the code and the prompts
+    are there, `PromptLibrary.render` reads a prompt file from it for every
+    frame, after the routing run as well as before it, and escalation's lazy
+    `import anthropic` loads a native module from it into this process. The
+    bootloader puts it in $TMPDIR at every launch, and in /tmp when that is
+    unset, and a command under the Codex profile overwrote a prompt file in
+    a folder under /tmp (security review round 1 on PR #28). The staging
+    root's check never sees it — in the executable that root is the per-user
+    data directory — so it is judged here too, before any frame is staged,
+    whatever the engine; in a checkout the code sits under the checkout
+    root, which the staging root's check already covers.
     """
     root = cache_file(STAGING_ROOT).resolve()
-    granted = _granted_containing(root)
-    if granted is not None:
-        raise BackendUnavailable(
-            f"melampus would stage images in {root}, which is inside {granted}: one of "
-            "the shared temp directories a CLI engine's permission profile grants whole "
-            "and writable (providers.CODEX_COMMAND), so the run analysing one frame "
-            "could read the frames staged beside it and overwrite the image it was "
-            "given. That directory follows the root melampus keeps its data under — the "
-            "checkout root in a checkout, $XDG_DATA_HOME/Melampus or the platform's "
-            "per-user data directory inside the executable — so put that root outside "
-            f"{', '.join(MINIMAL_GRANTED_TEMP)} and run again."
+    _refuse_inside_grant(
+        root, "melampus would stage images in",
+        "the run analysing one frame could read the frames staged beside it and "
+        "overwrite the image it was given",
+        "That directory follows the root melampus keeps its data under — the checkout "
+        "root in a checkout, $XDG_DATA_HOME/Melampus or the platform's per-user data "
+        "directory inside the executable — so put that root",
+    )
+    bundle = _bundle()
+    if bundle is not None:
+        _refuse_inside_grant(
+            bundle.resolve(), "melampus is running from",
+            "the run analysing one frame could rewrite the prompts melampus reads from "
+            "there for the next, or the code it loads",
+            "The executable unpacks itself into $TMPDIR, and into /tmp when that is unset, "
+            "so set $TMPDIR to a directory",
         )
     return root
 

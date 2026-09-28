@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sys
 import tempfile
 import types
@@ -26,6 +27,7 @@ from melampus.images import (
     MINIMAL_GRANTED_TEMP, NEUTRAL_NAME, STAGING_ROOT, content_hash, staged_pixels,
 )
 from melampus.prompts import PromptError, PromptLibrary
+from melampus.providers import BackendUnavailable
 from melampus.runner import run_batch
 from melampus.schema import Identification, Taxon
 
@@ -395,6 +397,103 @@ def test_cli_stops_escalation_at_exit_3_when_the_staging_root_is_inside_the_gran
     assert not cloud.exists(), (
         "the refusal was recorded on the frames instead of stopping the pass")
     assert not out.exists(), "a results file was written for a pass that never ran"
+
+
+def _unpacked_inside_the_grant(granted: str, home: Path, monkeypatch) -> Path:
+    """The executable's layout, unpacked where a run can write: return the bundle.
+
+    The one-file executable unpacks itself into $TMPDIR at every launch, and
+    into /tmp when that is unset (measured on a Mac: /private/tmp/_MEI…), and
+    `sys._MEIPASS` names that directory. `prompts/` is at its top level, as
+    the build lays it out, so the prompts melampus reads for every frame come
+    from there. The per-user data directory is under `home`, outside the
+    grant, so the staging root is outside it and the unpack directory is the
+    only thing here that can be refused.
+    """
+    bundle = Path(granted).resolve() / "_MEI000000"
+    shutil.copytree(REPO / "prompts", bundle / "prompts")
+    monkeypatch.setattr(sys, "_MEIPASS", str(bundle), raising=False)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_DATA_HOME", raising=False)
+    staging = cache_file(STAGING_ROOT).resolve()
+    if any(staging.is_relative_to(d) for d in MINIMAL_GRANTED_TEMP):
+        pytest.skip(f"the per-user data directory under {home} is itself inside the grant; "
+                    "the staging-root tests cover that")
+    return bundle
+
+
+def test_staging_refuses_a_frozen_run_unpacked_inside_the_shared_temp_directories(
+    tmp_path: Path, monkeypatch
+):
+    """Security review round 1 on PR #28: the staging root is not the only
+    directory melampus reads from that a run can write to.
+
+    Inside the executable the code and the prompts are the unpack directory,
+    `sys._MEIPASS`, and `PromptLibrary.render` reads a prompt file from it for
+    every frame, twice: the routing question, then, after the routing run,
+    the identification question. Measured under the Codex profile, a command
+    overwrote a prompt file in a user-owned folder under /tmp, so a run could
+    rewrite the next question sent; and escalation's lazy `import anthropic`
+    loads a native module from the same directory into melampus's own
+    process. With $TMPDIR unset the directory is under /tmp, which the
+    staging root's check never looks at: that root is the per-user data
+    directory, and it is outside the grant.
+
+    So a frozen run refuses before it stages anything, whichever engine it
+    runs (the refusal is `staging_root`'s): the refusal names the unpack
+    directory and the fix, $TMPDIR set outside the grant, and nothing is made
+    in the staging root.
+    """
+    source = tmp_path / "SECRET_SPECIES_NAME.jpg"
+    Image.new("RGB", (1200, 800), (70, 100, 60)).save(source, format="JPEG")
+
+    with _granted_temp_directory() as granted:
+        bundle = _unpacked_inside_the_grant(granted, tmp_path / "home", monkeypatch)
+        staging = cache_file(STAGING_ROOT).resolve()
+
+        with pytest.raises(BackendUnavailable) as refusal:
+            with staged_pixels(source, max_edge=800):
+                pass
+
+    message = str(refusal.value)
+    assert str(bundle) in message, (
+        f"the refusal does not name the unpack directory it refused: {message}")
+    assert any(d in message for d in MINIMAL_GRANTED_TEMP), (
+        f"the refusal does not name the granted directory it sits in: {message}")
+    assert "$TMPDIR" in message, f"the refusal does not say to set $TMPDIR: {message}"
+    assert not staging.exists(), f"staging made {staging} before refusing"
+
+
+def test_cli_stops_a_frozen_run_at_exit_3_when_it_is_unpacked_inside_the_grant(
+    tmp_path: Path, monkeypatch, capsys
+):
+    """The same refusal, through the real CLI: a configuration refusal, not a
+    bad frame, so the run stops at exit 3 on the message that names the fix,
+    with nothing cached and no results file, as a staging root inside the
+    grant does. Two frames, so a refusal recorded per frame would show."""
+    from melampus.cli import main
+
+    folder = tmp_path / "frames"
+    folder.mkdir()
+    for index, tint in enumerate(((70, 100, 60), (60, 70, 110))):
+        Image.new("RGB", (1200, 800), tint).save(
+            folder / f"SECRET_SPECIES_NAME_{index}.jpg", format="JPEG")
+    cache = tmp_path / "cache.jsonl"
+    out = tmp_path / "results.json"
+
+    with _granted_temp_directory() as granted:
+        bundle = _unpacked_inside_the_grant(granted, tmp_path / "home", monkeypatch)
+        code = main([str(folder), "--backend", "scripted", "--no-local-config",
+                     "--cache", str(cache), "--json-out", str(out)])
+
+    err = capsys.readouterr().err
+    assert code == 3, f"the run did not refuse: {err}"
+    assert err.count(str(bundle)) == 1, (
+        f"the refusal does not name the unpack directory once, at the first frame: {err}")
+    assert "$TMPDIR" in err and "run again" in err, f"the refusal does not say what to fix: {err}"
+    assert not cache.exists(), (
+        "the refusal was recorded on the frames instead of stopping the run")
+    assert not out.exists(), "a results file was written for a run that never ran"
 
 
 def test_backend_never_receives_original_filename(photo: Path, config):
