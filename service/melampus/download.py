@@ -76,6 +76,7 @@ from huggingface_hub.file_download import (  # noqa: E402
     REGEX_COMMIT_HASH,
     REGEX_SHA256,
     _create_symlink,
+    _get_file_length_from_http_response,
     _get_pointer_path,
     http_get,
     repo_folder_name,
@@ -420,7 +421,7 @@ class _Progress:
 
 
 def _hub_client(endpoint: str) -> httpx.Client:
-    """The hub library's own httpx client, with three rules on every request it
+    """The hub library's own httpx client, with four rules on every request it
     sends, wherever in the library the request is made, one hook each.
 
     `bound_by_the_metadata_timeout`: every request without a timeout is
@@ -444,7 +445,14 @@ def _hub_client(endpoint: str) -> httpx.Client:
     one coding is refused before a byte of it is read. httpx decodes every
     coding named, one inside another, a whole read at a time and without
     bound, so each stacked gzip multiplies what a few bytes on the wire
-    become in memory and on disk; a hub or its CDN compresses once at most."""
+    become in memory and on disk; a hub or its CDN compresses once at most.
+
+    `a_length_the_library_reads`: an answer whose length the hub library
+    cannot read is refused before a byte of it is read. Its `http_get`
+    reads the length with its own `_get_file_length_from_http_response`,
+    run here first: `int()` of what follows the `/` of Content-Range, whose
+    ValueError (`*`, the form for a length unknown, among them) nothing
+    catches, a traceback."""
     client = default_client_factory()
 
     def bound_by_the_metadata_timeout(request: httpx.Request) -> None:
@@ -466,8 +474,17 @@ def _hub_client(endpoint: str) -> httpx.Client:
                 f"which no hub sends and which would decode without bound; {NOT_A_HUB}"
             )
 
+    def a_length_the_library_reads(response: httpx.Response) -> None:
+        try:
+            _get_file_length_from_http_response(response)
+        except ValueError as exc:
+            raise DownloadError(
+                f"{response.url} answered with a Content-Range whose length is not a number, "
+                f"which the hub library cannot read; {NOT_A_HUB}"
+            ) from exc
+
     client.event_hooks["request"].extend([bound_by_the_metadata_timeout, token_only_to_the_hub])
-    client.event_hooks["response"].append(one_content_coding)
+    client.event_hooks["response"].extend([one_content_coding, a_length_the_library_reads])
     return client
 
 

@@ -497,7 +497,9 @@ def built_executable(request: pytest.FixtureRequest) -> Path:
 # file's length, unless a test names another. `gzip_layers` is how many times
 # each GET gzips a file's bytes, its Content-Encoding naming gzip once per
 # layer: one is how a server compresses a file it serves, more is a host
-# stacking codings, which httpx decodes one inside another.
+# stacking codings, which httpx decodes one inside another. `content_range`
+# is the Content-Range every GET for a file's bytes answers with in place of
+# its own, sent on a 200 as well as a 206.
 # `next_page` is a URL the tree listing names in its `Link: rel="next"`
 # header, as the real hub paginates a long listing and huggingface_hub
 # follows. `/api/agent-harnesses` is the hub's registry of AI coding agents,
@@ -573,6 +575,7 @@ class FakeHub:
         self.outage = False
         self.ignore_range = False
         self.gzip_layers = 0  # times each GET gzips the bytes, Content-Encoding naming each
+        self.content_range: str | None = None  # every GET's Content-Range, in place of its own
         self.short_resume = 0  # bytes a Range answer stops short of the file's end, Content-Length agreeing
         self.throttle: tuple[int, float] | None = None  # (bytes per write, seconds between)
         self.bytes_host: str | None = None
@@ -676,9 +679,11 @@ class FakeHub:
                 if self.headers.get("Range") and not hub.ignore_range:
                     start = int(self.headers["Range"].removeprefix("bytes=").partition("-")[0])
                     self.send_response(206)
-                    self.send_header("Content-Range", f"bytes {start}-{len(data) - 1}/{len(data)}")
+                    self.send_header("Content-Range", hub.content_range or f"bytes {start}-{len(data) - 1}/{len(data)}")
                 else:
                     self.send_response(200)
+                    if hub.content_range:
+                        self.send_header("Content-Range", hub.content_range)
                 end = len(data) - (hub.short_resume if start else 0)
                 self.send_header("Content-Length", str(end - start))
                 self.send_header("Accept-Ranges", "bytes")

@@ -545,6 +545,25 @@ def test_download_takes_one_content_coding_and_refuses_two_stacked_before_a_byte
     assert all(p.stat().st_size == 0 for p in _incomplete(tmp_path / "stacked")), "decoded bytes were written"
 
 
+def test_download_refuses_a_content_range_whose_length_is_not_a_number(fake_hub: FakeHub, tmp_path: Path):
+    """Security, card #500 (security round 1): no header shape may reach a
+    traceback. The hub library's `http_get` reads the file's length from the
+    answer's Content-Range with `int()` and nothing catches its ValueError,
+    so a host naming the length `*`, the form for one unknown, ended
+    `--download-model` in a traceback. Given a host answering every GET with
+    `Content-Range: bytes 0-9/*`, the run refuses naming the header and
+    HF_ENDPOINT, and no byte is written."""
+    with FakeHub().serve() as cdn:
+        fake_hub.bytes_host = cdn.endpoint
+        cdn.content_range = "bytes 0-9/*"
+        with pytest.raises(DownloadError) as failure:
+            _fetch(fake_hub, tmp_path / "hub")
+
+    message = str(failure.value)
+    assert "a Content-Range whose length is not a number" in message and "HF_ENDPOINT" in message, message
+    assert all(p.stat().st_size == 0 for p in _incomplete(tmp_path / "hub")), "bytes were written"
+
+
 def test_download_lays_out_the_snapshot_from_the_verified_blobs_and_asks_the_hub_nothing_more(
     fake_hub: FakeHub, tmp_path: Path
 ):
