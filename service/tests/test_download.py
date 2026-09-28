@@ -52,6 +52,7 @@ from conftest import (
     assert_download_completed,
     closed_port,
     fake_bytes,
+    fake_platform,
     loopback_server,
     snapshot_files,
 )
@@ -2360,6 +2361,39 @@ def test_the_models_load_refuses_while_a_download_holds_the_repos_lock(
     assert refused_while_held, "the load waited for the download instead of refusing"
     assert str(refused.value) == HELD.format(repo=FAKE_REPO) + LOAD_REFUSED, str(refused.value)
     assert not loading.is_set() and fake_hub.requests == [], "the load ran under the download"
+
+
+def test_an_analysis_started_during_a_download_refuses_with_exit_3_naming_the_download_in_settings(
+    fake_hub: FakeHub, photos: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+):
+    """Card #501, Done-when 1 and 2, through the entry point the plugin
+    runs for an analysis (`melampus-id <previews> --plugin-out`): given a
+    download holding the repo's lock (a real lock, held by
+    `_a_download_holds_the_repos_lock`), the run stops at the model's load
+    within LOCK_TIMEOUT (shortened here) while the download still holds
+    it, exit 3 with the refusal on stderr and no traceback, the contract
+    of every refusal (`cli._fail`). Nothing is loaded or fetched, nothing
+    cached, and no results file written."""
+    from melampus.cache import ResultCache
+
+    cache, results, out = tmp_path / "hub", tmp_path / "identifications.jsonl", tmp_path / "plugin_results.json"
+    _cli_sees_the_cache(monkeypatch, cache)
+    loading = _mlx_vlm_loading_through_the_hub(monkeypatch, fake_hub)
+    fake_platform(monkeypatch, "darwin", "arm64")
+    monkeypatch.setattr(download, "LOCK_TIMEOUT", 0.2)
+
+    with _a_download_holds_the_repos_lock(cache) as holding:
+        code = main([str(photos), "--no-local-config", "--backend", "mlx", "--model", FAKE_REPO,
+                     "--cache", str(results), "--plugin-out", str(out)])
+        refused_while_held = holding.is_set()
+
+    printed, err = capsys.readouterr()
+    assert refused_while_held, f"the analysis waited for the download instead of refusing: {err}"
+    assert code == 3 and printed == "" and "Traceback" not in err, (printed, err)
+    assert HELD.format(repo=FAKE_REPO) + LOAD_REFUSED in err, err
+    assert not loading.is_set() and fake_hub.requests == [], "the load ran under the download"
+    assert not out.exists(), "a results file was written"
+    assert ResultCache(results).results() == [], "the refusal was cached"
 
 
 def test_model_status_flag_needs_no_folder_and_prints_one_json_object_for_the_configured_repo(

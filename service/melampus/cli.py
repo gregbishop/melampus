@@ -543,9 +543,6 @@ def main(argv: list[str] | None = None) -> int:
             if pending and not args.yes and not _confirm(pending, cost, yes_flag="--yes"):
                 print("  cancelled; nothing was sent", file=sys.stderr)
                 return 0
-        else:
-            print(f"loading {backend.name} ...", file=sys.stderr)
-            backend.warmup()
 
         def progress(result: ImageResult, stats: BatchStats) -> None:
             done = stats.processed
@@ -559,6 +556,9 @@ def main(argv: list[str] | None = None) -> int:
             )
 
         try:
+            if not cloud_primary:
+                print(f"loading {backend.name} ...", file=sys.stderr)
+                backend.warmup()
             stats = run_batch(
                 paths, identifier, cache,
                 force=args.force, limit=args.limit, on_result=progress,
@@ -566,7 +566,9 @@ def main(argv: list[str] | None = None) -> int:
         except BATCH_FATAL as exc:
             # The engine is broken, or this machine cannot run as configured —
             # not the frame: stop here with the message rather than recording
-            # the same failure on every frame in turn.
+            # the same failure on every frame in turn. The local model's load
+            # is refused the same way, before any frame, while another run
+            # (a download from Settings, most often) holds it (card #501).
             return _fail(str(exc))
         print(
             f"\nprocessed {stats.processed}  skipped {stats.skipped}  "
