@@ -1228,9 +1228,10 @@ def test_bounded_block_ends_cleanly_for_a_cancel_whose_deadline_has_fired_too(ra
     cancel (true from the start) have both fired, ending as the hung-up
     read ends it, raising or returning, the block ends cleanly with
     `cancelled` set and nothing raised."""
-    with _bounded_pull(0.3, cancel=lambda: True) as deadline:
-        time.sleep(0.5)
-        assert deadline.expired.is_set() and deadline.cancelled.is_set(), "the case needs both fired"
+    timeout = 0.3
+    with _bounded_pull(timeout, cancel=lambda: True) as deadline:
+        assert deadline.expired.wait(timeout + SCHEDULING_SLACK) and deadline.cancelled.wait(
+            _Deadline.WATCH + SCHEDULING_SLACK), "the case needs both fired"
         if raising:
             raise ConnectionResetError("the hung-up read")
     assert deadline.cancelled.is_set()
@@ -1250,8 +1251,9 @@ def test_bounded_block_asks_the_cancel_once_more_when_the_deadline_fired_before_
     nothing raised, for `_lines_until_cancelled` to name the marker."""
     monkeypatch.setattr(_Deadline, "WATCH", 60.0)
     marker = threading.Event()
-    with _bounded_pull(0.3, cancel=marker.is_set) as deadline:
-        assert deadline.expired.wait(2.0), "the deadline never fired"
+    timeout = 0.3
+    with _bounded_pull(timeout, cancel=marker.is_set) as deadline:
+        assert deadline.expired.wait(timeout + SCHEDULING_SLACK), "the deadline never fired"
         marker.set()
         if raising:
             raise ConnectionResetError("the hung-up read")
