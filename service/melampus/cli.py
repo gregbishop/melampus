@@ -446,7 +446,12 @@ def main(argv: list[str] | None = None) -> int:
         overrides.setdefault("escalation", {})["provider"] = args.escalate_provider
     if args.escalate_base_url:
         overrides.setdefault("escalation", {})["base_url"] = args.escalate_base_url
-    config = load_config(args.config, use_local=not args.no_local_config, **overrides)
+    try:
+        config = load_config(args.config, use_local=not args.no_local_config, **overrides)
+    except ValueError as exc:
+        # A setting config.py refuses (pydantic's ValidationError, a
+        # ValueError), its message naming the field and the rule it broke.
+        return _fail(str(exc))
 
     if args.detect_engines:
         # The address probed is the configured one, read the way the run

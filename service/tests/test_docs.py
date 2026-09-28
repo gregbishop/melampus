@@ -1964,6 +1964,20 @@ def test_config_doc_names_the_command_output_ceiling():
     assert "4 MiB" in command_row, "docs/config.md's command row does not name the output ceiling"
 
 
+def test_config_doc_names_the_timeout_bound():
+    """Card #503: `[model] timeout_seconds` outside a finite positive range
+    is refused when the config loads, exit 3, naming the field and the
+    bound. docs/config.md's row for it must say so, with the ceiling the
+    refusal names, and must change when the ceiling does."""
+    from melampus.config import MAX_TIMEOUT_SECONDS
+    model = _section(CONFIG_DOC.read_text(encoding="utf-8"), "`[model]`")  # [escalation] has a timeout_seconds row of its own
+    timeout_row = _row(model, "timeout_seconds")
+    assert f"at most {MAX_TIMEOUT_SECONDS}" in timeout_row, (
+        "docs/config.md's timeout_seconds row does not name the ceiling")
+    assert "refused when the config loads" in timeout_row and "exit 3" in timeout_row, (
+        "docs/config.md's timeout_seconds row does not say a value outside the bound is refused, exit 3")
+
+
 def test_config_doc_says_the_commands_exit_ends_its_answer_and_stops_what_it_started():
     """Card #420: the command's exit ends its answer, and everything it
     started is stopped the moment it exits, so a helper it leaves holding

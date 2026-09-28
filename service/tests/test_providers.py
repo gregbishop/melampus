@@ -2002,6 +2002,60 @@ def test_command_template_with_a_control_character_is_refused_at_config_load(
     assert all(c.isprintable() for c in clause), clause
 
 
+@pytest.mark.parametrize(
+    ("value", "bound"),
+    [
+        ("inf", "less than or equal to {ceiling}"),
+        ("-inf", "greater than 0"),
+        ("nan", "less than or equal to {ceiling}"),
+        ("1e12", "less than or equal to {ceiling}"),
+        ("-5", "greater than 0"),
+        ("0", "greater than 0"),
+    ],
+    ids=["inf", "minus-inf", "nan", "huge", "negative", "zero"],
+)
+def test_timeout_outside_its_bound_is_refused_at_config_load_exit_3(
+    monkeypatch, photos, tmp_path, capsys, value, bound
+):
+    """Card #503, Done-when 1: `[model] timeout_seconds` is the one wait
+    every request of a cloud primary, `ollama` and `command` is bounded by,
+    and the socket and thread timeouts under it hold a finite positive
+    number of seconds only: `inf` or a huge value raised OverflowError out
+    of them, `nan` ValueError, a traceback (on stderr from the deadline's
+    thread, or out of --download-model), and zero or a negative timed out
+    every frame. Given a value outside a finite positive range, when the
+    config loads, then the run is refused there, exit 3, naming the field
+    and the bound it broke, before Ollama is asked anything."""
+    from melampus.cli import main
+    from melampus.config import MAX_TIMEOUT_SECONDS
+
+    with _fake_ollama(monkeypatch) as server:
+        settings = _settings_naming_the_fake(monkeypatch, tmp_path)
+        with settings.open("a", encoding="utf-8") as handle:
+            handle.write(f"timeout_seconds = {value}\n")
+        code = main([
+            str(photos), "--backend", "ollama", "--config", str(settings),
+            "--no-local-config", "--cache", str(tmp_path / "cache.jsonl"),
+        ])
+
+    err = capsys.readouterr().err
+    assert code == 3, err
+    assert "timeout_seconds" in err, err
+    assert bound.format(ceiling=MAX_TIMEOUT_SECONDS) in err, err
+    assert "Traceback" not in err, err
+    assert server.requests == [], "Ollama was asked before the config was refused"
+
+
+def test_timeout_bound_admits_its_ceiling_and_refuses_past_it():
+    """Card #503: the ceiling is the most `timeout_seconds` may be, itself
+    allowed; a fraction of a second past it is refused, naming the field."""
+    from melampus.config import MAX_TIMEOUT_SECONDS
+
+    assert _cfg(model={"timeout_seconds": MAX_TIMEOUT_SECONDS}).model.timeout_seconds == MAX_TIMEOUT_SECONDS
+    with pytest.raises(ValueError, match="timeout_seconds"):
+        _cfg(model={"timeout_seconds": MAX_TIMEOUT_SECONDS + 0.5})
+
+
 class _FakeRun:
     """Stands in for subprocess.Popen at the backend's process edge: records
     every call, then returns a started process whose stdout and stderr
