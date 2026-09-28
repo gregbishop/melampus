@@ -234,8 +234,9 @@ UNREADABLE = (
 # there: UnidentifiedImageError (an OSError) where it recognises no format;
 # ValueError or OSError where a header matches a format's magic and then does
 # not parse (text opening `P1 fix`, a frame cut short); SyntaxError where an
-# EXIF block is no TIFF structure. DecompressionBombError is none of these,
-# and propagates.
+# EXIF block is no TIFF structure. The gate's own walk of a JPEG or PNG raises
+# ValueError where it breaks off. DecompressionBombError is none of these, and
+# propagates.
 READ_ERRORS = (ValueError, OSError, SyntaxError)
 
 
@@ -246,6 +247,52 @@ def _opened(blob: bytes) -> Image.Image | None:
         return Image.open(io.BytesIO(blob))
     except READ_ERRORS:
         return None
+
+
+def _jpeg_end(data: bytes) -> int:
+    """Where the JPEG heading `data` ends: just past the EOI that closes its
+    scans. A marker segment is stepped over by its length; a scan's
+    entropy-coded data runs to the next marker, since inside it 0xFF is
+    followed only by a stuffed 0x00 or a restart marker. Raises ValueError
+    where the JPEG breaks off or does not parse."""
+    at = 2  # past SOI
+    while True:
+        marker = data[at : at + 2]
+        if len(marker) < 2 or marker[0] != 0xFF:
+            raise ValueError(f"no JPEG marker at byte {at}")
+        if marker[1] == 0xD9:  # EOI
+            return at + 2
+        if marker[1] == 0xFF:  # a fill byte before a marker
+            at += 1
+            continue
+        length = int.from_bytes(data[at + 2 : at + 4])
+        if length < 2:
+            raise ValueError(f"no JPEG segment length at byte {at}")
+        at += 2 + length
+        if marker[1] == 0xDA:  # SOS: entropy-coded data follows
+            while True:
+                at = data.index(b"\xff", at)
+                after = data[at + 1 : at + 2]
+                if after != b"\x00" and not b"\xd0" <= after <= b"\xd7":
+                    break
+                at += 2
+
+
+def _png_end(data: bytes) -> int:
+    """Where the PNG in `data` ends: just past its IEND chunk, each chunk
+    stepped over by its length. Raises ValueError where the PNG breaks off."""
+    at = 8  # past the signature
+    while True:
+        header = data[at : at + 8]
+        at += 12 + int.from_bytes(header[:4])
+        if len(header) < 8 or at > len(data):
+            raise ValueError("the PNG breaks off before IEND")
+        if header[4:] == b"IEND":
+            return at
+
+
+# The formats whose end the gate can find, so it can refuse what follows it.
+FRAME_ENDS = {"JPEG": _jpeg_end, "PNG": _png_end}
 
 
 def _frame_problems(data: bytes) -> list[str]:
@@ -264,6 +311,14 @@ def _frame_problems(data: bytes) -> list[str]:
             # An EXIF block found at open is EXIF, whether or not it parses.
             if "exif" in image.info or image.getexif():
                 problems.append("carries EXIF")
+            find_end = FRAME_ENDS.get(image.format)
+            if find_end is None:
+                problems.append(
+                    f"a {image.format} frame, whose end the gate cannot find: "
+                    "save it as JPEG or PNG"
+                )
+            elif after := len(data) - find_end(data):
+                problems.append(f"{after} bytes after the image ends")
         except READ_ERRORS:
             return [UNREADABLE]
     return problems
@@ -420,6 +475,28 @@ def test_a_frame_that_holds_more_frames_is_refused(tmp_path):
         later.encoderinfo = {"exif": tagged.info["exif"]}
     mpo = _frame(format="MPO", save_all=True, append_images=[later])
     assert "holds 2 frames" in _frame_problems(mpo)
+
+
+def test_bytes_after_the_image_ends_are_refused(tmp_path):
+    """Codex round 4, finding 3: Pillow reads a frame up to where its image
+    ends, so bytes after that went unread, and a clean JPEG or PNG followed by
+    a tagged JPEG's bytes passed. A JPEG ends at the EOI that closes its
+    scans, a PNG at its IEND chunk; a JPEG or PNG that never gets there is no
+    image the gate can read, and a format whose end the gate cannot find is
+    refused whole."""
+    tagged = _tagged_frame(tmp_path)
+    for format in ("JPEG", "PNG"):
+        frame = _frame(format=format)
+        assert _frame_problems(frame + tagged) == [
+            f"{len(tagged)} bytes after the image ends"
+        ]
+        # EOI and IEND are a frame's last 2 and 12 bytes.
+        assert _frame_problems(frame[: -2 if format == "JPEG" else -12]) == [
+            UNREADABLE
+        ]
+    assert _frame_problems(_frame(format="GIF") + tagged) == [
+        "a GIF frame, whose end the gate cannot find: save it as JPEG or PNG"
+    ]
 
 
 def test_a_fixture_is_judged_as_a_frame_whatever_it_is_called():
