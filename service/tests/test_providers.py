@@ -4379,6 +4379,39 @@ def test_cli_backend_for_the_cli_writes_a_json_result(
         "Tricolored Heron", "Little Blue Heron"]
 
 
+@posix_only
+@pytest.mark.parametrize(
+    ("cli", "own_words"),
+    [(providers.CLAUDE_CODE_CLI, ()), (providers.CODEX_CLI, ("401 Unauthorized",))],
+    ids=["claude-code", "codex"],
+)
+def test_the_cli_that_lapses_mid_run_stops_the_batch_at_the_first_reply(
+    monkeypatch, photos, tmp_path, capsys, cli, own_words
+):
+    """Done-when 2 where detection cannot tell: the status check passed, and
+    the first run answers not-signed-in the way the CLI does when its
+    session lapses mid-batch, exit 1 in both: Claude Code's documented
+    result object with is_error and nothing on stderr, Codex's turn failed
+    on stdout with the measured 401. The run stops at exit 3 on a refusal
+    naming the sign-in command and, where the CLI's words say more than
+    that, those words (`own_words`: Codex's 401), rather than recording
+    it on every frame; nothing is cached."""
+    from melampus.cli import main
+
+    _fake_engine_cli(monkeypatch, tmp_path, cli, mode="expired")
+    out = tmp_path / "results.json"
+
+    code = main([str(photos), "--backend", cli.engine, "--cache", str(tmp_path / "cache.jsonl"),
+                 "--json-out", str(out)])
+
+    err = capsys.readouterr().err
+    assert code == 3, err
+    assert "not signed in" in err and cli.sign_in in err
+    for words in own_words:
+        assert words in err, err
+    assert not out.exists() and not (tmp_path / "cache.jsonl").exists()
+
+
 # --- card #421: what is Claude Code's own ---------------------------------
 
 
@@ -5056,29 +5089,6 @@ def test_cli_detect_engines_prints_the_not_subscription_verdict(monkeypatch, tmp
     assert "remove ANTHROPIC_API_KEY from the `env` block of the settings" in verdict["reason"]
 
 
-@posix_only
-def test_claude_code_that_lapses_mid_run_stops_the_batch_at_the_first_reply(
-    monkeypatch, photos, tmp_path, capsys
-):
-    """Done-when 2 where detection cannot tell: the status check passed, and
-    the first run answers not-logged-in the documented way (exit 1, the
-    result object with is_error, nothing on stderr). The run stops at exit
-    3 on the same refusal, naming the sign-in command, rather than
-    recording it on every frame; nothing is cached."""
-    from melampus.cli import main
-
-    _fake_engine_cli(monkeypatch, tmp_path, providers.CLAUDE_CODE_CLI, mode="expired")
-    out = tmp_path / "results.json"
-
-    code = main([str(photos), "--backend", "claude-code", "--cache", str(tmp_path / "cache.jsonl"),
-                 "--json-out", str(out)])
-
-    err = capsys.readouterr().err
-    assert code == 3, err
-    assert "not signed in" in err and providers.CLAUDE_CODE_SIGN_IN in err
-    assert not out.exists() and not (tmp_path / "cache.jsonl").exists()
-
-
 # --- card #422: what is Codex CLI's own -----------------------------------
 
 
@@ -5383,31 +5393,6 @@ def test_codex_at_its_usage_limit_stops_the_batch_at_the_first_reply(
     err = capsys.readouterr().err
     assert code == 3, err
     assert "usage limit" in err and "Sep 19th, 2026 7:46 AM" in err
-    assert not out.exists() and not (tmp_path / "cache.jsonl").exists()
-
-
-@posix_only
-def test_codex_that_lapses_mid_run_stops_the_batch_at_the_first_reply(
-    monkeypatch, photos, tmp_path, capsys
-):
-    """Done-when 2's other half, where detection cannot tell: the status
-    check passed, and the first run fails the turn with the measured 401
-    (exit 1, the stream on stdout), the way a session that lapses
-    mid-batch does. The run stops at exit 3 on a refusal naming the
-    sign-in command and Codex's own words, rather than recording it on
-    every frame; nothing is cached."""
-    from melampus.cli import main
-
-    _fake_engine_cli(monkeypatch, tmp_path, providers.CODEX_CLI, mode="expired")
-    out = tmp_path / "results.json"
-
-    code = main([str(photos), "--backend", "codex", "--cache", str(tmp_path / "cache.jsonl"),
-                 "--json-out", str(out)])
-
-    err = capsys.readouterr().err
-    assert code == 3, err
-    assert "not signed in" in err and providers.CODEX_SIGN_IN in err
-    assert "401 Unauthorized" in err, err
     assert not out.exists() and not (tmp_path / "cache.jsonl").exists()
 
 
