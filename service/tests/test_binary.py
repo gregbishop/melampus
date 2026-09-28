@@ -47,7 +47,7 @@ progress on stdout, from a fake hub on loopback, on every platform's build.
 Card #420: `--backend command` with a program that is not installed is
 refused before any image is read, naming the command, exit 3. Card #421:
 `--backend claude-code` with no `claude` on PATH, likewise, naming where to
-install it.
+install it; card #422: `--backend codex` with no `codex`, the same.
 
 Nothing here downloads a model: the MLX check stops at the point where the
 executable goes looking for weights, and the download test's host is the fake
@@ -75,7 +75,7 @@ from conftest import (
     fake_platform,
 )
 
-from melampus import config
+from melampus import config, providers
 from melampus.backend import ScriptedBackend
 from melampus.config import load_config
 from melampus.identify import Identifier
@@ -609,21 +609,23 @@ def test_executable_refuses_a_command_that_is_not_installed(
         assert works_here in tail, f"{works_here!r} is not named as working here:\n{tail}"
 
 
-def test_executable_refuses_claude_code_that_is_not_installed(
-    built_executable: Path, photos: Path, tmp_path: Path
+@pytest.mark.parametrize("cli", providers.CLI_ENGINES, ids=lambda cli: cli.engine)
+def test_executable_refuses_a_cli_engine_that_is_not_installed(
+    built_executable: Path, photos: Path, tmp_path: Path, cli: providers.CliEngine
 ):
-    """Card #421, Done-when 2 in the frozen build: `--backend claude-code`
-    on a PATH with no `claude`, and the executable exits 3 on the
-    not-installed message, naming where to install it and how to sign in,
-    and the backends that do work here, before any image is read."""
+    """Cards #421 and #422, Done-when 2 in the frozen build: `--backend
+    <engine>` on a PATH with no `<program>`, and the executable exits 3 on
+    the not-installed message, naming the CLI, where to install it and how
+    to sign in, and the backends that do work here, before any image is
+    read. One test per CliEngine: the refusal's words are its fields."""
     env = no_python_environment(tmp_path)
-    assert shutil.which("claude", path=env["PATH"]) is None
-    proc = _request_backend(built_executable, photos, tmp_path, "claude-code", env=env)
+    assert shutil.which(cli.program, path=env["PATH"]) is None
+    proc = _request_backend(built_executable, photos, tmp_path, cli.engine, env=env)
     tail = proc.stderr[-3000:]
     assert proc.returncode == 3, f"exit {proc.returncode}:\n{tail}"
-    assert "invalid choice" not in tail, f"the executable does not accept claude-code:\n{tail}"
-    assert "Claude Code is not installed" in tail, tail
-    assert "https://code.claude.com/docs/en/setup" in tail and "claude auth login" in tail, tail
+    assert "invalid choice" not in tail, f"the executable does not accept {cli.engine}:\n{tail}"
+    assert f"{cli.title} is not installed" in tail, tail
+    assert cli.install in tail and cli.sign_in in tail, tail
     for works_here in ("claude", "openai", "scripted"):
         assert works_here in tail, f"{works_here!r} is not named as working here:\n{tail}"
 
@@ -695,27 +697,34 @@ def test_executable_detects_engines_as_json_with_no_python_on_the_path(
     built_executable: Path, tmp_path: Path
 ):
     """Card #404, from the executable alone: valid JSON on stdout, the four
-    engines in the owner's order then claude-code (card #421), exit 0, no
-    folder needed. Each local verdict mirrors the machine running the suite,
-    never a guess about it: mlx's is whether this is Apple Silicon, ollama's
-    is whether a server answers at OLLAMA_URL, asked from this process over
-    loopback (Done-when 4: a developer's running Ollama decides nothing the
-    test did not measure too), with the install pointer when none does; the
-    cloud engines are available and name their key variable; with no `claude`
-    on the PATH, claude-code is not installed, with where to get it."""
-    from melampus import providers
-
+    engines in the owner's order then claude-code and codex (cards #421,
+    #422), exit 0, no folder needed. Each local verdict mirrors the machine
+    running the suite, never a guess about it: mlx's is whether this is Apple
+    Silicon, ollama's is whether a server answers at OLLAMA_URL, asked from
+    this process over loopback (Done-when 4: a developer's running Ollama
+    decides nothing the test did not measure too), with the install pointer
+    when none does; the cloud engines are available and name their key
+    variable; with no CLI program on the PATH, every CliEngine is not
+    installed, with where to get it. The order above stays literal — the
+    owner's order is the contract it pins — but the per-CLI assertions
+    come from `providers.CLI_ENGINES`, as
+    test_executable_refuses_a_cli_engine_that_is_not_installed's cases do,
+    so a third CLI is not silently unchecked here (review round 9, C2;
+    rounds 4 and 8, C2)."""
     proc = subprocess.run(
         [str(built_executable), "--detect-engines"],
         env=no_python_environment(tmp_path), capture_output=True, text=True, timeout=600,
     )
     assert proc.returncode == 0, proc.stderr[-3000:]
     verdicts = json.loads(proc.stdout)
-    assert [v["engine"] for v in verdicts] == ["mlx", "ollama", "openai", "claude", "claude-code"]
+    assert [v["engine"] for v in verdicts] == [
+        "mlx", "ollama", "openai", "claude", "claude-code", "codex"]
     by_engine = {v["engine"]: v for v in verdicts}
-    assert by_engine["claude-code"]["available"] is False, "a claude on the empty PATH?"
-    assert "not installed" in by_engine["claude-code"]["reason"]
-    assert providers.CLAUDE_CODE_INSTALL in by_engine["claude-code"]["reason"]
+    for cli in providers.CLI_ENGINES:
+        verdict = by_engine[cli.engine]
+        assert verdict["available"] is False, f"a {cli.program} on the empty PATH?"
+        assert "not installed" in verdict["reason"], verdict["reason"]
+        assert cli.install in verdict["reason"], verdict["reason"]
     assert by_engine["mlx"]["available"] is on_apple_silicon()
     if not on_apple_silicon():
         assert by_engine["mlx"]["reason"] == "needs Apple Silicon"

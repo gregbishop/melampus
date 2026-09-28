@@ -14,10 +14,11 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from .backend import CommandFailed, VLMBackend
+from .backend import VLMBackend
 from .config import MelampusConfig
 from .images import staged_pixels
 from .prompts import ROUTING_FOR_PROFILE, ROUTING_PROMPT, PromptLibrary
+from .providers import BATCH_FATAL
 from .schema import Identification, ImageResult, Taxon, TaxonRouting
 
 _FENCE = re.compile(r"```(?:json)?\s*(.*?)```", re.S)
@@ -161,8 +162,9 @@ class Identifier:
             try:
                 with staged_pixels(path, edge, self.config.image.jpeg_quality) as staged:
                     result = self._identify_staged(staged, path.name, content)
-            except CommandFailed:
-                # The engine, not the file: every frame would fail the same way.
+            except BATCH_FATAL:
+                # The engine or the configuration, not the file: every frame
+                # would fail the same way.
                 raise
             except Exception as exc:  # noqa: BLE001 - one bad file must not abort a batch
                 return ImageResult(
