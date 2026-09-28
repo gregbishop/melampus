@@ -439,7 +439,12 @@ URL); a hub whose answers are not a hub's,
 an etag that is not a checksum or a commit that is not a hash, neither of which
 is let become a path in the cache, or a file size that is not a non-negative
 integer of at most 2^53 (`download.MAX_SIZE`, the status's own ceiling), refused
-before any byte moves with the file and the size named, so check `HF_ENDPOINT`; another run holding
+before any byte moves with the file and the size named, so check `HF_ENDPOINT`;
+a file larger than the hub library's own limit for a download over plain HTTP
+(`huggingface_hub.constants.MAX_HTTP_DOWNLOAD_SIZE`, 50 GB in the pinned
+version, where its download would otherwise end in a traceback), which this
+command cannot fetch since it turns the Xet transfer off, refused the same way
+with the limit named, so check `HF_ENDPOINT` and `[model] repo` or `--model`; another run holding
 the model, a download of it, an identification run loading it or a removal,
 whose lock this run waits five seconds
 for, so wait for it to finish and re-run; a cancel marker, below,

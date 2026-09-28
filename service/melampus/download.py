@@ -488,6 +488,16 @@ def _plan(repo: str, endpoint: str | None, cache: Path, storage: Path) -> tuple[
                 f"the hub at {endpoint} gave {entry.path} the size {meta.size}, "
                 f"not a non-negative integer of at most {MAX_SIZE}; {NOT_A_HUB}"
             )
+        # The hub library's `http_get` refuses a file above its own limit
+        # with a ValueError, a traceback, once other files' bytes have moved;
+        # a real file above it is one this module cannot fetch at all, since
+        # it sets HF_HUB_DISABLE_XET. Read at run time, the pinned library's.
+        if meta.size > constants.MAX_HTTP_DOWNLOAD_SIZE:
+            raise DownloadError(
+                f"the hub at {endpoint} gave {entry.path} the size {meta.size}, above "
+                f"{constants.MAX_HTTP_DOWNLOAD_SIZE}, the hub library's limit for a download over plain HTTP, "
+                "so this command cannot fetch it: check HF_ENDPOINT, and [model] repo in config or --model"
+            )
         blobs.append(_Blob(entry.path, meta.location, meta.etag, meta.size,
                            storage / "blobs" / meta.etag, Path(pointer)))
     return commit, blobs

@@ -467,22 +467,25 @@ def test_download_rejects_a_commit_that_is_not_a_hash_before_it_becomes_a_path(f
     assert not [r for r in fake_hub.requests if "/resolve/" in r.path], "files were asked for at a commit that is not one"
 
 
-@pytest.mark.parametrize("size", [
-    pytest.param(str(download.MAX_SIZE + 1), id="above MAX_SIZE"),
-    pytest.param("-1", id="negative"),
+@pytest.mark.parametrize(("size", "ceiling"), [
+    pytest.param(str(download.MAX_SIZE + 1), download.MAX_SIZE, id="above MAX_SIZE"),
+    pytest.param("-1", download.MAX_SIZE, id="negative"),
+    pytest.param("60000000000", constants.MAX_HTTP_DOWNLOAD_SIZE, id="above the hub library's download limit"),
 ])
 def test_cli_refuses_a_file_size_that_is_not_a_count_before_any_byte_moves(
-    fake_hub: FakeHub, hub_env: dict[str, str], size: str
+    fake_hub: FakeHub, hub_env: dict[str, str], size: str, ceiling: int
 ):
     """Card #500. The plan took the size the hub names for each LFS file
-    (X-Linked-Size) unchecked: one above MAX_SIZE ended `--download-model`
-    in the hub library's ValueError, a traceback, once another file's bytes
-    had moved, and a negative one had the file fetched whole before its size
-    failed. Given a hub naming model.safetensors a size above MAX_SIZE, the
-    ceiling the status holds the listing to (Done-when 1), or a size that is
-    not a non-negative integer (Done-when 2), the run exits 3 naming the
-    file and the size, nothing on stdout, before any byte is asked for from
-    the hub or the host serving the bytes."""
+    (X-Linked-Size) unchecked: one above the hub library's own download
+    limit (MAX_HTTP_DOWNLOAD_SIZE, where its `http_get` raises) ended
+    `--download-model` in that ValueError, a traceback, once another file's
+    bytes had moved, and a negative one had the file fetched whole before
+    its size failed. Given a hub naming model.safetensors a size above
+    MAX_SIZE, the ceiling the status holds the listing to (Done-when 1), a
+    size that is not a non-negative integer (Done-when 2), or one within
+    MAX_SIZE and above the library's limit, the run exits 3 naming the
+    file, the size and the ceiling it is over, nothing on stdout, before
+    any byte is asked for from the hub or the host serving the bytes."""
     with FakeHub().serve() as cdn:
         fake_hub.bytes_host = cdn.endpoint
         fake_hub.sizes["model.safetensors"] = size
@@ -490,6 +493,7 @@ def test_cli_refuses_a_file_size_that_is_not_a_count_before_any_byte_moves(
 
     assert proc.returncode == 3, proc.stderr[-3000:]
     assert "Traceback" not in proc.stderr and f"model.safetensors the size {size}" in proc.stderr, proc.stderr
+    assert str(ceiling) in proc.stderr, proc.stderr
     assert proc.stdout == "", "the refusal came after the run had started"
     assert not fake_hub.gets() and not cdn.gets(), "bytes moved before the refusal"
 
