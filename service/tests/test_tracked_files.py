@@ -253,15 +253,6 @@ UNLISTED = (
 READ_ERRORS = (ValueError, OSError, SyntaxError)
 
 
-def _opened(blob: bytes) -> Image.Image | None:
-    """The image Pillow reads from `blob`, or None when it reads none: the
-    gate's one reading of what a blob is; its caller closes what it opens."""
-    try:
-        return Image.open(io.BytesIO(blob))
-    except READ_ERRORS:
-        return None
-
-
 # What a frame may carry: the chunks that draw its picture, and nothing that
 # only rides along with it (text, a comment, XMP, IPTC, an ICC profile, a
 # private chunk). In a JPEG, the frame headers SOF0-SOF15 with the DHT and DAC
@@ -338,20 +329,17 @@ def _frame_problems(data: bytes) -> list[str]:
     """Why `data` (a blob from the index) is not a committable frame. Pillow
     opens lazily, so a read after the open can raise too, and that refuses
     the frame as unreadable, the same as a blob that does not open."""
-    image = _opened(data)
-    if image is None:
-        return [UNREADABLE]
-    problems = []
-    with image:
-        # The format first, found at open: a format the gate cannot walk is
-        # refused before Pillow reads anything more of it.
-        walk = FRAME_WALKS.get(image.format)
-        if walk is None:
-            return [
-                f"a {image.format} frame, whose end the gate cannot find: "
-                "save it as JPEG or PNG"
-            ]
-        try:
+    try:
+        with Image.open(io.BytesIO(data)) as image:
+            # The format first, found at open: a format the gate cannot walk
+            # is refused before Pillow reads anything more of it.
+            walk = FRAME_WALKS.get(image.format)
+            if walk is None:
+                return [
+                    f"a {image.format} frame, whose end the gate cannot find: "
+                    "save it as JPEG or PNG"
+                ]
+            problems = []
             frames = getattr(image, "n_frames", 1)
             if frames > 1:
                 problems.append(f"holds {frames} frames")
@@ -364,9 +352,9 @@ def _frame_problems(data: bytes) -> list[str]:
                 problems.append(f"carries chunks that draw no picture: {names}")
             if after := len(data) - end:
                 problems.append(f"{after} bytes after the image ends")
-        except READ_ERRORS:
-            return [UNREADABLE]
-    return problems
+            return problems
+    except READ_ERRORS:
+        return [UNREADABLE]
 
 
 def _fixture_problems(
