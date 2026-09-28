@@ -37,7 +37,7 @@ import zlib
 from pathlib import Path
 
 import pytest
-from PIL import Image
+from PIL import Image, PngImagePlugin
 
 from conftest import FIXTURE, REPO, _load_tool, metadata_laden
 
@@ -249,27 +249,45 @@ def _opened(blob: bytes) -> Image.Image | None:
         return None
 
 
-def _jpeg_end(data: bytes) -> int:
-    """Where the JPEG heading `data` ends: just past the EOI that closes its
-    scans. A marker segment is stepped over by its length; a scan's
-    entropy-coded data runs to the next marker, since inside it 0xFF is
-    followed only by a stuffed 0x00 or a restart marker. Raises ValueError
-    where the JPEG breaks off or does not parse."""
+# What a frame may carry: the chunks that draw its picture, and nothing that
+# only rides along with it (text, a comment, XMP, IPTC, an ICC profile, a
+# private chunk). In a JPEG, the frame headers SOF0-SOF15 with the DHT and DAC
+# tables among them (less JPG, C8, which is reserved), DQT, DRI and SOS, and
+# APP0 when it is JFIF's 16-byte header and nothing more; in a PNG, IHDR,
+# PLTE, tRNS, IDAT and IEND.
+JPEG_PICTURE = {*range(0xC0, 0xD0), 0xDA, 0xDB, 0xDD} - {0xC8}
+PNG_PICTURE = {b"IHDR", b"PLTE", b"tRNS", b"IDAT", b"IEND"}
+JPEG_NAMES = {0xFE: "COM", **{0xE0 + n: f"APP{n}" for n in range(16)}}
+
+
+def _jpeg_walk(data: bytes) -> tuple[list[str], int]:
+    """The segments of the JPEG heading `data` that draw no picture, by name,
+    and where it ends: just past the EOI that closes its scans. A marker
+    segment is stepped over by its length; a scan's entropy-coded data runs
+    to the next marker, since inside it 0xFF is followed only by a stuffed
+    0x00 or a restart marker. Raises ValueError where the JPEG breaks off or
+    does not parse."""
+    extras = []
     at = 2  # past SOI
     while True:
         marker = data[at : at + 2]
         if len(marker) < 2 or marker[0] != 0xFF:
             raise ValueError(f"no JPEG marker at byte {at}")
-        if marker[1] == 0xD9:  # EOI
-            return at + 2
-        if marker[1] == 0xFF:  # a fill byte before a marker
+        kind = marker[1]
+        if kind == 0xD9:  # EOI
+            return extras, at + 2
+        if kind == 0xFF:  # a fill byte before a marker
             at += 1
             continue
         length = int.from_bytes(data[at + 2 : at + 4])
         if length < 2:
             raise ValueError(f"no JPEG segment length at byte {at}")
+        # JFIF's header: 16 bytes, with no thumbnail and nothing after it.
+        jfif = kind == 0xE0 and length == 16 and data[at + 4 : at + 9] == b"JFIF\0"
+        if kind not in JPEG_PICTURE and not jfif:
+            extras.append(JPEG_NAMES.get(kind, f"marker FF{kind:02X}"))
         at += 2 + length
-        if marker[1] == 0xDA:  # SOS: entropy-coded data follows
+        if kind == 0xDA:  # SOS: entropy-coded data follows
             while True:
                 at = data.index(b"\xff", at)
                 after = data[at + 1 : at + 2]
@@ -278,21 +296,27 @@ def _jpeg_end(data: bytes) -> int:
                 at += 2
 
 
-def _png_end(data: bytes) -> int:
-    """Where the PNG in `data` ends: just past its IEND chunk, each chunk
-    stepped over by its length. Raises ValueError where the PNG breaks off."""
+def _png_walk(data: bytes) -> tuple[list[str], int]:
+    """The chunks of the PNG in `data` that draw no picture, by type, and
+    where it ends: just past its IEND chunk, each chunk stepped over by its
+    length. Raises ValueError where the PNG breaks off."""
+    extras = []
     at = 8  # past the signature
     while True:
         header = data[at : at + 8]
         at += 12 + int.from_bytes(header[:4])
         if len(header) < 8 or at > len(data):
             raise ValueError("the PNG breaks off before IEND")
-        if header[4:] == b"IEND":
-            return at
+        kind = header[4:]
+        if kind not in PNG_PICTURE:
+            extras.append(kind.decode("latin-1"))
+        if kind == b"IEND":
+            return extras, at
 
 
-# The formats whose end the gate can find, so it can refuse what follows it.
-FRAME_ENDS = {"JPEG": _jpeg_end, "PNG": _png_end}
+# The formats the gate can walk to their end, naming what they carry on the
+# way, so it can refuse what rides along and what follows.
+FRAME_WALKS = {"JPEG": _jpeg_walk, "PNG": _png_walk}
 
 
 def _frame_problems(data: bytes) -> list[str]:
@@ -311,14 +335,19 @@ def _frame_problems(data: bytes) -> list[str]:
             # An EXIF block found at open is EXIF, whether or not it parses.
             if "exif" in image.info or image.getexif():
                 problems.append("carries EXIF")
-            find_end = FRAME_ENDS.get(image.format)
-            if find_end is None:
+            walk = FRAME_WALKS.get(image.format)
+            if walk is None:
                 problems.append(
                     f"a {image.format} frame, whose end the gate cannot find: "
                     "save it as JPEG or PNG"
                 )
-            elif after := len(data) - find_end(data):
-                problems.append(f"{after} bytes after the image ends")
+            else:
+                extras, end = walk(data)
+                if extras:
+                    names = ", ".join(dict.fromkeys(extras))
+                    problems.append(f"carries chunks that draw no picture: {names}")
+                if after := len(data) - end:
+                    problems.append(f"{after} bytes after the image ends")
         except READ_ERRORS:
             return [UNREADABLE]
     return problems
@@ -375,6 +404,11 @@ def _png_chunk(kind: bytes, data: bytes) -> bytes:
     return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", crc)
 
 
+def _jpeg_segment(marker: int, data: bytes) -> bytes:
+    """A JPEG marker segment's bytes: 0xFF, the marker, length and data."""
+    return bytes([0xFF, marker]) + (len(data) + 2).to_bytes(2) + data
+
+
 def _ascii_frame(size: tuple[int, int] = (300, 300)) -> bytes:
     """An ASCII Netpbm frame's bytes: an image Pillow reads whose bytes are
     also UTF-8 with no NUL, and over the ceiling at this size."""
@@ -397,8 +431,16 @@ def _tagged_frame(tmp_path: Path) -> bytes:
     return path.read_bytes()
 
 
+# What the gate says of that frame: its EXIF, and the XMP (APP1), ICC profile
+# (APP2) and comment (COM) segments metadata_laden writes beside it.
+TAGGED_PROBLEMS = [
+    "carries EXIF",
+    "carries chunks that draw no picture: APP1, APP2, COM",
+]
+
+
 def test_a_frame_with_exif_is_refused(tmp_path):
-    assert _frame_problems(_tagged_frame(tmp_path)) == ["carries EXIF"]
+    assert _frame_problems(_tagged_frame(tmp_path)) == TAGGED_PROBLEMS
 
 
 def test_a_small_stripped_frame_passes():
@@ -418,9 +460,7 @@ def test_the_gate_judges_the_index_not_the_working_tree(tmp_path):
 
     _git("add", "frame.jpg", repo=repo)
     (repo / "frame.jpg").write_bytes(plain)
-    assert _frame_problems(_index_bytes("frame.jpg", repo=repo)) == [
-        "carries EXIF"
-    ]
+    assert _frame_problems(_index_bytes("frame.jpg", repo=repo)) == TAGGED_PROBLEMS
 
 
 def test_a_frame_the_gate_cannot_read_is_refused():
@@ -499,6 +539,41 @@ def test_bytes_after_the_image_ends_are_refused(tmp_path):
     ]
 
 
+def test_a_chunk_that_draws_no_picture_is_refused(tmp_path):
+    """Codex round 4, finding 3: the gate read a frame's EXIF and nothing else
+    it carries, so a PNG holding the tagged JPEG base64-encoded in a text
+    chunk passed. A frame may carry only the chunks that draw its picture --
+    in a PNG, IHDR, PLTE, tRNS, IDAT and IEND; in a JPEG, its tables, frame
+    and scan headers, and JFIF's 16-byte APP0 header -- so a text chunk, a
+    comment, XMP, IPTC or a private chunk is refused by name, whatever it
+    holds, and so is an APP0 that holds more than JFIF's header."""
+    payload = base64.b64encode(_tagged_frame(tmp_path))
+    text, ztext, itext = (PngImagePlugin.PngInfo() for _ in range(3))
+    text.add_text("frame", payload)
+    ztext.add_text("frame", payload, zip=True)
+    itext.add_itxt("frame", payload)
+    png, jpeg = _frame(format="PNG"), _frame()
+    iptc = b"Photoshop 3.0\x008BIM\x04\x04\x00\x00" + len(payload).to_bytes(4)
+    frames = {
+        "tEXt": _frame(format="PNG", pnginfo=text),
+        "zTXt": _frame(format="PNG", pnginfo=ztext),
+        "iTXt": _frame(format="PNG", pnginfo=itext),
+        # A private chunk after IHDR, which ends 33 bytes in.
+        "prVt": png[:33] + _png_chunk(b"prVt", payload) + png[33:],
+        "COM": _frame(comment=payload),
+        "APP1": _frame(xmp=b"<x:xmpmeta>SECRET_KEYWORD</x:xmpmeta>"),
+        "APP13": _frame(extra=_jpeg_segment(0xED, iptc + payload)),
+        "APP15": _frame(extra=_jpeg_segment(0xEF, payload)),
+        # JFIF's APP0 is its 16-byte header, which ends 20 bytes in; bytes
+        # after the header ride in the segment, which Pillow reads no further.
+        "APP0": jpeg[:2] + _jpeg_segment(0xE0, jpeg[6:20] + payload) + jpeg[20:],
+    }
+    for chunk, frame in frames.items():
+        assert _frame_problems(frame) == [
+            f"carries chunks that draw no picture: {chunk}"
+        ], chunk
+
+
 def test_a_fixture_is_judged_as_a_frame_whatever_it_is_called():
     # Every fixture but a listed text fixture is judged as a frame, never by
     # an allowlist of image suffixes: a frame under any other suffix is still a
@@ -519,7 +594,7 @@ def test_camera_bytes_under_a_text_name_are_still_gated(tmp_path):
     tagged = _tagged_frame(tmp_path)
     reviewed = {LISTED_TEXT: hashlib.sha256(b"one\ntwo\n").hexdigest()}
     for path in ("service/tests/fixtures/second.txt", LISTED_TEXT):
-        assert _fixture_problems(path, tagged, reviewed) == ["carries EXIF"]
+        assert _fixture_problems(path, tagged, reviewed) == TAGGED_PROBLEMS
 
 
 def test_an_ascii_frame_is_gated_whatever_it_decodes_as():
