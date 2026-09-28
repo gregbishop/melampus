@@ -1058,6 +1058,33 @@ def test_the_action_pinning_gate_takes_only_a_version_as_the_comment(tmp_path, m
     assert "ci.yml" not in reported, reported
 
 
+def test_the_action_pinning_gate_reads_no_comment_inside_a_scalar_that_ends_on_the_line(tmp_path, monkeypatch):
+    """Claude code round 7, 1: the comment is the text after the last node
+    that ends on the line, and no test held where that starts. Reading from
+    the line's start, or from the first node to end there, left every test
+    green, because each stand-in with a `#` inside a one-line scalar also
+    named a tag or had a real comment besides. Then a SHA-pinned step with no
+    comment passed on a `# v...` inside its `name:`. Each step here is pinned
+    with no comment, its only `# v...` inside a scalar that ends on its line:
+    double-quoted after `uses`, single-quoted before it, and plain. Each is
+    reported; ci.yml is pinned with its version and is not."""
+    sha = "11d5960a326750d5838078e36cf38b85af677262"
+    steps = [
+        f'- {{uses: actions/checkout@{sha}, name: "Checkout # v4.4.0"}}',
+        f"- {{name: 'Checkout # v4.4.0', uses: actions/checkout@{sha}}}",
+        f"- {{uses: actions/checkout@{sha}, name: pin#v4}}",
+    ]
+    (tmp_path / "ci.yml").write_text(f"{WORKFLOW_STEPS}      - uses: actions/checkout@{sha} # v4.4.0\n", encoding="utf-8")
+    (tmp_path / "x.yaml").write_text(WORKFLOW_STEPS + "".join(f"      {step}\n" for step in steps), encoding="utf-8")
+    monkeypatch.setitem(globals(), "WORKFLOWS", tmp_path)
+    with pytest.raises(AssertionError) as unpinned:
+        test_every_workflow_pins_every_action_to_a_commit_sha_with_its_version()
+    reported = str(unpinned.value)
+    for step in steps:
+        assert f"x.yaml: {step}" in reported, reported
+    assert "ci.yml" not in reported, reported
+
+
 RELEASE_ZIPS = ("Melampus-macOS.zip", "Melampus-Windows.zip")
 
 
