@@ -2091,6 +2091,59 @@ def test_timeout_bound_admits_its_ceiling_and_refuses_past_it():
         _cfg(model={"timeout_seconds": MAX_TIMEOUT_SECONDS + 0.5})
 
 
+# A value a config refusal must never carry, synthetic and plainly not a
+# credential: 80 characters, so pydantic's own message, which quotes a
+# refused value cut to its first and last 24 characters, carries some of
+# it wherever it sits in a string. Any four characters of it are one of
+# REFUSED_PIECES, which no message holds else.
+REFUSED_VALUE = "zq" * 40
+REFUSED_PIECES = ("zqzq", "qzqz")
+
+
+def test_config_refusal_names_the_field_never_the_value():
+    """Security review, card #503, round 1: a refusal names the field and
+    the rule it broke, never the value refused, since that value can be a
+    key the config was given under a name it does not have."""
+    with pytest.raises(ValueError) as err:
+        _cfg(model={"anthropic_api_key": REFUSED_VALUE})
+    assert "model.anthropic_api_key" in str(err.value), str(err.value)
+    assert not any(piece in str(err.value) for piece in REFUSED_PIECES), str(err.value)
+
+
+@pytest.mark.parametrize(
+    ("setting", "field"),
+    [
+        (f'api_key = "{REFUSED_VALUE}"\n', "api_key"),
+        (f'[model]\nanthropic_api_key = "{REFUSED_VALUE}"\n', "model.anthropic_api_key"),
+        ('[model]\nollama_host = "http://reader:' + REFUSED_VALUE + '@127.0.0.1:11434"\n',
+         "model.ollama_host"),
+    ],
+    ids=["key-above-the-first-table", "key-under-a-name-the-config-lacks",
+         "url-with-credentials-under-a-name-the-config-lacks"],
+)
+def test_config_refusal_on_exit_3_never_echoes_the_value_refused(tmp_path, capsys, setting, field):
+    """Security review, card #503, round 1. `main` prints a config refusal
+    on exit 3, to stderr, which the plugin writes to its CLI log and shows
+    the tail of in its dialogs. pydantic's own message quotes the value it
+    refused, and the realistic refusals of a secret are its mistakes: a key
+    above the first table header or under a name the config lacks, a URL
+    carrying a password under one. Given one, when the config loads, then
+    the refusal is exit 3, naming the field, with no part of the value in
+    it."""
+    from melampus.cli import main
+
+    settings = tmp_path / "settings.toml"
+    settings.write_text(setting, encoding="utf-8")
+    code = main([str(tmp_path), "--config", str(settings), "--no-local-config"])
+
+    printed = capsys.readouterr()
+    assert code == 3, printed.err
+    assert field in printed.err, printed.err
+    assert "Traceback" not in printed.err, printed.err
+    for piece in REFUSED_PIECES:
+        assert piece not in printed.err + printed.out, printed.err
+
+
 class _FakeRun:
     """Stands in for subprocess.Popen at the backend's process edge: records
     every call, then returns a started process whose stdout and stderr

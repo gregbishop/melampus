@@ -73,7 +73,11 @@ MAX_TIMEOUT_SECONDS = 3600
 
 
 class _Base(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    # A refusal names the field and the rule it broke, never the value:
+    # pydantic's message otherwise quotes it (`input_value=`), and the CLI
+    # prints a refusal on exit 3 to stderr, the plugin's CLI log and its
+    # dialogs, where a key under a name the config lacks would be quoted.
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
 
 
 class ModelConfig(_Base):
