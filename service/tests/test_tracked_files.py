@@ -25,7 +25,9 @@ rather than its exit status, which reads the same whether a rule ignores a path
 or re-includes it.
 """
 
+import base64
 import io
+import re
 import subprocess
 from pathlib import Path
 
@@ -204,9 +206,13 @@ def test_the_committed_frame_is_not_ignored(tmp_path, path):
 # suffixes would let a raw (CR3, DNG), HEIC or BMP in unopened, and a raw
 # carries the whole camera record, while an exemption by suffix would let the
 # same bytes in under a .txt name. Text alone does not exempt either: the ASCII
-# Netpbm formats (P1/P2/P3) and XPM are images whose bytes decode as text.
+# Netpbm formats (P1/P2/P3) and XPM are images whose bytes decode as text, and a
+# text file can carry an image base64-encoded (a data URI, a JSON string).
 FRAME_CEILING = 400 * 1024
 CORPUS_DIRS = {"fixtures", "fixtures_full"}
+# A run of the base64 alphabet long enough to hold an image header, unbroken
+# (a data URI, a JSON string) or wrapped across lines (a 76-column dump).
+BASE64_RUN = re.compile(rb"[A-Za-z0-9+/\r\n]{64,}")
 
 
 def _opened(blob: bytes) -> Image.Image | None:
@@ -271,15 +277,27 @@ def _is_text(blob: bytes) -> bool:
     return b"\0" not in blob
 
 
+def _embeds_image(blob: bytes) -> bool:
+    """Whether a text blob carries an image base64-encoded: any run of the
+    alphabet Pillow reads one from, once its line breaks are dropped."""
+    for run in BASE64_RUN.findall(blob):
+        data = run.translate(None, b"\r\n")
+        if _is_image(base64.b64decode(data[: len(data) // 4 * 4])):
+            return True
+    return False
+
+
 def _gated_fixtures(blobs: dict[str, bytes]) -> list[str]:
     """Tracked fixtures the frame gate opens: every one whose indexed blob is
-    an image's, or is not a text file's. An image can be text -- Pillow reads
-    the ASCII Netpbm formats and XPM -- so only a blob that is text and no
-    image Pillow knows is exempt."""
+    an image's, or is not a text file's, or carries an image as base64. An
+    image can be text -- Pillow reads the ASCII Netpbm formats and XPM -- and
+    text can hold one, so only a blob that is text, no image Pillow knows, and
+    carries none is exempt. A carrier is refused whole: the gate reads a frame
+    as one image, and cannot vouch for one inside another file."""
     return [
         path
         for path, blob in blobs.items()
-        if _is_image(blob) or not _is_text(blob)
+        if _is_image(blob) or not _is_text(blob) or _embeds_image(blob)
     ]
 
 
@@ -392,6 +410,37 @@ def test_an_ascii_frame_is_gated_whatever_it_decodes_as():
     }
     assert _gated_fixtures(blobs) == [named, renamed]
     assert any("over the" in problem for problem in _frame_problems(ascii_frame))
+
+
+def test_an_image_carried_as_base64_text_is_gated(tmp_path):
+    """Nor is a text container. An image base64-encoded inside a text fixture
+    is still the image, camera record and all, in the shapes this repository
+    writes one: a data URI (an SVG's embedded bitmap, the review sheet's
+    thumbnails, the OpenAI request body), a bare JSON string (the Anthropic
+    request body), a dump wrapped at 76 columns. Each decodes as text Pillow
+    reads no image in, so each let a tagged frame past both checks."""
+    tagged = _tagged_frame(tmp_path)
+    inline = base64.b64encode(tagged)
+    carriers = {
+        "service/tests/fixtures/second.svg": (
+            b'<svg xmlns="http://www.w3.org/2000/svg">'
+            b'<image href="data:image/jpeg;base64,' + inline + b'"/></svg>\n'
+        ),
+        "service/tests/fixtures/request.json": (
+            b'{"source": {"type": "base64", "media_type": "image/jpeg", '
+            b'"data": "' + inline + b'"}}\n'
+        ),
+        "service/tests/fixtures/second.b64": base64.encodebytes(tagged),
+    }
+    blobs = {
+        "service/tests/fixtures/download-lines.txt": b"one\ntwo\n",
+        # base64 that decodes to no image is text like any other.
+        "service/tests/fixtures/noise.b64": base64.encodebytes(bytes(range(256)) * 8),
+        **carriers,
+    }
+    assert _gated_fixtures(blobs) == list(carriers)
+    for path in carriers:
+        assert _frame_problems(blobs[path]) == ["not an image the gate can read"]
 
 
 def test_stray_fixture_paths_are_named():
