@@ -1085,6 +1085,33 @@ def test_the_action_pinning_gate_reads_no_comment_inside_a_scalar_that_ends_on_t
     assert "ci.yml" not in reported, reported
 
 
+def test_the_action_pinning_gate_takes_only_forty_hex_digits_as_the_sha(tmp_path, monkeypatch):
+    """Claude code round 7, 2: Done-when 1 is a full commit SHA, and the
+    pin asks for forty hex digits, but every stand-in's ref was either not
+    hex (`v4`, `v1`) or a full SHA with something after it, so loosening the
+    forty to any count, or the hex to any word character, left every test
+    green. A short SHA, a tag whose name happens to be hex (`1`, `cafe`) and
+    a branch named with forty word characters can each be moved or be
+    ambiguous; none is a full commit SHA. Each carries a version comment, so
+    only the ref is wrong, and each is reported; ci.yml is pinned and is not."""
+    sha = "11d5960a326750d5838078e36cf38b85af677262"
+    steps = [
+        "- uses: actions/checkout@11d5960 # v4.4.0",
+        "- uses: someorg/someaction@1 # v1",
+        "- uses: someorg/someaction@cafe # v1",
+        f"- uses: someorg/someaction@{'main' * 10} # v1",
+    ]
+    (tmp_path / "ci.yml").write_text(f"{WORKFLOW_STEPS}      - uses: actions/checkout@{sha} # v4.4.0\n", encoding="utf-8")
+    (tmp_path / "x.yaml").write_text(WORKFLOW_STEPS + "".join(f"      {step}\n" for step in steps), encoding="utf-8")
+    monkeypatch.setitem(globals(), "WORKFLOWS", tmp_path)
+    with pytest.raises(AssertionError) as unpinned:
+        test_every_workflow_pins_every_action_to_a_commit_sha_with_its_version()
+    reported = str(unpinned.value)
+    for step in steps:
+        assert f"x.yaml: {step}" in reported, reported
+    assert "ci.yml" not in reported, reported
+
+
 RELEASE_ZIPS = ("Melampus-macOS.zip", "Melampus-Windows.zip")
 
 
