@@ -536,6 +536,13 @@ def test_every_workflow_pins_every_action_to_a_commit_sha_with_its_version():
     assert not unpinned, f"a workflow names an action by tag, not a commit SHA with its version: {unpinned}"
 
 
+# The action-pinning gate's stand-in files are whole workflows, the way GitHub
+# reads them: each test's lines follow a job's `steps:`, or the job itself
+# where a line is the job's own key, six spaces in as in .github/workflows.
+WORKFLOW_JOB = "jobs:\n  build:\n"
+WORKFLOW_STEPS = WORKFLOW_JOB + "    steps:\n"
+
+
 def test_the_action_pinning_gate_reads_flow_style_steps_too(tmp_path, monkeypatch):
     """Security review of card #439: a step written as a YAML flow mapping,
     `- {uses: actions/checkout@v4}`, is a `uses:` line naming a tag, and
@@ -544,9 +551,9 @@ def test_the_action_pinning_gate_reads_flow_style_steps_too(tmp_path, monkeypatc
     read at call time; ci.yml in it is pinned, so the only thing wrong is the
     flow-style step in the .yaml file."""
     (tmp_path / "ci.yml").write_text(
-        "      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0\n", encoding="utf-8"
+        WORKFLOW_STEPS + "      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0\n", encoding="utf-8"
     )
-    (tmp_path / "x.yaml").write_text("      - {uses: actions/checkout@v4}\n", encoding="utf-8")
+    (tmp_path / "x.yaml").write_text(WORKFLOW_STEPS + "      - {uses: actions/checkout@v4}\n", encoding="utf-8")
     monkeypatch.setitem(globals(), "WORKFLOWS", tmp_path)
     with pytest.raises(AssertionError, match=r"x\.yaml: - \{uses: actions/checkout@v4\}"):
         test_every_workflow_pins_every_action_to_a_commit_sha_with_its_version()
@@ -560,7 +567,7 @@ def test_the_action_pinning_gate_counts_a_flow_style_step_as_using_an_action(tmp
     the mapping's continuation, uses an action and is pinned: the gate passes
     on it rather than reporting that the workflow uses no action."""
     (tmp_path / "ci.yml").write_text(
-        "      - { uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0\n        }\n",
+        WORKFLOW_STEPS + "      - { uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0\n        }\n",
         encoding="utf-8",
     )
     monkeypatch.setitem(globals(), "WORKFLOWS", tmp_path)
@@ -577,12 +584,12 @@ def test_the_action_pinning_gate_reads_a_uses_key_wherever_yaml_puts_one(tmp_pat
     name actions/checkout by tag, so both must be reported. The folder is a
     stand-in read at call time; ci.yml in it is pinned."""
     (tmp_path / "ci.yml").write_text(
-        "      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0\n", encoding="utf-8"
+        WORKFLOW_STEPS + "      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0\n", encoding="utf-8"
     )
     (tmp_path / "quoted-scalar.yaml").write_text(
-        "      - {name: 'Checkout # source', uses: actions/checkout@v4}\n", encoding="utf-8"
+        WORKFLOW_STEPS + "      - {name: 'Checkout # source', uses: actions/checkout@v4}\n", encoding="utf-8"
     )
-    (tmp_path / "quoted-key.yaml").write_text('      - "uses": actions/checkout@v4\n', encoding="utf-8")
+    (tmp_path / "quoted-key.yaml").write_text(WORKFLOW_STEPS + '      - "uses": actions/checkout@v4\n', encoding="utf-8")
     monkeypatch.setitem(globals(), "WORKFLOWS", tmp_path)
     with pytest.raises(AssertionError) as unpinned:
         test_every_workflow_pins_every_action_to_a_commit_sha_with_its_version()
@@ -599,10 +606,10 @@ def test_the_action_pinning_gate_reads_the_pin_in_the_code_not_in_a_comment(tmp_
     comment is for. The folder is a stand-in read at call time; ci.yml in it
     is pinned, so the only thing wrong is the .yaml file's tag."""
     (tmp_path / "ci.yml").write_text(
-        "      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0\n", encoding="utf-8"
+        WORKFLOW_STEPS + "      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0\n", encoding="utf-8"
     )
     (tmp_path / "x.yaml").write_text(
-        "      - uses: actions/checkout@v4 # formerly uses: "
+        WORKFLOW_STEPS + "      - uses: actions/checkout@v4 # formerly uses: "
         "actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0\n",
         encoding="utf-8",
     )
@@ -622,17 +629,17 @@ def test_the_action_pinning_gate_reads_the_pin_of_every_uses_on_the_line(tmp_pat
     both are pinned. The folder is a stand-in read at call time; ci.yml in it
     is pinned, so the only things wrong are the .yaml files."""
     sha = "11d5960a326750d5838078e36cf38b85af677262"
-    (tmp_path / "ci.yml").write_text(f"      - uses: actions/checkout@{sha} # v4.4.0\n", encoding="utf-8")
+    (tmp_path / "ci.yml").write_text(f"{WORKFLOW_STEPS}      - uses: actions/checkout@{sha} # v4.4.0\n", encoding="utf-8")
     (tmp_path / "first-pinned.yaml").write_text(
-        "      steps: [{uses: actions/checkout@" + sha + "}, {uses: actions/checkout@v4}] # v4.4.0\n",
+        WORKFLOW_JOB + "      steps: [{uses: actions/checkout@" + sha + "}, {uses: actions/checkout@v4}] # v4.4.0\n",
         encoding="utf-8",
     )
     (tmp_path / "last-pinned.yaml").write_text(
-        "      steps: [{uses: actions/checkout@v4}, {uses: actions/checkout@" + sha + "}] # v4.4.0\n",
+        WORKFLOW_JOB + "      steps: [{uses: actions/checkout@v4}, {uses: actions/checkout@" + sha + "}] # v4.4.0\n",
         encoding="utf-8",
     )
     (tmp_path / "two-pinned.yaml").write_text(
-        "      steps: [{uses: actions/checkout@" + sha + "}, {uses: actions/setup-python@" + sha + "}] # v4.4.0\n",
+        WORKFLOW_JOB + "      steps: [{uses: actions/checkout@" + sha + "}, {uses: actions/setup-python@" + sha + "}] # v4.4.0\n",
         encoding="utf-8",
     )
     monkeypatch.setitem(globals(), "WORKFLOWS", tmp_path)
@@ -658,13 +665,13 @@ def test_the_action_pinning_gate_opens_a_quoted_scalar_only_where_one_can_begin(
     reported while both .yaml files must be."""
     sha = "11d5960a326750d5838078e36cf38b85af677262"
     (tmp_path / "ci.yml").write_text(
-        "      - {name: Don't touch, uses: actions/checkout@" + sha + "} # v4.4.0\n", encoding="utf-8"
+        WORKFLOW_STEPS + "      - {name: Don't touch, uses: actions/checkout@" + sha + "} # v4.4.0\n", encoding="utf-8"
     )
     (tmp_path / "plain-apostrophe.yaml").write_text(
-        "      - {a: don't, name: 'Checkout # source', uses: actions/checkout@v4}\n", encoding="utf-8"
+        WORKFLOW_STEPS + "      - {a: don't, name: 'Checkout # source', uses: actions/checkout@v4}\n", encoding="utf-8"
     )
     (tmp_path / "escaped-quote.yaml").write_text(
-        "      - {name: 'Checkout '' # '' source', uses: actions/checkout@v4}\n", encoding="utf-8"
+        WORKFLOW_STEPS + "      - {name: 'Checkout '' # '' source', uses: actions/checkout@v4}\n", encoding="utf-8"
     )
     monkeypatch.setitem(globals(), "WORKFLOWS", tmp_path)
     with pytest.raises(AssertionError) as unpinned:
@@ -688,7 +695,7 @@ def test_the_action_pinning_gate_finds_a_step_whatever_its_scalars_hold(tmp_path
     uses an action and is not reported, while every .yaml file is."""
     sha = "11d5960a326750d5838078e36cf38b85af677262"
     (tmp_path / "ci.yml").write_text(
-        "      - {name: pre-'fix, env: {NOTE: 'Checkout # source'}, uses: actions/checkout@" + sha + "} # v4.4.0\n",
+        WORKFLOW_STEPS + "      - {name: pre-'fix, env: {NOTE: 'Checkout # source'}, uses: actions/checkout@" + sha + "} # v4.4.0\n",
         encoding="utf-8",
     )
     steps = {
@@ -698,7 +705,7 @@ def test_the_action_pinning_gate_finds_a_step_whatever_its_scalars_hold(tmp_path
         "anchor.yaml": '- {name: &n "a # b", uses: actions/checkout@v4}',
     }
     for name, step in steps.items():
-        (tmp_path / name).write_text(f"      {step}\n", encoding="utf-8")
+        (tmp_path / name).write_text(f"{WORKFLOW_STEPS}      {step}\n", encoding="utf-8")
     monkeypatch.setitem(globals(), "WORKFLOWS", tmp_path)
     with pytest.raises(AssertionError) as unpinned:
         test_every_workflow_pins_every_action_to_a_commit_sha_with_its_version()
@@ -719,14 +726,14 @@ def test_the_action_pinning_gate_takes_only_a_whole_sha_as_a_pin(tmp_path, monke
     read at call time; ci.yml in it is pinned, so every .yaml file, and
     only those, must be reported."""
     sha = "11d5960a326750d5838078e36cf38b85af677262"
-    (tmp_path / "ci.yml").write_text(f"      - uses: actions/checkout@{sha} # v4.4.0\n", encoding="utf-8")
+    (tmp_path / "ci.yml").write_text(f"{WORKFLOW_STEPS}      - uses: actions/checkout@{sha} # v4.4.0\n", encoding="utf-8")
     steps = {
         "hyphen.yaml": f"- uses: actions/checkout@{sha}-moving # v4.4.0",
         "dot.yaml": f"- uses: actions/checkout@{sha}.1 # v4.4.0",
         "slash.yaml": f"- uses: actions/checkout@{sha}/x # v4.4.0",
     }
     for name, step in steps.items():
-        (tmp_path / name).write_text(f"      {step}\n", encoding="utf-8")
+        (tmp_path / name).write_text(f"{WORKFLOW_STEPS}      {step}\n", encoding="utf-8")
     monkeypatch.setitem(globals(), "WORKFLOWS", tmp_path)
     with pytest.raises(AssertionError) as unpinned:
         test_every_workflow_pins_every_action_to_a_commit_sha_with_its_version()
@@ -746,7 +753,7 @@ def test_the_action_pinning_gate_finds_no_key_inside_a_quoted_scalar(tmp_path, m
     double-quoted, each pinned, so the gate passes on it."""
     sha = "11d5960a326750d5838078e36cf38b85af677262"
     (tmp_path / "ci.yml").write_text(
-        "      - {name: 'Replaces uses: actions/checkout@v4', uses: actions/checkout@" + sha + "} # v4.4.0\n"
+        WORKFLOW_STEPS + "      - {name: 'Replaces uses: actions/checkout@v4', uses: actions/checkout@" + sha + "} # v4.4.0\n"
         '      - {name: "Replaces uses: actions/checkout@v4", uses: actions/checkout@' + sha + "} # v4.4.0\n",
         encoding="utf-8",
     )
@@ -783,7 +790,7 @@ def test_the_action_pinning_gate_reads_the_last_line_without_a_newline(tmp_path,
     ends where its text does. ci.yml here is one pinned step with no
     trailing newline, so the gate passes on it."""
     sha = "11d5960a326750d5838078e36cf38b85af677262"
-    (tmp_path / "ci.yml").write_text(f"      - uses: actions/checkout@{sha} # v4.4.0", encoding="utf-8")
+    (tmp_path / "ci.yml").write_text(f"{WORKFLOW_STEPS}      - uses: actions/checkout@{sha} # v4.4.0", encoding="utf-8")
     monkeypatch.setitem(globals(), "WORKFLOWS", tmp_path)
     test_every_workflow_pins_every_action_to_a_commit_sha_with_its_version()
 
@@ -796,13 +803,13 @@ def test_the_action_pinning_gate_reports_a_uses_that_is_not_a_string(tmp_path, m
     pin check. The folder is a stand-in read at call time; ci.yml in it is
     pinned, so both .yaml files, and only those, must be reported."""
     sha = "11d5960a326750d5838078e36cf38b85af677262"
-    (tmp_path / "ci.yml").write_text(f"      - uses: actions/checkout@{sha} # v4.4.0\n", encoding="utf-8")
+    (tmp_path / "ci.yml").write_text(f"{WORKFLOW_STEPS}      - uses: actions/checkout@{sha} # v4.4.0\n", encoding="utf-8")
     steps = {
         "list.yaml": f"- uses: [actions/checkout@{sha}] # v4.4.0",
         "mapping.yaml": f"- uses: {{ref: actions/checkout@{sha}}} # v4.4.0",
     }
     for name, step in steps.items():
-        (tmp_path / name).write_text(f"      {step}\n", encoding="utf-8")
+        (tmp_path / name).write_text(f"{WORKFLOW_STEPS}      {step}\n", encoding="utf-8")
     monkeypatch.setitem(globals(), "WORKFLOWS", tmp_path)
     with pytest.raises(AssertionError) as unpinned:
         test_every_workflow_pins_every_action_to_a_commit_sha_with_its_version()
@@ -822,10 +829,10 @@ def test_the_action_pinning_gate_ends_on_an_alias_to_itself(tmp_path, monkeypatc
     alone."""
     sha = "11d5960a326750d5838078e36cf38b85af677262"
     (tmp_path / "ci.yml").write_text(
-        f"      - uses: actions/checkout@{sha} # v4.4.0\n        with: &loop [*loop]\n", encoding="utf-8"
+        f"{WORKFLOW_STEPS}      - uses: actions/checkout@{sha} # v4.4.0\n        with: &loop [*loop]\n", encoding="utf-8"
     )
     (tmp_path / "x.yaml").write_text(
-        "      - {uses: actions/checkout@v4, with: &loop {self: *loop}}\n", encoding="utf-8"
+        WORKFLOW_STEPS + "      - {uses: actions/checkout@v4, with: &loop {self: *loop}}\n", encoding="utf-8"
     )
     monkeypatch.setitem(globals(), "WORKFLOWS", tmp_path)
     with pytest.raises(AssertionError) as unpinned:
@@ -845,9 +852,9 @@ def test_the_action_pinning_gate_reports_a_value_that_runs_past_its_first_line(t
     read at call time; ci.yml in it is pinned, so x.yaml, and only it, must
     be reported."""
     sha = "11d5960a326750d5838078e36cf38b85af677262"
-    (tmp_path / "ci.yml").write_text(f"      - uses: actions/checkout@{sha} # v4.4.0\n", encoding="utf-8")
+    (tmp_path / "ci.yml").write_text(f"{WORKFLOW_STEPS}      - uses: actions/checkout@{sha} # v4.4.0\n", encoding="utf-8")
     (tmp_path / "x.yaml").write_text(
-        "      - uses:\n          actions/checkout@v4\n          continued # v4\n", encoding="utf-8"
+        WORKFLOW_STEPS + "      - uses:\n          actions/checkout@v4\n          continued # v4\n", encoding="utf-8"
     )
     monkeypatch.setitem(globals(), "WORKFLOWS", tmp_path)
     with pytest.raises(AssertionError) as unpinned:
@@ -867,9 +874,9 @@ def test_the_action_pinning_gate_reports_a_uses_key_with_no_value_at_the_end(tmp
     stand-in read at call time; ci.yml in it is pinned, so both .yaml files,
     and only those, must be reported."""
     sha = "11d5960a326750d5838078e36cf38b85af677262"
-    (tmp_path / "ci.yml").write_text(f"      - uses: actions/checkout@{sha} # v4.4.0\n", encoding="utf-8")
-    (tmp_path / "last.yaml").write_text("      ? uses\n", encoding="utf-8")
-    (tmp_path / "then-comment.yaml").write_text("      ? uses\n      # trailing\n", encoding="utf-8")
+    (tmp_path / "ci.yml").write_text(f"{WORKFLOW_STEPS}      - uses: actions/checkout@{sha} # v4.4.0\n", encoding="utf-8")
+    (tmp_path / "last.yaml").write_text(WORKFLOW_JOB + "      ? uses\n", encoding="utf-8")
+    (tmp_path / "then-comment.yaml").write_text(WORKFLOW_JOB + "      ? uses\n      # trailing\n", encoding="utf-8")
     monkeypatch.setitem(globals(), "WORKFLOWS", tmp_path)
     with pytest.raises(AssertionError) as unpinned:
         test_every_workflow_pins_every_action_to_a_commit_sha_with_its_version()
@@ -888,7 +895,7 @@ def test_the_action_pinning_gate_reports_a_workflow_nested_too_deep_to_parse(tmp
     reported by its name. The folder is a stand-in read at call time;
     ci.yml in it is pinned, so deep.yaml, and only it, must be reported."""
     sha = "11d5960a326750d5838078e36cf38b85af677262"
-    (tmp_path / "ci.yml").write_text(f"      - uses: actions/checkout@{sha} # v4.4.0\n", encoding="utf-8")
+    (tmp_path / "ci.yml").write_text(f"{WORKFLOW_STEPS}      - uses: actions/checkout@{sha} # v4.4.0\n", encoding="utf-8")
     (tmp_path / "deep.yaml").write_text("on: " + "[" * 1000 + "]" * 1000 + "\n", encoding="utf-8")
     monkeypatch.setitem(globals(), "WORKFLOWS", tmp_path)
     with pytest.raises(AssertionError) as unpinned:
@@ -910,9 +917,8 @@ def test_the_action_pinning_gate_reads_no_comment_inside_a_scalar_that_runs_on(t
     here is pinned in both spellings, so every .yaml file, and only those,
     must be reported."""
     sha = "11d5960a326750d5838078e36cf38b85af677262"
-    steps = "jobs:\n  build:\n    steps:\n"
     (tmp_path / "ci.yml").write_text(
-        f"{steps}      - uses: actions/checkout@{sha} # v4.4.0\n"
+        f"{WORKFLOW_STEPS}      - uses: actions/checkout@{sha} # v4.4.0\n"
         f"      - uses: |- # v4.4.0\n          actions/checkout@{sha}\n",
         encoding="utf-8",
     )
@@ -922,15 +928,15 @@ def test_the_action_pinning_gate_reads_no_comment_inside_a_scalar_that_runs_on(t
         "plain.yaml": f"- {{uses: actions/checkout@{sha}, name: pin#v4",
     }
     (tmp_path / "double.yaml").write_text(
-        f'{steps}      {first_lines["double.yaml"]}\n          for reference"}}\n', encoding="utf-8"
+        f'{WORKFLOW_STEPS}      {first_lines["double.yaml"]}\n          for reference"}}\n', encoding="utf-8"
     )
     (tmp_path / "single.yaml").write_text(
-        f"{steps}      {first_lines['single.yaml']}\n          for reference'}}\n", encoding="utf-8"
+        f"{WORKFLOW_STEPS}      {first_lines['single.yaml']}\n          for reference'}}\n", encoding="utf-8"
     )
-    (tmp_path / "plain.yaml").write_text(f"{steps}      {first_lines['plain.yaml']}\n          kept}}\n", encoding="utf-8")
+    (tmp_path / "plain.yaml").write_text(f"{WORKFLOW_STEPS}      {first_lines['plain.yaml']}\n          kept}}\n", encoding="utf-8")
     first_lines["one-line-steps.yaml"] = f'steps: [{{uses: actions/checkout@{sha}}}, {{run: echo, name: "# v4'
     (tmp_path / "one-line-steps.yaml").write_text(
-        f'jobs:\n  build:\n    {first_lines["one-line-steps.yaml"]}\n        x"}}]\n', encoding="utf-8"
+        f'{WORKFLOW_JOB}    {first_lines["one-line-steps.yaml"]}\n        x"}}]\n', encoding="utf-8"
     )
     monkeypatch.setitem(globals(), "WORKFLOWS", tmp_path)
     with pytest.raises(AssertionError) as unpinned:
@@ -953,7 +959,7 @@ def test_the_action_pinning_gate_judges_an_alias_where_it_is_written(tmp_path, m
     so that line, and only it, is reported."""
     sha = "11d5960a326750d5838078e36cf38b85af677262"
     anchored = f"- uses: &checkout actions/checkout@{sha} # v4.4.0"
-    steps = f"jobs:\n  build:\n    steps:\n      {anchored}\n"
+    steps = f"{WORKFLOW_STEPS}      {anchored}\n"
     (tmp_path / "ci.yml").write_text(f"{steps}      - uses: *checkout # v4.4.0\n", encoding="utf-8")
     (tmp_path / "x.yaml").write_text(f"{steps}      - uses: *checkout\n", encoding="utf-8")
     monkeypatch.setitem(globals(), "WORKFLOWS", tmp_path)
@@ -974,9 +980,8 @@ def test_the_action_pinning_gate_takes_no_at_sign_before_the_sha(tmp_path, monke
     a whole workflow, `jobs.<id>.steps`; ci.yml here is pinned, so x.yaml,
     and only it, must be reported."""
     sha = "11d5960a326750d5838078e36cf38b85af677262"
-    steps = "jobs:\n  build:\n    steps:\n"
-    (tmp_path / "ci.yml").write_text(f"{steps}      - uses: actions/checkout@{sha} # v4.4.0\n", encoding="utf-8")
-    (tmp_path / "x.yaml").write_text(f"{steps}      - uses: actions/checkout@v4@{sha} # v4.4.0\n", encoding="utf-8")
+    (tmp_path / "ci.yml").write_text(f"{WORKFLOW_STEPS}      - uses: actions/checkout@{sha} # v4.4.0\n", encoding="utf-8")
+    (tmp_path / "x.yaml").write_text(f"{WORKFLOW_STEPS}      - uses: actions/checkout@v4@{sha} # v4.4.0\n", encoding="utf-8")
     monkeypatch.setitem(globals(), "WORKFLOWS", tmp_path)
     with pytest.raises(AssertionError) as unpinned:
         test_every_workflow_pins_every_action_to_a_commit_sha_with_its_version()
