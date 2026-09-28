@@ -371,10 +371,24 @@ CODEX_PROGRAM = "codex"
 #: session producing no output at all. So a photograph's text can leave a
 #: payload or an instruction in those directories for the next run to read
 #: back: `--ephemeral` keeps no session per frame, but the channel
-#: survives from one frame to the next. Whether that is acceptable for
-#: this engine is the owner's call; the measurement is recorded in
-#: security review round 9 on PR #17, and the decision it leaves open is
-#: card #505. docs/config.md says the same and
+#: survives from one frame to the next. That write boundary is accepted,
+#: not closed (card #505, 2026-09-28): the engine is billed to the user's
+#: own plan, never per call; melampus never reads what a run leaves in
+#: those directories (the answer is what Codex prints, and
+#: images.staging_root keeps the staged folder out of them) so long as
+#: nothing else it reads is in them: the photographs and any file melampus
+#: is pointed at are the user's to keep out, and the executable is refused
+#: rather than trusted: it unpacks itself into $TMPDIR, /tmp when that is
+#: unset, PromptLibrary.render reads its prompts from there for every
+#: frame and code is loaded from there, so images.staging_root refuses a
+#: frozen run unpacked inside them, exit 3, saying to set $TMPDIR outside
+#: them (security review round 1 on PR #28); the executable's own file,
+#: which it reads code from at every import and every launch runs, is
+#: refused the same way when it sits inside them, saying to move it
+#: (security review round 2 on PR #28); and melampus
+#: wraps no CLI engine in a sandbox of its own. It is revisited when
+#: Codex's permission profiles leave beta; the measurement is recorded in
+#: security review round 9 on PR #17. docs/config.md says the same and
 #: test_docs.py pins it. Permission profiles are documented
 #: as beta ("under active development and may change"); the shape here is
 #: the documentation's own example, pinned by
@@ -420,10 +434,11 @@ class BackendUnavailable(RuntimeError):
 
     An uninstalled command, a signed-out CLI, an Ollama with no server — and
     `images.staging_root`, which refuses a staging root inside the directories
-    a CLI engine's permission profile grants whole, and `download.load_lock`,
-    which refuses the MLX model's load while another run, a download from
-    Settings most often, holds the model. All of them are settled before a
-    frame is read and none of them changes from frame to frame.
+    a CLI engine's permission profile grants whole, and a frozen run unpacked
+    or started there, and `download.load_lock`, which refuses the MLX model's
+    load while another run, a download from Settings most often, holds the
+    model. All of them are settled before a frame is read and none of them
+    changes from frame to frame.
     """
 
 

@@ -613,6 +613,15 @@ local function tempDir()
 	return M.state.tempDir
 end
 
+--- What every command the plugin runs on a fake macOS Lightroom starts with:
+-- Lightroom's temp folder, this run's, handed to the executable as TMPDIR,
+-- single-quoted for sh, so the one-file executable unpacks there and never
+-- under /tmp, where a frozen run refuses to stage (PR #28). Spelled once for
+-- every suite, from the mock's own quoting and not the plugin's.
+function M.macTemp()
+	return 'TMPDIR=' .. sh(tempDir()) .. ' '
+end
+
 --- The Windows temp folder of a fake Windows Lightroom: the one the test
 -- named in reset's options, if it did. Otherwise, on a Windows host, the
 -- real one, TEMP, which is what Lightroom reports there, so a command

@@ -320,9 +320,32 @@ and dropping `":minimal" = "read"` left the session producing no output at
 all — so text rendered in a photograph can leave a payload or an
 instruction in those directories for the next run to read back.
 `--ephemeral` keeps no session per frame, but it does not close that
-channel: it survives from one frame to the next. Whether that is acceptable
-for this engine is the owner's call; the measurement is recorded in security
-review round 9 on PR #17, and the decision it leaves open is card #505.
+channel: it survives from one frame to the next. That write boundary is
+accepted, not closed: card #505 decided so on 2026-09-28, rather than
+dropping the engine or running it inside an outer sandbox. The engine is the
+user's own install, billed to their own plan and never per call; melampus
+never reads what a run leaves in those directories, since it takes the
+answer from what Codex prints and stages outside them, as above, so long as
+nothing else it reads is in them, since a run can overwrite what is there:
+keep the photographs, and any file melampus is pointed at, out of them. The
+executable is held to that rather than trusted with it: it unpacks itself
+into `$TMPDIR` at every launch, into `/tmp` when that is unset, reads its
+prompts from there for every frame, so a run could rewrite the prompt the
+next question is sent (measured on a Mac, security review round 1 on PR
+#28), and loads code from there, so a frozen run unpacked inside them refuses
+to stage anything, whatever the engine, and stops at exit 3 naming the
+directory and saying to set `$TMPDIR` outside them (`images.staging_root`);
+on macOS the Lightroom plugin sets it to Lightroom's own temp directory on
+every line it runs (docs/plugin.md). The executable's own file is held to it too: it
+reads its code from that file at every import, and every launch runs
+whatever is there, which a run could replace (measured on a Mac, security
+review round 2 on PR #28), so a frozen run started from inside them is
+refused the same way, saying to move the executable, and the plugin folder
+it sits in, outside them. Nor is it different for any CLI engine a user installs: melampus wraps none
+of them in a sandbox of its own, so each reaches as far as that CLI's own
+mechanism lets it. It is revisited when
+Codex's permission profiles leave beta. The measurement is recorded in
+security review round 9 on PR #17.
 Claude Code's template confines reads
 the same way with its own mechanism (`--tools Read`, `--allowedTools
 Read(/{image})`, *Claude Code* above). What the commands Codex runs can

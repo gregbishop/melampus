@@ -2181,7 +2181,54 @@ def test_config_doc_says_the_codex_profile_leaves_the_shared_temp_directories_wr
     The owner has since filed that card, #505, so the sentence names it as
     well: security review round 9 on PR #17 is where the measurement is,
     card #505 is where the decision is recorded, and the prose no longer
-    says the card is his to file."""
+    says the card is his to file.
+
+    Card #505 has since decided it: the boundary is accepted and stated, not
+    closed, and revisited when Codex's permission profiles leave beta. So
+    the prose no longer leaves an open call; it says what was decided, where
+    (card #505), and why: the engine bills to the user's own plan, never per
+    call; melampus never reads what a run leaves in those directories; and
+    melampus wraps no CLI engine in a sandbox of its own, so each reaches as
+    far as its own CLI lets it. The negatives keep the prose from going back
+    to an undecided call or an unnamed card.
+
+    Security review round 1 on PR #28: "never reads" held for the staged
+    folder and the reply, not for the executable. It unpacks itself into
+    $TMPDIR at every launch, and into /tmp when that is unset (measured on
+    a Mac: the unpack directory, prompts/ in it, held under /private/tmp by
+    a launch without $TMPDIR, and under /var/folders by one with it), and
+    PromptLibrary.render reads the prompt file from there for every frame,
+    once per question. Measured with `codex sandbox -P` under this profile,
+    codex-cli 0.158.0, no model call: a command overwrote a prompt file in a
+    user-owned 0700 folder under /tmp made outside the sandbox. So a run
+    could rewrite the prompt melampus sends next, the same frame's
+    identification call included. The passage must say that the claim
+    depends on where the executable unpacks, and what to set.
+
+    The owner's call on that finding was to enforce it, not only document
+    it: `images.staging_root` refuses a frozen run whose unpack directory is
+    inside the grant, exit 3, before any frame is staged, whatever the
+    engine (test_pipeline.py and test_binary.py pin the code). So the
+    passage says melampus refuses, naming the fix the refusal names, and no
+    longer leaves it to the user as advice.
+
+    Review round 1 on PR #28 (Codex code review, finding 1; Claude code
+    review, finding 2): the bare phrase "never reads" is not the decision's
+    ground. Deleting the caveat that keeps it true (the photographs and any
+    file melampus is pointed at kept out of those directories, since a run
+    can overwrite what is there) or the grounds given for it (the answer is
+    what Codex prints, the staged folder is outside them) left this pin
+    green while the doc made an unconditional claim that is false for
+    photographs in /tmp. Both are required inside the decision passage.
+
+    Security review round 2 on PR #28: the unpack directory is not the only
+    file of the executable's in reach. PyInstaller reads each module from
+    the executable's own file at every import, and every launch runs what
+    is at that path. Measured under this profile, codex-cli 0.158.0, no
+    model call: a command listed /tmp and replaced an executable in a
+    user-owned folder there. `images.staging_root` refuses a frozen run
+    started from inside the grant the same way, so the passage says so,
+    with the fix the refusal names."""
     prose = " ".join(CONFIG_DOC.read_text(encoding="utf-8").split())
     for path in ("`/tmp`", "`/private/tmp`", "`/var/tmp`", "`/private/var/tmp`"):
         assert path in prose, f"docs/config.md does not name {path} under the profile"
@@ -2189,13 +2236,32 @@ def test_config_doc_says_the_codex_profile_leaves_the_shared_temp_directories_wr
         assert said in prose, f"docs/config.md does not say {said!r} of the shared temp directories"
     assert "no write anywhere" not in prose, (
         "docs/config.md still says the profile writes nowhere; writes land in the shared temp directories")
-    deferral = re.search(r"Whether that is acceptable[^.]*\.", prose)
-    assert deferral, "docs/config.md no longer says whose call the shared temp writes are"
-    for said in ("the owner's call", "security review round 9", "PR #17", "card #505"):
-        assert said in deferral.group(0), (
-            f"docs/config.md does not say {said!r} where it leaves the shared temp writes to the owner")
-    assert "own card" not in prose, (
-        "docs/config.md defers the decision to a card it does not name; name where the decision is recorded")
+    decision = re.search(r"That write boundary is accepted.*?PR #17\.", prose)
+    assert decision, "docs/config.md does not say what was decided about the shared temp writes"
+    for said in (
+        "card #505",  # where it was decided
+        "never per call",  # why: the engine bills to the user's own plan
+        "never reads",  # why: melampus does not read what a run leaves there
+        # the grounds for "never reads", and the caveat that keeps it true
+        "since it takes the answer from what Codex prints and stages outside them",
+        "keep the photographs, and any file melampus is pointed at, out of them",
+        "sandbox of its own",  # why: the same holds of every CLI engine a user installs
+        "leave beta",  # when it is revisited
+        "security review round 9",  # where the measurement is
+        "unpacks itself",  # the executable's own files are read from $TMPDIR
+        "its prompts",  # what melampus reads there, for every frame
+        "a frozen run unpacked inside them refuses",  # enforced, not advised
+        "set `$TMPDIR` outside them",  # the fix the refusal names
+        "a frozen run started from inside them is refused",  # the executable file too
+        "move the executable",  # the fix that refusal names
+    ):
+        assert said in decision.group(0), (
+            f"docs/config.md does not say {said!r} where it states the shared temp writes are accepted")
+    assert "run the executable with `$TMPDIR`" not in prose, (
+        "docs/config.md leaves the unpack directory to the user; melampus refuses it")
+    for undecided in ("the owner's call", "leaves open", "own card"):
+        assert undecided not in prose, (
+            f"docs/config.md still says {undecided!r}; card #505 decided the shared temp writes")
 
 
 def test_config_doc_says_the_staged_folder_sits_outside_the_shared_temp_directories():

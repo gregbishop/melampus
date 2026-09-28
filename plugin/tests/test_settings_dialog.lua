@@ -588,6 +588,21 @@ for _, case in ipairs(MODEL_ENGINES) do
 		t.equals(#dialogsShown(false), 0, 'a message was shown for a removal that worked')
 	end)
 
+	t.test(engine .. ': every command the dialog runs on macOS hands the executable Lightroom\'s temp folder as TMPDIR', function()
+		-- Detection, the model status and the removal (the download's whole
+		-- line is pinned above). A frozen run unpacked under /tmp refuses to
+		-- stage (PR #28), and what Lightroom's own environment holds is not
+		-- the plugin's to know, so each line sets it.
+		removeClicked()
+		for _, flag in ipairs({ '--detect-engines', '--model-status', '--remove-model' }) do
+			t.isTrue(commandsRun(flag) >= 1, 'the dialog did not run ' .. flag)
+		end
+		for _, command in ipairs(mock.state.executed) do
+			t.equals(string.sub(command, 1, #mock.macTemp()), mock.macTemp(),
+				'a command without Lightroom\'s temp folder as TMPDIR: ' .. command)
+		end
+	end)
+
 	t.test(engine .. ': a refused removal shows the message and the model stays Installed', function()
 		local _, model = removeClicked({ removeCode = 3 })
 		t.equals(model.phase, 'installed')
@@ -645,7 +660,8 @@ for _, case in ipairs(MODEL_ENGINES) do
 		local progress = mock.state.tempDir .. '/melampus-download.progress'
 		local log = mock.state.tempDir .. '/melampus-download.log'
 		t.equals(mock.state.executed[#mock.state.executed],
-			"'" .. mock.EXECUTABLE .. "' --download-model --backend '" .. engine .. "' >'" .. progress .. "' 2>'" .. log .. "'")
+			mock.macTemp() .. "'" .. mock.EXECUTABLE .. "' --download-model --backend '" .. engine
+				.. "' >'" .. progress .. "' 2>'" .. log .. "'")
 		t.equals(model.phase, 'downloading')
 		theButton(row, model, 'Cancel', true)
 		theButton(row, model, 'Download ' .. NAME, false)
@@ -869,8 +885,11 @@ t.test('the download command runs the executable for the engine with stdout to t
 		local Analyze = loadAnalyze({ existing = { [mock.EXECUTABLE] = true } })
 		local progress, log = Analyze.downloadFiles()
 		t.equals(Analyze.downloadCommand(engine),
-			"'" .. mock.EXECUTABLE .. "' --download-model --backend '" .. engine .. "' >'" .. progress .. "' 2>'" .. log .. "'")
+			mock.macTemp() .. "'" .. mock.EXECUTABLE .. "' --download-model --backend '" .. engine
+				.. "' >'" .. progress .. "' 2>'" .. log .. "'")
 
+		-- On Windows nothing is set ahead: the directories the executable
+		-- refuses are POSIX paths, judged on POSIX only.
 		local exe = PLUGIN .. '\\melampus.exe'
 		Analyze = loadAnalyze({ windows = true, existing = { [exe] = true } })
 		progress, log = Analyze.downloadFiles()

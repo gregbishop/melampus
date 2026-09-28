@@ -68,9 +68,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import tomllib
 import types
 from collections.abc import Callable, Iterator
@@ -103,12 +105,15 @@ def no_python_environment(tmp_path: Path) -> dict[str, str]:
     empty = tmp_path / "empty-bin"
     empty.mkdir()
     (tmp_path / "home").mkdir()
-    env = {"PATH": str(empty), "HOME": str(tmp_path / "home")}
+    # The one-file executable unpacks itself into the temp directory, and a
+    # frozen run unpacked inside the shared temp directories a CLI engine's
+    # permission profile grants is refused (images.staging_root): /tmp is
+    # where it lands on macOS and Linux with $TMPDIR unset. So every run here
+    # names a temp directory of its own. None gives a python back.
+    (tmp_path / "tmp").mkdir()
+    env = {"PATH": str(empty), "HOME": str(tmp_path / "home"), "TMPDIR": str(tmp_path / "tmp")}
     if sys.platform == "win32":
-        # A Windows process needs the system root to load system DLLs, and the
-        # one-file executable unpacks itself into the temp directory. Neither
-        # gives a python back.
-        (tmp_path / "tmp").mkdir()
+        # A Windows process needs the system root to load system DLLs.
         env |= {
             "SYSTEMROOT": os.environ["SYSTEMROOT"],
             "USERPROFILE": env["HOME"],
@@ -432,6 +437,52 @@ def test_frozen_prompts_come_from_the_bundle(monkeypatch: pytest.MonkeyPatch, tm
     bundle, executable = tmp_path / "unpack", tmp_path / "dist" / "melampus"
     _frozen(monkeypatch, bundle, executable)
     assert load_config(use_local=False).run.prompts_dir == bundle / "prompts"
+
+
+@pytest.fixture()
+def drive_tmp() -> Iterator[Path]:
+    """A folder of this test's own under `Path("/tmp")`, resolved: under /tmp
+    on macOS and Linux, and on Windows under the current drive's \\tmp, which
+    is made for the test when the machine has none and removed after."""
+    root = Path("/tmp")
+    made = not root.exists()
+    root.mkdir(exist_ok=True)
+    try:
+        with tempfile.TemporaryDirectory(prefix="melampus-granted-", dir=root) as folder:
+            yield Path(folder).resolve()
+    finally:
+        if made:
+            root.rmdir()
+
+
+def test_a_windows_run_is_not_refused_under_the_current_drives_tmp(
+    monkeypatch: pytest.MonkeyPatch, drive_tmp: Path
+):
+    """Review round 2 on PR #28 (Claude code review): the four directories
+    `images.staging_root` refuses are the Codex profile's POSIX grant. On
+    Windows `Path("/tmp")` is the current drive's \\tmp and NTFS ignores
+    case, so `os.path.samefile` matched a TEMP at C:\\TMP, or a plugin folder
+    under C:\\tmp, and every analysis was refused with advice to set $TMPDIR,
+    which Windows' bootloader never reads. There they name nothing Codex is
+    granted, so on a non-POSIX run nothing is judged against them.
+
+    `images`' own `os` is a stand-in named "nt", as a Windows host has it,
+    carrying the real `os.path`: on Windows that is the real thing, on the
+    others it is the one difference asked about. A frozen run whose unpack
+    directory, executable and per-user data directory are all under that
+    \\tmp is not refused, and stages there."""
+    from melampus import images
+
+    monkeypatch.setattr(images, "os", types.SimpleNamespace(name="nt", path=os.path))
+    bundle = drive_tmp / "_MEI000000"
+    bundle.mkdir()
+    executable = drive_tmp / "melampus.exe"
+    executable.write_bytes(b"")
+    _frozen(monkeypatch, bundle, executable)
+    for variable in ("HOME", "USERPROFILE", "LOCALAPPDATA", "XDG_DATA_HOME"):
+        monkeypatch.setenv(variable, str(drive_tmp / "profile"))
+
+    assert images.staging_root().is_relative_to(drive_tmp)
 
 
 def per_user_data_dir(home: Path) -> Path:
@@ -803,6 +854,85 @@ def test_executable_refuses_a_cli_engine_that_is_not_installed(
     assert cli.install in tail and cli.sign_in in tail, tail
     for works_here in ("claude", "openai", "scripted"):
         assert works_here in tail, f"{works_here!r} is not named as working here:\n{tail}"
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="the shared temp directories a CLI engine's profile grants are POSIX paths; "
+           "on Windows they name nothing it is granted, and nothing is judged against them",
+)
+def test_executable_refuses_to_run_unpacked_inside_the_shared_temp_directories(
+    built_executable: Path, photos: Path, tmp_path: Path
+):
+    """Security review round 1 on PR #28, in the frozen build: launched with
+    $TMPDIR unset, the executable unpacks itself under /tmp, where a Codex
+    run can write, and would read its prompts, and load code, from there
+    after a run had been. So it exits 3 on the refusal before any frame is
+    staged, naming the unpack directory and $TMPDIR, the fix, with nothing
+    cached. The engine is the scripted one: the refusal is not Codex's, it
+    is where the executable runs from."""
+    env = no_python_environment(tmp_path)
+    del env["TMPDIR"]
+    proc = _request_backend(built_executable, photos, tmp_path, "scripted", env=env)
+    tail = proc.stderr[-3000:]
+    assert proc.returncode == 3, f"exit {proc.returncode}:\n{tail}"
+    assert re.search(r"/(private/)?tmp/_MEI\w+", tail), (
+        f"the refusal does not name the unpack directory under /tmp:\n{tail}")
+    assert "$TMPDIR" in tail, f"the refusal does not say to set $TMPDIR:\n{tail}"
+    assert not (tmp_path / "cache.jsonl").exists(), (
+        "the refusal was recorded on the frames instead of stopping the run")
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="the shared temp directories a CLI engine's profile grants are POSIX paths; "
+           "on Windows they name nothing it is granted, and nothing is judged against them",
+)
+def test_executable_refuses_to_run_started_from_inside_the_shared_temp_directories(
+    built_executable: Path, photos: Path, tmp_path: Path
+):
+    """Security review round 2 on PR #28, in the frozen build: copied into a
+    folder under /tmp and launched with $TMPDIR outside the grant, as the
+    plugin launches it, the executable ran a frame at exit 0, and a command
+    under the Codex profile could replace that file for the next launch and
+    for every module this one still imports from it. So it exits 3 on the
+    refusal before any frame is staged, naming itself, with nothing cached.
+    The engine is the scripted one: the refusal is not Codex's, it is where
+    the executable runs from."""
+    with tempfile.TemporaryDirectory(prefix="melampus-granted-", dir="/tmp") as granted:
+        executable = Path(granted).resolve() / built_executable.name
+        shutil.copy2(built_executable, executable)
+        proc = _request_backend(executable, photos, tmp_path, "scripted")
+    tail = proc.stderr[-3000:]
+    assert proc.returncode == 3, f"exit {proc.returncode}:\n{tail}"
+    assert str(executable) in tail, f"the refusal does not name the executable:\n{tail}"
+    assert "Move the executable" in tail, f"the refusal does not say to move it:\n{tail}"
+    assert not (tmp_path / "cache.jsonl").exists(), (
+        "the refusal was recorded on the frames instead of stopping the run")
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="the current drive's \\tmp is a Windows case")
+def test_executable_runs_on_windows_from_and_unpacked_under_the_current_drives_tmp(
+    built_executable: Path, photos: Path, tmp_path: Path, drive_tmp: Path
+):
+    """Review round 2 on PR #28 (Claude code review), in the Windows build:
+    melampus.exe copied under the current drive's \\tmp, with TEMP and TMP
+    there so it unpacks there too, and its per-user data directory there as
+    well. \\tmp is not the Codex profile's /tmp, so the run is not refused:
+    it analyses the frame at exit 0 and caches it. Before the POSIX-only
+    judgement every analysis here was refused, telling the user to set a
+    $TMPDIR the Windows bootloader never reads."""
+    executable = drive_tmp / built_executable.name
+    shutil.copy2(built_executable, executable)
+    (drive_tmp / "temp").mkdir()
+    env = no_python_environment(tmp_path) | {
+        "TEMP": str(drive_tmp / "temp"), "TMP": str(drive_tmp / "temp"),
+        "LOCALAPPDATA": str(drive_tmp / "local"),
+    }
+    proc = _request_backend(executable, photos, tmp_path, "scripted", env=env)
+    tail = proc.stderr[-3000:]
+    assert proc.returncode == 0, f"exit {proc.returncode}:\n{tail}"
+    assert (tmp_path / "cache.jsonl").exists(), f"the frame was not analysed:\n{tail}"
 
 
 def test_executable_prints_the_same_json_as_the_cli_with_no_python_on_the_path(

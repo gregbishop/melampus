@@ -70,7 +70,17 @@ neither names nor lets a plugin choose, so the path shown could only have been
 a guess. Settings → **Show log file** opens that folder with the log selected,
 making both if nothing has been logged yet. The executable's own output from a
 run goes to `melampus-cli.log` in the OS temp directory; a failed run's message
-names both files.
+names both files. On macOS every line the plugin runs begins
+`TMPDIR='<that temp directory>'`, set the way a key is (*The engine*, below):
+the one-file executable unpacks itself into `$TMPDIR`, into `/tmp` when it is
+unset, and refuses to run unpacked in `/tmp` or its kin, where a CLI engine's
+run can write (docs/config.md § Codex CLI), or started from there, so the
+plugin folder that holds it is kept out of them too. What Lightroom's own environment
+holds is not the plugin's to know; Lightroom's temp directory,
+`/var/folders/<per-user>/T/` in the plugin's log, is outside them. On Windows
+nothing is set: those directories are the Codex profile's POSIX grant, which
+names nothing there, so the executable does not judge `%TEMP%` or the plugin
+folder against them, even under a drive's `\tmp`.
 
 ---
 
@@ -129,9 +139,10 @@ never in the preferences, never in `melampus.local.toml` or any other file,
 and never logged. When a run starts, `MelampusAnalyze.lua` sets that variable
 in the executable's environment for the picked engine only (with none picked,
 for the engine `--default-cloud` names, below): `LrTasks.execute`
-takes one shell line and nothing else, so the line begins `VAR='key'` (sh) or
-`set "VAR=key" &&` (cmd.exe) ahead of the executable, and the log carries the
-line with the value blanked. The key is not an argument of the executable, but
+takes one shell line and nothing else, so `VAR='key'` (sh, after the line's
+`TMPDIR='…'`, see above) or `set "VAR=key" &&` (cmd.exe, where the line begins
+with it) goes ahead of the executable, and the log carries the line with the
+value blanked. The key is not an argument of the executable, but
 the shell line is the child's command line for the run's duration. On Windows a
 stored key holding `"`, `%` or a line break is refused before anything runs, the
 way a path holding `%` is: cmd.exe would rewrite any of them inside
