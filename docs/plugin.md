@@ -188,7 +188,10 @@ size Ollama lists.
   in that window holds. Lightroom's own cancel on the progress bar does
   the same: the poller asks the scope on every tick, from the first,
   whether or not a protocol line has arrived, so a cancel during the
-  executable's start-up holds too.
+  executable's start-up holds too. An analysis started on mlx meanwhile
+  does not wait for the download: within seconds it reports
+  *Identification failed (exit 3)*, its log saying to wait for the
+  Download in Settings to finish (docs/config.md § Downloading the model).
 - Done (`done <path>`, exit 0): the row reads **Installed**, greyed, beside
   **Remove**, which runs `--remove-model` and flips the row back. Exit 3 shows
   a message with the tail of the download log. A refused removal shows its

@@ -450,6 +450,19 @@ file in the cache as the hub's `<etag>.incomplete` blob, and the next run
 failed run leaves the same partial file, so re-running after a network drop
 resumes too.
 
+An analysis on `mlx` (`melampus-id <folder>`, the plugin's analysis) started
+while a download of its model runs does not wait for the download (card
+#501). The model's load takes the lock the download holds (`repo.lock`,
+§ `--model-status` and `--remove-model` below), waits five seconds for it as
+a download does, and then stops the run before any frame is read: **exit
+3**, the message on stderr naming what can hold the lock, a download, an
+identification run loading the model or a removal of it (the lock cannot
+tell which), saying to wait for it to finish and then run the analysis
+again, and that a model being downloaded shows its progress under the
+Download in Settings. Nothing is loaded, nothing cached and no results file
+written; the plugin reports *Identification failed (exit 3)* with the log
+that carries the message.
+
 ### The cancel marker
 
 The Lightroom plugin cannot signal the executable (`LrTasks.execute` blocks,
@@ -540,7 +553,10 @@ permissions.
   model is gone), an identification run loading the model (it holds the
   same lock from the start of its load until the model is in memory,
   mlx-vlm's load fetching what the cache lacks the while; a load starting
-  under a removal waits for it and then fetches the model from nothing),
+  under a removal waits for it, five seconds at most as under a download,
+  which a removal usually ends within, and then fetches the model from
+  nothing; a load that finds the lock held longer stops its run at exit 3,
+  § Downloading the model),
   or another removal. The removal cannot tell which holds the lock, so the
   message names all three, the same sentence `--download-model` refuses
   with, and says to wait for it to finish (cancelling a download first),
