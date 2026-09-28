@@ -30,8 +30,10 @@ import base64
 import binascii
 import hashlib
 import io
+import struct
 import subprocess
 import urllib.parse
+import zlib
 from pathlib import Path
 
 import pytest
@@ -228,31 +230,39 @@ UNREADABLE = (
 )
 
 
+# What Pillow raises on a blob it cannot read, at open or reading on from
+# there: UnidentifiedImageError (an OSError) where it recognises no format;
+# ValueError or OSError where a header matches a format's magic and then does
+# not parse (text opening `P1 fix`, a frame cut short); SyntaxError where an
+# EXIF block is no TIFF structure. DecompressionBombError is none of these,
+# and propagates.
+READ_ERRORS = (ValueError, OSError, SyntaxError)
+
+
 def _opened(blob: bytes) -> Image.Image | None:
     """The image Pillow reads from `blob`, or None when it reads none: the
-    gate's one reading of what a blob is; its caller closes what it opens.
-
-    A blob in which Pillow recognises no format raises UnidentifiedImageError,
-    an OSError. A header that matches a format's magic and then does not
-    parse -- text opening `P1 fix`, a frame cut short -- raises ValueError or
-    OSError. Either way the gate reads no image there. DecompressionBombError
-    is neither, and propagates."""
+    gate's one reading of what a blob is; its caller closes what it opens."""
     try:
         return Image.open(io.BytesIO(blob))
-    except (ValueError, OSError):
+    except READ_ERRORS:
         return None
 
 
 def _frame_problems(data: bytes) -> list[str]:
-    """Why `data` (a blob from the index) is not a committable frame."""
-    problems = []
+    """Why `data` (a blob from the index) is not a committable frame. Pillow
+    opens lazily, so a read after the open can raise too, and that refuses
+    the frame as unreadable, the same as a blob that does not open."""
     image = _opened(data)
     if image is None:
-        problems.append(UNREADABLE)
-    else:
-        with image:
-            if image.getexif() or "exif" in image.info:
+        return [UNREADABLE]
+    problems = []
+    with image:
+        try:
+            # An EXIF block found at open is EXIF, whether or not it parses.
+            if "exif" in image.info or image.getexif():
                 problems.append("carries EXIF")
+        except READ_ERRORS:
+            return [UNREADABLE]
     return problems
 
 
@@ -293,11 +303,18 @@ def _stray_fixture_paths(tracked):
 LISTED_TEXT = "service/tests/fixtures/download-lines.txt"
 
 
-def _frame(image: Image.Image | None = None, **save) -> bytes:
-    """A JPEG's bytes, the way the gate sees a blob."""
+def _frame(image: Image.Image | None = None, format: str = "JPEG", **save) -> bytes:
+    """A frame's bytes, a JPEG unless `format` says otherwise, the way the
+    gate sees a blob."""
     buffer = io.BytesIO()
-    (image or Image.new("RGB", (8, 8))).save(buffer, format="JPEG", **save)
+    (image or Image.new("RGB", (8, 8))).save(buffer, format=format, **save)
     return buffer.getvalue()
+
+
+def _png_chunk(kind: bytes, data: bytes) -> bytes:
+    """A PNG chunk's bytes: length, type, data and CRC."""
+    crc = zlib.crc32(kind + data)
+    return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", crc)
 
 
 def _ascii_frame(size: tuple[int, int] = (300, 300)) -> bytes:
@@ -366,6 +383,26 @@ def test_a_blob_pillow_raises_on_is_refused_by_name():
     }
     for path, blob in blobs.items():
         assert _fixture_problems(path, blob) == [UNREADABLE]
+
+
+def test_a_metadata_read_that_raises_is_refused_by_name():
+    """Pillow opens a frame lazily, and getexif() reads on from where the open
+    stopped. A PNG cut short after its header opens, and getexif() loads it
+    and raises OSError (Codex round 4, finding 4); an EXIF block that is no
+    TIFF structure raises SyntaxError when getexif() parses it (Claude round
+    8, finding 3). Each was a traceback that named no file. An EXIF block
+    Pillow found at open is EXIF, whatever is in it, so it is refused as EXIF
+    unparsed; one past the pixels is found only by that read, and a read that
+    raises refuses the frame as unreadable."""
+    garbage = b"garbage!" * 4
+    png = _frame(format="PNG")
+    assert _frame_problems(png[:41]) == [UNREADABLE]
+    for format in ("PNG", "WEBP"):
+        assert "carries EXIF" in _frame_problems(_frame(format=format, exif=garbage))
+    # IEND, the last 12 bytes, closes a PNG; an eXIf chunk just before it
+    # sits past the pixels.
+    past_the_pixels = png[:-12] + _png_chunk(b"eXIf", garbage) + png[-12:]
+    assert _frame_problems(past_the_pixels) == [UNREADABLE]
 
 
 def test_a_fixture_is_judged_as_a_frame_whatever_it_is_called():
