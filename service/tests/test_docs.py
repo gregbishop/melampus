@@ -1640,10 +1640,16 @@ def test_a_doc_whose_opening_says_macos_and_windows_does_not_still_offer_linux()
 NUMBER = r"(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)"
 # "Six engines", "(six engines)", "7 engines": a number right before the noun;
 # and "one of two things", the count of ways to run one that readme.md's
-# Windows section put before the three it lists. "the two local engines" is
-# not one: a subset qualified in place is named member by member in the same
-# sentence, so it does not move with the total.
-ENGINE_COUNT = re.compile(rf"\b{NUMBER}\s+engines\b|\bone of {NUMBER}\b", re.IGNORECASE)
+# Windows section put before the three it lists; and "The other four bring
+# their own", the engines left once two are named, with no noun after the
+# number. "the two local engines" is not one: a subset qualified in place is
+# named member by member in the same sentence, so it does not move with the
+# total. Nor is "the other two routes": a plural noun after the number says
+# what is counted, and when that noun is engines the first form has it.
+ENGINE_COUNT = re.compile(
+    rf"\b{NUMBER}\s+engines\b|\bone of {NUMBER}\b|\bthe other {NUMBER}\b(?!\s+[a-z]+s\b)",
+    re.IGNORECASE,
+)
 
 
 def test_the_docs_card_491_rewrote_state_no_engine_count():
@@ -1659,13 +1665,19 @@ def test_the_docs_card_491_rewrote_state_no_engine_count():
     Review round 3, finding 2: readme.md's Windows section said the primary
     backend there "is one of two things" and then listed three — Ollama, a
     subscription CLI, the cloud. The same count, in the same place a new
-    engine goes, so the same gate reads it."""
+    engine goes, so the same gate reads it.
+
+    After round 3: readme.md's opening, having named the two local engines,
+    said "The other four bring their own", a count of the rest that is
+    wrong the day an engine is added, the same as the total."""
     for counted in ("Six engines, picked in the plugin's Settings dialog.",
                     "• VLM inference (six engines)", "7 engines behind one seam",
-                    "the primary backend is one of two things."):
+                    "the primary backend is one of two things.",
+                    "The other four bring their own."):
         assert ENGINE_COUNT.search(counted), f"the gate misses a stated count: {counted!r}"
-    subset = "On the two local engines no image leaves the machine: `mlx` and `ollama`."
-    assert not ENGINE_COUNT.search(subset), f"the gate calls a named subset a count: {subset!r}"
+    for uncounted in ("On the two local engines no image leaves the machine: `mlx` and `ollama`.",
+                      "`test_prompt_rejects_unapproved_context` cover the other two routes in."):
+        assert not ENGINE_COUNT.search(uncounted), f"the gate calls this an engine count: {uncounted!r}"
     stated = [
         f"{doc.name}: {sentence}"
         for doc in (README, BRIEF, REPO / "docs" / "architecture.md")

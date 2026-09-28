@@ -27,7 +27,7 @@ Ollama's cloud models, which that server runs on Ollama's own machines under
 the account it is signed in to; either sends every frame off this one
 ([docs/config.md](docs/config.md) § `[model]`). The model is not bundled: the
 Settings dialog downloads it, into the HuggingFace cache for `mlx`, or has
-Ollama pull it for `ollama`. The other four bring their own.
+Ollama pull it for `ollama`. The others bring their own.
 
 The plugin is a folder with the executable inside it, `melampus` on macOS or
 `melampus.exe` on Windows, from a release zip; a user installs no Python.
