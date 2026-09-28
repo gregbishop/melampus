@@ -1507,6 +1507,10 @@ def test_readme_opening_lists_the_engines_providers_offers_and_names_the_spec():
     installed here, the way the `ollama` row names the server on this
     machine, while Claude Code reads the staged frame into its conversation
     with Anthropic and Codex attaches it to its first message to OpenAI.
+    The `ollama` row's nothing is qualified with `ollama_model` (review
+    round 4, finding 2): the same opening says a cloud model there runs
+    under the Ollama account the server is signed in to, so a bare
+    "nothing" is false for that setting.
     `scripted` (the fake) and `command` (the seam, not in the picker) must
     not appear. The opening also names `AGENTS.md` and `docs/brief.md`, not
     CLAUDE.md, as the build specification: CLAUDE.md is two includes now."""
@@ -1539,6 +1543,9 @@ def test_readme_opening_lists_the_engines_providers_offers_and_names_the_spec():
         assert expected in bills, (
             f"readme.md's What it bills cell for `{name}` does not say it bills "
             f"{expected!r}: {bills!r}")
+        assert name != providers.OLLAMA or "`ollama_model`" in bills, (
+            f"readme.md's What it bills cell for `{name}` says {bills!r} without naming "
+            "`ollama_model`, which can name one of Ollama's cloud models")
         where = cells[0]
         assert expected == "nothing" or re.search(r"\b\w+'s (?:API|servers)\b", where), (
             f"readme.md's Where it runs cell for `{name}` does not say whose API or servers "

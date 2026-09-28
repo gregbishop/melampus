@@ -14,7 +14,7 @@ the reason.
 | Engine | Where it runs | What it bills |
 |---|---|---|
 | `mlx` | on this Mac, Apple Silicon | nothing |
-| `ollama` | on this machine, through Ollama; macOS or Windows | nothing |
+| `ollama` | on this machine, through Ollama; macOS or Windows | nothing, unless `ollama_model` names one of Ollama's cloud models, which count against the Ollama account it is signed in to |
 | `openai` | OpenAI's API | an API key, per call |
 | `claude` | Anthropic's API | an API key, per call |
 | `claude-code` | Anthropic's servers, through Claude Code installed and signed in here | a Claude subscription, the one it is signed in to |
