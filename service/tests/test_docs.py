@@ -788,6 +788,30 @@ def test_the_action_pinning_gate_reads_the_last_line_without_a_newline(tmp_path,
     test_every_workflow_pins_every_action_to_a_commit_sha_with_its_version()
 
 
+def test_the_action_pinning_gate_reports_a_uses_that_is_not_a_string(tmp_path, monkeypatch):
+    """An action reference is a string, and a `uses:` whose value YAML
+    parses as a list or a mapping names no action at all, whatever SHA is
+    written inside it. It is not pinned, and it is reported by the file's
+    name like any other line the gate cannot pass, not a crash out of the
+    pin check. The folder is a stand-in read at call time; ci.yml in it is
+    pinned, so both .yaml files, and only those, must be reported."""
+    sha = "11d5960a326750d5838078e36cf38b85af677262"
+    (tmp_path / "ci.yml").write_text(f"      - uses: actions/checkout@{sha} # v4.4.0\n", encoding="utf-8")
+    steps = {
+        "list.yaml": f"- uses: [actions/checkout@{sha}] # v4.4.0",
+        "mapping.yaml": f"- uses: {{ref: actions/checkout@{sha}}} # v4.4.0",
+    }
+    for name, step in steps.items():
+        (tmp_path / name).write_text(f"      {step}\n", encoding="utf-8")
+    monkeypatch.setitem(globals(), "WORKFLOWS", tmp_path)
+    with pytest.raises(AssertionError) as unpinned:
+        test_every_workflow_pins_every_action_to_a_commit_sha_with_its_version()
+    reported = str(unpinned.value)
+    for name, step in steps.items():
+        assert f"{name}: {step}" in reported, reported
+    assert "ci.yml" not in reported, reported
+
+
 RELEASE_ZIPS = ("Melampus-macOS.zip", "Melampus-Windows.zip")
 
 
@@ -812,17 +836,18 @@ def _action_references(text: str) -> list[tuple[str, bool]]:
     key as YAML parses it: a key counts by its value, however it is quoted,
     and the text of a quoted scalar is never a key. What the workflow runs is
     that value, so a SHA quoted in a comment pins nothing, and all of it must
-    be the action and a commit SHA: a ref that merely begins with a SHA,
-    `<sha>-moving`, can be moved. The version is what the line's trailing
-    comment says. PyYAML drops comments, so the comment is the text after
-    the last scalar or flow collection that ends on the line, which leaves a
-    `#` inside a quoted scalar, or a flow mapping's closing brace, where it
-    belongs; a block collection ends where the next token begins, past any
-    comment, so it does not say where the line's text ends. One trailing
-    comment cannot name two actions' versions, so a line holding two
-    references is not pinned whatever each names. A workflow that does not
-    parse cannot be read for its references, so it is one line nothing pins,
-    the parser's error, reported by its name."""
+    be one string, the action and a commit SHA: a ref that merely begins
+    with a SHA, `<sha>-moving`, can be moved, and a list or mapping names no
+    action at all. The version is what the line's trailing comment says.
+    PyYAML drops comments, so the comment is the text after the last scalar
+    or flow collection that ends on the line, which leaves a `#` inside a
+    quoted scalar, or a flow mapping's closing brace, where it belongs; a
+    block collection ends where the next token begins, past any comment, so
+    it does not say where the line's text ends. One trailing comment cannot
+    name two actions' versions, so a line holding two references is not
+    pinned whatever each names. A workflow that does not parse cannot be
+    read for its references, so it is one line nothing pins, the parser's
+    error, reported by its name."""
     try:
         nodes = _nodes(text)
     except yaml.YAMLError as error:
@@ -843,6 +868,7 @@ def _action_references(text: str) -> list[tuple[str, bool]]:
         )
         pinned = (
             len(values) == 1
+            and isinstance(values[0], yaml.ScalarNode)
             and re.fullmatch(r"\S+@[0-9a-f]{40}", values[0].value)
             and re.search(r"#\s*v\d", lines[line][written:])
         )
