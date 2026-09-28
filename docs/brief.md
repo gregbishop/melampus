@@ -14,8 +14,9 @@ Local first, or a cloud API, or a subscription CLI: six engines, picked in
 the plugin's Settings dialog. `readme.md`'s opening is the one list of them
 and of what each bills, and a test holds that list to `providers.py`. On a
 local engine no image leaves the machine — so long as `[model] ollama_url`
-is not pointed at another host, which sends every frame there. macOS and
-Windows. The plugin is a folder with the one-file executable inside it; a
+is not pointed at another host and `[model] ollama_model` does not name a
+cloud model, which its server runs elsewhere; either sends every frame off
+the machine. macOS and Windows. The plugin is a folder with the one-file executable inside it; a
 user installs no Python.
 
 The original 368-line build spec now lives in `docs/build-spec.md`. It is

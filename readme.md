@@ -22,7 +22,9 @@ reason.
 
 On the two local engines no image leaves the machine: `mlx` runs inside the
 executable, and `ollama` talks to the Ollama server on this machine — unless
-`ollama_url` is pointed at another host, which sends every frame there
+`ollama_url` is pointed at another host, or `ollama_model` names one of
+Ollama's cloud models, which that server runs on Ollama's own machines under
+the account it is signed in to; either sends every frame off this one
 ([docs/config.md](docs/config.md) § `[model]`). The model is not bundled: the
 Settings dialog downloads it, into the HuggingFace cache for `mlx`, or has
 Ollama pull it for `ollama`. The other four bring their own.
