@@ -194,13 +194,18 @@ end
 -- windowsPathRefusal), a line feed ends the line so what follows it is not
 -- the line the plugin built, and a carriage return is dropped; none of them
 -- can be escaped on a cmd.exe command line. sh gets the key through
--- quote(), where nothing needs refusing. The message never shows the key.
-local function windowsKeyRefusal(key)
+-- quote(), where nothing needs refusing. The message never shows the key;
+-- it names `engine`, whose key it is. With no engine `picked` (card #498)
+-- Settings shows that key's field only while its engine is picked, so the
+-- message says so, and to let Melampus choose again after.
+local function windowsKeyRefusal(key, engine, picked)
 	if not WIN_ENV then return nil end
 	if string.find(key, '["%%\r\n]') then
-		return 'The API key kept for this engine contains a character the Windows '
+		return 'The API key kept for ' .. engine .. ' contains a character the Windows '
 			.. 'shell rewrites (", % or a line break), so Melampus will not hand it '
-			.. 'to its analysis program.\n\nOpen Settings and enter the key again.'
+			.. 'to its analysis program.\n\nOpen Settings and enter the key again'
+			.. (picked and '.' or (': pick ' .. engine .. ' to show its field, then pick '
+				.. '"Let Melampus choose" again.'))
 	end
 	return nil
 end
@@ -543,7 +548,7 @@ function Analyze.run(previewFolder, resultsPath, profile, engine)
 	-- logged; the log carries the line with the key blanked.
 	local logged = line
 	if key then
-		local keyRefusal = windowsKeyRefusal(key)
+		local keyRefusal = windowsKeyRefusal(key, keyed, chosen)
 		if keyRefusal then return false, keyRefusal end
 		line = environmentPrefix(variable, key) .. line
 		logged = environmentPrefix(variable, '') .. logged

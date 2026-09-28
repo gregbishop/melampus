@@ -136,8 +136,10 @@ the shell line is the child's command line for the run's duration. On Windows a
 stored key holding `"`, `%` or a line break is refused before anything runs, the
 way a path holding `%` is: cmd.exe would rewrite any of them inside
 `set "VAR=key"` (a line feed ends the line, so what follows it is not the line
-the plugin built), and none can be escaped there; the message says to enter the
-key again in Settings and shows no part of it.
+the plugin built), and none can be escaped there; the message names the engine
+whose key it is, says to enter the key again in Settings and shows no part of
+it. With no engine picked it also says that picking that engine shows its
+field, and to pick *Let Melampus choose* again after.
 
 When the preference is set, `MelampusAnalyze.lua` passes it to the executable
 as `--backend <engine>`, and the executable's own rules apply: `ollama` needs an

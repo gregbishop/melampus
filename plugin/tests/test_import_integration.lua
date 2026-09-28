@@ -766,6 +766,37 @@ t.test('on Windows a stored key holding a character cmd.exe rewrites is refused 
 	end
 end)
 
+t.test('on Windows, with no engine picked, a stored key cmd.exe would rewrite is refused naming its engine and the way back', function()
+	-- Card #498: with no engine picked the run carries the first stored key,
+	-- so the refusal above reaches a run whose user picked nothing. There is
+	-- no "this engine" then, and Settings shows a key's field only while its
+	-- engine is picked: the message names the engine whose key it is, says
+	-- picking that engine shows the field, and says to pick "Let Melampus
+	-- choose" again after, or the engine picked to reach the field stays
+	-- picked and bills every frame even where a local engine could run.
+	local key = 'sk-not-a-real-key-%TEMP%'
+	for _, engine in ipairs(ENGINES) do
+		local variable = Rules.keyVariable(engine)
+		if variable then
+			local Analyze = loadUnderMock('MelampusAnalyze',
+				{ existing = { [WIN_EXECUTABLE] = true }, passwords = { [variable] = key } },
+				WIN_PLUGIN, { windows = true })
+			local ok, message = Analyze.run(WIN_PREVIEWS, WIN_PREVIEWS .. '\\results.json', 'wildlife')
+			t.isFalse(ok, engine .. ': ran with a key cmd.exe would rewrite')
+			t.isNil(mock.state.executed, engine .. ': a command carrying the key reached cmd.exe')
+			t.isNil(string.find(message, 'this engine', 1, true),
+				engine .. ': the message speaks of "this engine" with none picked:\n' .. message)
+			t.isNotNil(string.find(message, 'kept for ' .. engine, 1, true),
+				engine .. ': the message does not name the engine whose key it is:\n' .. message)
+			t.isNotNil(string.find(message, 'pick ' .. engine, 1, true),
+				engine .. ': the message does not say picking the engine shows its key:\n' .. message)
+			t.isNotNil(string.find(message, 'Let Melampus choose', 1, true),
+				engine .. ': the message does not say to let Melampus choose again after:\n' .. message)
+			t.isNil(string.find(message, key, 1, true), engine .. ': the message shows the key:\n' .. message)
+		end
+	end
+end)
+
 t.test('on macOS a key holding shell characters travels intact, single-quoted for sh', function()
 	-- sh gets the key through quote(): an apostrophe closed, escaped and
 	-- reopened; a double quote, a percent sign and a dollar mean nothing
