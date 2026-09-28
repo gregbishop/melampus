@@ -965,6 +965,26 @@ def test_the_action_pinning_gate_judges_an_alias_where_it_is_written(tmp_path, m
     assert "ci.yml" not in reported, reported
 
 
+def test_the_action_pinning_gate_takes_no_at_sign_before_the_sha(tmp_path, monkeypatch):
+    """Round 3, noted by both reviewers: the pin was `\\S+@<40 hex>`, and
+    `\\S+` takes an `@` too, so `actions/checkout@v4@<sha>`, a reference
+    whose ref is `v4@<sha>` rather than a SHA, passed. GitHub refuses a
+    reference with two `@` when it parses the workflow, but the gate should
+    say so itself: the action is everything before the one `@`. The file is
+    a whole workflow, `jobs.<id>.steps`; ci.yml here is pinned, so x.yaml,
+    and only it, must be reported."""
+    sha = "11d5960a326750d5838078e36cf38b85af677262"
+    steps = "jobs:\n  build:\n    steps:\n"
+    (tmp_path / "ci.yml").write_text(f"{steps}      - uses: actions/checkout@{sha} # v4.4.0\n", encoding="utf-8")
+    (tmp_path / "x.yaml").write_text(f"{steps}      - uses: actions/checkout@v4@{sha} # v4.4.0\n", encoding="utf-8")
+    monkeypatch.setitem(globals(), "WORKFLOWS", tmp_path)
+    with pytest.raises(AssertionError) as unpinned:
+        test_every_workflow_pins_every_action_to_a_commit_sha_with_its_version()
+    reported = str(unpinned.value)
+    assert f"x.yaml: - uses: actions/checkout@v4@{sha} # v4.4.0" in reported, reported
+    assert "ci.yml" not in reported, reported
+
+
 RELEASE_ZIPS = ("Melampus-macOS.zip", "Melampus-Windows.zip")
 
 
@@ -1062,7 +1082,7 @@ def _action_references(text: str) -> list[tuple[str, bool]]:
         pinned = (
             len(values) == 1
             and isinstance(values[0], yaml.ScalarNode)
-            and re.fullmatch(r"\S+@[0-9a-f]{40}", values[0].value)
+            and re.fullmatch(r"[^@\s]+@[0-9a-f]{40}", values[0].value)
             and re.search(r"#\s*v\d", lines[line][written:runs_on])
         )
         judged.append((lines[line].strip(), bool(pinned)))
