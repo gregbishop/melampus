@@ -834,8 +834,9 @@ def test_an_ascii_frame_pillow_raises_on_is_gated_over_the_ceiling():
     """Nor is an image Pillow raises on. XPM names colours (`c black`) as well
     as spelling them `#rrggbb`, and Pillow reads only the second, so it
     recognises this frame and raises ValueError. Exempted as text Pillow reads
-    no image in, it went in at any size. A text image carries no EXIF Pillow
-    reads, so the ceiling is the one check that could refuse it."""
+    no image in, it went in at any size. Listed as an image, it is held to the
+    ceiling, which needs no reader, and refused as unreadable as well, because
+    Pillow raises on it: the ceiling is not the one check that refuses it."""
     width, height = 700, 600
     rows = b"\n".join(b'"' + b"ab" * (width // 2) + b'",' for _ in range(height))
     xpm = (
