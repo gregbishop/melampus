@@ -298,20 +298,22 @@ def _jpeg_walk(data: bytes) -> tuple[list[str], int]:
 
 def _png_walk(data: bytes) -> tuple[list[str], int]:
     """The chunks of the PNG in `data` that draw no picture, by type, and
-    where it ends: just past its IEND chunk, each chunk stepped over by its
-    length. Raises ValueError where the PNG breaks off."""
+    where it ends: 12 bytes after its IEND chunk starts, since IEND is empty,
+    each chunk before it stepped over by its length. Raises ValueError where
+    the PNG breaks off."""
     extras = []
     at = 8  # past the signature
     while True:
         header = data[at : at + 8]
-        at += 12 + int.from_bytes(header[:4])
-        if len(header) < 8 or at > len(data):
+        length = int.from_bytes(header[:4])
+        if len(header) < 8 or at + 12 + length > len(data):
             raise ValueError("the PNG breaks off before IEND")
         kind = header[4:]
         if kind not in PNG_PICTURE:
             extras.append(kind.decode("latin-1"))
         if kind == b"IEND":
-            return extras, at
+            return extras, at + 12
+        at += 12 + length
 
 
 # The formats the gate can walk to their end, naming what they carry on the
@@ -537,6 +539,10 @@ def test_bytes_after_the_image_ends_are_refused(tmp_path):
     assert _frame_problems(_frame(format="GIF") + tagged) == [
         "a GIF frame, whose end the gate cannot find: save it as JPEG or PNG"
     ]
+    # IEND is empty, so a PNG ends 12 bytes after IEND starts: bytes an IEND
+    # declares it holds are after the image ends too.
+    stuffed = _frame(format="PNG")[:-12] + _png_chunk(b"IEND", tagged)
+    assert _frame_problems(stuffed) == [f"{len(tagged)} bytes after the image ends"]
 
 
 def test_a_chunk_that_draws_no_picture_is_refused(tmp_path):
