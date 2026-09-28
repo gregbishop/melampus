@@ -1175,12 +1175,33 @@ def _refuse_here(reason: str, ollama_url: str | None) -> BackendUnavailable:
     return _refusal(reason, works_here=_works_here(detect_engines(ollama_url)))
 
 
+#: The engines the default takes when nothing names one (card #498), in the
+#: owner's order: the local ones, which send nothing and bill nothing.
+LOCAL_ENGINES = ("mlx", OLLAMA)
+
+#: Where a refusal of the unchosen default sends the user (card #498): the
+#: plugin's engine picker, by the title of its group in the Settings dialog.
+PICKER = 'the Lightroom plugin\'s Settings, under "Where identification runs"'
+
+
 def default_engine(ollama_at: str | None = None) -> str:
-    """What runs when nothing names an engine: the first detection says is
-    available, in the owner's order. There is always one, because the cloud
-    engines are available everywhere; no fallback, so if the list ever
-    changes that invariant breaks loudly here rather than naming mlx."""
-    return next(v.engine for v in detect_engines(ollama_at) if v.available)
+    """What runs when nothing names an engine (card #498): the first local
+    engine detection says is available, in the owner's order. A cloud engine
+    is available everywhere but bills every frame, so an API key in the
+    environment never makes one the default; nor does a subscription CLI,
+    which the default never reached before (openai, always available, came
+    first). With nothing local, BackendUnavailable naming the picker and,
+    through the refusal's shape, --backend."""
+    verdicts = detect_engines(ollama_at)
+    engine = next((v.engine for v in verdicts if v.available and v.engine in LOCAL_ENGINES), None)
+    if engine is None:
+        raise _refusal(
+            "No engine is chosen, and none that runs locally can run here "
+            "(--detect-engines says why). Melampus does not choose a cloud engine "
+            f"for you, since every frame would bill to it: choose an engine in {PICKER}.",
+            works_here=_works_here(verdicts),
+        )
+    return engine
 
 
 def normalise_provider(provider: str | None) -> str:

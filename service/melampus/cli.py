@@ -475,10 +475,14 @@ def main(argv: list[str] | None = None) -> int:
         ap.error("the following arguments are required: folder")
 
     # Nothing named an engine: neither --backend nor [model] backend. The
-    # first that can run here answers (card #404), before anything reads
-    # the choice: the cloud retuning below, the cache file, the refusals.
-    _pick_engine(config, functools.partial(default_engine, config.model.ollama_url),
-                 "the first that can run here")
+    # first local engine that can run here answers (cards #404, #498),
+    # before anything reads the choice: the cloud retuning below, the cache
+    # file, the refusals. With none, the run is refused rather than billed.
+    try:
+        _pick_engine(config, functools.partial(default_engine, config.model.ollama_url),
+                     "the first local engine that can run here")
+    except BackendUnavailable as exc:
+        return _fail(str(exc))
 
     cloud_primary = is_cloud_primary(config)
     if cloud_primary:

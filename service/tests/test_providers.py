@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import base64
 import contextlib
-import dataclasses
 import errno
 import http.client
 import io
@@ -590,22 +589,27 @@ def test_the_refusal_names_what_detection_says_is_available(monkeypatch):
     assert "ollama, openai, claude, scripted" in str(err.value)
 
 
-def test_default_engine_is_always_one_detection_names_available(
+def test_default_engine_is_the_first_local_engine_detection_names_available_and_never_a_cloud_one(
     monkeypatch, no_ambient_keys, no_ambient_ollama
 ):
-    """`default_engine()` is the first verdict that is available, in the
-    owner's order, and nothing else: the cloud engines are available
-    everywhere, so there is always one, and there is no fallback that could
-    quietly name an engine detection did not. Were the list ever to change so
-    that nothing is available, the call raises rather than inventing mlx."""
+    """Card #498: `default_engine()` is the first local engine detection says
+    is available, in the owner's order (mlx, then ollama), and nothing else.
+    The cloud engines are available everywhere, but every frame bills, so a
+    key in the environment does not make one the default: with nothing local
+    the call refuses, naming the plugin's picker, rather than falling through
+    to openai (or to a subscription CLI, which the default never reached)."""
+    monkeypatch.setenv("MELAMPUS_OPENAI_KEY", "key-from-env")
+    fake_platform(monkeypatch, "darwin", "arm64")
+    assert providers.default_engine() == "mlx"
     fake_platform(monkeypatch, "linux", "x86_64")
-    verdicts = providers.detect_engines()
-    assert providers.default_engine() == next(v.engine for v in verdicts if v.available) == "openai"
+    monkeypatch.setattr(providers, "ollama_answers", lambda url=None: True)
+    assert providers.default_engine() == "ollama"
 
-    nothing_available = [dataclasses.replace(v, available=False) for v in verdicts]
-    monkeypatch.setattr(providers, "detect_engines", lambda ollama_at=None: nothing_available)
-    with pytest.raises(StopIteration):
+    monkeypatch.setattr(providers, "ollama_answers", lambda url=None: False)
+    with pytest.raises(providers.BackendUnavailable) as err:
         providers.default_engine()
+    assert "Where identification runs" in str(err.value), err.value
+    assert "key-from-env" not in str(err.value)
 
 
 @contextlib.contextmanager
@@ -1471,14 +1475,53 @@ def test_cli_default_engine_is_the_first_that_can_run_here(
     assert "engine: ollama" in err and "--backend" in err, err
 
 
-def test_cli_default_engine_is_mlx_on_apple_silicon_and_openai_with_nothing_local(
+def test_cli_default_engine_is_mlx_on_apple_silicon(
     monkeypatch, photos, tmp_path, no_ambient_keys, no_ambient_ollama
 ):
     argv = [str(photos), "--cache", str(tmp_path / "cache.jsonl")]
     fake_platform(monkeypatch, "darwin", "arm64")
     assert _chosen_engine(monkeypatch, argv) == "mlx"
-    fake_platform(monkeypatch, "linux", "x86_64")
-    assert _chosen_engine(monkeypatch, argv) == "openai"
+
+
+#: What the plugin's Settings dialog calls the engine picker's group: the
+#: place a refusal of the unchosen default sends the user (card #498).
+PICKER_GROUP = "Where identification runs"
+
+
+def test_cli_with_nothing_local_refuses_rather_than_bill_a_key_from_the_environment(
+    monkeypatch, photos, tmp_path, capsys, no_ambient_keys, no_ambient_ollama
+):
+    """Card #498, decision (b), the case the card was raised for: no engine
+    chosen, nothing local can run here (no Apple Silicon, no Ollama), and an
+    API key in the environment only. A key there is not a choice: the run is
+    refused, exit 3, before any backend is built or any estimate printed,
+    naming the plugin's picker and --backend, and the key is not repeated.
+    Before, the default was openai and every frame billed unpicked."""
+    import melampus.cli
+
+    fake_platform(monkeypatch, "win32", "AMD64")
+    for variable in ALL_KEY_VARIABLES:
+        monkeypatch.setenv(variable, "key-from-env")
+    built: list[str] = []
+
+    def build(config):
+        built.append(config.model.backend)
+        raise providers.BackendUnavailable("stopped at the seam")
+
+    monkeypatch.setattr(melampus.cli, "build_primary_backend", build)
+
+    code = melampus.cli.main(
+        [str(photos), "--cache", str(tmp_path / "cache.jsonl"), "--yes", "--no-local-config"])
+
+    err = capsys.readouterr().err
+    assert built == [], f"a backend was built for {built}"
+    assert code == 3, err
+    assert PICKER_GROUP in err and "--backend" in err, err
+    assert "engine: " not in err and "est. $" not in err, err
+    assert "key-from-env" not in err, err
+    settings = Path(__file__).resolve().parents[2] / "plugin" / "Melampus.lrplugin" / "MelampusSettings.lua"
+    assert f"title = '{PICKER_GROUP}'" in settings.read_text(encoding="utf-8"), (
+        "the refusal names a picker group the Settings dialog does not have")
 
 
 def test_cli_detection_never_overrides_a_chosen_engine(
