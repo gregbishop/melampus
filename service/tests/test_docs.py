@@ -1484,8 +1484,6 @@ def _picker() -> list[tuple[str, str]]:
     machine and runs nothing: Ollama is not asked (stubbed here, for the
     call), and the subscription CLIs are not run (conftest's
     no_ambient_subscription_cli stubs their verdicts in every test)."""
-    from melampus import providers
-
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(providers, "ollama_answers", lambda url=None: False)
         verdicts = providers.detect_engines()
@@ -1514,8 +1512,6 @@ def test_readme_opening_lists_the_engines_providers_offers_and_names_the_spec():
     `scripted` (the fake) and `command` (the seam, not in the picker) must
     not appear. The opening also names `AGENTS.md` and `docs/brief.md`, not
     CLAUDE.md, as the build specification: CLAUDE.md is two includes now."""
-    from melampus import providers
-
     # The raw opening, not `_opening`: the rows below are matched line by line.
     opening = _raw_opening(README.read_text(encoding="utf-8"))
     rows = re.findall(r"^\| `([\w-]+)` \|(.*)$", opening, re.MULTILINE)
@@ -1616,8 +1612,6 @@ def test_the_engine_gates_read_the_picker_detect_engines_builds(monkeypatch, tmp
     opening that names the seventh, by key or by title, fails the second.
     And the list is read without asking Ollama: the probe here records, and
     must not be reached."""
-    from melampus import providers
-
     detect = providers.detect_engines
     seventh = providers.EngineVerdict("gemini", "Gemini — cloud, needs an API key", True, "API key required")
     monkeypatch.setattr(providers, "detect_engines", lambda ollama_at=None: [*detect(ollama_at), seventh])
@@ -1647,8 +1641,6 @@ def test_the_readme_billing_check_reads_the_subscription_clis_from_cli_engines(m
     for it bills nothing fails the gate: its What it bills cell must name
     that CLI's subscription."""
     import dataclasses
-
-    from melampus import providers
 
     third = dataclasses.replace(providers.CODEX_CLI, engine="gemini-cli", title="Gemini CLI",
                                 subscription="a Gemini subscription")
