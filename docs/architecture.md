@@ -5,7 +5,7 @@ with their reasoning so they can be revisited deliberately rather than by accide
 
 The scope is readme.md's opening: species identification and photo-quality
 triage for Lightroom Classic, on macOS and Windows; a Lua plugin running a
-one-file Python executable from its own folder; six engines behind one seam
+one-file Python executable from its own folder; the engines behind one seam
 — local first, or a cloud API, or a subscription CLI — picked in the
 plugin's Settings. Their names, and what each bills, are readme.md's table,
 which a test holds to `providers.py`.
@@ -18,7 +18,7 @@ which a test holds to `providers.py`.
 ┌──────────────────────────────┐        ┌───────────────────────────────┐
 │  LrC Plugin (Lua)            │        │  Melampus executable (Python) │
 │                              │  runs  │                               │
-│  • menu items                │◄──────►│  • VLM inference (six engines)│
+│  • menu items                │◄──────►│  • VLM inference (any engine) │
 │  • config dialog             │  JSON  │  • sharpness / quality CV     │
 │  • reads GPS + capture date  │        │  • range & season re-ranking  │
 │  • exports JPEG previews     │        │  • occurrence API clients     │

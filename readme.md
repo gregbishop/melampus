@@ -7,9 +7,9 @@ subject, and writes the result into the catalog. macOS and Windows.
 > Named for the Greek seer who, after serpents cleaned his ears as he slept, could
 > understand the speech of animals — birds especially. Pronounced *meh-LAM-pus*.
 
-Local first, or a cloud API, or a subscription CLI. Six engines, picked in the
-plugin's Settings dialog; the ones this machine cannot run are greyed with the
-reason.
+Local first, or a cloud API, or a subscription CLI. The engines are picked in
+the plugin's Settings dialog; the ones this machine cannot run are greyed with
+the reason.
 
 | Engine | Where it runs | What it bills |
 |---|---|---|
@@ -43,7 +43,7 @@ how to run what exists today.
 | **1** | Local VLM species identification | **Working.** Run over a 1,743-frame corpus |
 | **2** | Quality scoring + location/season re-ranking | **Working.** Subject-localised sharpness and GBIF re-ranking both in the pipeline |
 | **3** | One-file executable | **Working.** Built and smoke-tested in CI on macOS and Windows; ships inside the plugin folder; keeps its config and caches in a per-user data directory. There is no HTTP service: the plugin runs the executable. Not yet signed or notarized (card #438) |
-| **4** | Lightroom Classic plugin | **Working.** Analyses with the executable beside it and writes to a real catalog; six engines and the model download in its Settings dialog. On Windows the executable and the plugin's cmd.exe command run in CI; a run inside Lightroom there is card #424 |
+| **4** | Lightroom Classic plugin | **Working.** Analyses with the executable beside it and writes to a real catalog; the engine picker and the model download in its Settings dialog. On Windows the executable and the plugin's cmd.exe command run in CI; a run inside Lightroom there is card #424 |
 | — | Optional cloud escalation for the hard tail (docs/build-spec.md §6.6) | **Working.** Off by default |
 
 The tests, Python and Lua, need no model weights and no network; one command runs

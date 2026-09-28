@@ -1584,6 +1584,37 @@ def test_a_doc_whose_opening_says_macos_and_windows_does_not_still_offer_linux()
             f"{doc.name}'s opening says macOS and Windows, but it still offers Linux: {offers}")
 
 
+# A count, in digits or in the words a doc spells one out with.
+NUMBER = r"(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)"
+# "Six engines", "(six engines)", "7 engines": a number right before the noun.
+# "the two local engines" is not one: a subset qualified in place is named
+# member by member in the same sentence, so it does not move with the total.
+ENGINE_COUNT = re.compile(rf"\b{NUMBER}\s+engines\b", re.IGNORECASE)
+
+
+def test_the_docs_card_491_rewrote_state_no_engine_count():
+    """Review round 3, finding 1: readme.md, the brief and architecture said
+    "six engines" in five places, and no gate read the number: changed to
+    seven, four or three, every gate stayed green. How many engines there are
+    is readme.md's table, which the gate above holds to providers.py; a count
+    written anywhere else is wrong the day an engine is added, the reason card
+    #437 took the test counts out. So these docs name the engines' shape and
+    cite the table, and state no count of them, in prose, in the Status table
+    or in the diagram."""
+    for counted in ("Six engines, picked in the plugin's Settings dialog.",
+                    "• VLM inference (six engines)", "7 engines behind one seam"):
+        assert ENGINE_COUNT.search(counted), f"the gate misses a stated count: {counted!r}"
+    subset = "On the two local engines no image leaves the machine: `mlx` and `ollama`."
+    assert not ENGINE_COUNT.search(subset), f"the gate calls a named subset a count: {subset!r}"
+    stated = [
+        f"{doc.name}: {sentence}"
+        for doc in (README, BRIEF, REPO / "docs" / "architecture.md")
+        for sentence in _sentences(doc.read_text(encoding="utf-8"))
+        if ENGINE_COUNT.search(sentence)
+    ]
+    assert not stated, f"docs state an engine count no gate checks; cite readme.md's table: {stated}"
+
+
 def test_docs_name_engine_detection_where_the_default_and_the_refusal_are_described():
     """Card #404: the backend's default is now the first engine that can run
     here, and `--detect-engines` is how a user (and card #405's dialog) sees
