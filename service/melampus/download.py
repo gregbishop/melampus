@@ -40,7 +40,8 @@ import os
 os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
 
-import hashlib  # noqa: E402 - after the environment the hub reads at import
+import errno  # noqa: E402 - after the environment the hub reads at import
+import hashlib  # noqa: E402
 import ipaddress  # noqa: E402
 import json  # noqa: E402
 import logging  # noqa: E402
@@ -75,6 +76,7 @@ from huggingface_hub.file_download import (  # noqa: E402
     REGEX_COMMIT_HASH,
     REGEX_SHA256,
     _create_symlink,
+    _get_file_length_from_http_response,
     _get_pointer_path,
     http_get,
     repo_folder_name,
@@ -84,7 +86,7 @@ from huggingface_hub.utils import WeakFileLock, build_hf_headers, filter_repo_ob
 from huggingface_hub.utils import logging as hub_logging  # noqa: E402 - the library's own logger, where its warnings go
 from huggingface_hub.utils._http import default_client_factory  # noqa: E402 - the library's own client, not a copy of it
 
-from .backend import OllamaBackend, ollama_request  # noqa: E402
+from .backend import OllamaBackend, VLMBackend, ollama_request  # noqa: E402
 from .config import cache_file  # noqa: E402
 from .providers import BackendUnavailable  # noqa: E402
 
@@ -155,7 +157,8 @@ LOCK_TIMEOUT: float = 5
 PROBE_TIMEOUT: float = 0.1
 
 # The largest size, of a file or of the model, the status takes from the
-# hub's listing: the largest integer a double carries exactly, so the
+# hub's listing, and of a file the download's plan takes from the hub's
+# metadata call: the largest integer a double carries exactly, so the
 # plugin's JSON decoder (MelampusJson.lua, `tonumber`) reads it as the hub
 # gave it; a real file is far below it (nine petabytes). Above it, or with
 # a total above it, the listing is not a hub's: `json.dumps` cannot print
@@ -172,7 +175,8 @@ def _is_count(value: object) -> bool:
     refuses with an OverflowError, not a ValueError, and which the plugin's
     JSON decoder rejects as `Infinity`; above MAX_SIZE a count is one
     `json.dumps` or the plugin's decoder cannot carry. One rule for the
-    hub's file sizes, Ollama's pull counts and its list's sizes."""
+    hub's file sizes (the status's listing and the download's plan alike),
+    Ollama's pull counts and its list's sizes."""
     return type(value) is int and 0 <= value <= MAX_SIZE
 
 # The query string of any URL in a piece of text: an LFS file's bytes come
@@ -185,6 +189,45 @@ def _without_query(text: str) -> str:
     """`text` with every URL in it cut at its `?`: the path stays, so the
     message still names the file, the signed query does not."""
     return _URL_QUERY.sub(r"\1", text)
+
+
+# The most of one piece of another side's text (a file's name, a URL, the
+# commit or the etag the hub gave) a DownloadError quotes. The message is one
+# line cut at MAX_ERROR_BYTES, and its own words (the reason, a size, a
+# limit, the fix) follow what it quotes: a quarter of the line a piece, so a
+# message quoting two keeps half the line for its own.
+MAX_QUOTED = VLMBackend.MAX_ERROR_BYTES // 4
+
+# The most of another side's text read for a URL's query, before the piece
+# is cut to its room: eight lines' worth, room for the text around a CDN's
+# signed URL (some two kilobytes) twice over. And a bound on that pattern's
+# work, which grows with the square of what it reads when the text is
+# `https://` over and over (64 KB of it took 1.5 s): an error body is the
+# hub's, or its CDN's, to make as long as it likes.
+MAX_SCANNED = VLMBackend.MAX_ERROR_BYTES * 8
+
+
+def _quoted(text: object, room: int = MAX_QUOTED) -> str:
+    """`text`, a piece another side wrote, as a DownloadError quotes it:
+    without a URL's query first, so a signed query never takes the room of
+    the words after it, read from at most MAX_SCANNED characters of it;
+    then cut to `room` characters, so no more than that is ever cleaned (a
+    60 MiB error body, cleaned whole, took the run to 2 GB); then in
+    printable words (`VLMBackend.plain`). The query goes before the
+    cleaning, which could part a URL from its query."""
+    return VLMBackend.plain(_without_query(str(text)[:MAX_SCANNED])[:max(room, 0)])
+
+
+def _quoted_in(before: str, text: object, after: str) -> str:
+    """A message quoting one long piece of another side's text, the hub
+    library's exception or Ollama's error: `before`, then `text` in all the
+    room the line has left after the message's own words (`_quoted`), then
+    `after`. The piece's reason comes after some 250 characters of the hub
+    library's own (the status, the URL, the request id), so a quarter of the
+    line lost it; the message's own advice keeps its place whatever the
+    piece's length, and the whole stays within MAX_ERROR_BYTES."""
+    room = VLMBackend.MAX_ERROR_BYTES - len(before) - len(after)
+    return f"{before}{_quoted(text, room)}{after}"
 
 
 def _redact(record: logging.LogRecord) -> bool:
@@ -277,10 +320,18 @@ class Status:
 class DownloadError(Exception):
     """The download failed; the message names what to fix. A URL in it is
     named by its path alone: the hub library's exceptions carry the URL they
-    failed at, an LFS file's being the CDN's signed one."""
+    failed at, an LFS file's being the CDN's signed one. And it is one line
+    of printable text (`VLMBackend.plain`, the one rule for text another
+    side wrote): it carries the hub's words, a file's name among them, to
+    the terminal, the plugin's download log and its failure dialog, where
+    an escape sequence would retitle the terminal or erase the line and a
+    line break would fake a line of its own. Each piece of another side's
+    text in it goes in through `_quoted`, bounded, so the line keeps the
+    message's own reason and fix, and the cleaning here runs over a
+    bounded message."""
 
     def __init__(self, message: str) -> None:
-        super().__init__(_without_query(message))
+        super().__init__(VLMBackend.plain(_without_query(message)))
 
 
 class DownloadCancelled(BaseException):
@@ -384,12 +435,19 @@ class _Progress:
         self.done += n
         self.on_update(Update.progress(self.done, self.total))
 
-    def tqdm_class(self, resumed: int) -> type:
-        """The counter class for one file, `resumed` bytes of it counted from disk."""
+    def tqdm_class(self, resumed: int, size: int) -> type:
+        """The counter class for one file, `resumed` bytes of it counted from
+        disk and `size` the most the plan let it be. `http_get` writes every
+        chunk the host sends and compares the length only once the body has
+        ended, so a host sending more than `size`, or never stopping, would
+        fill the disk: the chunk that would take the file past `size` is
+        refused here, before it is written, as an OSError `_fetch` reports
+        by its text with the file named."""
         progress = self
 
         class ChunkCounter:
             def __init__(self, initial: int = 0, **_ignored) -> None:
+                self.at = initial
                 if initial != resumed:
                     progress.advance(initial - resumed)
 
@@ -400,13 +458,17 @@ class _Progress:
                 pass
 
             def update(self, n: int | float | None = 1) -> None:
-                progress.advance(int(n or 0))
+                n = int(n or 0)
+                self.at += n
+                if self.at > size:
+                    raise OSError(errno.EFBIG, f"more than the {size} bytes the hub gave it arrived")
+                progress.advance(n)
 
         return ChunkCounter
 
 
 def _hub_client(endpoint: str) -> httpx.Client:
-    """The hub library's own httpx client, with two rules on every request it
+    """The hub library's own httpx client, with four rules on every request it
     sends, wherever in the library the request is made, one hook each.
 
     `bound_by_the_metadata_timeout`: every request without a timeout is
@@ -424,7 +486,20 @@ def _hub_client(endpoint: str) -> httpx.Client:
     listing, at whatever URL the hub's `Link: rel="next"` names. Any
     request whose origin is not the endpoint's, another host or an
     `http://` downgrade of the hub's own, goes without it; so does every
-    request to an `http://` hub that is not on loopback (`_token_may_go`)."""
+    request to an `http://` hub that is not on loopback (`_token_may_go`).
+
+    `one_content_coding`: an answer whose Content-Encoding names more than
+    one coding is refused before a byte of it is read. httpx decodes every
+    coding named, one inside another, a whole read at a time and without
+    bound, so each stacked gzip multiplies what a few bytes on the wire
+    become in memory and on disk; a hub or its CDN compresses once at most.
+
+    `a_length_the_library_reads`: an answer whose length the hub library
+    cannot read is refused before a byte of it is read. Its `http_get`
+    reads the length with its own `_get_file_length_from_http_response`,
+    run here first: `int()` of what follows the `/` of Content-Range, whose
+    ValueError (`*`, the form for a length unknown, among them) nothing
+    catches, a traceback."""
     client = default_client_factory()
 
     def bound_by_the_metadata_timeout(request: httpx.Request) -> None:
@@ -438,7 +513,25 @@ def _hub_client(endpoint: str) -> httpx.Client:
         if not _token_may_go(str(request.url), endpoint):
             request.headers.pop("authorization", None)
 
+    def one_content_coding(response: httpx.Response) -> None:
+        codings = response.headers.get_list("content-encoding", split_commas=True)
+        if len(codings) > 1:
+            raise DownloadError(
+                f"{_quoted(response.url)} answered with {len(codings)} content codings, one inside another, "
+                f"which no hub sends and which would decode without bound; {NOT_A_HUB}"
+            )
+
+    def a_length_the_library_reads(response: httpx.Response) -> None:
+        try:
+            _get_file_length_from_http_response(response)
+        except ValueError as exc:
+            raise DownloadError(
+                f"{_quoted(response.url)} answered with a Content-Range whose length is not a number, "
+                f"which the hub library cannot read; {NOT_A_HUB}"
+            ) from exc
+
     client.event_hooks["request"].extend([bound_by_the_metadata_timeout, token_only_to_the_hub])
+    client.event_hooks["response"].extend([one_content_coding, a_length_the_library_reads])
     return client
 
 
@@ -460,7 +553,7 @@ def _plan(repo: str, endpoint: str | None, cache: Path, storage: Path) -> tuple[
     # them): a name that is absolute, a drive or UNC path, or traverses is
     # refused, and the pointer must land under the snapshot folder.
     if not REGEX_COMMIT_HASH.match(commit):
-        raise DownloadError(f"the hub at {endpoint} says main of {repo} is {commit!r}, not a commit hash; {NOT_A_HUB}")
+        raise DownloadError(f"the hub at {endpoint} says main of {repo} is {_quoted(commit)!r}, not a commit hash; {NOT_A_HUB}")
     blobs = []
     for entry in api.list_repo_tree(repo, recursive=True, revision=commit):
         if not isinstance(entry, RepoFile):
@@ -470,16 +563,31 @@ def _plan(repo: str, endpoint: str | None, cache: Path, storage: Path) -> tuple[
             pointer = _get_pointer_path(str(storage), commit, os.path.join(*entry.path.split("/")))
         except ValueError as exc:
             raise DownloadError(
-                f"the hub at {endpoint} lists {entry.path!r} in {repo}, which is a path, not a file name; {NOT_A_HUB}"
+                f"the hub at {endpoint} lists {_quoted(entry.path)!r} in {repo}, which is a path, not a file name; {NOT_A_HUB}"
             ) from exc
         url = hf_hub_url(repo, entry.path, revision=commit, endpoint=endpoint)
         meta = get_hf_file_metadata(url, endpoint=endpoint)
         if meta.etag is None or meta.size is None:
-            raise DownloadError(f"the hub gave no etag or size for {entry.path}; {RERUN}")
+            raise DownloadError(f"the hub gave no etag or size for {_quoted(entry.path)}; {RERUN}")
         if not (REGEX_SHA256.match(meta.etag) or REGEX_COMMIT_HASH.match(meta.etag)):
             raise DownloadError(
-                f"the hub at {endpoint} gave {entry.path} the etag {meta.etag!r}, "
+                f"the hub at {endpoint} gave {_quoted(entry.path)} the etag {_quoted(meta.etag)!r}, "
                 f"not a sha256 or git blob checksum; {NOT_A_HUB}"
+            )
+        if not _is_count(meta.size):
+            raise DownloadError(
+                f"the hub at {endpoint} gave {_quoted(entry.path)} the size {_quoted(meta.size)}, "
+                f"not a non-negative integer of at most {MAX_SIZE}; {NOT_A_HUB}"
+            )
+        # The hub library's `http_get` refuses a file above its own limit
+        # with a ValueError, a traceback, once other files' bytes have moved;
+        # a real file above it is one this module cannot fetch at all, since
+        # it sets HF_HUB_DISABLE_XET. Read at run time, the pinned library's.
+        if meta.size > constants.MAX_HTTP_DOWNLOAD_SIZE:
+            raise DownloadError(
+                f"the hub at {endpoint} gave {_quoted(entry.path)} the size {meta.size}, above "
+                f"{constants.MAX_HTTP_DOWNLOAD_SIZE}, the hub library's limit for a download over plain HTTP, "
+                "so this command cannot fetch it: check HF_ENDPOINT, and [model] repo in config or --model"
             )
         blobs.append(_Blob(entry.path, meta.location, meta.etag, meta.size,
                            storage / "blobs" / meta.etag, Path(pointer)))
@@ -503,7 +611,7 @@ def _verify(blob: _Blob) -> None:
     if digest.hexdigest() != blob.etag:
         blob.partial.unlink()
         raise DownloadError(
-            f"{blob.filename} did not match the checksum the hub gave for it; "
+            f"{_quoted(blob.filename)} did not match the checksum the hub gave for it; "
             "the partial file is discarded; re-run melampus-id --download-model to fetch it whole"
         )
 
@@ -548,13 +656,13 @@ def _fetch(blob: _Blob, progress: _Progress, headers: dict[str, str], lock_dir: 
                 http_get(
                     blob.url, partial,
                     resume_size=resumed, headers=headers, expected_size=blob.size,
-                    displayed_filename=blob.filename, tqdm_class=progress.tqdm_class(resumed),
+                    displayed_filename=blob.filename, tqdm_class=progress.tqdm_class(resumed, blob.size),
                 )
             except httpx.HTTPError:
                 raise
             except OSError as exc:
                 why = exc.strerror or f"{partial.tell()} bytes arrived where the hub said {blob.size}"
-                raise DownloadError(f"{blob.filename}: {why}; the partial file is kept; {RERUN}") from exc
+                raise DownloadError(f"{_quoted(blob.filename)}: {why}; the partial file is kept; {RERUN}") from exc
         _verify(blob)
         blob.partial.replace(blob.path)
 
@@ -727,29 +835,29 @@ def download_model(
         except GatedRepoError as exc:
             # A GatedRepoError is a RepositoryNotFoundError, but the repo exists:
             # what is missing is the user's access to it.
-            raise DownloadError(
+            raise DownloadError(_quoted_in(
                 f"the model repo {repo} on the hub at {endpoint} is gated: request access to it "
-                f"on the hub, sign in with `hf auth login` (or set HF_TOKEN), then {RERUN} ({exc})"
-            ) from exc
+                f"on the hub, sign in with `hf auth login` (or set HF_TOKEN), then {RERUN} (", exc, ")"
+            )) from exc
         except RepositoryNotFoundError as exc:
-            raise DownloadError(
+            raise DownloadError(_quoted_in(
                 f"the hub at {endpoint} has no model repo named {repo}: "
-                f"check [model] repo in config, or --model ({exc})"
-            ) from exc
+                f"check [model] repo in config, or --model (", exc, ")"
+            )) from exc
         except (httpx.TransportError, RevisionResolutionError) as exc:
             # RevisionResolutionError: the hub could not be reached to resolve
             # `main` and the cache has no refs/main to fall back on.
-            raise DownloadError(
-                f"could not reach the hub at {endpoint} ({type(exc).__name__}: {exc}): "
-                f"check the network, then {RERUN}"
-            ) from exc
+            raise DownloadError(_quoted_in(
+                f"could not reach the hub at {endpoint} ({type(exc).__name__}: ", exc,
+                f"): check the network, then {RERUN}"
+            )) from exc
         except Timeout as exc:
             # The repo's lock, or a blob's: a download of this model (another
             # run of this command), a load of it (the hub library's own
             # download for mlx-vlm's load) or a removal of it holds it.
             raise DownloadError(f"{HELD.format(repo=repo)}, then {RERUN} ({exc})") from exc
         except (OSError, httpx.HTTPError) as exc:
-            raise DownloadError(f"download of {repo} from {endpoint} failed: {exc}; {RERUN}") from exc
+            raise DownloadError(_quoted_in(f"download of {repo} from {endpoint} failed: ", exc, f"; {RERUN}")) from exc
     return path
 
 
@@ -1027,14 +1135,15 @@ def _pull_error(model: str, error: object) -> DownloadError:
     has and resumes them. The words are the server's and land on stderr,
     so in the CLI log and the terminal: only their printable characters,
     by the backend's one rule for every message carrying them
-    (OllamaBackend.plain)."""
-    words = OllamaBackend.plain(str(error))
-    if "file does not exist" in words:
-        return DownloadError(
-            f"Ollama has no model named {model} ({words}): check [model] ollama_model "
-            "is a tag from ollama.com/library"
-        )
-    return DownloadError(f"Ollama could not pull {model}: {words}; {RERUN}")
+    (OllamaBackend.plain), in the room the line has left after the
+    message's own words (`_quoted_in`), so the fix stays on the line
+    however long the server's words (a proxy's error page) run."""
+    if "file does not exist" in _quoted(error, VLMBackend.MAX_ERROR_BYTES):
+        return DownloadError(_quoted_in(
+            f"Ollama has no model named {model} (", error,
+            "): check [model] ollama_model is a tag from ollama.com/library"
+        ))
+    return DownloadError(_quoted_in(f"Ollama could not pull {model}: ", error, f"; {RERUN}"))
 
 
 def _json_object(raw: bytes | str, named: str) -> dict:

@@ -67,7 +67,7 @@ from huggingface_hub.file_download import repo_folder_name
 from huggingface_hub.utils import WeakFileLock
 
 from melampus import download
-from melampus.backend import MLXBackend
+from melampus.backend import MLXBackend, VLMBackend
 from melampus.cli import main
 from melampus.config import ModelConfig
 from melampus.download import (
@@ -465,6 +465,164 @@ def test_download_rejects_a_commit_that_is_not_a_hash_before_it_becomes_a_path(f
     assert sorted(tmp_path.iterdir()) == [tmp_path / "hub"], "the run wrote outside the cache"
     assert not _escape(tmp_path), "the commit became a path"
     assert not [r for r in fake_hub.requests if "/resolve/" in r.path], "files were asked for at a commit that is not one"
+
+
+@pytest.mark.parametrize(("size", "ceiling"), [
+    pytest.param(str(download.MAX_SIZE + 1), download.MAX_SIZE, id="above MAX_SIZE"),
+    pytest.param("-1", download.MAX_SIZE, id="negative"),
+    pytest.param("60000000000", constants.MAX_HTTP_DOWNLOAD_SIZE, id="above the hub library's download limit"),
+])
+def test_cli_refuses_a_file_size_that_is_not_a_count_before_any_byte_moves(
+    fake_hub: FakeHub, hub_env: dict[str, str], size: str, ceiling: int
+):
+    """Card #500. The plan took the size the hub names for each LFS file
+    (X-Linked-Size) unchecked: one above the hub library's own download
+    limit (MAX_HTTP_DOWNLOAD_SIZE, where its `http_get` raises) ended
+    `--download-model` in that ValueError, a traceback, once another file's
+    bytes had moved, and a negative one had the file fetched whole before
+    its size failed. Given a hub naming model.safetensors a size above
+    MAX_SIZE, the ceiling the status holds the listing to (Done-when 1), a
+    size that is not a non-negative integer (Done-when 2), or one within
+    MAX_SIZE and above the library's limit, the run exits 3 naming the
+    file, the size and the ceiling it is over, nothing on stdout, before
+    any byte is asked for from the hub or the host serving the bytes."""
+    with FakeHub().serve() as cdn:
+        fake_hub.bytes_host = cdn.endpoint
+        fake_hub.sizes["model.safetensors"] = size
+        proc = _cli(["--download-model", "--model", FAKE_REPO], hub_env)
+
+    assert proc.returncode == 3, proc.stderr[-3000:]
+    assert "Traceback" not in proc.stderr and f"model.safetensors the size {size}" in proc.stderr, proc.stderr
+    assert str(ceiling) in proc.stderr, proc.stderr
+    assert proc.stdout == "", "the refusal came after the run had started"
+    assert not fake_hub.gets() and not cdn.gets(), "bytes moved before the refusal"
+
+
+def test_download_writes_no_byte_past_the_size_the_hub_gave_the_file(fake_hub: FakeHub, tmp_path: Path):
+    """Security, card #500 (security round 1): a download must not fill the
+    disk past what the plan checked. The plan holds each file to the size
+    the hub names, but the hub library's `http_get` writes every chunk the
+    host sends and compares the length only once the body has ended, so a
+    host sending more than that size, or never stopping, wrote it all. Given
+    a hub naming model.safetensors 10 bytes and a host serving the whole
+    file, the run refuses naming the file and the size, and no byte past
+    the tenth is on disk."""
+    with FakeHub().serve() as cdn:
+        fake_hub.bytes_host = cdn.endpoint
+        fake_hub.sizes["model.safetensors"] = "10"
+        with pytest.raises(DownloadError) as failure:
+            _fetch(fake_hub, tmp_path / "hub")
+
+    assert str(failure.value).startswith("model.safetensors: more than the 10 bytes the hub gave it arrived"), failure.value
+    (partial,) = _incomplete(tmp_path / "hub")
+    assert partial.stat().st_size <= 10, f"{partial.stat().st_size} bytes on disk where the plan checked 10"
+
+
+def test_download_takes_one_content_coding_and_refuses_two_stacked_before_a_byte_is_decoded(
+    fake_hub: FakeHub, tmp_path: Path
+):
+    """Security, card #500 (security round 1): no header shape may reach an
+    unbounded allocation. httpx decodes every coding a response's
+    Content-Encoding names, one inside another, a whole read at a time and
+    without bound, and the hub library's `http_get` passes that header on
+    unchecked: 591 bytes sent as `gzip, gzip` decoded to 256 MiB in one
+    read and took the command from 60 to 1314 MiB, and each further layer
+    multiplies it again. Given a host gzipping the files once, as a server
+    compresses what it serves, the model downloads; given one stacking two
+    gzips, the run refuses naming the codings, before any byte is decoded
+    or written."""
+    with FakeHub().serve() as cdn:
+        fake_hub.bytes_host = cdn.endpoint
+        cdn.gzip_layers = 1
+        path, _ = _fetch(fake_hub, tmp_path / "once")
+        assert snapshot_files(path) == FAKE_FILES
+
+        cdn.gzip_layers = 2
+        with pytest.raises(DownloadError) as failure:
+            _fetch(fake_hub, tmp_path / "stacked")
+
+    assert "2 content codings, one inside another" in str(failure.value), failure.value
+    assert all(p.stat().st_size == 0 for p in _incomplete(tmp_path / "stacked")), "decoded bytes were written"
+
+
+def test_download_refuses_a_content_range_whose_length_is_not_a_number(fake_hub: FakeHub, tmp_path: Path):
+    """Security, card #500 (security round 1): no header shape may reach a
+    traceback. The hub library's `http_get` reads the file's length from the
+    answer's Content-Range with `int()` and nothing catches its ValueError,
+    so a host naming the length `*`, the form for one unknown, ended
+    `--download-model` in a traceback. Given a host answering every GET with
+    `Content-Range: bytes 0-9/*`, the run refuses naming the header and
+    HF_ENDPOINT, and no byte is written."""
+    with FakeHub().serve() as cdn:
+        fake_hub.bytes_host = cdn.endpoint
+        cdn.content_range = "bytes 0-9/*"
+        with pytest.raises(DownloadError) as failure:
+            _fetch(fake_hub, tmp_path / "hub")
+
+    message = str(failure.value)
+    assert "a Content-Range whose length is not a number" in message and "HF_ENDPOINT" in message, message
+    assert all(p.stat().st_size == 0 for p in _incomplete(tmp_path / "hub")), "bytes were written"
+
+
+# A file name a hostile hub may list: the library's path checks take it (no
+# `..`, not absolute), and it carries an escape that retitles the terminal,
+# one that erases the line, a bell and a line break.
+ESCAPING_NAME = "model\x1b]0;hub\x07\x1b[2K\n.safetensors"
+
+
+@pytest.mark.parametrize("size", [
+    pytest.param("-1", id="not a count"),
+    pytest.param("60000000000", id="above the hub library's download limit"),
+    pytest.param("1.5", id="no size"),
+])
+def test_download_refusal_of_a_size_prints_no_control_character_from_the_file_name(tmp_path: Path, size: str):
+    """Security, card #500 (security round 1): the refusal of a size names
+    the file, and the name is the hub's text. It reached stderr as the hub
+    gave it, and from there the terminal, the plugin's download log and its
+    failure dialog: an escape sequence in it retitled the terminal or erased
+    the line, and a line break faked a line of its own. Given a hub listing
+    a file whose name carries them, each of the plan's size refusals is one
+    printable line that still names the file."""
+    files = {"config.json": FAKE_FILES["config.json"], ESCAPING_NAME: FAKE_FILES["model.safetensors"]}
+    with FakeHub(files=files).serve() as hub, FakeHub().serve() as cdn:
+        hub.bytes_host = cdn.endpoint
+        hub.sizes[ESCAPING_NAME] = size
+        with pytest.raises(DownloadError) as failure:
+            _fetch(hub, tmp_path / "hub")
+
+    message = str(failure.value)
+    assert message.isprintable(), repr(message)
+    assert "model ]0;hub [2K .safetensors" in message, message
+
+
+# A file name as long as a hub may nest one, twenty folders deep: the
+# Codex code review of round 2 measured the refusal with 1,223 characters.
+LONG_NAME = "/".join(["folder" * 10] * 20) + "/model.safetensors"
+
+
+@pytest.mark.parametrize("fake_hub", [{"config.json": FAKE_FILES["config.json"],
+                                       LONG_NAME: FAKE_FILES["model.safetensors"]}],
+                         indirect=True, ids=["a file twenty folders deep"])
+def test_cli_refusal_of_a_size_keeps_the_size_and_the_fix_on_the_line_whatever_the_file_name(
+    fake_hub: FakeHub, hub_env: dict[str, str]
+):
+    """Codex code review, round 2 (card #500). A refusal is one printable
+    line cut at MAX_ERROR_BYTES (`VLMBackend.plain`), and the file's name,
+    the hub's text, comes before the size and the fix: a name of some 1,200
+    characters pushed both off the end, so the line named a file and
+    neither what was wrong with it nor what to check. Given a hub naming a
+    file twenty folders deep a size above the hub library's download limit,
+    the one line on stderr names the file by its start, the size, and
+    HF_ENDPOINT, exit 3."""
+    with FakeHub().serve() as cdn:
+        fake_hub.bytes_host = cdn.endpoint
+        fake_hub.sizes[LONG_NAME] = "60000000000"
+        proc = _cli(["--download-model", "--model", FAKE_REPO], hub_env)
+
+    assert proc.returncode == 3, proc.stderr[-3000:]
+    line = proc.stderr.splitlines()[-1]
+    assert line.isprintable() and LONG_NAME[:200] in line, line
+    assert "the size 60000000000" in line and "HF_ENDPOINT" in line, line
 
 
 def test_download_lays_out_the_snapshot_from_the_verified_blobs_and_asks_the_hub_nothing_more(
@@ -1052,6 +1210,65 @@ def test_cli_names_the_cdn_url_on_stderr_without_its_signed_query_when_the_bytes
     assert "503" in proc.stderr and "--download-model" in proc.stderr
     assert f"{cdn.endpoint}/{FAKE_REPO}/resolve/{FAKE_COMMIT}/model.safetensors" in proc.stderr, "the URL's path is not named"
     _assert_no_signature_on(proc.stderr)
+
+
+def test_cli_keeps_the_rerun_advice_on_the_line_when_the_host_serving_the_bytes_answers_a_long_error(
+    fake_hub: FakeHub, hub_env: dict[str, str]
+):
+    """Codex code review, round 2 (card #500). The hub library puts the
+    body of a host's error answer into its exception whole, and the failure
+    line quoted the exception before the re-run advice, the line cut at
+    MAX_ERROR_BYTES: an error text past some 868 characters (a realistic
+    CDN's is some 680) pushed the advice off the end, so the line said the
+    download failed and not what to do. Given a CDN answering every GET
+    with a 503 whose body is a long error text, the one line on stderr
+    names the 503 and ends with the re-run advice, exit 3, with no signed
+    query on stderr."""
+    body = b"<Error><Code>ServiceUnavailable</Code><Message>Please retry.</Message></Error>" * 60
+    _, proc = _cli_with_the_bytes_on_a_signed_cdn(fake_hub, hub_env, outage=True, outage_body=body)
+
+    assert proc.returncode == 3, proc.stderr[-3000:]
+    line = proc.stderr.splitlines()[-1]
+    assert line.isprintable() and "503" in line and line.endswith(download.RERUN), line
+    _assert_no_signature_on(proc.stderr)
+
+
+# The real hub's request id, as its X-Request-Id carries one: the hub
+# library puts it ahead of the hub's reason in its exception's text.
+REQUEST_ID = "Root=1-68d9c1a5-2b3c4d5e6f7a8b9c0d1e2f3a;6c0f2a1e-9b3d-4e5f-8a7b-1c2d3e4f5a6b"
+
+
+@pytest.mark.parametrize(("refusal", "reason", "advice"), [
+    pytest.param(
+        (401, {"X-Error-Message": "Invalid credentials in Authorization header", "X-Request-Id": REQUEST_ID},
+         {"error": "Invalid credentials in Authorization header"}),
+        "Invalid credentials in Authorization header", download.RERUN, id="a bad token"),
+    pytest.param(
+        (401, {"X-Error-Code": "RepoNotFound", "X-Error-Message": "Invalid username or password.",
+               "X-Request-Id": REQUEST_ID},
+         {"error": "Invalid username or password."}),
+        "make sure you are authenticated", "check [model] repo", id="a private repo, signed out"),
+])
+def test_cli_keeps_the_hubs_reason_on_the_line_when_the_hub_refuses_the_request(
+    fake_hub: FakeHub, hub_env: dict[str, str], refusal, reason: str, advice: str
+):
+    """Codex and Claude code review, round 3 (card #500). The hub library's
+    exception text puts some 250 characters (the status, the URL, the
+    request id, a pointer to the HTTP docs) ahead of the hub's reason, and
+    the line quoted it cut at MAX_QUOTED: a revoked or bad token lost
+    `Invalid credentials in Authorization header`, leaving only the advice
+    to re-run, which fails the same way, and a private repo asked for
+    signed out lost the library's hint to sign in. Given the real hub's
+    answer to each, its headers and its body, the one line on stderr
+    carries the hub's reason and the message's own advice, within
+    MAX_ERROR_BYTES, exit 3."""
+    fake_hub.refusal = refusal
+    proc = _cli(["--download-model", "--model", FAKE_REPO], hub_env)
+
+    assert proc.returncode == 3, proc.stderr[-3000:]
+    line = proc.stderr.splitlines()[-1]
+    assert line.isprintable() and len(line) <= VLMBackend.MAX_ERROR_BYTES, line
+    assert reason in line and advice in line, line
 
 
 def test_cli_names_the_file_on_stderr_and_never_the_tail_of_its_signed_url_when_the_resumed_bytes_are_the_wrong_size(
@@ -2635,6 +2852,38 @@ def test_pull_stream_error_words_keep_none_of_the_servers_control_characters(err
     message = str(failure.value)
     assert "fake log line" in message
     assert all(c.isprintable() for c in message), repr(message)
+
+
+# A reverse proxy's error page in front of an Ollama that is down, the shape
+# the Codex code review of round 3 measured: a 502 with 1.3 KB of HTML.
+PROXY_PAGE = (
+    b"<!DOCTYPE html><html><head><title>502 Bad Gateway</title><style>body{font-family:sans-serif;margin:2em}"
+    b"h1{color:#c00}p{max-width:40em}</style></head><body><h1>502 Bad Gateway</h1><p>The proxy server received an "
+    b"invalid response from an upstream server. The upstream server may be down or unreachable. Please contact "
+    b"your network administrator if the problem persists.</p>" + b"<p>Reference: 0123456789abcdef</p>" * 20
+    + b"</body></html>"
+)
+
+
+def test_cli_keeps_the_rerun_advice_on_the_line_when_a_proxy_answers_the_pull_with_a_long_page(
+    monkeypatch, capsys, tmp_path: Path, fake_ollama: FakeOllama
+):
+    """Codex and Claude code review, round 3, finding 2 (card #500). The
+    backend's error carries up to MAX_ERROR_BYTES of the server's body, and
+    the pull's message put the re-run advice after it, the whole line cut at
+    MAX_ERROR_BYTES: past some 950 characters of body the advice fell off.
+    Given a reverse proxy answering the pull with a 502 and its 1.3 KB error
+    page, the one line on stderr names the 502 and ends with the re-run
+    advice, within MAX_ERROR_BYTES, exit 3."""
+    monkeypatch.setattr(download, "cancel_marker_path", lambda: _marker(tmp_path))
+    fake_ollama.proxy_error = (502, PROXY_PAGE)
+
+    err = _refused_through_the_cli(capsys, "--download-model", "502", "--backend", "ollama",
+                                   "--config", str(_ollama_settings(tmp_path, fake_ollama.endpoint)))
+
+    line = err.splitlines()[-1]
+    assert line.isprintable() and len(line) <= VLMBackend.MAX_ERROR_BYTES, line
+    assert line.endswith(download.RERUN), line
 
 
 @pytest.mark.parametrize(

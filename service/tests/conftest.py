@@ -38,6 +38,7 @@ a camera file would, that both the staging test and the committed-frame gate
 from __future__ import annotations
 
 import contextlib
+import gzip
 import hashlib
 import http.client
 import importlib.util
@@ -51,6 +52,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.parse
 import urllib.request
 from collections.abc import Callable, Iterator
 from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
@@ -473,7 +475,8 @@ def built_executable(request: pytest.FixtureRequest) -> Path:
 # 206 and Content-Range), plus the repo info the library's `resolve_revision`
 # resolves the commit from (`GET /api/models/<repo>`). The knobs that drive the resume tests: `cut_after` drops
 # the connection once that many bytes of a file have been sent and starts an
-# outage (503 until `outage` is cleared); `throttle` slows the bytes so a cancel
+# outage (503 until `outage` is cleared, its body `outage_body`, as a CDN's
+# error page, empty unless a test names one); `throttle` slows the bytes so a cancel
 # can land mid-file; `ignore_range` answers a Range request with 200 and the
 # whole file, as a CDN that ignores Range does; `short_resume` answers a Range
 # request with a body that ends that many bytes before the file's end,
@@ -486,11 +489,22 @@ def built_executable(request: pytest.FixtureRequest) -> Path:
 # served with their first byte flipped while the etag stays the true one.
 # `gated` makes the repo one the user has no access to: it is listed, but
 # every resolve answers 403 with X-Error-Code GatedRepo, as huggingface.co
-# does until the user has accepted the repo's terms with their token. `commit`
+# does until the user has accepted the repo's terms with their token.
+# `refusal` is an answer every GET gets instead, (status, headers, JSON body),
+# as the real hub refuses a bad token or a private repo asked for signed
+# out: its X-Error-Code, X-Error-Message and X-Request-Id, its {"error"}. `commit`
 # is what `main` points at: a test moves the branch mid-run by setting it. The
 # etags are the real hub's: the sha256 of an LFS file (the weights), git's blob
 # sha1 of a regular file; `later_etag` is what every HEAD after a file's first
 # answers instead, a hub that changes its story once the run has planned.
+# `sizes` is the text each LFS file's HEAD names as its X-Linked-Size, the
+# size the hub library's metadata call reads before Content-Length: the
+# file's length, unless a test names another. `gzip_layers` is how many times
+# each GET gzips a file's bytes, its Content-Encoding naming gzip once per
+# layer: one is how a server compresses a file it serves, more is a host
+# stacking codings, which httpx decodes one inside another. `content_range`
+# is the Content-Range every GET for a file's bytes answers with in place of
+# its own, sent on a 200 as well as a 206.
 # `next_page` is a URL the tree listing names in its `Link: rel="next"`
 # header, as the real hub paginates a long listing and huggingface_hub
 # follows. `/api/agent-harnesses` is the hub's registry of AI coding agents,
@@ -564,13 +578,17 @@ class FakeHub:
         self.requests: list[HubRequest] = []
         self.cut_after: int | None = None
         self.outage = False
+        self.outage_body = b""
         self.ignore_range = False
+        self.gzip_layers = 0  # times each GET gzips the bytes, Content-Encoding naming each
+        self.content_range: str | None = None  # every GET's Content-Range, in place of its own
         self.short_resume = 0  # bytes a Range answer stops short of the file's end, Content-Length agreeing
         self.throttle: tuple[int, float] | None = None  # (bytes per write, seconds between)
         self.bytes_host: str | None = None
         self.cdn_query: str | None = None  # `Signature=...&Expires=...` on the LFS redirect's Location
         self.corrupt: set[str] = set()
         self.gated = False
+        self.refusal: tuple[int, dict[str, str], dict] | None = None
         self.commit = FAKE_COMMIT  # what `main` points at; a test moves the branch by setting it
         self.later_etag: str | None = None  # the etag of every HEAD after a file's first
         self.next_page: str | None = None  # the tree listing's `Link: rel="next"` URL
@@ -580,6 +598,7 @@ class FakeHub:
             else hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
             for name, data in files.items()
         }
+        self.sizes = {name: str(len(data)) for name, data in files.items()}
 
         class Handler(QuietHandler):
             protocol_version = "HTTP/1.1"
@@ -598,12 +617,14 @@ class FakeHub:
                 """The file a /<repo>/resolve/<revision>/<file> path names, else
                 None; `commit` is what the revision resolves to, as the real
                 hub answers X-Repo-Commit: the commit hash itself, or what the
-                branch points at now."""
+                branch points at now. The file's name is percent-decoded, as
+                the hub library quotes it in the URL and the real hub reads it."""
                 prefix = f"/{hub.repo}/resolve/"
                 path = self.path.partition("?")[0]
                 if not path.startswith(prefix):
                     return None
                 revision, _, name = path[len(prefix):].partition("/")
+                name = urllib.parse.unquote(name)
                 self.commit = revision if REGEX_COMMIT_HASH.match(revision) else hub.commit
                 return name if name in hub.files else None
 
@@ -628,6 +649,10 @@ class FakeHub:
 
             def do_GET(self):  # noqa: N802 - http.server's name
                 self._record()
+                if hub.refusal:
+                    status, headers, body = hub.refusal
+                    self._json(status, body, headers)
+                    return
                 path = self.path.partition("?")[0]
                 if path == "/api/agent-harnesses":
                     self._json(200, {"standardEnvVars": ["AI_AGENT"],
@@ -655,22 +680,29 @@ class FakeHub:
                     return
                 if hub.outage:
                     self.send_response(503)
-                    self.send_header("Content-Length", "0")
+                    self.send_header("Content-Length", str(len(hub.outage_body)))
                     self.end_headers()
+                    self.wfile.write(hub.outage_body)
                     return
                 data = hub.files[name]
                 if name in hub.corrupt:
                     data = bytes([data[0] ^ 0xFF]) + data[1:]
+                for _ in range(hub.gzip_layers):
+                    data = gzip.compress(data)
                 start = 0
                 if self.headers.get("Range") and not hub.ignore_range:
                     start = int(self.headers["Range"].removeprefix("bytes=").partition("-")[0])
                     self.send_response(206)
-                    self.send_header("Content-Range", f"bytes {start}-{len(data) - 1}/{len(data)}")
+                    self.send_header("Content-Range", hub.content_range or f"bytes {start}-{len(data) - 1}/{len(data)}")
                 else:
                     self.send_response(200)
+                    if hub.content_range:
+                        self.send_header("Content-Range", hub.content_range)
                 end = len(data) - (hub.short_resume if start else 0)
                 self.send_header("Content-Length", str(end - start))
                 self.send_header("Accept-Ranges", "bytes")
+                if hub.gzip_layers:
+                    self.send_header("Content-Encoding", ", ".join(["gzip"] * hub.gzip_layers))
                 self.end_headers()
                 if hub.cut_after is not None and hub.cut_after < end:
                     end, hub.cut_after, hub.outage = hub.cut_after, None, not hub.short_resume
@@ -699,7 +731,7 @@ class FakeHub:
                     self.send_response(302)
                     self.send_header("Location", f"{hub.bytes_host}{self.path}" + (f"?{hub.cdn_query}" if hub.cdn_query else ""))
                     self.send_header("X-Linked-Etag", f'"{etag}"')
-                    self.send_header("X-Linked-Size", str(len(hub.files[name])))
+                    self.send_header("X-Linked-Size", hub.sizes[name])
                 else:
                     self.send_response(200)
                     self.send_header("ETag", f'"{etag}"')
@@ -835,6 +867,9 @@ class FakeOllama:
         self.models: dict[str, int] = {}
         self.partial: dict[tuple[str, str], int] = {}
         self.throttle: tuple[int, float] | None = None
+        # (status, HTML page) the pull is answered with instead of the stream,
+        # as a reverse proxy in front of an Ollama that is down answers it.
+        self.proxy_error: tuple[int, bytes] | None = None
         self.endpoint = ""  # set while `serve` runs
         self.server_port = 0
         self.release = threading.Event()
@@ -894,6 +929,13 @@ class FakeOllama:
 
             def _pull(self, body: dict) -> None:
                 ollama.pulls.append(body)
+                if ollama.proxy_error:
+                    code, page = ollama.proxy_error
+                    self.send_response(code)
+                    self.send_header("Content-Type", "text/html")
+                    self.end_headers()
+                    self.wfile.write(page)
+                    return
                 name = body.get("model") or ""
                 if not name:
                     self._answer(400, {"error": "invalid model name"})
