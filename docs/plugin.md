@@ -127,7 +127,8 @@ string; the OS keychain on macOS), under the name of the variable the
 executable reads, `MELAMPUS_OPENAI_KEY` or `MELAMPUS_ANTHROPIC_KEY`. It is
 never in the preferences, never in `melampus.local.toml` or any other file,
 and never logged. When a run starts, `MelampusAnalyze.lua` sets that variable
-in the executable's environment for the picked engine only: `LrTasks.execute`
+in the executable's environment for the picked engine only (with none picked,
+for the engine `--default-cloud` names, below): `LrTasks.execute`
 takes one shell line and nothing else, so the line begins `VAR='key'` (sh) or
 `set "VAR=key" &&` (cmd.exe) ahead of the executable, and the log carries the
 line with the value blanked. The key is not an argument of the executable, but
@@ -143,10 +144,18 @@ as `--backend <engine>`, and the executable's own rules apply: `ollama` needs an
 Ollama server answering (card #406), `openai` and `claude` need their key
 (docs/config.md § `[model]`). When it is unset — the default, *Let Melampus
 choose* — the command carries no `--backend` and the executable decides:
-`[model] backend` in `melampus.local.toml`, else the first engine that can
-run on this machine. A value that is not one of the six is refused before
-anything runs, with the six named, so a stale preference never reaches the
-shell.
+`[model] backend` in `melampus.local.toml`, else the first local engine that
+can run on this machine, `mlx` then `ollama` (docs/config.md § `[model]`).
+A cloud engine's key stored here is a choice (card #498): with the
+preference unset, the command carries the key of the first cloud engine, in
+the picker's order, whose key is stored, in the executable's environment as
+for a picked engine, and `--default-cloud <engine>`, so with nothing local
+able to run the executable takes that engine. With no key stored it names
+none, and with nothing local the run is refused, exit 3, the message naming
+the picker; an API key set in the environment Lightroom was started with
+never makes a cloud engine the default. A value that is not one of the six is
+refused before anything runs, with the six named, so a stale preference
+never reaches the shell.
 
 ### The Download row
 

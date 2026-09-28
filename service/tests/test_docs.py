@@ -1814,6 +1814,33 @@ def test_docs_name_engine_detection_where_the_default_and_the_refusal_are_descri
     assert "`--detect-engines`" in readme, "readme.md does not name --detect-engines"
 
 
+def test_docs_say_the_unchosen_default_takes_a_cloud_engine_only_for_a_key_stored_in_settings():
+    """Card #498, decision (b): with no engine chosen, the default takes the
+    first local engine that can run here, else the cloud engine whose key
+    the user stored in the plugin's Settings (the plugin passes it as
+    `--default-cloud`), else the run is refused naming the picker; a key in
+    the environment alone never makes a cloud engine the default.
+    docs/config.md's `backend` row, docs/plugin.md's engine section and
+    readme.md each describe the default, so each names `--default-cloud`
+    and none still says the default falls through to openai; the backend
+    row, the reference, also names the picker and the environment rule."""
+    backend_row = " ".join(_row(CONFIG_DOC.read_text(encoding="utf-8"), "backend").split())
+    engine = " ".join(_section(PLUGIN_DOC.read_text(encoding="utf-8"), "The engine").split())
+    readme = " ".join(README.read_text(encoding="utf-8").split())
+    for doc, prose in (
+        ("docs/config.md's backend row", backend_row),
+        ("docs/plugin.md § The engine", engine),
+        ("readme.md", readme),
+    ):
+        assert "`--default-cloud`" in prose, f"{doc} does not name --default-cloud"
+        for stale in ("else `openai`", "in the order mlx, ollama, openai, claude",
+                      "else the first engine that can run on this machine"):
+            assert stale not in prose, f"{doc} still says the default falls through to openai: {stale!r}"
+    assert "Where identification runs" in backend_row, "docs/config.md's backend row does not name the picker"
+    assert "an API key set in the environment alone never" in backend_row, (
+        "docs/config.md's backend row does not say an environment key never picks a cloud engine")
+
+
 def test_brief_names_ollama_as_the_windows_executables_local_option():
     """Card #406: Ollama is the local engine on Windows, as readme.md § Windows,
     docs/architecture.md and docs/config.md say. The stack contract's build
