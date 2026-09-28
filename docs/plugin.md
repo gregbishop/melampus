@@ -78,7 +78,9 @@ run can write (docs/config.md § Codex CLI), or started from there, so the
 plugin folder that holds it is kept out of them too. What Lightroom's own environment
 holds is not the plugin's to know; Lightroom's temp directory,
 `/var/folders/<per-user>/T/` in the plugin's log, is outside them. On Windows
-nothing is set: the executable unpacks under `%TEMP%`.
+nothing is set: those directories are the Codex profile's POSIX grant, which
+names nothing there, so the executable does not judge `%TEMP%` or the plugin
+folder against them, even under a drive's `\tmp`.
 
 ---
 

@@ -769,7 +769,8 @@ def test_the_command_the_plugin_builds_runs_where_lightroom_sets_no_tmpdir(
     land where the command said.
 
     On Windows the plugin adds nothing: the directories a CLI engine's
-    profile grants are POSIX paths, and the executable unpacks under %TEMP%.
+    profile grants are POSIX paths, which the executable judges on POSIX
+    only (test_binary.py runs it from, and unpacked under, a drive's \\tmp).
     The same run there shows the command carries no TMPDIR and still runs."""
     plugin_dir = _plugin_folder_holding(built_executable, tmp_path)
     previews = photos

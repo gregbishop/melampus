@@ -888,7 +888,8 @@ t.test('the download command runs the executable for the engine with stdout to t
 			mock.macTemp() .. "'" .. mock.EXECUTABLE .. "' --download-model --backend '" .. engine
 				.. "' >'" .. progress .. "' 2>'" .. log .. "'")
 
-		-- On Windows nothing is set ahead: the executable unpacks under %TEMP%.
+		-- On Windows nothing is set ahead: the directories the executable
+		-- refuses are POSIX paths, judged on POSIX only.
 		local exe = PLUGIN .. '\\melampus.exe'
 		Analyze = loadAnalyze({ windows = true, existing = { [exe] = true } })
 		progress, log = Analyze.downloadFiles()

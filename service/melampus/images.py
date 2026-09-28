@@ -83,7 +83,17 @@ def _granted_containing(root: Path) -> str | None:
     still runs first, for a granted directory this machine does not have at
     all — /var/tmp is absent on some Linux images, and `mkdir(parents=True)`
     would make it — where identity has nothing to compare against.
+
+    On POSIX only. The four are the Codex profile's grant, POSIX paths; on
+    Windows `Path("/tmp")` is the current drive's \\tmp and NTFS ignores
+    case, so identity matched a TEMP at C:\\TMP or a plugin folder under
+    C:\\tmp and refused every analysis there, with advice to set a $TMPDIR
+    the Windows bootloader never reads (review round 2 on PR #28). There
+    they name nothing a run is granted, so every check that goes through
+    here passes.
     """
+    if os.name != "posix":
+        return None
     ancestors = (root, *root.parents)
     for granted in MINIMAL_GRANTED_TEMP:
         target = Path(granted)

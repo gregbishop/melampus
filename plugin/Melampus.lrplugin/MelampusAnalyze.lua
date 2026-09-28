@@ -166,8 +166,10 @@ end
 -- engine's run can write there (images.staging_root, PR #28). What
 -- Lightroom's environment holds is not the plugin's to know; its temp folder
 -- (/var/folders/<per-user>/T/ in the plugin's log) is outside those
--- directories. cmd.exe gets nothing more: they are POSIX paths, and the
--- executable unpacks under %TEMP% on Windows.
+-- directories. cmd.exe gets nothing more: those directories are the Codex
+-- profile's POSIX grant, which names nothing on Windows, so the executable
+-- judges nothing against them there (images._granted_containing), wherever
+-- %TEMP% or the plugin folder is.
 local function shellLine(command)
 	if WIN_ENV then return '"' .. command .. '"' end
 	return environmentPrefix('TMPDIR', LrPathUtils.getStandardFilePath('temp')) .. command
