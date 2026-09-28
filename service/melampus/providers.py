@@ -371,10 +371,14 @@ CODEX_PROGRAM = "codex"
 #: session producing no output at all. So a photograph's text can leave a
 #: payload or an instruction in those directories for the next run to read
 #: back: `--ephemeral` keeps no session per frame, but the channel
-#: survives from one frame to the next. Whether that is acceptable for
-#: this engine is the owner's call; the measurement is recorded in
-#: security review round 9 on PR #17, and the decision it leaves open is
-#: card #505. docs/config.md says the same and
+#: survives from one frame to the next. That write boundary is accepted,
+#: not closed (card #505, 2026-09-28): the engine is billed to the user's
+#: own plan, never per call; melampus never reads what a run leaves in
+#: those directories (the answer is what Codex prints, and
+#: images.staging_root keeps the staged folder out of them); and melampus
+#: wraps no CLI engine in a sandbox of its own. It is revisited when
+#: Codex's permission profiles leave beta; the measurement is recorded in
+#: security review round 9 on PR #17. docs/config.md says the same and
 #: test_docs.py pins it. Permission profiles are documented
 #: as beta ("under active development and may change"); the shape here is
 #: the documentation's own example, pinned by

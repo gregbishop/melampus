@@ -2181,7 +2181,16 @@ def test_config_doc_says_the_codex_profile_leaves_the_shared_temp_directories_wr
     The owner has since filed that card, #505, so the sentence names it as
     well: security review round 9 on PR #17 is where the measurement is,
     card #505 is where the decision is recorded, and the prose no longer
-    says the card is his to file."""
+    says the card is his to file.
+
+    Card #505 has since decided it: the boundary is accepted and stated, not
+    closed, and revisited when Codex's permission profiles leave beta. So
+    the prose no longer leaves an open call; it says what was decided, where
+    (card #505), and why: the engine bills to the user's own plan, never per
+    call; melampus never reads what a run leaves in those directories; and
+    melampus wraps no CLI engine in a sandbox of its own, so each reaches as
+    far as its own CLI lets it. The negatives keep the prose from going back
+    to an undecided call or an unnamed card."""
     prose = " ".join(CONFIG_DOC.read_text(encoding="utf-8").split())
     for path in ("`/tmp`", "`/private/tmp`", "`/var/tmp`", "`/private/var/tmp`"):
         assert path in prose, f"docs/config.md does not name {path} under the profile"
@@ -2189,13 +2198,21 @@ def test_config_doc_says_the_codex_profile_leaves_the_shared_temp_directories_wr
         assert said in prose, f"docs/config.md does not say {said!r} of the shared temp directories"
     assert "no write anywhere" not in prose, (
         "docs/config.md still says the profile writes nowhere; writes land in the shared temp directories")
-    deferral = re.search(r"Whether that is acceptable[^.]*\.", prose)
-    assert deferral, "docs/config.md no longer says whose call the shared temp writes are"
-    for said in ("the owner's call", "security review round 9", "PR #17", "card #505"):
-        assert said in deferral.group(0), (
-            f"docs/config.md does not say {said!r} where it leaves the shared temp writes to the owner")
-    assert "own card" not in prose, (
-        "docs/config.md defers the decision to a card it does not name; name where the decision is recorded")
+    decision = re.search(r"That write boundary is accepted.*?PR #17\.", prose)
+    assert decision, "docs/config.md does not say what was decided about the shared temp writes"
+    for said in (
+        "card #505",  # where it was decided
+        "never per call",  # why: the engine bills to the user's own plan
+        "never reads",  # why: melampus does not read what a run leaves there
+        "sandbox of its own",  # why: the same holds of every CLI engine a user installs
+        "leave beta",  # when it is revisited
+        "security review round 9",  # where the measurement is
+    ):
+        assert said in decision.group(0), (
+            f"docs/config.md does not say {said!r} where it states the shared temp writes are accepted")
+    for undecided in ("the owner's call", "leaves open", "own card"):
+        assert undecided not in prose, (
+            f"docs/config.md still says {undecided!r}; card #505 decided the shared temp writes")
 
 
 def test_config_doc_says_the_staged_folder_sits_outside_the_shared_temp_directories():

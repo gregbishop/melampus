@@ -320,9 +320,18 @@ and dropping `":minimal" = "read"` left the session producing no output at
 all — so text rendered in a photograph can leave a payload or an
 instruction in those directories for the next run to read back.
 `--ephemeral` keeps no session per frame, but it does not close that
-channel: it survives from one frame to the next. Whether that is acceptable
-for this engine is the owner's call; the measurement is recorded in security
-review round 9 on PR #17, and the decision it leaves open is card #505.
+channel: it survives from one frame to the next. That write boundary is
+accepted, not closed: card #505 decided so on 2026-09-28, rather than
+dropping the engine or running it inside an outer sandbox. The engine is the
+user's own install, billed to their own plan and never per call; melampus
+never reads what a run leaves in those directories, since it takes the
+answer from what Codex prints and stages outside them, as above (keep the
+photographs, and any file melampus is pointed at, out of them too: a run can
+overwrite what is there); and it is no different for any CLI engine a user
+installs: melampus wraps none of them in a sandbox of its own, so each
+reaches as far as that CLI's own mechanism lets it. It is revisited when
+Codex's permission profiles leave beta. The measurement is recorded in
+security review round 9 on PR #17.
 Claude Code's template confines reads
 the same way with its own mechanism (`--tools Read`, `--allowedTools
 Read(/{image})`, *Claude Code* above). What the commands Codex runs can
