@@ -2190,7 +2190,20 @@ def test_config_doc_says_the_codex_profile_leaves_the_shared_temp_directories_wr
     call; melampus never reads what a run leaves in those directories; and
     melampus wraps no CLI engine in a sandbox of its own, so each reaches as
     far as its own CLI lets it. The negatives keep the prose from going back
-    to an undecided call or an unnamed card."""
+    to an undecided call or an unnamed card.
+
+    Security review round 1 on PR #28: "never reads" held for the staged
+    folder and the reply, not for the executable. It unpacks itself into
+    $TMPDIR at every launch, and into /tmp when that is unset (measured on
+    a Mac: the unpack directory, prompts/ in it, held under /private/tmp by
+    a launch without $TMPDIR, and under /var/folders by one with it), and
+    PromptLibrary.render reads the prompt file from there for every frame,
+    once per question. Measured with `codex sandbox -P` under this profile,
+    codex-cli 0.158.0, no model call: a command overwrote a prompt file in a
+    user-owned 0700 folder under /tmp made outside the sandbox. So a run
+    could rewrite the prompt melampus sends next, the same frame's
+    identification call included. The passage must say that the claim
+    depends on where the executable unpacks, and what to set."""
     prose = " ".join(CONFIG_DOC.read_text(encoding="utf-8").split())
     for path in ("`/tmp`", "`/private/tmp`", "`/var/tmp`", "`/private/var/tmp`"):
         assert path in prose, f"docs/config.md does not name {path} under the profile"
@@ -2207,6 +2220,9 @@ def test_config_doc_says_the_codex_profile_leaves_the_shared_temp_directories_wr
         "sandbox of its own",  # why: the same holds of every CLI engine a user installs
         "leave beta",  # when it is revisited
         "security review round 9",  # where the measurement is
+        "unpacks itself",  # the executable's own files are read from $TMPDIR
+        "its prompts",  # what melampus reads there, for every frame
+        "`$TMPDIR` set outside them",  # what keeps "never reads" true
     ):
         assert said in decision.group(0), (
             f"docs/config.md does not say {said!r} where it states the shared temp writes are accepted")

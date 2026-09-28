@@ -325,11 +325,16 @@ accepted, not closed: card #505 decided so on 2026-09-28, rather than
 dropping the engine or running it inside an outer sandbox. The engine is the
 user's own install, billed to their own plan and never per call; melampus
 never reads what a run leaves in those directories, since it takes the
-answer from what Codex prints and stages outside them, as above (keep the
-photographs, and any file melampus is pointed at, out of them too: a run can
-overwrite what is there); and it is no different for any CLI engine a user
-installs: melampus wraps none of them in a sandbox of its own, so each
-reaches as far as that CLI's own mechanism lets it. It is revisited when
+answer from what Codex prints and stages outside them, as above, so long as
+nothing else it reads is in them, since a run can overwrite what is there:
+keep the photographs, and any file melampus is pointed at, out of them, and
+run the executable with `$TMPDIR` set outside them, because it unpacks itself
+into `$TMPDIR` at every launch, into `/tmp` when that is unset, and reads its
+prompts from there for every frame, so a run could rewrite the prompt the
+next question is sent (measured on a Mac, security review round 1 on PR
+#28); and it is no different for any CLI engine a user installs:
+melampus wraps none of them in a sandbox of its own, so each reaches as far
+as that CLI's own mechanism lets it. It is revisited when
 Codex's permission profiles leave beta. The measurement is recorded in
 security review round 9 on PR #17.
 Claude Code's template confines reads

@@ -375,7 +375,11 @@ CODEX_PROGRAM = "codex"
 #: not closed (card #505, 2026-09-28): the engine is billed to the user's
 #: own plan, never per call; melampus never reads what a run leaves in
 #: those directories (the answer is what Codex prints, and
-#: images.staging_root keeps the staged folder out of them); and melampus
+#: images.staging_root keeps the staged folder out of them) so long as
+#: nothing else it reads is in them: the executable unpacks itself into
+#: $TMPDIR, /tmp when that is unset, and PromptLibrary.render reads its
+#: prompts from there for every frame, so it must run with $TMPDIR set
+#: outside them (security review round 1 on PR #28); and melampus
 #: wraps no CLI engine in a sandbox of its own. It is revisited when
 #: Codex's permission profiles leave beta; the measurement is recorded in
 #: security review round 9 on PR #17. docs/config.md says the same and
