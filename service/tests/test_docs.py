@@ -736,6 +736,24 @@ def test_the_action_pinning_gate_takes_only_a_whole_sha_as_a_pin(tmp_path, monke
     assert "ci.yml" not in reported, reported
 
 
+def test_the_action_pinning_gate_finds_no_key_inside_a_quoted_scalar(tmp_path, monkeypatch):
+    """Open finding 3 at b275279 (Codex round 2, 3): a `uses:` key was
+    found by a pattern over the line's code, so the words `uses:
+    actions/checkout@v4` inside a quoted `name:` counted as a second key, and
+    a step pinned correctly was reported as holding two action references.
+    A key is what YAML parses as one, however it is quoted, and the text of
+    a quoted scalar never is. ci.yml here is two such steps, single- and
+    double-quoted, each pinned, so the gate passes on it."""
+    sha = "11d5960a326750d5838078e36cf38b85af677262"
+    (tmp_path / "ci.yml").write_text(
+        "      - {name: 'Replaces uses: actions/checkout@v4', uses: actions/checkout@" + sha + "} # v4.4.0\n"
+        '      - {name: "Replaces uses: actions/checkout@v4", uses: actions/checkout@' + sha + "} # v4.4.0\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setitem(globals(), "WORKFLOWS", tmp_path)
+    test_every_workflow_pins_every_action_to_a_commit_sha_with_its_version()
+
+
 RELEASE_ZIPS = ("Melampus-macOS.zip", "Melampus-Windows.zip")
 
 
