@@ -17,8 +17,8 @@ the reason.
 | `ollama` | on this machine, through Ollama; macOS or Windows | nothing |
 | `openai` | OpenAI's API | an API key, per call |
 | `claude` | Anthropic's API | an API key, per call |
-| `claude-code` | Claude Code, installed and signed in | the Claude subscription it is signed in to |
-| `codex` | Codex CLI, installed and signed in | the ChatGPT subscription it is signed in to |
+| `claude-code` | Anthropic's servers, through Claude Code installed and signed in here | the Claude subscription it is signed in to |
+| `codex` | OpenAI's servers, through Codex CLI installed and signed in here | the ChatGPT subscription it is signed in to |
 
 On the two local engines no image leaves the machine: `mlx` runs inside the
 executable, and `ollama` talks to the Ollama server on this machine — unless
