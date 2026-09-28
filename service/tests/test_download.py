@@ -2256,9 +2256,10 @@ def test_the_models_load_waits_for_a_removal_and_then_lays_the_model_out_from_no
     """Codex review 10, code finding 1 and security finding 1 (download.py:833),
     the other side: a load starting under a removal, at the rename or at
     the deletion, fetched into a folder the removal was setting aside and
-    deleting. The load waits at the repo's lock, as the hub library's own
-    download waits at a blob's, without bound: it fetches nothing until
-    the removal has returned, then lays the model out from nothing."""
+    deleting. The load waits at the repo's lock, LOCK_TIMEOUT as the
+    download does (card #501; a removal ends well within it): it fetches
+    nothing until the removal has returned, then lays the model out from
+    nothing."""
     cache = tmp_path / "hub"
     _fetch(fake_hub, cache)
     _cli_sees_the_cache(monkeypatch, cache)
@@ -2298,6 +2299,67 @@ def test_the_load_of_a_folder_of_weights_on_disk_takes_no_lock(
 
     assert loading.is_set() and fake_hub.requests == []
     assert not cache.exists(), "the load of a folder on disk touched the cache"
+
+
+@contextlib.contextmanager
+def _a_download_holds_the_repos_lock(cache: Path, most: float = 10) -> Iterator[threading.Event]:
+    """Another run holding FAKE_REPO's lock in `cache` the way a download
+    from Settings holds it for its whole run: a thread takes the real lock
+    (`repo.lock`, the one `download_model` takes) and keeps it until the
+    block ends, or for `most` seconds, so a run that waits for it rather
+    than refusing comes back (a red, not a hang). Yields the event that is
+    set while the thread holds the lock."""
+    holding, done = threading.Event(), threading.Event()
+
+    def hold() -> None:
+        with WeakFileLock(_lock_dir(cache) / download.REPO_LOCK):
+            holding.set()
+            done.wait(timeout=most)
+            holding.clear()
+
+    holder = threading.Thread(target=hold)
+    holder.start()
+    assert holding.wait(timeout=5), "the helper never took the repo's lock"
+    try:
+        yield holding
+    finally:
+        done.set()
+        holder.join()
+
+
+# What the load's refusal says after the lock's holders (card #501).
+LOAD_REFUSED = (
+    ", then run the analysis again. If the model is being downloaded, "
+    "the Download in Settings shows its progress."
+)
+
+
+def test_the_models_load_refuses_while_a_download_holds_the_repos_lock(
+    fake_hub: FakeHub, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Card #501. The load waited at the repo's lock without bound and said
+    nothing, so an analysis started while Settings downloads the model sat
+    at "loading" until the download ended. It waits LOCK_TIMEOUT, as the
+    download does (shortened here), then refuses the way a
+    machine that cannot run the engine as configured is refused
+    (`providers.BackendUnavailable`, one of BATCH_FATAL): the lock's
+    holders, the one sentence the download and the removal refuse with,
+    and the Download in Settings. Nothing is loaded or fetched."""
+    from melampus.providers import BackendUnavailable
+
+    cache = tmp_path / "hub"
+    _cli_sees_the_cache(monkeypatch, cache)
+    loading = _mlx_vlm_loading_through_the_hub(monkeypatch, fake_hub)
+    monkeypatch.setattr(download, "LOCK_TIMEOUT", 0.2)
+
+    with _a_download_holds_the_repos_lock(cache) as holding:
+        with pytest.raises(BackendUnavailable) as refused:
+            MLXBackend(FAKE_REPO).warmup()
+        refused_while_held = holding.is_set()
+
+    assert refused_while_held, "the load waited for the download instead of refusing"
+    assert str(refused.value) == HELD.format(repo=FAKE_REPO) + LOAD_REFUSED, str(refused.value)
+    assert not loading.is_set() and fake_hub.requests == [], "the load ran under the download"
 
 
 def test_model_status_flag_needs_no_folder_and_prints_one_json_object_for_the_configured_repo(

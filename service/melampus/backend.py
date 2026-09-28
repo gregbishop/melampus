@@ -103,7 +103,9 @@ class MLXBackend(VLMBackend):
 
         # `load` fetches what the cache does not hold of the repo, so the load
         # takes the repo's lock the download and the removal take: a removal
-        # in the meantime is refused, one already running is waited for.
+        # in the meantime is refused, and a load finding the lock held (a
+        # download from Settings, most often) waits LOCK_TIMEOUT for it and is
+        # then refused, BackendUnavailable naming the Download in Settings.
         with load_lock(self.repo):
             self._model, self._processor = load(self.repo)
             self._config = load_config(self.repo)
