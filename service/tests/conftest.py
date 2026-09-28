@@ -38,6 +38,7 @@ a camera file would, that both the staging test and the committed-frame gate
 from __future__ import annotations
 
 import contextlib
+import gzip
 import hashlib
 import http.client
 import importlib.util
@@ -493,7 +494,10 @@ def built_executable(request: pytest.FixtureRequest) -> Path:
 # answers instead, a hub that changes its story once the run has planned.
 # `sizes` is the text each LFS file's HEAD names as its X-Linked-Size, the
 # size the hub library's metadata call reads before Content-Length: the
-# file's length, unless a test names another.
+# file's length, unless a test names another. `gzip_layers` is how many times
+# each GET gzips a file's bytes, its Content-Encoding naming gzip once per
+# layer: one is how a server compresses a file it serves, more is a host
+# stacking codings, which httpx decodes one inside another.
 # `next_page` is a URL the tree listing names in its `Link: rel="next"`
 # header, as the real hub paginates a long listing and huggingface_hub
 # follows. `/api/agent-harnesses` is the hub's registry of AI coding agents,
@@ -568,6 +572,7 @@ class FakeHub:
         self.cut_after: int | None = None
         self.outage = False
         self.ignore_range = False
+        self.gzip_layers = 0  # times each GET gzips the bytes, Content-Encoding naming each
         self.short_resume = 0  # bytes a Range answer stops short of the file's end, Content-Length agreeing
         self.throttle: tuple[int, float] | None = None  # (bytes per write, seconds between)
         self.bytes_host: str | None = None
@@ -665,6 +670,8 @@ class FakeHub:
                 data = hub.files[name]
                 if name in hub.corrupt:
                     data = bytes([data[0] ^ 0xFF]) + data[1:]
+                for _ in range(hub.gzip_layers):
+                    data = gzip.compress(data)
                 start = 0
                 if self.headers.get("Range") and not hub.ignore_range:
                     start = int(self.headers["Range"].removeprefix("bytes=").partition("-")[0])
@@ -675,6 +682,8 @@ class FakeHub:
                 end = len(data) - (hub.short_resume if start else 0)
                 self.send_header("Content-Length", str(end - start))
                 self.send_header("Accept-Ranges", "bytes")
+                if hub.gzip_layers:
+                    self.send_header("Content-Encoding", ", ".join(["gzip"] * hub.gzip_layers))
                 self.end_headers()
                 if hub.cut_after is not None and hub.cut_after < end:
                     end, hub.cut_after, hub.outage = hub.cut_after, None, not hub.short_resume

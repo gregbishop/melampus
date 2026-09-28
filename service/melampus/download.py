@@ -420,7 +420,7 @@ class _Progress:
 
 
 def _hub_client(endpoint: str) -> httpx.Client:
-    """The hub library's own httpx client, with two rules on every request it
+    """The hub library's own httpx client, with three rules on every request it
     sends, wherever in the library the request is made, one hook each.
 
     `bound_by_the_metadata_timeout`: every request without a timeout is
@@ -438,7 +438,13 @@ def _hub_client(endpoint: str) -> httpx.Client:
     listing, at whatever URL the hub's `Link: rel="next"` names. Any
     request whose origin is not the endpoint's, another host or an
     `http://` downgrade of the hub's own, goes without it; so does every
-    request to an `http://` hub that is not on loopback (`_token_may_go`)."""
+    request to an `http://` hub that is not on loopback (`_token_may_go`).
+
+    `one_content_coding`: an answer whose Content-Encoding names more than
+    one coding is refused before a byte of it is read. httpx decodes every
+    coding named, one inside another, a whole read at a time and without
+    bound, so each stacked gzip multiplies what a few bytes on the wire
+    become in memory and on disk; a hub or its CDN compresses once at most."""
     client = default_client_factory()
 
     def bound_by_the_metadata_timeout(request: httpx.Request) -> None:
@@ -452,7 +458,16 @@ def _hub_client(endpoint: str) -> httpx.Client:
         if not _token_may_go(str(request.url), endpoint):
             request.headers.pop("authorization", None)
 
+    def one_content_coding(response: httpx.Response) -> None:
+        codings = response.headers.get_list("content-encoding", split_commas=True)
+        if len(codings) > 1:
+            raise DownloadError(
+                f"{response.url} answered with {len(codings)} content codings, one inside another, "
+                f"which no hub sends and which would decode without bound; {NOT_A_HUB}"
+            )
+
     client.event_hooks["request"].extend([bound_by_the_metadata_timeout, token_only_to_the_hub])
+    client.event_hooks["response"].append(one_content_coding)
     return client
 
 

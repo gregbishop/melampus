@@ -518,6 +518,33 @@ def test_download_writes_no_byte_past_the_size_the_hub_gave_the_file(fake_hub: F
     assert partial.stat().st_size <= 10, f"{partial.stat().st_size} bytes on disk where the plan checked 10"
 
 
+def test_download_takes_one_content_coding_and_refuses_two_stacked_before_a_byte_is_decoded(
+    fake_hub: FakeHub, tmp_path: Path
+):
+    """Security, card #500 (security round 1): no header shape may reach an
+    unbounded allocation. httpx decodes every coding a response's
+    Content-Encoding names, one inside another, a whole read at a time and
+    without bound, and the hub library's `http_get` passes that header on
+    unchecked: 591 bytes sent as `gzip, gzip` decoded to 256 MiB in one
+    read and took the command from 60 to 1314 MiB, and each further layer
+    multiplies it again. Given a host gzipping the files once, as a server
+    compresses what it serves, the model downloads; given one stacking two
+    gzips, the run refuses naming the codings, before any byte is decoded
+    or written."""
+    with FakeHub().serve() as cdn:
+        fake_hub.bytes_host = cdn.endpoint
+        cdn.gzip_layers = 1
+        path, _ = _fetch(fake_hub, tmp_path / "once")
+        assert snapshot_files(path) == FAKE_FILES
+
+        cdn.gzip_layers = 2
+        with pytest.raises(DownloadError) as failure:
+            _fetch(fake_hub, tmp_path / "stacked")
+
+    assert "2 content codings, one inside another" in str(failure.value), failure.value
+    assert all(p.stat().st_size == 0 for p in _incomplete(tmp_path / "stacked")), "decoded bytes were written"
+
+
 def test_download_lays_out_the_snapshot_from_the_verified_blobs_and_asks_the_hub_nothing_more(
     fake_hub: FakeHub, tmp_path: Path
 ):
