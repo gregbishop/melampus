@@ -3817,37 +3817,57 @@ def test_cli_pull_cancelled_by_a_signal_prints_cancelled_exit_4_and_the_next_pul
 
 # Run in a fresh interpreter, so a SIGINT that lands outside the pull's
 # handler, or a thread left stuck on a lock, is that process's, not the
-# suite's. `--download-model` through `main` as it is, counting the lock
-# releases the main thread makes inside `pull_model`; then once per
-# release, SIGINT delivered as that release returns (os.kill runs the
-# handler before it returns). Each pull's exit code and last protocol line.
+# suite's. `--download-model` through `main` as it is, naming each lock
+# release the main thread makes inside `pull_model` by its site: the
+# melampus line that led to it, the line it returns into, and which
+# occurrence of that pair it is. Then one pull per site, SIGINT delivered
+# as that release returns (os.kill runs the handler before it returns):
+# the site the signal was delivered at, and the pull's exit code and last
+# protocol line. Targeted by site, not by count, since a pull need not
+# make the same releases in the same order: a thread that runs before
+# Thread.start() waits for it leaves the wait, and its release, out
+# (Codex review, round 1). A long switch interval keeps a started thread
+# from running before the main thread waits for it, so every pull makes
+# the waits the test is for.
 SIGNAL_AT_EACH_RELEASE = """\
-import contextlib, io, json, os, signal, sys, _thread
+import collections, contextlib, io, json, os, signal, sys, _thread
 from pathlib import Path
 from melampus.cli import main
 from melampus.download import pull_model
 
 LOCKS = (type(_thread.allocate_lock()), type(_thread.RLock()))
+MELAMPUS = str(Path(pull_model.__code__.co_filename).parent)
 
 
-def in_the_pull(frame):
+def line(frame):
+    return f"{Path(frame.f_code.co_filename).name}:{frame.f_code.co_name}:{frame.f_lineno}"
+
+
+def site(frame):
+    release, caller = line(frame), None
     while frame is not None:
+        if caller is None and frame.f_code.co_filename.startswith(MELAMPUS):
+            caller = line(frame)
         if frame.f_code is pull_model.__code__:
-            return True
+            return f"{caller} > {release}"
         frame = frame.f_back
-    return False
+    return None
 
 
-def pull(signal_at):
-    releases = []
+def pull(target=None):
+    made, signalled = collections.Counter(), []
 
     def on_return(frame, event, arg):
         if (event == "c_return" and isinstance(getattr(arg, "__self__", None), LOCKS)
-                and arg.__name__ in ("release", "__exit__") and in_the_pull(frame)):
-            releases.append(f"{Path(frame.f_code.co_filename).name}:{frame.f_code.co_name}:{frame.f_lineno}")
-            if len(releases) == signal_at:
-                sys.setprofile(None)
-                os.kill(os.getpid(), signal.SIGINT)
+                and arg.__name__ in ("release", "__exit__")):
+            at = site(frame)
+            if at is not None:
+                made[at] += 1
+                at = f"{at} #{made[at]}"
+                if at == target:
+                    sys.setprofile(None)
+                    signalled.append(at)
+                    os.kill(os.getpid(), signal.SIGINT)
 
     out = io.StringIO()
     sys.setprofile(on_return)
@@ -3856,18 +3876,14 @@ def pull(signal_at):
             code = main(sys.argv[1:])
     finally:
         sys.setprofile(None)
-    return releases, [code, out.getvalue().splitlines()[-1:]]
+    sites = [f"{at} #{n}" for at, count in made.items() for n in range(1, count + 1)]
+    return sites, {"signalled": signalled, "ended": [code, out.getvalue().splitlines()[-1:]]}
 
 
-def ended_with_the_signal_at(signal_at):
-    releases, ended = pull(signal_at)
-    return ended if len(releases) == signal_at else "the pull ended before the signal was delivered"
-
-
-pull(signal_at=0)  # the first imports what the pull imports on first use: module locks the next do not take
-releases, uninterrupted = pull(signal_at=0)
-ended = {f"{signal_at} {where}": ended_with_the_signal_at(signal_at) for signal_at, where in enumerate(releases, 1)}
-print(json.dumps({"uninterrupted": uninterrupted, "releases": len(releases), "ended": ended}))
+sys.setswitchinterval(10.0)
+pull()  # the first imports what the pull imports on first use: module locks the next do not take
+sites, uninterrupted = pull()
+print(json.dumps({"uninterrupted": uninterrupted["ended"], "at": {target: pull(target)[1] for target in sites}}))
 """
 
 
@@ -3885,8 +3901,10 @@ def test_cli_pull_cancelled_by_a_signal_inside_any_lock_release_prints_cancelled
     RuntimeError, named as Ollama's failure, exit 3, the cancel lost.
     Given the pull through the entry point, and SIGINT delivered as each
     lock release the main thread makes in the pull returns, one pull per
-    release: every pull prints `cancelled` and exits 4, and nothing is
-    written on stderr."""
+    release, targeted by its site: the signal is delivered at each site,
+    the two thread starts' `_release_save` in `_Deadline.__enter__` among
+    them, every pull prints `cancelled` and exits 4, and nothing is written
+    on stderr."""
     settings = _ollama_settings(tmp_path, fake_ollama.endpoint)
     proc = subprocess.run(
         [sys.executable, "-c", SIGNAL_AT_EACH_RELEASE, "--download-model", "--backend", "ollama",
@@ -3896,8 +3914,13 @@ def test_cli_pull_cancelled_by_a_signal_inside_any_lock_release_prints_cancelled
     assert proc.returncode == 0, f"exit {proc.returncode}:\n{proc.stderr[-3000:]}"
     report = json.loads(proc.stdout)
     assert report["uninterrupted"] == [0, [f"done {FAKE_MODEL}"]]
-    assert report["releases"] > 0, "the pull released no lock on the main thread: nothing was delivered"
-    broken = {where: ended for where, ended in report["ended"].items() if ended != [EXIT_CANCELLED, ["cancelled"]]}
+    starts = [target for target in report["at"]
+              if "backend.py:__enter__" in target and "threading.py:_release_save" in target]
+    assert len(starts) == 2, f"the timer's and the watcher's start were not both among the sites: {list(report['at'])}"
+    missed = {target: pull["signalled"] for target, pull in report["at"].items() if pull["signalled"] != [target]}
+    assert not missed, f"the signal was not delivered at the site aimed at: {missed}"
+    broken = {target: pull["ended"] for target, pull in report["at"].items()
+              if pull["ended"] != [EXIT_CANCELLED, ["cancelled"]]}
     assert not broken, (broken, proc.stderr[-3000:])
     assert proc.stderr == "", f"the process wrote on stderr:\n{proc.stderr[-3000:]}"
 
