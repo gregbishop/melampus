@@ -435,11 +435,15 @@ is discarded and the re-run fetches it whole; a file that arrived at a size othe
 than the one the hub named, so its partial is kept and the re-run resumes it (the
 message names the file and both sizes, never the hub library's own wording, which
 after its own retry of a dropped connection names the file by the tail of its
-URL); a hub whose answers are not a hub's,
+URL; a host sending more is stopped at the size named, the chunk that would pass
+it never written, and the message names the file and that size); a hub whose answers are not a hub's,
 an etag that is not a checksum or a commit that is not a hash, neither of which
 is let become a path in the cache, or a file size that is not a non-negative
 integer of at most 2^53 (`download.MAX_SIZE`, the status's own ceiling), refused
-before any byte moves with the file and the size named, so check `HF_ENDPOINT`;
+before any byte moves with the file and the size named, or an answer whose
+content codings are stacked one inside another (decoded, a few bytes on the wire
+become gigabytes) or whose Content-Range gives a length that is not a number,
+refused before a byte of it is read with its URL named, so check `HF_ENDPOINT`;
 a file larger than the hub library's own limit for a download over plain HTTP
 (`huggingface_hub.constants.MAX_HTTP_DOWNLOAD_SIZE`, 50 GB in the pinned
 version, where its download would otherwise end in a traceback), which this
