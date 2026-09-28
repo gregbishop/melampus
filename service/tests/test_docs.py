@@ -754,6 +754,25 @@ def test_the_action_pinning_gate_finds_no_key_inside_a_quoted_scalar(tmp_path, m
     test_every_workflow_pins_every_action_to_a_commit_sha_with_its_version()
 
 
+def test_the_action_pinning_gate_reports_a_workflow_that_does_not_parse(tmp_path, monkeypatch):
+    """The gate reads each workflow as YAML parses it, so a workflow that
+    does not parse cannot be read for its `uses:` keys. That is a failure of
+    the gate, reported by the file's name, not a file skipped: a gate that
+    passed it would vouch for references it never read. ci.yml here is a
+    flow mapping never closed, which a line scan took for a pinned step, and
+    x.yaml has no `uses:` at all, so a line scan never looked at it; the gate
+    names each as not parsing, not ci.yml as using no action."""
+    sha = "11d5960a326750d5838078e36cf38b85af677262"
+    (tmp_path / "ci.yml").write_text(f"      - {{uses: actions/checkout@{sha} # v4.4.0\n", encoding="utf-8")
+    (tmp_path / "x.yaml").write_text("on: [push\n", encoding="utf-8")
+    monkeypatch.setitem(globals(), "WORKFLOWS", tmp_path)
+    with pytest.raises(AssertionError) as unpinned:
+        test_every_workflow_pins_every_action_to_a_commit_sha_with_its_version()
+    reported = str(unpinned.value)
+    for name in ("ci.yml", "x.yaml"):
+        assert f"{name}: does not parse as YAML" in reported, reported
+
+
 RELEASE_ZIPS = ("Melampus-macOS.zip", "Melampus-Windows.zip")
 
 
@@ -817,8 +836,13 @@ def _action_references(text: str) -> list[tuple[str, bool]]:
     comment is the text after the last node that ends on the line, which
     leaves a `#` inside a quoted scalar, or a flow mapping's closing brace,
     where it belongs. One trailing comment cannot name two actions' versions,
-    so a line holding two references is not pinned whatever each names."""
-    nodes = _nodes(text)
+    so a line holding two references is not pinned whatever each names. A
+    workflow that does not parse cannot be read for its references, so it is
+    one line nothing pins, the parser's error, reported by its name."""
+    try:
+        nodes = _nodes(text)
+    except yaml.YAMLError as error:
+        return [(f"does not parse as YAML: {' '.join(str(error).split())}", False)]
     lines = text.splitlines()
     references = {}
     for node in nodes:
