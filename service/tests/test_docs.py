@@ -1498,7 +1498,9 @@ def test_readme_opening_lists_the_engines_providers_offers_and_names_the_spec():
     exactly the engines a user can pick, in the picker's order: providers'
     detect_engines, read through `_picker`; and each row says what the
     engine bills, from the same module: nothing for a local engine, an API
-    key for one in KEY_VARIABLES, a subscription for one in CLI_ENGINES.
+    key for one in KEY_VARIABLES, and for one in CLI_ENGINES the
+    subscription its CliEngine names (review round 4, finding 1: the word
+    "subscription" alone let the two CLIs' cells swap and stay green).
     An engine that bills runs its model off this machine, so its Where it
     runs cell names whose API or servers every frame goes to (security
     review, round 4): the subscription CLIs' cells named only the program
@@ -1518,12 +1520,12 @@ def test_readme_opening_lists_the_engines_providers_offers_and_names_the_spec():
     assert listed == picker, (
         f"readme.md's opening must list the engines the picker offers, in its order: {picker}, not {listed}"
     )
-    subscriptions = [cli.engine for cli in providers.CLI_ENGINES]
+    subscriptions = {cli.engine: cli.subscription for cli in providers.CLI_ENGINES}
     for name, row in rows:
         if name in providers.KEY_VARIABLES:
             expected = "API key"
         elif name in subscriptions:
-            expected = "subscription"
+            expected = subscriptions[name]
         else:
             expected = "nothing"
         # The What it bills cell alone. Read against the whole row, the word
@@ -1635,13 +1637,14 @@ def test_the_readme_billing_check_reads_the_subscription_clis_from_cli_engines(m
     subscription CLIs by hand, so a third, in providers.CLI_ENGINES and the
     picker alike, fell through to "nothing" and a row saying it costs
     nothing passed. Given a third CLI engine in both, a readme.md whose row
-    for it bills nothing fails the gate: its What it bills cell must say
-    subscription."""
+    for it bills nothing fails the gate: its What it bills cell must name
+    that CLI's subscription."""
     import dataclasses
 
     from melampus import providers
 
-    third = dataclasses.replace(providers.CODEX_CLI, engine="gemini-cli", title="Gemini CLI")
+    third = dataclasses.replace(providers.CODEX_CLI, engine="gemini-cli", title="Gemini CLI",
+                                subscription="a Gemini subscription")
     monkeypatch.setattr(providers, "CLI_ENGINES", (*providers.CLI_ENGINES, third))
     detect = providers.detect_engines
     verdict = providers.EngineVerdict(third.engine, third.title, False, "Gemini CLI is not installed")
@@ -1652,7 +1655,29 @@ def test_the_readme_billing_check_reads_the_subscription_clis_from_cli_engines(m
     readme = tmp_path / "readme.md"
     readme.write_text(text[:codex_row.end()] + row + text[codex_row.end():], encoding="utf-8")
     monkeypatch.setitem(globals(), "README", readme)
-    with pytest.raises(AssertionError, match=re.escape("`gemini-cli` does not say it bills 'subscription'")):
+    with pytest.raises(AssertionError, match=re.escape(f"`gemini-cli` does not say it bills {third.subscription!r}")):
+        test_readme_opening_lists_the_engines_providers_offers_and_names_the_spec()
+
+
+def test_the_readme_billing_check_holds_each_cli_to_its_own_subscription(monkeypatch, tmp_path):
+    """Review round 4, finding 1: the billing check took only the engine
+    names from CLI_ENGINES, so any CLI row saying "subscription" passed, and
+    a readme.md whose claude-code and codex rows swap their What it bills
+    cells, Claude Code billing the ChatGPT plan, stayed green. Each CLI's
+    cell must name the subscription providers.py says it runs on
+    (`CliEngine.subscription`), so the swap fails at the first CLI's row."""
+    text = README.read_text(encoding="utf-8")
+    first, second = providers.CLI_ENGINES[:2]
+    rows = [re.search(rf"^\| `{re.escape(cli.engine)}` \|.*$", text, re.MULTILINE).group(0)
+            for cli in (first, second)]
+    cells = [row.split("|") for row in rows]
+    cells[0][3], cells[1][3] = cells[1][3], cells[0][3]
+    for row, swapped in zip(rows, cells):
+        text = text.replace(row, "|".join(swapped))
+    readme = tmp_path / "readme.md"
+    readme.write_text(text, encoding="utf-8")
+    monkeypatch.setitem(globals(), "README", readme)
+    with pytest.raises(AssertionError, match=re.escape(f"`{first.engine}` does not say it bills {first.subscription!r}")):
         test_readme_opening_lists_the_engines_providers_offers_and_names_the_spec()
 
 
