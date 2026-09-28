@@ -32,6 +32,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+import yaml
 
 from melampus import providers
 from melampus.config import MelampusConfig
@@ -674,6 +675,39 @@ def test_the_action_pinning_gate_opens_a_quoted_scalar_only_where_one_can_begin(
     assert "ci.yml" not in reported, reported
 
 
+def test_the_action_pinning_gate_finds_a_step_whatever_its_scalars_hold(tmp_path, monkeypatch):
+    """Open finding 1 at b275279 (Codex round 2, 1; Claude round 4, 1):
+    whether a quote opened a scalar was guessed from the one character
+    before it, so a plain scalar that merely held a `-` or `:` before an
+    apostrophe, `pre-'fix` or `a:'b`, and a quoted scalar after a tag or
+    anchor, `!!str "a # b"` or `&n "a # b"`, each put the guess out of step
+    with the line: it was cut at a `#` inside a quoted scalar, the step's
+    `uses:` key was thrown away with the rest, and the moving tag was never
+    looked at. Where a scalar begins and ends is YAML's to say, so the gate
+    reads what YAML parses. ci.yml here is the first such step, pinned: it
+    uses an action and is not reported, while every .yaml file is."""
+    sha = "11d5960a326750d5838078e36cf38b85af677262"
+    (tmp_path / "ci.yml").write_text(
+        "      - {name: pre-'fix, env: {NOTE: 'Checkout # source'}, uses: actions/checkout@" + sha + "} # v4.4.0\n",
+        encoding="utf-8",
+    )
+    steps = {
+        "hyphen.yaml": "- {name: pre-'fix, env: {NOTE: 'Checkout # source'}, uses: actions/checkout@v4}",
+        "colon.yaml": "- {name: a:'b, env: {NOTE: 'Checkout # source'}, uses: actions/checkout@v4}",
+        "tag.yaml": '- {name: !!str "a # b", uses: actions/checkout@v4}',
+        "anchor.yaml": '- {name: &n "a # b", uses: actions/checkout@v4}',
+    }
+    for name, step in steps.items():
+        (tmp_path / name).write_text(f"      {step}\n", encoding="utf-8")
+    monkeypatch.setitem(globals(), "WORKFLOWS", tmp_path)
+    with pytest.raises(AssertionError) as unpinned:
+        test_every_workflow_pins_every_action_to_a_commit_sha_with_its_version()
+    reported = str(unpinned.value)
+    for name, step in steps.items():
+        assert f"{name}: {step}" in reported, reported
+    assert "ci.yml" not in reported, reported
+
+
 RELEASE_ZIPS = ("Melampus-macOS.zip", "Melampus-Windows.zip")
 
 
@@ -710,34 +744,62 @@ def _code(line: str) -> str:
     return line
 
 
+def _nodes(text: str) -> list[yaml.Node]:
+    """Every node YAML composes from that workflow text, each carrying the
+    marks of where it is written. What is a key, a value or a quoted scalar
+    is the parser's to say, not a guess from the characters around it."""
+    nodes, pending = [], list(yaml.compose_all(text, Loader=yaml.SafeLoader))
+    while pending:
+        node = pending.pop()
+        nodes.append(node)
+        if isinstance(node, yaml.MappingNode):
+            pending.extend(part for pair in node.value for part in pair)
+        elif isinstance(node, yaml.SequenceNode):
+            pending.extend(node.value)
+    return nodes
+
+
+def _action_references(text: str) -> list[tuple[str, bool]]:
+    """Each line of that workflow text on which an action is referenced,
+    stripped, and whether it is pinned. A reference is the value of a `uses`
+    key as YAML parses it: a key counts by its value, however it is quoted,
+    and the text of a quoted scalar is never a key. What the workflow runs is
+    that value, so a SHA quoted in a comment pins nothing, and the version is
+    what the line's trailing comment says. PyYAML drops comments, so the
+    comment is the text after the last node that ends on the line, which
+    leaves a `#` inside a quoted scalar, or a flow mapping's closing brace,
+    where it belongs. One trailing comment cannot name two actions' versions,
+    so a line holding two references is not pinned whatever each names."""
+    nodes = _nodes(text)
+    lines = text.splitlines()
+    references = {}
+    for node in nodes:
+        if isinstance(node, yaml.MappingNode):
+            for key, value in node.value:
+                if key.value == "uses":
+                    references.setdefault(value.start_mark.line, []).append(value)
+    judged = []
+    for line, values in sorted(references.items()):
+        written = max(node.end_mark.column for node in nodes if node.end_mark.line == line)
+        pinned = (
+            len(values) == 1
+            and re.match(r"\s*\S+@[0-9a-f]{40}\b", values[0].value)
+            and re.search(r"#\s*v\d", lines[line][written:])
+        )
+        judged.append((lines[line].strip(), bool(pinned)))
+    return judged
+
+
 def _uses_lines(text: str) -> list[str]:
-    """The lines of that text with a `uses:` key, stripped. A `uses:` key
-    counts wherever YAML puts it in the line's code (block style, or inside
-    a flow mapping after `{` or `,`), quoted or not; a comment is not code,
-    so a line that only mentions `uses:` after `#` does not."""
-    return [line.strip() for line in text.splitlines() if re.search(USES_KEY, _code(line))]
+    """The lines of that workflow text on which an action is referenced,
+    stripped: the same definition the pin check reads."""
+    return [line for line, _ in _action_references(text)]
 
 
 def _unpinned_actions(text: str) -> list[str]:
-    """The `uses:` lines in that text not pinned to a commit SHA with the
-    version in a trailing comment. What the workflow runs is the reference
-    after each `uses:` key and the version is what the comment says, so each
-    is read where it belongs: a SHA quoted in a comment pins nothing, and a
-    SHA after one key on the line vouches for no other. One trailing comment
-    cannot name two actions' versions, so a line holding a second `uses:`
-    key is reported whether or not both name a SHA."""
-    unpinned = []
-    for line in _uses_lines(text):
-        code = _code(line)
-        references = [code[key.end():] for key in re.finditer(USES_KEY, code)]
-        pinned = (
-            len(references) == 1
-            and re.match(r"\s*\S+@[0-9a-f]{40}\b", references[0])
-            and re.search(r"#\s*v\d", line[len(code):])
-        )
-        if not pinned:
-            unpinned.append(line)
-    return unpinned
+    """The lines of that workflow text on which an action is referenced but
+    not pinned to a commit SHA with the version in a trailing comment."""
+    return [line for line, pinned in _action_references(text) if not pinned]
 
 
 def test_ci_packages_a_zip_per_platform_and_a_tag_releases_both():
