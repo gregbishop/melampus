@@ -230,7 +230,8 @@ end)
 -- Where inference runs is the user's choice. The preference is named engine,
 -- its values are the owner's words, and the plugin passes it to the CLI as
 -- --backend. Unset means no --backend at all: the CLI's own default applies
--- (mlx today; the first engine that can run here once card #404 detects).
+-- (the first local engine that can run here, card #404; else the cloud
+-- engine whose key is stored in Settings, card #498).
 -- Card #423 adds the two subscription CLIs after the owner's four, in the
 -- order the executable's --detect-engines prints them (test_lua_plugin.py
 -- pins the two orders to each other against the real executable).
@@ -289,6 +290,20 @@ t.test('the picker lists the six engines in the executable\'s order, after letti
 	local items = Rules.engineItems(verdicts())
 	t.equals(items[1].value, '', 'the first item must be the unset preference: let the CLI choose')
 	t.isTrue(items[1].enabled, 'letting Melampus choose is always allowed')
+	-- Card #498: what letting Melampus choose does is a local engine, else
+	-- a cloud one only for its stored key, and the item says so, not "the
+	-- first engine that can run here" (openai and claude always can).
+	local choose = items[1].title
+	t.isNotNil(string.find(choose, '^Let Melampus choose'), 'the automatic item is not titled as such: ' .. choose)
+	t.isNotNil(string.find(choose, 'local', 1, true), 'the automatic item does not say it takes a local engine: ' .. choose)
+	t.isNotNil(string.find(choose, 'API key', 1, true),
+		'the automatic item does not say a cloud engine needs its key stored: ' .. choose)
+	t.isNil(string.find(choose, 'first engine that can run here', 1, true), 'the old promise is still there: ' .. choose)
+	-- It fits the dialog: no wider, in characters (a UTF-8 continuation
+	-- byte is not one), than the widest control already in it, the colour
+	-- label checkbox's 70.
+	local characters = select(2, string.gsub(choose, '[^\128-\191]', ''))
+	t.isTrue(characters <= 70, 'the automatic item is ' .. characters .. ' characters, wider than the dialog: ' .. choose)
 	t.equals(#items, 7, 'the automatic item and the six engines')
 	for i, engine in ipairs(ENGINES) do
 		t.equals(items[i + 1].value, engine, 'item ' .. (i + 1))
@@ -640,6 +655,25 @@ t.test('whether an engine can run here is detection\'s verdict on it, and nothin
 	t.isFalse(Rules.canRun(nil, 'mlx'), 'without detection nothing is known to run')
 	t.isFalse(Rules.canRun({ 'not', 'verdicts' }, 'mlx'), 'output that is not the list')
 	t.isFalse(Rules.canRun(verdicts(), 'scripted'), 'an engine detection never names')
+end)
+
+t.test('nothing local can run only when detection says so of every local engine', function()
+	-- Security round 1, S1 (card #498): with no engine picked the plugin
+	-- hands a stored key over only when detection says no local engine
+	-- (mlx, ollama) can run here. Any doubt is "a local engine may run":
+	-- no detection, output that is not the list, a local engine it did not
+	-- name. Neither the cloud engines nor the subscription CLIs count.
+	local noMlx = { available = false, reason = 'needs Apple Silicon' }
+	t.isFalse(Rules.nothingLocalCanRun(verdicts()), 'mlx runs on this Mac')
+	t.isFalse(Rules.nothingLocalCanRun(verdicts(mock.allAvailable({ mlx = noMlx }))), 'Ollama is answering')
+	t.isTrue(Rules.nothingLocalCanRun(verdicts({ mlx = noMlx })), 'no Apple Silicon, no Ollama')
+	t.isTrue(Rules.nothingLocalCanRun(verdicts(mock.allAvailable({ mlx = noMlx, ollama = mock.canned.ollama }))),
+		'the cloud engines and the signed-in CLIs are not local')
+	t.isFalse(Rules.nothingLocalCanRun(nil), 'without detection nothing is known')
+	t.isFalse(Rules.nothingLocalCanRun({ 'not', 'verdicts' }), 'output that is not the list')
+	t.isFalse(Rules.nothingLocalCanRun({ { engine = 'mlx', available = false } }), 'ollama was not named')
+	t.isFalse(Rules.nothingLocalCanRun({ { engine = 'mlx', available = false }, { engine = 'ollama' } }),
+		'an ollama verdict that does not say it is unavailable')
 end)
 
 -- ── colour labels ──────────────────────────────────────────────────────────

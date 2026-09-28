@@ -203,8 +203,11 @@ set in your environment. Then everything works as on the Mac, plugin included:
 One-off runs can skip the config file: `--backend ollama`, `--backend claude`,
 `--backend claude-code`, `--backend codex`, `--backend command` (with
 `[model] command` set).
-With no `--backend` and no `[model] backend`, the CLI takes the first engine
-that can run on this machine, in the order mlx, ollama, openai, claude
+With no `--backend` and no `[model] backend`, the CLI takes the first local
+engine that can run on this machine, mlx then ollama, else the cloud engine
+`--default-cloud` names (the Lightroom plugin passes it for a key stored in
+its Settings), else it refuses, naming the plugin's picker: an API key set
+in the environment alone never makes a cloud engine the default
 (docs/config.md § `[model]`); `--detect-engines` (`melampus-id
 --detect-engines`, no folder needed) prints those verdicts as JSON, each with
 the reason an engine cannot run here or what it needs, and after the four,

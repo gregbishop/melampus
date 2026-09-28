@@ -148,15 +148,16 @@ function M.detectionText(overrides)
 end
 
 --- A fake executable for state.onExecute: answers a --detect-engines command
--- by writing `text` to the file the command's stdout is redirected to, and
--- exits with `code`; any other command exits 0 and writes nothing.
+-- by leaving `text` in the file the command's stdout is redirected to,
+-- quoted for sh or for cmd.exe, and exits with `code`; any other command
+-- exits 0 and writes nothing. The file is held in state.files, which
+-- LrFileUtils.readFile reads first, so a fake Windows Lightroom's temp
+-- folder, which exists nowhere on another host, can hold it too.
 function M.answersDetection(text, code)
 	return function(command)
 		if not string.find(command, '--detect-engines', 1, true) then return 0 end
-		local target = string.match(command, ">'([^']+)'")
-		local handle = assert(io.open(target, 'w'))
-		handle:write(text)
-		handle:close()
+		local target = string.match(command, ">'([^']+)'") or string.match(command, '>"([^"]+)"')
+		M.state.files[assert(target, 'no stdout redirect in ' .. command)] = text
 		return code or 0
 	end
 end
@@ -193,6 +194,9 @@ function M.reset(options)
 		-- plugin, on either platform; false so a test that wants it missing
 		-- holds after the readme's install step has put the real one there.
 		existing = options.existing or {},
+		-- Files a fake executable wrote (answersDetection), by path: what
+		-- LrFileUtils.readFile hands back for that path before the disk.
+		files = {},
 		-- Plays the executable for LrTasks.execute: given the command, it
 		-- writes what the real one would and returns its exit code.
 		onExecute = options.onExecute,
@@ -202,6 +206,8 @@ function M.reset(options)
 		-- What LrPasswords holds, by key string; the URLs the browser was
 		-- asked to open.
 		passwords = options.passwords or {},
+		-- The key strings LrPasswords.retrieve was asked for, in order.
+		retrieved = {},
 		openedUrls = {},
 		-- The Windows temp folder a fake Windows Lightroom reports, when a
 		-- test names one; otherwise windowsTemp() decides.
@@ -512,6 +518,7 @@ namespaces.LrPasswords = {
 	end,
 	retrieve = function(key)
 		assert(key ~= nil, 'keystring is nil.')
+		M.state.retrieved[#M.state.retrieved + 1] = key
 		return M.state.passwords[key]
 	end,
 }
@@ -574,6 +581,7 @@ namespaces.LrFileUtils = {
 		return true
 	end,
 	readFile = function(path)
+		if M.state.files[path] ~= nil then return M.state.files[path] end
 		local handle = io.open(path, 'r')
 		if not handle then return nil end
 		local text = handle:read('*a')

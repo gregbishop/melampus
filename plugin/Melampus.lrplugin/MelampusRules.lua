@@ -82,8 +82,9 @@ function Rules.defaultSettings()
 		profile = 'wildlife',
 		-- Where inference runs (card #403): one of Rules.ENGINES, passed to the
 		-- CLI as --backend. Empty means the user has not chosen, so the CLI's
-		-- own default applies: mlx today, and the first engine that can run on
-		-- this machine once card #404's detection lands.
+		-- own default applies: the first local engine that can run on this
+		-- machine (card #404), else the cloud engine whose key is stored in
+		-- Settings, else a refusal naming the picker (card #498).
 		engine = '',
 	}
 end
@@ -155,8 +156,10 @@ function Rules.engineItems(verdicts, problem)
 			end
 		end
 	end
+	-- The unset preference: the executable's default (card #498), a local
+	-- engine that can run here, else a cloud engine whose key is stored.
 	local items = {
-		{ title = 'Let Melampus choose — the first engine that can run here',
+		{ title = 'Let Melampus choose — a local engine, else one whose API key is stored',
 			value = '', enabled = true },
 	}
 	local lines = {}
@@ -221,6 +224,24 @@ function Rules.canRun(verdicts, engine)
 	return false
 end
 
+--- Whether detection says no local engine (Rules.MODEL_ENGINES, the
+-- executable's LOCAL_ENGINES) can run here: each named, and each said to
+-- be unavailable. Only then does a run with no engine picked hand a stored
+-- key over (card #498, security round 1, S1). Any doubt is false: no
+-- detection, output that is not the list, a local engine it did not name
+-- or did not say is unavailable. The cloud engines and the subscription
+-- CLIs are not local.
+function Rules.nothingLocalCanRun(verdicts)
+	local named = {}
+	for _, verdict in ipairs(type(verdicts) == 'table' and verdicts or {}) do
+		if type(verdict) == 'table' and type(verdict.engine) == 'string' then named[verdict.engine] = verdict end
+	end
+	for _, engine in ipairs(Rules.MODEL_ENGINES) do
+		if not named[engine] or named[engine].available ~= false then return false end
+	end
+	return true
+end
+
 --- What to say under the picker about the picked engine: its item's reason
 -- (card #423: a signed-in subscription CLI's says what every frame bills
 -- to, before a run; a cloud engine's names the key it needs), or '' when
@@ -235,7 +256,10 @@ end
 --- The engine a picker value comes to (card #408): the picked one, or with
 -- the preference unset the first that detection says can run here, in the
 -- owner's order, which is the executable's own default (providers
--- .default_engine). nil when nothing is picked and there is no detection.
+-- .default_engine) whenever it is a local engine, the one case a Download
+-- row asks about; with nothing local the executable takes a cloud engine
+-- only when its key is stored (card #498). nil when nothing is picked and
+-- there is no detection.
 function Rules.resolvedEngine(engine, verdicts)
 	if engine ~= nil and engine ~= '' then return engine end
 	return availableEngines(verdicts)[1]

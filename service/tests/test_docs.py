@@ -1814,6 +1814,54 @@ def test_docs_name_engine_detection_where_the_default_and_the_refusal_are_descri
     assert "`--detect-engines`" in readme, "readme.md does not name --detect-engines"
 
 
+def test_docs_say_the_unchosen_default_takes_a_cloud_engine_only_for_a_key_stored_in_settings():
+    """Card #498, decision (b): with no engine chosen, the default takes the
+    first local engine that can run here, else the cloud engine whose key
+    the user stored in the plugin's Settings (the plugin passes it as
+    `--default-cloud`), else the run is refused naming the picker; a key in
+    the environment alone never makes a cloud engine the default.
+    docs/config.md's `backend` row, docs/plugin.md's engine section and
+    readme.md each describe the default, so each names `--default-cloud`
+    and none still says the default falls through to openai; the backend
+    row, the reference, also names the picker and the environment rule."""
+    backend_row = " ".join(_row(CONFIG_DOC.read_text(encoding="utf-8"), "backend").split())
+    engine = " ".join(_section(PLUGIN_DOC.read_text(encoding="utf-8"), "The engine").split())
+    readme = " ".join(README.read_text(encoding="utf-8").split())
+    for doc, prose in (
+        ("docs/config.md's backend row", backend_row),
+        ("docs/plugin.md § The engine", engine),
+        ("readme.md", readme),
+    ):
+        assert "`--default-cloud`" in prose, f"{doc} does not name --default-cloud"
+        for stale in ("else `openai`", "in the order mlx, ollama, openai, claude",
+                      "else the first engine that can run on this machine"):
+            assert stale not in prose, f"{doc} still says the default falls through to openai: {stale!r}"
+    assert "Where identification runs" in backend_row, "docs/config.md's backend row does not name the picker"
+    # Security round 1, S1: the plugin hands a stored key over only once
+    # detection says nothing local can run, and a local engine that vanishes
+    # before the run leaves the executable refusing, not billing.
+    for said in ("only when detection says nothing local can run", "no key is looked up",
+                 "refuses, exit 3", "nothing bills"):
+        assert said in engine, f"docs/plugin.md § The engine does not say {said!r}"
+    assert "an API key set in the environment alone never" in backend_row, (
+        "docs/config.md's backend row does not say an environment key never picks a cloud engine")
+
+
+def test_docs_name_the_pickers_automatic_item_as_the_plugin_titles_it():
+    """Card #498: the picker's first item, the unset preference, is titled
+    for what the default now does (a local engine, else a cloud engine
+    whose key is stored), in MelampusRules.lua's engineItems.
+    docs/plugin.md's engine section names that item, so it quotes the title
+    as the plugin spells it, and a reworded label cannot leave the doc
+    promising the old default."""
+    rules = (REPO / "plugin" / "Melampus.lrplugin" / "MelampusRules.lua").read_text(encoding="utf-8")
+    titled = re.search(r"title = '(Let Melampus choose[^']*)'", rules)
+    assert titled, "MelampusRules.lua has no 'Let Melampus choose' item"
+    engine = " ".join(_section(PLUGIN_DOC.read_text(encoding="utf-8"), "The engine").split())
+    assert f"*{titled.group(1)}*" in engine, (
+        f"docs/plugin.md's engine section does not name the automatic item as the plugin titles it: {titled.group(1)}")
+
+
 def test_brief_names_ollama_as_the_windows_executables_local_option():
     """Card #406: Ollama is the local engine on Windows, as readme.md § Windows,
     docs/architecture.md and docs/config.md say. The stack contract's build

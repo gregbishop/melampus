@@ -127,7 +127,8 @@ string; the OS keychain on macOS), under the name of the variable the
 executable reads, `MELAMPUS_OPENAI_KEY` or `MELAMPUS_ANTHROPIC_KEY`. It is
 never in the preferences, never in `melampus.local.toml` or any other file,
 and never logged. When a run starts, `MelampusAnalyze.lua` sets that variable
-in the executable's environment for the picked engine only: `LrTasks.execute`
+in the executable's environment for the picked engine only (with none picked,
+for the engine `--default-cloud` names, below): `LrTasks.execute`
 takes one shell line and nothing else, so the line begins `VAR='key'` (sh) or
 `set "VAR=key" &&` (cmd.exe) ahead of the executable, and the log carries the
 line with the value blanked. The key is not an argument of the executable, but
@@ -135,18 +136,39 @@ the shell line is the child's command line for the run's duration. On Windows a
 stored key holding `"`, `%` or a line break is refused before anything runs, the
 way a path holding `%` is: cmd.exe would rewrite any of them inside
 `set "VAR=key"` (a line feed ends the line, so what follows it is not the line
-the plugin built), and none can be escaped there; the message says to enter the
-key again in Settings and shows no part of it.
+the plugin built), and none can be escaped there; the message names the engine
+whose key it is, says to enter the key again in Settings and shows no part of
+it. With no engine picked it also says that picking that engine shows its
+field, and to pick *Let Melampus choose* again after.
 
 When the preference is set, `MelampusAnalyze.lua` passes it to the executable
 as `--backend <engine>`, and the executable's own rules apply: `ollama` needs an
 Ollama server answering (card #406), `openai` and `claude` need their key
-(docs/config.md § `[model]`). When it is unset — the default, *Let Melampus
-choose* — the command carries no `--backend` and the executable decides:
-`[model] backend` in `melampus.local.toml`, else the first engine that can
-run on this machine. A value that is not one of the six is refused before
-anything runs, with the six named, so a stale preference never reaches the
-shell.
+(docs/config.md § `[model]`). When it is unset — the default, the picker's
+*Let Melampus choose — a local engine, else one whose API key is stored* —
+the command carries no `--backend` and the executable decides:
+`[model] backend` in `melampus.local.toml`, else the first local engine that
+can run on this machine, `mlx` then `ollama` (docs/config.md § `[model]`).
+A cloud engine's key stored here is a choice (card #498). With the
+preference unset, `MelampusAnalyze.lua` first asks the executable which
+engines can run here, the dialog's own `--detect-engines`: one more start of
+the executable per batch. Where a local engine can run, the command carries
+no key and no `--default-cloud`, and no key is looked up: a key on the
+shell line is readable by any account on the machine while the run lasts,
+so a run that goes to `mlx` or `ollama` carries none, and a stored key
+cmd.exe would rewrite cannot stop it. The key goes with the run only when
+detection says nothing local can run: the key of the first cloud engine, in
+the picker's order, whose key is stored, in the executable's environment
+as for a picked engine, with `--default-cloud <engine>`, so the executable
+takes that engine. Detection that fails, or does not say of both local
+engines that they cannot run, hands no key over. Should a local engine stop
+answering between detection and the run (Ollama quit), the executable,
+told of no cloud engine, refuses, exit 3, the message naming the picker, and
+nothing bills. With no key stored the command names none, and with nothing
+local the run is refused the same way; an API key set in the environment
+Lightroom was started with never makes a cloud engine the default. A value
+that is not one of the six is refused before anything runs, with the six
+named, so a stale preference never reaches the shell.
 
 ### The Download row
 

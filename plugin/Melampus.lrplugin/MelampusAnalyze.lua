@@ -194,13 +194,18 @@ end
 -- windowsPathRefusal), a line feed ends the line so what follows it is not
 -- the line the plugin built, and a carriage return is dropped; none of them
 -- can be escaped on a cmd.exe command line. sh gets the key through
--- quote(), where nothing needs refusing. The message never shows the key.
-local function windowsKeyRefusal(key)
+-- quote(), where nothing needs refusing. The message never shows the key;
+-- it names `engine`, whose key it is. With no engine `picked` (card #498)
+-- Settings shows that key's field only while its engine is picked, so the
+-- message says so, and to let Melampus choose again after.
+local function windowsKeyRefusal(key, engine, picked)
 	if not WIN_ENV then return nil end
 	if string.find(key, '["%%\r\n]') then
-		return 'The API key kept for this engine contains a character the Windows '
+		return 'The API key kept for ' .. engine .. ' contains a character the Windows '
 			.. 'shell rewrites (", % or a line break), so Melampus will not hand it '
-			.. 'to its analysis program.\n\nOpen Settings and enter the key again.'
+			.. 'to its analysis program.\n\nOpen Settings and enter the key again'
+			.. (picked and '.' or (': pick ' .. engine .. ' to show its field, then pick '
+				.. '"Let Melampus choose" again.'))
 	end
 	return nil
 end
@@ -475,10 +480,28 @@ function Analyze.downloadModel(engine, cancelPath, onProgress, onFinish, cancelA
 	}
 end
 
+--- The cloud engine whose key a run carries, the variable it travels in and
+-- the key (card #405): the picked engine's, when it needs one and one is
+-- stored; with no engine picked, the first engine, in the owner's order,
+-- whose key the user stored in Settings (card #498: a key typed there is a
+-- choice, so the executable's default may take that engine when nothing
+-- local can run; Analyze.run asks only once detection has said so). nil
+-- when there is none.
+local function storedKey(chosen)
+	for _, engine in ipairs(chosen and { chosen } or Rules.ENGINES) do
+		local variable = Rules.keyVariable(engine)
+		local key = variable and LrPasswords.retrieve(variable)
+		if key and key ~= '' then return engine, variable, key end
+	end
+	return nil
+end
+
 --- Run the identification pipeline over a folder of previews, writing the
 -- enriched results (quality and its rank, burst agreement, range flag,
 -- encounter) to `resultsPath` in the same run. `engine` is the engine
--- preference (Rules.ENGINES); nil or empty leaves the choice to the CLI.
+-- preference (Rules.ENGINES); nil or empty leaves the choice to the CLI,
+-- told of the cloud engine whose key is stored, if any (storedKey), when
+-- detection says nothing local can run.
 -- Returns true plus the results path, or false plus a message.
 function Analyze.run(previewFolder, resultsPath, profile, engine)
 	local folder = pluginDir()
@@ -486,7 +509,8 @@ function Analyze.run(previewFolder, resultsPath, profile, engine)
 	if not executable then return false, missing end
 
 	-- Identification and enrichment, one process. --backend only when the
-	-- user chose an engine; otherwise the CLI decides.
+	-- user chose an engine; otherwise the CLI decides, among the local
+	-- engines (card #498).
 	local parts, chosen = engineArguments({
 		quote(executable), quote(previewFolder),
 		'--profile', quote(profile or 'wildlife'),
@@ -502,6 +526,29 @@ function Analyze.run(previewFolder, resultsPath, profile, engine)
 	})
 	if refusal then return false, refusal end
 
+	-- The key a run carries (storedKey): the picked engine's, or with none
+	-- picked the first stored one, with --default-cloud naming its engine,
+	-- and then only when detection, asked first, says nothing local can run
+	-- (card #498, security round 1, S1). A key on the shell line is readable
+	-- by any account while the run lasts, so a run that the executable will
+	-- give to mlx or Ollama carries none, and its key is neither looked up
+	-- nor refused. Should a local engine vanish between detection and the
+	-- run, the executable, with no --default-cloud, refuses: nothing bills.
+	local keyed, variable, key
+	if chosen then
+		keyed, variable, key = storedKey(chosen)
+	else
+		local verdicts, problem = Analyze.detectEngines()
+		if problem then Log.warn('no key handed over; detection said: ' .. problem) end
+		if Rules.nothingLocalCanRun(verdicts) then
+			keyed, variable, key = storedKey(nil)
+			if keyed then
+				parts[#parts + 1] = '--default-cloud'
+				parts[#parts + 1] = quote(keyed)
+			end
+		end
+	end
+
 	-- Long-running, so it must not be inside any write gate.
 	-- --yes: this is a non-interactive caller, so the cloud-primary cost gate
 	-- cannot ask. Selecting the photos and configuring a cloud backend with a
@@ -515,13 +562,12 @@ function Analyze.run(previewFolder, resultsPath, profile, engine)
 
 	-- A cloud engine's key (card #405): stored by the Settings dialog through
 	-- LrPasswords, handed to the executable in the variable it reads, and
-	-- only for the engine the user picked. It is never an argument and never
+	-- only for the engine the user picked, or with none picked the one
+	-- --default-cloud names (storedKey). It is never an argument and never
 	-- logged; the log carries the line with the key blanked.
 	local logged = line
-	local variable = Rules.keyVariable(chosen)
-	local key = variable and LrPasswords.retrieve(variable)
-	if key and key ~= '' then
-		local keyRefusal = windowsKeyRefusal(key)
+	if key then
+		local keyRefusal = windowsKeyRefusal(key, keyed, chosen)
 		if keyRefusal then return false, keyRefusal end
 		line = environmentPrefix(variable, key) .. line
 		logged = environmentPrefix(variable, '') .. logged

@@ -57,8 +57,9 @@ SCRIPTED = "scripted"
 OLLAMA = "ollama"
 
 #: The engines the user chooses between, in the owner's order, then the fake.
-#: `detect_engines` tries them in this order for a default (card #404): the
-#: first that can run on this machine.
+#: `detect_engines` lists them in this order, and the default (card #404) is
+#: the first local one that can run on this machine (card #498:
+#: `default_engine`).
 BACKEND_CHOICES = ("mlx", OLLAMA, "openai", "claude", SCRIPTED)
 
 #: What the plugin's picker calls the four engines (card #423): the one
@@ -1175,12 +1176,40 @@ def _refuse_here(reason: str, ollama_url: str | None) -> BackendUnavailable:
     return _refusal(reason, works_here=_works_here(detect_engines(ollama_url)))
 
 
-def default_engine(ollama_at: str | None = None) -> str:
-    """What runs when nothing names an engine: the first detection says is
-    available, in the owner's order. There is always one, because the cloud
-    engines are available everywhere; no fallback, so if the list ever
-    changes that invariant breaks loudly here rather than naming mlx."""
-    return next(v.engine for v in detect_engines(ollama_at) if v.available)
+#: The local engines, in the owner's order: each runs a model on this
+#: machine, with no API key to bill. The default takes one of them when
+#: nothing names an engine (card #498), and they are the engines with a
+#: model to fetch (cli.MODEL_ENGINES, cards #408, #409).
+LOCAL_ENGINES = ("mlx", OLLAMA)
+
+#: Where a refusal of the unchosen default sends the user (card #498): the
+#: plugin's engine picker, by the title of its group in the Settings dialog.
+PICKER = 'the Lightroom plugin\'s Settings, under "Where identification runs"'
+
+
+def default_engine(ollama_at: str | None = None, cloud: str | None = None) -> str:
+    """What runs when nothing names an engine (card #498): the first local
+    engine detection says is available, in the owner's order, else `cloud`,
+    the cloud engine the user picked by storing its key in the plugin's
+    Settings (a key typed there is a choice; the plugin passes it as
+    --default-cloud). A cloud engine is available everywhere but bills every
+    frame, so an API key in the environment alone never makes one the
+    default; nor does a subscription CLI, which the default never reached
+    before (openai, always available, came first). With neither,
+    BackendUnavailable naming the picker and, through the refusal's shape,
+    --backend."""
+    verdicts = detect_engines(ollama_at)
+    eligible = (*LOCAL_ENGINES, cloud)
+    engine = next((v.engine for v in verdicts if v.available and v.engine in eligible), None)
+    if engine is None:
+        raise _refusal(
+            "No engine is chosen, and none that runs locally can run here "
+            "(--detect-engines says why). Melampus does not choose a cloud engine "
+            f"for you, since every frame would bill to it: choose an engine in {PICKER} "
+            "(a cloud engine's API key stored there lets Melampus choose that engine).",
+            works_here=_works_here(verdicts),
+        )
+    return engine
 
 
 def normalise_provider(provider: str | None) -> str:
@@ -1217,7 +1246,8 @@ def build_primary_backend(config: MelampusConfig) -> VLMBackend:
     """The backend the main pipeline talks to, per `[model] backend`.
 
     Nothing set, the CLI has already written `default_engine()` here: the
-    first engine detection says can run on this machine (card #404). `mlx` is
+    first local engine detection says can run on this machine, else the
+    cloud engine --default-cloud names (cards #404, #498). `mlx` is
     the local-first path and exists only on Apple Silicon. The cloud choices
     are for machines without a local runtime — they reuse the exact classes
     escalation uses, so prompts, schema validation and the corrective retry

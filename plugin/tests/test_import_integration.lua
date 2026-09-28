@@ -376,13 +376,23 @@ end)
 -- `melampus.exe` on Windows. The plugin runs it with --plugin-out, one command,
 -- and never consults a Python environment.
 
+--- The commands the shell was given that run the analysis: every one but
+--- the detection a run with no engine picked asks for first (card #498).
+local function runCommands()
+	local runs = {}
+	for _, command in ipairs(mock.state.executed or {}) do
+		if not string.find(command, '--detect-engines', 1, true) then runs[#runs + 1] = command end
+	end
+	return runs
+end
+
 --- Run the import with photos the results file has never seen, accept the
---- offer to analyse, and hand back the commands the shell was given.
+--- offer to analyse, and hand back the commands that ran the analysis.
 -- `prefs` overrides individual preferences on top of the defaults.
 local function runAnalysis(existing, prefs)
 	runImport({}, { { 'fresh_01.CR3' }, { 'fresh_02.CR3' } }, defaultPrefs(prefs),
 		{ existing = existing })
-	return mock.state.executed or {}
+	return runCommands()
 end
 
 -- The executable beside this plugin, on the fake macOS Lightroom the suite
@@ -405,11 +415,13 @@ local function loadAnalyzeOnWindows(executablePresent)
 end
 
 --- The engine's place on the command line: `--backend <engine>` after the
---- profile when one is set, quoted as `quote` quotes it, nothing when not
---- (the CLI decides).
-local function engineOption(engine, quote)
-	if engine == nil or engine == '' then return '' end
-	return ' --backend ' .. quote(engine)
+--- profile when one is set, quoted as `quote` quotes it; with none set,
+--- `--default-cloud <defaultCloud>` when a cloud engine's key is stored in
+--- Settings (card #498), and nothing when not (the CLI decides).
+local function engineOption(engine, quote, defaultCloud)
+	if engine ~= nil and engine ~= '' then return ' --backend ' .. quote(engine) end
+	if defaultCloud then return ' --default-cloud ' .. quote(defaultCloud) end
+	return ''
 end
 
 --- The one line the import runs on macOS: the executable beside the plugin
@@ -422,14 +434,15 @@ end
 --- preference, on the line as --backend when set. `variable` and `key` are
 --- the cloud engine's key variable and the key LrPasswords holds for it: set
 --- ahead of the executable in its environment (`VAR='key' command`, as sh
---- sets one) when given, nothing when not.
-local function macCommand(engine, variable, key)
+--- sets one) when given, nothing when not. `defaultCloud` is the engine
+--- --default-cloud names with no engine set (engineOption).
+local function macCommand(engine, variable, key, defaultCloud)
 	local temp = mock.state.tempDir
 	local previews = temp .. '/melampus-previews-1'
 	local environment = variable and (variable .. '=' .. mock.sh(key) .. ' ') or ''
 	return environment .. table.concat({
 		mock.sh(MAC_EXECUTABLE), mock.sh(previews),
-		'--profile', mock.sh('wildlife') .. engineOption(engine, mock.sh),
+		'--profile', mock.sh('wildlife') .. engineOption(engine, mock.sh, defaultCloud),
 		'--plugin-out', mock.sh(previews .. '/results.json'),
 		'--yes',
 		'>' .. mock.sh(temp .. '/melampus-cli.log') .. ' 2>&1',
@@ -442,11 +455,12 @@ end
 --- line wrapped in a pair of quotes of its own: cmd.exe /c strips the first
 --- and last quote of a line that starts with one and holds more than two, so
 --- the ones around each path survive.
-local function windowsCommand(engine, variable, key)
+local function windowsCommand(engine, variable, key, defaultCloud)
 	local environment = variable and ('set "' .. variable .. '=' .. key .. '" && ') or ''
 	return string.format(
 		'"%s"%s" "%s" --profile "wildlife"%s --plugin-out "%s\\results.json" --yes >"%s\\melampus-cli.log" 2>&1"',
-		environment, WIN_EXECUTABLE, WIN_PREVIEWS, engineOption(engine, function(w) return '"' .. w .. '"' end),
+		environment, WIN_EXECUTABLE, WIN_PREVIEWS,
+		engineOption(engine, function(w) return '"' .. w .. '"' end, defaultCloud),
 		WIN_PREVIEWS, WIN_TEMP)
 end
 
@@ -486,7 +500,7 @@ t.test('with no results file configured, the executable analyses the selection',
 	t.isNotNil(dialogMatching('never been analysed'),
 		'no offer to analyse; first dialog: ' .. tostring((mock.state.dialogs[1] or {}).body))
 	t.isNil(dialogMatching('plugin_results.json'), 'asked for a results file instead of analysing')
-	local executed = mock.state.executed or {}
+	local executed = runCommands()
 	t.equals(#executed, 1, 'the executable did not run')
 	t.equals(executed[1], macCommand(), 'not the one command for the executable beside the plugin')
 end)
@@ -495,7 +509,7 @@ t.test('on Windows the command names melampus.exe with cmd.exe quoting', functio
 	local Analyze = loadAnalyzeOnWindows(true)
 	local ok, message = Analyze.run(WIN_PREVIEWS, WIN_PREVIEWS .. '\\results.json', 'wildlife')
 	t.isTrue(ok, 'run failed: ' .. tostring(message))
-	t.equals(mock.state.executed[1], windowsCommand(),
+	t.equals(runCommands()[1], windowsCommand(),
 		'not the one command for melampus.exe beside the plugin, as cmd.exe needs it')
 end)
 
@@ -643,12 +657,23 @@ end)
 -- an argument, never in the log, and never for an engine that needs none.
 local KEY = 'stored-in-lrpasswords-not-a-real-key-4c1e'
 
+-- What --detect-engines says, for a run with no engine picked (card #498):
+-- the canned Mac, where mlx runs; no Apple Silicon but Ollama answering
+-- (and both subscription CLIs signed in, which are not local); and nothing
+-- local at all.
+local NO_MLX = { available = false, reason = 'needs Apple Silicon' }
+local MLX_RUNS = mock.detectionText()
+local OLLAMA_RUNS = mock.detectionText(mock.allAvailable({ mlx = NO_MLX }))
+local NOTHING_LOCAL = mock.detectionText({ mlx = NO_MLX })
+
 --- Run the import for `engine` with the given LrPasswords contents, on macOS,
---- and hand back the one command the shell was given.
-local function commandWithKeys(engine, passwords)
+--- with `detection` (text) as what --detect-engines prints, or nothing,
+--- and hand back the one command that ran the analysis.
+local function commandWithKeys(engine, passwords, detection)
 	runImport({}, { { 'fresh_01.CR3' }, { 'fresh_02.CR3' } }, defaultPrefs({ engine = engine }),
-		{ existing = { [MAC_EXECUTABLE] = true }, passwords = passwords })
-	local executed = mock.state.executed or {}
+		{ existing = { [MAC_EXECUTABLE] = true }, passwords = passwords,
+			onExecute = detection and mock.answersDetection(detection) })
+	local executed = runCommands()
 	t.equals(#executed, 1, 'expected one command')
 	return executed[1]
 end
@@ -671,25 +696,99 @@ t.test('the key is never logged', function()
 	t.isNil(string.find(logText(), KEY, 1, true), 'the key was logged: ' .. logText())
 end)
 
-t.test('a local engine, a subscription CLI, or no engine, carries no key even when keys are stored', function()
+t.test('a local engine or a subscription CLI carries no key even when keys are stored', function()
 	local stored = { MELAMPUS_OPENAI_KEY = KEY, MELAMPUS_ANTHROPIC_KEY = KEY }
 	-- Card #423: the CLI engines bill to a subscription, never to a key
 	-- here, so their line is the executable and --backend, nothing ahead.
 	-- Which engines need no key is the plugin's own rule, Rules.keyVariable,
 	-- pinned by name in test_rules.lua; walked over ENGINES here, so the
-	-- next keyless engine is checked without a line here.
+	-- next keyless engine is checked without a line here. No engine picked
+	-- is card #498's, below.
 	for _, engine in ipairs(ENGINES) do
 		if not Rules.keyVariable(engine) then
 			local command = commandWithKeys(engine, stored)
 			t.equals(command, macCommand(engine), engine .. ': a key travels with a run that needs none')
 		end
 	end
-	t.equals(commandWithKeys('', stored), macCommand(''), 'a key travels with a run that names no engine')
 end)
 
 t.test('a cloud engine with no stored key runs without one, so the executable says what is missing', function()
 	local command = commandWithKeys('openai', {})
 	t.equals(command, macCommand('openai'), 'an empty key was set')
+end)
+
+-- ── with no engine picked, a key stored in Settings is the choice (card #498) ──
+-- Decision (b): the executable's default takes a local engine that can run
+-- here, and a cloud engine only when the user stored its key in Settings: a
+-- key typed there is a choice, one in Lightroom's environment is not. The
+-- executable cannot tell the two apart (both arrive in the same variable),
+-- so with no engine picked the command carries the first stored key, in
+-- the owner's order, and --default-cloud naming its engine; with none
+-- stored it carries neither, and the executable refuses rather than bill.
+-- Security round 1, S1: only when detection, asked first, says nothing
+-- local can run. A key on the shell line is readable by any account for
+-- the run (ps), so a run that ends on mlx or Ollama carries none, and its
+-- key is neither looked up nor refused.
+
+t.test('with no engine picked and nothing local, the first cloud engine whose key is stored goes to the executable as --default-cloud', function()
+	local command = commandWithKeys('', { MELAMPUS_OPENAI_KEY = KEY, MELAMPUS_ANTHROPIC_KEY = 'other' }, NOTHING_LOCAL)
+	t.equals(command, macCommand('', 'MELAMPUS_OPENAI_KEY', KEY, 'openai'),
+		'not the command with the OpenAI key and --default-cloud openai alone')
+	t.isNotNil(string.find(mock.state.executed[1], '--detect-engines', 1, true), 'detection did not run first')
+	t.isNil(string.find(logText(), KEY, 1, true), 'the key was logged: ' .. logText())
+
+	command = commandWithKeys('', { MELAMPUS_ANTHROPIC_KEY = KEY, MELAMPUS_OPENAI_KEY = '' }, NOTHING_LOCAL)
+	t.equals(command, macCommand('', 'MELAMPUS_ANTHROPIC_KEY', KEY, 'claude'),
+		'not the command with the Claude key and --default-cloud claude, an emptied OpenAI key being no key')
+end)
+
+t.test('with no engine picked and no key stored, the command names no cloud engine and carries no key', function()
+	t.equals(commandWithKeys('', {}, NOTHING_LOCAL), macCommand(''), 'a cloud engine was named with no key stored')
+end)
+
+t.test('with no engine picked and a local engine that can run, no key is looked up or handed over', function()
+	local stored = { MELAMPUS_OPENAI_KEY = KEY, MELAMPUS_ANTHROPIC_KEY = KEY }
+	for name, detection in pairs({ mlx = MLX_RUNS, ollama = OLLAMA_RUNS }) do
+		t.equals(commandWithKeys('', stored, detection), macCommand(''),
+			name .. ' can run here, yet a key or --default-cloud went with the run')
+		t.isNotNil(string.find(mock.state.executed[1], '--detect-engines', 1, true), name .. ': detection did not run first')
+		t.equals(#mock.state.retrieved, 0, name .. ': a key was looked up for a run that needs none')
+	end
+end)
+
+t.test('with no engine picked and no answer from detection, no key is handed over', function()
+	-- Detection that fails or prints no list says nothing about what can
+	-- run: a local engine may, so the run goes as it would with no key
+	-- stored, and the executable picks the local engine or refuses.
+	t.equals(commandWithKeys('', { MELAMPUS_OPENAI_KEY = KEY }), macCommand(''),
+		'a key went with a run whose detection did not answer')
+end)
+
+t.test('a picked engine runs without asking detection', function()
+	commandWithKeys('openai', { MELAMPUS_OPENAI_KEY = KEY }, NOTHING_LOCAL)
+	t.equals(#mock.state.executed, 1, 'detection ran for a run whose engine was picked')
+end)
+
+t.test('on Windows, with no engine picked and nothing local, the stored key and --default-cloud are set for cmd.exe', function()
+	local Analyze = loadUnderMock('MelampusAnalyze',
+		{ existing = { [WIN_EXECUTABLE] = true }, passwords = { MELAMPUS_ANTHROPIC_KEY = KEY },
+			onExecute = mock.answersDetection(NOTHING_LOCAL) },
+		WIN_PLUGIN, { windows = true })
+	local ok, message = Analyze.run(WIN_PREVIEWS, WIN_PREVIEWS .. '\\results.json', 'wildlife')
+	t.isTrue(ok, 'run failed: ' .. tostring(message))
+	t.equals(runCommands()[1], windowsCommand('', 'MELAMPUS_ANTHROPIC_KEY', KEY, 'claude'),
+		'not the command with the Claude key set for cmd.exe and --default-cloud double-quoted')
+end)
+
+t.test('on Windows, with no engine picked and a local engine that can run, a key cmd.exe would rewrite neither travels nor stops the run', function()
+	local Analyze = loadUnderMock('MelampusAnalyze',
+		{ existing = { [WIN_EXECUTABLE] = true }, passwords = { MELAMPUS_OPENAI_KEY = 'sk-not-a-real-key-%TEMP%' },
+			onExecute = mock.answersDetection(OLLAMA_RUNS) },
+		WIN_PLUGIN, { windows = true })
+	local ok, message = Analyze.run(WIN_PREVIEWS, WIN_PREVIEWS .. '\\results.json', 'wildlife')
+	t.isTrue(ok, 'a run on Ollama was refused for a key it never uses: ' .. tostring(message))
+	t.equals(runCommands()[1], windowsCommand(), 'a key or --default-cloud went with a run on Ollama')
+	t.equals(#mock.state.retrieved, 0, 'a key was looked up for a run that needs none')
 end)
 
 t.test('on Windows the key is set for cmd.exe before the executable, once', function()
@@ -725,6 +824,38 @@ t.test('on Windows a stored key holding a character cmd.exe rewrites is refused 
 			'the message does not say where to enter the key again:\n' .. tostring(message))
 		t.isNil(string.find(message, key, 1, true), 'the message shows the key:\n' .. message)
 		t.isNil(string.find(logText() or '', key, 1, true), 'the key was logged: ' .. tostring(logText()))
+	end
+end)
+
+t.test('on Windows, with no engine picked, a stored key cmd.exe would rewrite is refused naming its engine and the way back', function()
+	-- Card #498: with no engine picked the run carries the first stored key,
+	-- so the refusal above reaches a run whose user picked nothing. There is
+	-- no "this engine" then, and Settings shows a key's field only while its
+	-- engine is picked: the message names the engine whose key it is, says
+	-- picking that engine shows the field, and says to pick "Let Melampus
+	-- choose" again after, or the engine picked to reach the field stays
+	-- picked and bills every frame even where a local engine could run.
+	local key = 'sk-not-a-real-key-%TEMP%'
+	for _, engine in ipairs(ENGINES) do
+		local variable = Rules.keyVariable(engine)
+		if variable then
+			local Analyze = loadUnderMock('MelampusAnalyze',
+				{ existing = { [WIN_EXECUTABLE] = true }, passwords = { [variable] = key },
+					onExecute = mock.answersDetection(NOTHING_LOCAL) },
+				WIN_PLUGIN, { windows = true })
+			local ok, message = Analyze.run(WIN_PREVIEWS, WIN_PREVIEWS .. '\\results.json', 'wildlife')
+			t.isFalse(ok, engine .. ': ran with a key cmd.exe would rewrite')
+			t.equals(#runCommands(), 0, engine .. ': a command carrying the key reached cmd.exe')
+			t.isNil(string.find(message, 'this engine', 1, true),
+				engine .. ': the message speaks of "this engine" with none picked:\n' .. message)
+			t.isNotNil(string.find(message, 'kept for ' .. engine, 1, true),
+				engine .. ': the message does not name the engine whose key it is:\n' .. message)
+			t.isNotNil(string.find(message, 'pick ' .. engine, 1, true),
+				engine .. ': the message does not say picking the engine shows its key:\n' .. message)
+			t.isNotNil(string.find(message, 'Let Melampus choose', 1, true),
+				engine .. ': the message does not say to let Melampus choose again after:\n' .. message)
+			t.isNil(string.find(message, key, 1, true), engine .. ': the message shows the key:\n' .. message)
+		end
 	end
 end)
 

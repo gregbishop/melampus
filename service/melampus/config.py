@@ -97,9 +97,10 @@ class ModelConfig(_Base):
     #   codex     — Codex CLI, the same seam configured for it (card #422,
     #               providers.CODEX_COMMAND); `command` below overrides the
     #               template. Bills to the ChatGPT plan it is signed in to.
-    # Left unset, the CLI replaces this value with the first engine detection
-    # says can run here (providers.default_engine, card #404); `model_fields_set`
-    # is how it tells "unset" from "set to mlx".
+    # Left unset, the CLI replaces this value with the first local engine
+    # detection says can run here, else the cloud engine --default-cloud names
+    # (providers.default_engine, cards #404, #498); `model_fields_set` is how
+    # it tells "unset" from "set to mlx".
     backend: str = "mlx"
     # CLAUDE.md §3 wants the model to be a setting, never a hardcode. (mlx only.)
     repo: str = "mlx-community/Qwen3-VL-30B-A3B-Instruct-4bit"
