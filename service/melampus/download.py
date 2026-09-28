@@ -40,7 +40,8 @@ import os
 os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
 
-import hashlib  # noqa: E402 - after the environment the hub reads at import
+import errno  # noqa: E402 - after the environment the hub reads at import
+import hashlib  # noqa: E402
 import ipaddress  # noqa: E402
 import json  # noqa: E402
 import logging  # noqa: E402
@@ -386,12 +387,19 @@ class _Progress:
         self.done += n
         self.on_update(Update.progress(self.done, self.total))
 
-    def tqdm_class(self, resumed: int) -> type:
-        """The counter class for one file, `resumed` bytes of it counted from disk."""
+    def tqdm_class(self, resumed: int, size: int) -> type:
+        """The counter class for one file, `resumed` bytes of it counted from
+        disk and `size` the most the plan let it be. `http_get` writes every
+        chunk the host sends and compares the length only once the body has
+        ended, so a host sending more than `size`, or never stopping, would
+        fill the disk: the chunk that would take the file past `size` is
+        refused here, before it is written, as an OSError `_fetch` reports
+        by its text with the file named."""
         progress = self
 
         class ChunkCounter:
             def __init__(self, initial: int = 0, **_ignored) -> None:
+                self.at = initial
                 if initial != resumed:
                     progress.advance(initial - resumed)
 
@@ -402,7 +410,11 @@ class _Progress:
                 pass
 
             def update(self, n: int | float | None = 1) -> None:
-                progress.advance(int(n or 0))
+                n = int(n or 0)
+                self.at += n
+                if self.at > size:
+                    raise OSError(errno.EFBIG, f"more than the {size} bytes the hub gave it arrived")
+                progress.advance(n)
 
         return ChunkCounter
 
@@ -565,7 +577,7 @@ def _fetch(blob: _Blob, progress: _Progress, headers: dict[str, str], lock_dir: 
                 http_get(
                     blob.url, partial,
                     resume_size=resumed, headers=headers, expected_size=blob.size,
-                    displayed_filename=blob.filename, tqdm_class=progress.tqdm_class(resumed),
+                    displayed_filename=blob.filename, tqdm_class=progress.tqdm_class(resumed, blob.size),
                 )
             except httpx.HTTPError:
                 raise

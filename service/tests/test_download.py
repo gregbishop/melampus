@@ -498,6 +498,26 @@ def test_cli_refuses_a_file_size_that_is_not_a_count_before_any_byte_moves(
     assert not fake_hub.gets() and not cdn.gets(), "bytes moved before the refusal"
 
 
+def test_download_writes_no_byte_past_the_size_the_hub_gave_the_file(fake_hub: FakeHub, tmp_path: Path):
+    """Security, card #500 (security round 1): a download must not fill the
+    disk past what the plan checked. The plan holds each file to the size
+    the hub names, but the hub library's `http_get` writes every chunk the
+    host sends and compares the length only once the body has ended, so a
+    host sending more than that size, or never stopping, wrote it all. Given
+    a hub naming model.safetensors 10 bytes and a host serving the whole
+    file, the run refuses naming the file and the size, and no byte past
+    the tenth is on disk."""
+    with FakeHub().serve() as cdn:
+        fake_hub.bytes_host = cdn.endpoint
+        fake_hub.sizes["model.safetensors"] = "10"
+        with pytest.raises(DownloadError) as failure:
+            _fetch(fake_hub, tmp_path / "hub")
+
+    assert str(failure.value).startswith("model.safetensors: more than the 10 bytes the hub gave it arrived"), failure.value
+    (partial,) = _incomplete(tmp_path / "hub")
+    assert partial.stat().st_size <= 10, f"{partial.stat().st_size} bytes on disk where the plan checked 10"
+
+
 def test_download_lays_out_the_snapshot_from_the_verified_blobs_and_asks_the_hub_nothing_more(
     fake_hub: FakeHub, tmp_path: Path
 ):
