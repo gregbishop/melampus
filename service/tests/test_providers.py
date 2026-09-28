@@ -39,6 +39,7 @@ from conftest import (
     PHOTO,
     REAL_CLAUDE_CODE_VERDICT,
     REAL_CODEX_VERDICT,
+    SCHEDULING_SLACK,
     THE_DECODER_REFUSES,
     THE_DECODER_REFUSES_IDS,
     BadStatusLine,
@@ -685,12 +686,6 @@ def _ollama_served_by(monkeypatch, handler: type[QuietHandler], prefix: str = ""
         yield server
 
 
-# Slack for thread scheduling in the deadline tests: the timer thread fires and
-# the main thread's read returns some tens of milliseconds after the deadline,
-# while waiting out the trickle takes over two seconds.
-SCHEDULING_SLACK = 0.5
-
-
 @contextlib.contextmanager
 def _timed():
     """How long the block took, as `seconds` on the object yielded, read
@@ -894,13 +889,14 @@ def test_ollama_probe_gives_up_after_its_timeout(monkeypatch):
 
 class Trickling(QuietHandler):
     """A listener that sends a valid 200 with the headers trickled: each
-    byte within the socket timeout, the whole well past the probe's
-    deadline. A POST gets the same, once its body is read."""
+    byte within the socket timeout, the whole (the header's value padded
+    to 45 bytes, 4.5 seconds) well past the probe's deadline plus
+    SCHEDULING_SLACK. A POST gets the same, once its body is read."""
 
     def do_GET(self):  # noqa: N802 - http.server's name
         with contextlib.suppress(OSError):
             self.wfile.write(b"HTTP/1.1 200 OK\r\n")
-            trickle(self.wfile, b"Content-Length: 2\r\n\r\n")
+            trickle(self.wfile, b"Content-Length: 2".ljust(41) + b"\r\n\r\n")
             self.wfile.write(b"{}")
 
     def do_POST(self):  # noqa: N802 - http.server's name
@@ -911,9 +907,10 @@ class Trickling(QuietHandler):
 def _trickling_body(status: int) -> type[QuietHandler]:
     """A listener that answers a POST's status line and headers at once,
     then a `status` body trickled: each byte within the socket timeout,
-    the whole well past the deadline. 200 is a reply being read; 500 is an
-    error body being read."""
-    body = b'{"error": "slowly"}'
+    the whole (padded to 45 bytes, 4.5 seconds) well past the deadline
+    plus SCHEDULING_SLACK. 200 is a reply being read; 500 is an error
+    body being read."""
+    body = b'{"error": "slowly"}'.ljust(45)
 
     class TricklingBody(QuietHandler):
         def do_POST(self):  # noqa: N802 - http.server's name
@@ -933,7 +930,7 @@ def test_ollama_probe_gives_up_at_its_deadline_when_the_headers_trickle(monkeypa
     port when Ollama does not could send the status line and then one header
     byte every hundred milliseconds, each within the timeout, and hold
     detection, and the CLI's startup behind it, for as long as it liked. Given
-    a server that trickles a valid 200 over two seconds, the probe reports
+    a server that trickles a valid 200 over 4.5 seconds, the probe reports
     unavailable and returns within its deadline, not after the trickle."""
     deadline = 0.3
     monkeypatch.setattr(providers, "OLLAMA_PROBE_SECONDS", deadline)
@@ -962,12 +959,13 @@ def test_ollama_probe_gives_up_at_its_deadline_when_the_handshake_stalls_after_a
     socket timeout on its own; a connection that took most of
     OLLAMA_PROBE_SECONDS, then a handshake that stalls, held detection a
     second whole probe timeout. Given a connect that returns just before
-    the deadline (held 0.6s of 0.8s) and a listener behind an https address
-    that accepts and never completes the handshake, the probe reports
-    unavailable within its deadline."""
-    deadline = 0.8
+    the deadline (held 2.2s of 2.5s, so the handshake's own timeout would
+    end it past the deadline plus SCHEDULING_SLACK) and a listener behind
+    an https address that accepts and never completes the handshake, the
+    probe reports unavailable within its deadline."""
+    deadline = 2.5
     monkeypatch.setattr(providers, "OLLAMA_PROBE_SECONDS", deadline)
-    _hold_connect(monkeypatch, 0.6)
+    _hold_connect(monkeypatch, 2.2)
     with loopback_server(Silent) as server, _timed() as took:
         answered = providers.ollama_answers(f"https://127.0.0.1:{server.server_port}")
     assert took.seconds < deadline + SCHEDULING_SLACK, f"the probe shook hands past its deadline: {took.seconds:.2f}s"
@@ -1032,15 +1030,28 @@ def test_hang_up_records_the_deadline_and_ends_the_stream_it_holds():
 def test_deadline_again_counts_the_bound_from_now():
     """Security (review round 4): a stream has no one exchange to bound, so
     `_Deadline.again` gives the next line the bound an exchange gets, from
-    now. Given a deadline of one second armed, 0.6s in and again, it has
-    not fired 0.6s after that (1.2s from the start: the first timer would
-    have), and fires within the bound from the re-arm."""
-    with _Deadline(1.0) as deadline:
-        time.sleep(0.6)
+    now. Given a deadline of two seconds armed, one second in and again,
+    three times over as for three lines arriving together, it fires no
+    sooner than two seconds after the last re-arm (the first timer would
+    fire one second after it), and within the bound plus SCHEDULING_SLACK
+    (a re-arm that moved the deadline on by a bound from where it was, not
+    from now, would put it seven seconds out, and after k lines of a pull
+    k bounds out: code review, PR #34 round 1). The clock runs around the
+    last re-arm and the wait, so a timer or a test thread that wakes late
+    only moves the fire later; a first second that runs past the first
+    deadline leaves nothing to re-arm, and says so."""
+    seconds = 2.0
+    with _Deadline(seconds) as deadline:
+        time.sleep(seconds / 2)
+        assert not deadline.expired.is_set(), "the first deadline passed before the re-arm: the machine held the test"
         deadline.again()
-        time.sleep(0.6)
-        assert not deadline.expired.is_set(), "the deadline counted from the start, not from again()"
-        assert deadline.expired.wait(2.0), "the deadline never fired after again()"
+        deadline.again()
+        with _timed() as took:
+            deadline.again()
+            assert deadline.expired.wait(seconds + SCHEDULING_SLACK), (
+                "the deadline did not fire within a bound of the last again()")
+    assert took.seconds >= seconds, (
+        f"the deadline counted from the start, not from again(): it fired {took.seconds:.2f}s after it")
 
 
 AGAIN_UNDER_A_SIGNAL = """\
@@ -1230,9 +1241,10 @@ def test_bounded_block_ends_cleanly_for_a_cancel_whose_deadline_has_fired_too(ra
     cancel (true from the start) have both fired, ending as the hung-up
     read ends it, raising or returning, the block ends cleanly with
     `cancelled` set and nothing raised."""
-    with _bounded_pull(0.3, cancel=lambda: True) as deadline:
-        time.sleep(0.5)
-        assert deadline.expired.is_set() and deadline.cancelled.is_set(), "the case needs both fired"
+    timeout = 0.3
+    with _bounded_pull(timeout, cancel=lambda: True) as deadline:
+        assert deadline.expired.wait(timeout + SCHEDULING_SLACK) and deadline.cancelled.wait(
+            _Deadline.WATCH + SCHEDULING_SLACK), "the case needs both fired"
         if raising:
             raise ConnectionResetError("the hung-up read")
     assert deadline.cancelled.is_set()
@@ -1252,8 +1264,9 @@ def test_bounded_block_asks_the_cancel_once_more_when_the_deadline_fired_before_
     nothing raised, for `_lines_until_cancelled` to name the marker."""
     monkeypatch.setattr(_Deadline, "WATCH", 60.0)
     marker = threading.Event()
-    with _bounded_pull(0.3, cancel=marker.is_set) as deadline:
-        assert deadline.expired.wait(2.0), "the deadline never fired"
+    timeout = 0.3
+    with _bounded_pull(timeout, cancel=marker.is_set) as deadline:
+        assert deadline.expired.wait(timeout + SCHEDULING_SLACK), "the deadline never fired"
         marker.set()
         if raising:
             raise ConnectionResetError("the hung-up read")
@@ -1916,11 +1929,12 @@ def test_ollama_backend_gives_up_at_its_deadline_when_the_server_trickles(tmp_pa
     server sending one byte within the timeout, then another, could hold a
     frame, and the batch behind it, for as long as it liked; the byte limit
     bounds how much, not how long. Given a server on loopback trickling a
-    valid answer over two seconds, in the headers, in a 200 body, or in a
+    valid answer over 4.5 seconds, in the headers, in a 200 body, or in a
     500 body (the error text the backend reads for its message), and a
-    timeout of 0.3s, the frame fails as timed out within the deadline, not
-    after the trickle."""
-    deadline = 0.3
+    timeout of 1s (ten times the trickle's pace, so each byte arrives
+    within the socket timeout on a loaded machine too), the frame fails as
+    timed out within the deadline, not after the trickle."""
+    deadline = 1.0
     image = tmp_path / "image.jpg"
     image.write_bytes(b"jpeg")
     with loopback_server(handler) as server:
@@ -1932,6 +1946,17 @@ def test_ollama_backend_gives_up_at_its_deadline_when_the_server_trickles(tmp_pa
     assert f"did not answer within {deadline:g}s" in str(err.value), str(err.value)
 
 
+class TricklingFiveLines(TricklingPull):
+    """TricklingPull with five whole lines 0.3s apart: each 0.7s inside a
+    one-second deadline, the five together (1.5s) past it, and five
+    re-arms before the trickle, so a re-arm that moved the deadline on by
+    a bound from where it was, not from now, puts it seven seconds from the
+    start, 5.5s past the last whole line (code review, PR #34 round 1)."""
+
+    LINES = 5
+    PAUSE = 0.3
+
+
 def test_ollama_backend_stream_gives_up_at_its_deadline_when_a_line_trickles():
     """Security (review round 4, download.py:784): the pull's stream was read
     a line at a time with urlopen's socket timeout alone, which bounds each
@@ -1940,29 +1965,35 @@ def test_ollama_backend_stream_gives_up_at_its_deadline_when_a_line_trickles():
     for as long as it liked (a probe: the marker written one second into a
     trickled line was read eight seconds later, at its newline). `stream`
     gives each line what `send` gives an exchange, the deadline armed again
-    for it. Given a server writing two whole lines, each after a pause
-    within the deadline and the two together past it, then a line trickled
-    well past it, the stream yields both whole lines (the deadline counts
-    per line, not per exchange) and ends as timed out within a deadline of
-    the trickle's start, not at its newline."""
-    deadline = 0.5
-    with loopback_server(TricklingPull) as server:
+    for it, from now. Given a server writing five whole lines, each after a
+    pause within the deadline and the five together past it, then a line
+    trickled well past it, the stream yields every whole line (the deadline
+    counts per line, not per exchange) and ends as timed out within a
+    deadline, plus SCHEDULING_SLACK, of the last whole line: not at the
+    trickle's newline, and not several bounds out, where a re-arm counted
+    from the deadline before it would put the end. The clock runs from the
+    last whole line, so a server that wakes late between lines takes none
+    of the slack."""
+    deadline = 1.0
+    with loopback_server(TricklingFiveLines) as server:
         url = f"http://127.0.0.1:{server.server_port}"
         backend = OllamaBackend("qwen3-vl:8b-instruct", url, timeout=deadline)
         request = urllib.request.Request(f"{url}/api/pull", data=b"{}", method="POST")
-        lines = []
-        with _timed() as took, pytest.raises(TimeoutError) as err:
+        lines, last = [], None
+        with pytest.raises(TimeoutError) as err:
             for line in backend.stream(request):
                 lines.append(line)
-    assert lines == [TricklingPull.WHOLE, TricklingPull.WHOLE]
-    ceiling = 2 * TricklingPull.PAUSE + deadline + SCHEDULING_SLACK
-    assert took.seconds < ceiling, f"the stream read past its deadline: {took.seconds:.2f}s"
+                last = time.monotonic()
+        ended = time.monotonic()
+    assert lines == [TricklingFiveLines.WHOLE] * TricklingFiveLines.LINES
+    took = ended - last
+    assert took < deadline + SCHEDULING_SLACK, f"the stream read past its deadline: {took:.2f}s after the last line"
     assert f"did not answer within {deadline:g}s" in str(err.value), str(err.value)
 
 
 @pytest.mark.parametrize(
     ("hold", "ceiling"),
-    [(0.85, 0.85), (0.6, 0.8)],
+    [(2.55, 2.55), (2.2, 2.5)],
     ids=["connect-after-deadline", "connect-just-before"],
 )
 def test_ollama_backend_deadline_covers_the_handshake_whenever_connect_lands(
@@ -1978,12 +2009,13 @@ def test_ollama_backend_deadline_covers_the_handshake_whenever_connect_lands(
     connection that took most of the budget, or landed just after it, and
     then a handshake that stalls, held the frame a whole socket timeout
     more. The kernel's connect timing is not reproducible, so the TCP phase
-    is held here, as the probe's tests hold it. Given a 0.8s timeout, a
-    connect held `hold` seconds (just past the deadline, or 0.6s of it) and
+    is held here, as the probe's tests hold it. Given a 2.5s timeout, a
+    connect held `hold` seconds (just past the deadline, or 2.2s of it) and
     a listener behind an https address that accepts and never completes
     the handshake, the frame fails as timed out by `ceiling` (the deadline,
-    or the late connect's own moment), not a whole timeout later."""
-    deadline = 0.8
+    or the late connect's own moment) plus SCHEDULING_SLACK, not a whole
+    timeout later: `hold` and the handshake's own 2.5s are past that."""
+    deadline = 2.5
     _hold_connect(monkeypatch, hold)
     image = tmp_path / "image.jpg"
     image.write_bytes(b"jpeg")
@@ -2807,8 +2839,10 @@ def test_command_backend_counts_starting_the_program_against_the_timeout(tmp_pat
     run = _FakeRun(stdout=ID_OK)
     backend = _command_backend(run, timeout=0.3)
 
+    launch = 0.6
+
     def slow_launch(argv, **kwargs):
-        time.sleep(0.6)
+        time.sleep(launch)
         return run(argv, **kwargs)
     backend._run = slow_launch
 
@@ -2816,7 +2850,8 @@ def test_command_backend_counts_starting_the_program_against_the_timeout(tmp_pat
     with pytest.raises(TimeoutError, match="did not answer within 0.3s"):
         backend.complete(image, "prompt", 10)
 
-    assert time.monotonic() - started < 1.5, "the launch was given a fresh timeout on top of its own"
+    assert time.monotonic() - started < launch + SCHEDULING_SLACK, (
+        "the launch was given a fresh timeout on top of its own")
     (process,) = run.processes
     assert process.returncode is not None, "the command was not reaped"
 
@@ -2857,7 +2892,7 @@ def test_command_backend_uses_the_reply_of_a_command_that_exited_leaving_its_pip
 
 @pytest.mark.parametrize(
     ("timeout", "at_least", "under"),
-    [(5.0, 4.5, 7), (1.5, 1.5, 2.5)],
+    [(5.0, 4.5, 5.0 + SCHEDULING_SLACK), (1.5, 1.5, 1.5 + SCHEDULING_SLACK)],
     ids=["five-second-bound-wins", "timeout-wins"],
 )
 def test_command_backend_leaves_a_pipe_still_held_past_the_reader_bound_to_its_holder(
@@ -3312,6 +3347,15 @@ def _script_on_path(monkeypatch, tmp_path, name: str, text: str) -> Path:
     return script
 
 
+#: How long a script `_script_on_path` wrote can take to start the first
+#: time it runs: macOS assesses a freshly written executable before running
+#: it, measured over 40 fresh scripts on a machine at rest at 0.54 to 2.11s
+#: (median 0.83s) against the interpreter's own 0.02s, and longer on a
+#: loaded one. A timeout the script must be up within, or a bound on a call
+#: that runs it, leaves this and SCHEDULING_SLACK beside it (card #506).
+SCRIPT_START = 2.0
+
+
 def _real_detection(monkeypatch, cli: providers.CliEngine) -> None:
     """Run the real detection of `cli` against what this test put on PATH:
     conftest's autouse fixture stubs it out for every test, so one that
@@ -3475,8 +3519,11 @@ def test_command_backend_timeout_stops_the_worker_the_command_started(monkeypatc
     the way a CLI wrapping a daemon does, and neither answers within the
     timeout. Then the run is a TimeoutError as before, and the worker is
     gone too: stopping only the command would leave a worker per timed-out
-    frame running while the batch goes on."""
-    backend = _real_command_backend(monkeypatch, tmp_path, _LAUNCHER_SCRIPT, timeout=1,
+    frame running while the batch goes on. The worker must be running, its
+    pid written, before the timeout stops the tree, so the timeout leaves
+    the command's start SCRIPT_START and SCHEDULING_SLACK."""
+    timeout = SCRIPT_START + SCHEDULING_SLACK
+    backend = _real_command_backend(monkeypatch, tmp_path, _LAUNCHER_SCRIPT, timeout=timeout,
                                     pid_file=str(pid_file), waits=True)
     image = tmp_path / "image.jpg"
     image.write_bytes(b"jpeg")
@@ -3484,7 +3531,7 @@ def test_command_backend_timeout_stops_the_worker_the_command_started(monkeypatc
     with pytest.raises(TimeoutError) as err:
         backend.complete(image, "prompt", 10)
 
-    assert "fake-vlm did not answer within 1s" in str(err.value)
+    assert f"fake-vlm did not answer within {timeout:g}s" in str(err.value)
     worker = int(pid_file.read_text(encoding="utf-8"))
     assert _gone(worker, within=10.0), f"worker {worker} is still running after the timeout"
 
@@ -3540,8 +3587,9 @@ def test_command_backend_uses_the_reply_of_a_command_that_exits_leaving_a_worker
     outcome was a TimeoutError at the whole timeout, advising a longer one
     that could not help, the reply discarded), the worker is gone, and
     the group was stopped by a pid that was still the command's own, its
-    exited process unreaped (a signal 0 still reaches it)."""
-    backend = _real_command_backend(monkeypatch, tmp_path, _LAUNCHER_SCRIPT, timeout=4,
+    exited process unreaped (a signal 0 still reaches it). "Well inside" is
+    the command's start, SCRIPT_START, and SCHEDULING_SLACK, of 10s."""
+    backend = _real_command_backend(monkeypatch, tmp_path, _LAUNCHER_SCRIPT, timeout=10,
                                     pid_file=str(pid_file), waits=False)
     image = tmp_path / "image.jpg"
     image.write_bytes(b"jpeg")
@@ -3559,7 +3607,7 @@ def test_command_backend_uses_the_reply_of_a_command_that_exits_leaving_a_worker
     started = time.monotonic()
     completion = backend.complete(image, "prompt", 10)
 
-    assert time.monotonic() - started < 2, "the reply was held to the timeout"
+    assert time.monotonic() - started < SCRIPT_START + SCHEDULING_SLACK, "the reply was held to the timeout"
     assert completion.text.strip() == ID_OK
     worker = int(pid_file.read_text(encoding="utf-8"))
     assert _gone(worker, within=10.0), f"worker {worker} outlived the command's exit"
