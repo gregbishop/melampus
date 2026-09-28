@@ -9,22 +9,62 @@ running the installer again.
 
 Checks against the git index rather than the working tree: no tracked symlink
 resolves outside the repository, no tracked file names an absolute home-directory
-path, and service/uv.lock is tracked. One check against the working tree: that
-lockfile is current with service/pyproject.toml.
+path, and service/uv.lock is tracked. Card #441 adds the corpus gates: .gitignore
+ignores a photo corpus folder wherever it lands in the checkout, no tracked file
+sits under any other fixtures folder, and every frame in service/tests/fixtures/
+is small and EXIF-free like the first one. The fixture gate reads each blob
+from the index, so it judges the bytes a push would carry: every fixture,
+image or text, is listed as reviewed by its path and that blob's SHA-256, or
+it is refused before anything reads it, and a listed image is still judged as
+a frame, whatever the file is called. A fixture that passes through a filter
+is refused too, since a checkout of it is not the blob that was judged.
+
+Three checks read the working tree instead, because each judges what the next
+commit would do rather than what the last one carried: that the lockfile is
+current with service/pyproject.toml; the ignore rules, which are checked
+from the working-tree .gitignore because that is the file `git add -A` consults
+when a corpus is about to be staged; and a fixture's filter, read from the
+.gitattributes `git add` consults, whose clean filter decides there that the
+blob is a pointer and not the file. The ignore verdict is the rule git matched
+rather than its exit status, which reads the same whether a rule ignores a path
+or re-includes it.
 """
 
+import base64
+import binascii
+import hashlib
+import io
+import struct
 import subprocess
+import urllib.parse
+import zlib
 from pathlib import Path
 
-REPO = Path(__file__).resolve().parents[2]
+import pytest
+from PIL import Image, PngImagePlugin
+
+from conftest import FIXTURE, REPO, _load_tool, metadata_laden
+
 # POSIX ERE, for git grep.
 HOME_PATH = "/(Users|home)/[^/[:space:]`'\"]+/"
 
 
-def _git(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+def _git(*args: str, check: bool = True, text: bool = True, repo: Path = REPO):
     return subprocess.run(
-        ["git", "-C", str(REPO), *args], check=check, capture_output=True, text=True
+        ["git", "-C", str(repo), *args], check=check, capture_output=True, text=text
     )
+
+
+def _index_bytes(path: str, repo: Path = REPO) -> bytes:
+    """The blob staged for `path`: what a push carries, whatever is on disk."""
+    return _git("cat-file", "-p", f":{path}", text=False, repo=repo).stdout
+
+
+def _throwaway_repo(tmp_path: Path) -> Path:
+    repo = tmp_path / "repo"
+    repo.mkdir(exist_ok=True)
+    _git("init", "-q", repo=repo)
+    return repo
 
 
 def _tracked_symlinks():
@@ -78,3 +118,954 @@ def test_the_lockfile_is_current_with_pyproject():
         timeout=60,
     )
     assert check.returncode == 0, check.stderr
+
+
+# Card #441. Ignored: a corpus folder anywhere in the checkout. Not ignored: the
+# one committed frame's folder. The rules are checked against a copy of
+# .gitignore in a throwaway repository: `git check-ignore` on `fixtures/x.jpg`
+# refuses a checkout where `fixtures` is a symlink to the corpus, and the
+# verdict must not depend on what a given checkout has under that name.
+CORPUS_PATHS = [
+    # A symlink to the corpus, the way a checkout borrows one; it is not a
+    # directory, so a directory-only rule (`fixtures/`) would let it through.
+    "fixtures",
+    "fixtures/x.jpg",
+    "fixtures_full/x.jpg",
+    "service/fixtures/x.jpg",
+    "plugin/fixtures/x.jpg",
+    "service/tests/quality/fixtures/x.jpg",
+    "fixtures_full/nested/x.jpg",
+    # A corpus folder nested under the re-included one. This is where
+    # `!/service/tests/fixtures` could over-reach: the negation exempts the
+    # committed frame's folder, and a corpus dropped inside it is still a
+    # corpus. The root-only rules it replaces let both of these through.
+    "service/tests/fixtures/fixtures/x.jpg",
+    "service/tests/fixtures/fixtures_full/x.jpg",
+]
+# conftest.FIXTURE names the frame; git paths are POSIX strings from the root.
+COMMITTED_FRAME = FIXTURE.relative_to(REPO).as_posix()
+# The one folder .gitignore re-includes: neither it nor the frame it holds is
+# ignored, and no other fixtures folder may hold a tracked file.
+FIXTURES_DIR = FIXTURE.parent.relative_to(REPO).as_posix()
+
+
+def test_the_frame_sits_under_the_repository_through_a_symlink(tmp_path):
+    """pytest keeps symlinks in collected paths, so conftest.py can be reached
+    through one. REPO is resolved; FIXTURE must be built the same way, or the
+    two disagree and COMMITTED_FRAME raises at import, collecting nothing."""
+    link = tmp_path / "link"
+    link.symlink_to(REPO)
+    conftest = _load_tool(link / "service" / "tests" / "conftest.py")
+    assert conftest.FIXTURE.is_relative_to(conftest.REPO), (
+        f"{conftest.FIXTURE} is not under {conftest.REPO}"
+    )
+
+
+def _check_ignore(tmp_path: Path, path: str, extra: str = "") -> tuple[bool, str]:
+    """Whether the checkout's .gitignore ignores `path`, and the rule that says
+    so (`source:line:pattern`, or why no rule matched).
+
+    The verdict is the matched pattern, not the exit status: `git check-ignore
+    -v` exits 0 for a negated rule too, printing the `!`-prefixed pattern that
+    re-includes the path -- a path git would happily commit. `extra` appends
+    rules to the copy, which is how that case is proven.
+    """
+    repo = _throwaway_repo(tmp_path)
+    rules = (REPO / ".gitignore").read_bytes() + extra.encode()
+    (repo / ".gitignore").write_bytes(rules)
+    # 0: a rule matched, stdout "source:line:pattern\tpath"; 1: none did.
+    verdict = _git("check-ignore", "-v", "--", path, check=False, repo=repo)
+    if verdict.returncode != 0:
+        return False, f"no rule matches {path}: {verdict.stderr.strip()}"
+    rule = verdict.stdout.split("\t", 1)[0]
+    return not rule.split(":", 2)[2].startswith("!"), rule
+
+
+@pytest.mark.parametrize("path", CORPUS_PATHS)
+def test_a_corpus_folder_is_ignored_anywhere_in_the_checkout(tmp_path, path):
+    ignored, rule = _check_ignore(tmp_path, path)
+    assert ignored, f"{path} is committable: {rule}"
+    # The rule is the checkout's own, not a global excludes file git also reads.
+    assert rule.startswith(".gitignore:"), rule
+
+
+def test_a_negation_is_not_an_ignore(tmp_path):
+    """The check that makes the corpus gate above mean anything. A negated rule
+    re-includes the path, and `git check-ignore -v` still exits 0 on it: read
+    that status alone and `!/fixtures` in .gitignore would leave the corpus
+    symlink committable with every case above still passing."""
+    ignored, rule = _check_ignore(tmp_path, "fixtures", extra="\n!/fixtures\n")
+    assert not ignored, f"a negated rule was read as an ignore: {rule}"
+    assert rule.endswith(":!/fixtures"), rule
+
+
+@pytest.mark.parametrize("path", [COMMITTED_FRAME, FIXTURES_DIR])
+def test_the_committed_frame_is_not_ignored(tmp_path, path):
+    ignored, rule = _check_ignore(tmp_path, path)
+    assert not ignored, f"{path} is ignored: {rule}"
+
+
+# Card #441, Done-when 2. service/tests/fixtures/ holds one frame, downscaled
+# and stripped (157 KB, no EXIF; 9351e64). A second frame is committable only
+# on the same terms: under the ceiling and carrying no camera metadata, which
+# the secret scanner does not read. And no tracked file may sit under any other
+# fixtures folder, so a corpus cannot slip in even if the ignore rule is edited.
+# By the owner's rulings of 2026-09-28, every fixture, image or text, is
+# listed in FIXTURES by its path and its blob's SHA-256, and one that is not,
+# or whose blob has changed since, is refused by name before anything reads
+# it: a reviewer sees each fixture go in, as one line, and data hidden in the
+# chunks a picture is drawn from is not a class the gate has to chase. A
+# listed fixture is held to the ceiling, and a listed image, whatever it is
+# called, to the strict checks as well, which catch what tools write. Each
+# entry says whether it is an image or text; the gate never reads that from a
+# name or from the bytes, since an exemption by suffix or by content would let
+# a raw's camera record in under a .txt name, as ASCII Netpbm, or
+# base64-encoded inside text. Any kind but text is judged as an image.
+FRAME_CEILING = 400 * 1024
+CORPUS_DIRS = {"fixtures", "fixtures_full"}
+# Every fixture, each reviewed: its path, whether it is an image or text, and
+# the SHA-256 of the blob that was reviewed (`git cat-file -p :<path> |
+# shasum -a 256`). A listed file that changes is no longer the one reviewed,
+# and is refused until its line is.
+FIXTURES = {
+    "service/tests/fixtures/0A1A2829.jpg": (
+        "image",
+        "094b182022d606c57e1c099d679eb50eba21fa754ba388e86b393ca3564c83f0",
+    ),
+    "service/tests/fixtures/download-lines.txt": (
+        "text",
+        "8d09e262af2370bd11ede8883f811aa5479df3fa3cce81e0d418d8862b8f3bc5",
+    ),
+}
+UNREADABLE = (
+    "not an image the gate can read; if it is text, list it in FIXTURES as text"
+)
+UNLISTED = (
+    "not listed in FIXTURES with this blob's SHA-256: review it, and list its "
+    "path and SHA-256 in FIXTURES"
+)
+
+
+# What Pillow raises on a blob it cannot read, at open or reading on from
+# there: UnidentifiedImageError (an OSError) where it recognises no format;
+# ValueError or OSError where a header matches a format's magic and then does
+# not parse (`P6` and garbage, a frame cut short); SyntaxError where an
+# EXIF block is no TIFF structure. The gate's own walk of a JPEG or PNG raises
+# ValueError where it breaks off. DecompressionBombError is none of these, and
+# propagates, with the fixture's path noted on it.
+READ_ERRORS = (ValueError, OSError, SyntaxError)
+
+
+# What a frame may carry: the chunks that draw its picture, and nothing that
+# only rides along with it (text, a comment, XMP, IPTC, an ICC profile, a
+# private chunk). In a JPEG, the frame headers SOF0-SOF15 with the DHT and DAC
+# tables among them (less JPG, C8, which is reserved), DQT, DRI and SOS, and
+# APP0 when it is JFIF's 16-byte header and nothing more; in a PNG, IHDR,
+# PLTE, tRNS, IDAT and IEND.
+JPEG_PICTURE = {*range(0xC0, 0xD0), 0xDA, 0xDB, 0xDD} - {0xC8}
+PNG_PICTURE = {b"IHDR", b"PLTE", b"tRNS", b"IDAT", b"IEND"}
+JPEG_NAMES = {0xFE: "COM", **{0xE0 + n: f"APP{n}" for n in range(16)}}
+
+
+def _jpeg_walk(data: bytes) -> tuple[list[str], int]:
+    """The segments of the JPEG heading `data` that draw no picture, by name,
+    and where it ends: just past the EOI that closes its scans. A marker
+    segment is stepped over by its length; a scan's entropy-coded data runs
+    to the next marker, since inside it 0xFF is followed only by a stuffed
+    0x00 or a restart marker. Raises ValueError where the JPEG breaks off or
+    does not parse."""
+    extras = []
+    at = 2  # past SOI
+    while True:
+        marker = data[at : at + 2]
+        if len(marker) < 2 or marker[0] != 0xFF:
+            raise ValueError(f"no JPEG marker at byte {at}")
+        kind = marker[1]
+        if kind == 0xD9:  # EOI
+            return extras, at + 2
+        if kind == 0xFF:  # a fill byte before a marker
+            at += 1
+            continue
+        length = int.from_bytes(data[at + 2 : at + 4])
+        if length < 2:
+            raise ValueError(f"no JPEG segment length at byte {at}")
+        # JFIF's header: 16 bytes, with no thumbnail and nothing after it.
+        jfif = kind == 0xE0 and length == 16 and data[at + 4 : at + 9] == b"JFIF\0"
+        if kind not in JPEG_PICTURE and not jfif:
+            extras.append(JPEG_NAMES.get(kind, f"marker FF{kind:02X}"))
+        at += 2 + length
+        if kind == 0xDA:  # SOS: entropy-coded data follows
+            while True:
+                at = data.index(b"\xff", at)
+                after = data[at + 1 : at + 2]
+                if after != b"\x00" and not b"\xd0" <= after <= b"\xd7":
+                    break
+                at += 2
+
+
+def _png_walk(data: bytes) -> tuple[list[str], int]:
+    """The chunks of the PNG in `data` that draw no picture, by type, and
+    where it ends: 12 bytes after its IEND chunk starts, since IEND is empty,
+    each chunk before it stepped over by its length. Raises ValueError where
+    the PNG breaks off."""
+    extras = []
+    at = 8  # past the signature
+    while True:
+        header = data[at : at + 8]
+        length = int.from_bytes(header[:4])
+        if len(header) < 8 or at + 12 + length > len(data):
+            raise ValueError("the PNG breaks off before IEND")
+        kind = header[4:]
+        if kind not in PNG_PICTURE:
+            extras.append(kind.decode("latin-1"))
+        if kind == b"IEND":
+            return extras, at + 12
+        at += 12 + length
+
+
+# The formats the gate can walk to their end, naming what they carry on the
+# way, so it can refuse what rides along and what follows.
+FRAME_WALKS = {"JPEG": _jpeg_walk, "PNG": _png_walk}
+
+
+def _frame_problems(data: bytes) -> list[str]:
+    """Why `data` (a blob from the index) is not a committable frame. Pillow
+    opens lazily, so a read after the open can raise too, and that refuses
+    the frame as unreadable, the same as a blob that does not open."""
+    try:
+        with Image.open(io.BytesIO(data)) as image:
+            # The format first, found at open: a format the gate cannot walk
+            # is refused before Pillow reads anything more of it.
+            walk = FRAME_WALKS.get(image.format)
+            if walk is None:
+                return [
+                    f"a {image.format} frame, whose end the gate cannot find: "
+                    "save it as JPEG or PNG"
+                ]
+            problems = []
+            frames = getattr(image, "n_frames", 1)
+            if frames > 1:
+                problems.append(f"holds {frames} frames")
+            # An EXIF block found at open is EXIF, whether or not it parses.
+            if "exif" in image.info or image.getexif():
+                problems.append("carries EXIF")
+            extras, end = walk(data)
+            if extras:
+                names = ", ".join(dict.fromkeys(extras))
+                problems.append(f"carries chunks that draw no picture: {names}")
+            if after := len(data) - end:
+                problems.append(f"{after} bytes after the image ends")
+            return problems
+    except READ_ERRORS:
+        return [UNREADABLE]
+
+
+def _fixture_problems(
+    path: str, blob: bytes, listed: dict[str, tuple[str, str]] = FIXTURES
+) -> list[str]:
+    """Why a tracked fixture (its path, and its blob from the index) is not
+    committable. Not listed with its blob's SHA-256, it is refused unread.
+    Listed, it is held to the ceiling, and a listed image is judged as a
+    frame as well."""
+    kind, digest = listed.get(path, (None, None))
+    if digest != hashlib.sha256(blob).hexdigest():
+        return [UNLISTED]
+    problems = []
+    size = len(blob)
+    if size > FRAME_CEILING:
+        problems.append(f"{size} bytes, over the {FRAME_CEILING} byte ceiling")
+    if kind != "text":
+        try:
+            problems += _frame_problems(blob)
+        except Exception as exc:
+            # Raised on, not refused (a decompression bomb): named all the same.
+            exc.add_note(path)
+            raise
+    return problems
+
+
+# Paths are compared casefolded: git keeps a path's case as committed, and the
+# macOS and Windows disks the owner and CI check out on fold it, so
+# service/tests/Fixtures/ from a case-sensitive checkout is this folder there.
+
+
+def _is_stray_fixture(path: str) -> bool:
+    """A corpus-named directory component anywhere in the path, except the
+    one that is service/tests/fixtures: a corpus folder nested under the
+    exempt folder is still another corpus folder."""
+    exempt = FIXTURES_DIR.casefold().split("/")
+    parts = path.casefold().split("/")[:-1]
+    return any(
+        part in CORPUS_DIRS and parts[: i + 1] != exempt
+        for i, part in enumerate(parts)
+    )
+
+
+def _stray_fixture_paths(tracked):
+    """Tracked paths under a fixtures folder other than service/tests/fixtures."""
+    return [path for path in tracked if path and _is_stray_fixture(path)]
+
+
+def _fixture_paths(tracked):
+    """Tracked paths in service/tests/fixtures, or standing in its place: the
+    fixtures the frame gate judges."""
+    folder = FIXTURES_DIR.casefold() + "/"
+    return [
+        path for path in tracked if path and (path.casefold() + "/").startswith(folder)
+    ]
+
+
+def _filters(paths: list[str], repo: Path = REPO) -> dict[str, str]:
+    """The filter each of `paths` passes through, where one is set, read as
+    `git add` reads the attributes: the working tree's .gitattributes, the
+    index's where the working tree has none, and this machine's own. A
+    filter's clean stores other bytes than the file, and its smudge writes
+    other bytes than the blob: Git LFS's stores a pointer and writes the file
+    the pointer names."""
+    if not paths:
+        return {}
+    # -z: each path, attribute and value is NUL-terminated, in that order.
+    out = _git("check-attr", "-z", "filter", "--", *paths, repo=repo)
+    fields = out.stdout.split("\0")
+    return {
+        path: value
+        for path, value in zip(fields[0::3], fields[2::3])
+        if value not in ("unspecified", "unset")
+    }
+
+
+def _refused_fixtures(
+    repo: Path = REPO, listed: dict[str, tuple[str, str]] = FIXTURES
+) -> dict[str, list[str]]:
+    """The fixtures in `repo`'s index the gate refuses, each with why, each
+    judged by its staged blob against `listed`, and refused as well if it
+    passes through a filter, since then its checkout is not that blob."""
+    # ls-files -z terminates each path, so the split leaves a trailing empty.
+    tracked = _git("ls-files", "-z", repo=repo).stdout.split("\0")
+    paths = _fixture_paths(tracked)
+    filters = _filters(paths, repo)
+    refused = {}
+    for path in paths:
+        problems = _fixture_problems(path, _index_bytes(path, repo=repo), listed)
+        if path in filters:
+            problems.append(
+                f"passes through the {filters[path]} filter, so its checkout "
+                "is not the blob listed: remove its filter attribute"
+            )
+        if problems:
+            refused[path] = problems
+    return refused
+
+
+# A text fixture's path, listed in the tests' own manifests.
+LISTED_TEXT = "service/tests/fixtures/download-lines.txt"
+
+
+def _listed(kind: str, blobs: dict[str, bytes]) -> dict[str, tuple[str, str]]:
+    """A manifest that lists each of `blobs` under its path as `kind`, with
+    its SHA-256, the way FIXTURES lists a reviewed fixture."""
+    return {
+        path: (kind, hashlib.sha256(blob).hexdigest()) for path, blob in blobs.items()
+    }
+
+
+def _frame(image: Image.Image | None = None, format: str = "JPEG", **save) -> bytes:
+    """A frame's bytes, a JPEG unless `format` says otherwise, the way the
+    gate sees a blob."""
+    buffer = io.BytesIO()
+    (image or Image.new("RGB", (8, 8))).save(buffer, format=format, **save)
+    return buffer.getvalue()
+
+
+def _png_chunk(kind: bytes, data: bytes) -> bytes:
+    """A PNG chunk's bytes: length, type, data and CRC."""
+    crc = zlib.crc32(kind + data)
+    return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", crc)
+
+
+def _jpeg_segment(marker: int, data: bytes) -> bytes:
+    """A JPEG marker segment's bytes: 0xFF, the marker, length and data."""
+    return bytes([0xFF, marker]) + (len(data) + 2).to_bytes(2) + data
+
+
+def _bomb() -> bytes:
+    """A PNG of 65 bytes whose IHDR declares 20000 x 20000 pixels, over
+    Pillow's limit: opening it raises DecompressionBombError."""
+    header = struct.pack(">IIBBBBB", 20000, 20000, 8, 0, 0, 0, 0)
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + _png_chunk(b"IHDR", header)
+        + _png_chunk(b"IDAT", zlib.compress(b""))
+        + _png_chunk(b"IEND", b"")
+    )
+
+
+def _raw_tiff() -> bytes:
+    """A TIFF shaped like a CR2 or ARW raw: a 16 x 16 frame whose next IFD is
+    a JPEG preview found by its offset and length (tags 0x201, 0x202), with
+    no dimensions of its own. Pillow opens it, and counting its frames raises
+    TypeError."""
+    tiff = _frame(Image.new("RGB", (16, 16)), format="TIFF")
+    first = int.from_bytes(tiff[4:8], "little")
+    # The first IFD's pointer to the next follows its 12-byte entries.
+    pointer = first + 2 + 12 * int.from_bytes(tiff[first : first + 2], "little")
+    preview = [(0x103, 3, 1, 6), (0x201, 4, 1, 0), (0x202, 4, 1, 0)]
+    second = struct.pack("<H", len(preview))
+    second += b"".join(struct.pack("<HHII", *entry) for entry in preview)
+    second += bytes(4)
+    return (
+        tiff[:pointer] + len(tiff).to_bytes(4, "little") + tiff[pointer + 4 :] + second
+    )
+
+
+def _ascii_frame(size: tuple[int, int] = (300, 300)) -> bytes:
+    """An ASCII Netpbm frame's bytes: an image Pillow reads whose bytes are
+    also UTF-8 with no NUL, and over the ceiling at this size."""
+    values = ((i * 7) % 256 for i in range(size[0] * size[1] * 3))
+    body = " ".join(f"{value:3d}" for value in values)
+    return f"P3\n{size[0]} {size[1]}\n255\n{body}\n".encode()
+
+
+def test_a_frame_over_the_ceiling_is_refused():
+    # Noise does not compress: 1200 x 800 at quality 100 is well over 1 MB.
+    big = _frame(Image.effect_noise((1200, 800), 64), quality=100)
+    path = "service/tests/fixtures/second.jpg"
+    problems = _fixture_problems(path, big, _listed("image", {path: big}))
+    assert any("over the" in problem for problem in problems)
+
+
+def _tagged_frame(tmp_path: Path) -> bytes:
+    """The camera-record-laden frame the staging test is proven against."""
+    path = tmp_path / "tagged.jpg"
+    metadata_laden(path)
+    return path.read_bytes()
+
+
+# What the gate says of that frame: its EXIF, and the XMP (APP1), ICC profile
+# (APP2) and comment (COM) segments metadata_laden writes beside it.
+TAGGED_PROBLEMS = [
+    "carries EXIF",
+    "carries chunks that draw no picture: APP1, APP2, COM",
+]
+
+
+def test_a_frame_with_exif_is_refused(tmp_path):
+    assert _frame_problems(_tagged_frame(tmp_path)) == TAGGED_PROBLEMS
+
+
+def test_a_small_stripped_frame_passes():
+    assert _frame_problems(_frame()) == []
+
+
+def test_the_gate_judges_the_index_not_the_working_tree(tmp_path):
+    """What a push carries is the staged blob. A clean frame staged and then
+    overwritten on disk by a tagged one still passes; the reverse is refused."""
+    repo = _throwaway_repo(tmp_path)
+    plain, tagged = _frame(), _tagged_frame(tmp_path)
+
+    (repo / "frame.jpg").write_bytes(plain)
+    _git("add", "frame.jpg", repo=repo)
+    (repo / "frame.jpg").write_bytes(tagged)
+    assert _frame_problems(_index_bytes("frame.jpg", repo=repo)) == []
+
+    _git("add", "frame.jpg", repo=repo)
+    (repo / "frame.jpg").write_bytes(plain)
+    assert _frame_problems(_index_bytes("frame.jpg", repo=repo)) == TAGGED_PROBLEMS
+
+
+def test_a_frame_the_gate_cannot_read_is_refused():
+    # A raw file (CR3, DNG, HEIC) carries the full camera record and Pillow
+    # cannot read it, so the gate cannot prove it stripped: refused, by name.
+    raw = bytes(range(256)) * 8
+    assert _frame_problems(raw) == [UNREADABLE]
+
+
+def test_a_blob_pillow_raises_on_is_refused_by_name():
+    """A header that matches a format's magic and then does not parse makes
+    Pillow raise ValueError or OSError, not UnidentifiedImageError. Listed as
+    an image, the gate cannot read it, so it is refused under its path like a
+    raw, not with a traceback that names no file."""
+    blobs = {
+        "service/tests/fixtures/second.ppm": b"P6\n" + bytes(range(256)) * 4,
+        "service/tests/fixtures/second.jpg": _frame()[:57],
+    }
+    listed = _listed("image", blobs)
+    for path, blob in blobs.items():
+        assert _fixture_problems(path, blob, listed) == [UNREADABLE]
+
+
+def test_a_metadata_read_that_raises_is_refused_by_name():
+    """Pillow opens a frame lazily, and getexif() reads on from where the open
+    stopped. A PNG cut short after its header opens, and getexif() loads it
+    and raises OSError (Codex round 4, finding 4); an EXIF block that is no
+    TIFF structure raises SyntaxError when getexif() parses it (Claude round
+    8, finding 3). Each was a traceback that named no file. An EXIF block
+    Pillow found at open is EXIF, whatever is in it, so it is refused as EXIF
+    unparsed; one past the pixels is found only by that read, and a read that
+    raises refuses the frame as unreadable. A WebP's EXIF is not read at all:
+    the gate cannot walk a WebP, so it refuses one before any other read."""
+    garbage = b"garbage!" * 4
+    png = _frame(format="PNG")
+    assert _frame_problems(png[:41]) == [UNREADABLE]
+    assert "carries EXIF" in _frame_problems(_frame(format="PNG", exif=garbage))
+    assert _frame_problems(_frame(format="WEBP", exif=garbage)) == [
+        "a WEBP frame, whose end the gate cannot find: save it as JPEG or PNG"
+    ]
+    # IEND, the last 12 bytes, closes a PNG; an eXIf chunk just before it
+    # sits past the pixels.
+    past_the_pixels = png[:-12] + _png_chunk(b"eXIf", garbage) + png[-12:]
+    assert _frame_problems(past_the_pixels) == [UNREADABLE]
+
+
+def test_a_frame_that_holds_more_frames_is_refused(tmp_path):
+    """Codex round 4, finding 2: EXIF was read from the first frame only. An
+    MPO -- a JPEG that carries more frames after its first, the way a camera
+    stores a stereo pair or a large preview -- with a clean first frame and a
+    tagged second passed. A fixture is one frame, so a blob that holds more is
+    refused whole, whichever of its frames carries what: an MPO before its
+    frames are counted, as a format the gate cannot walk (Claude round 9,
+    finding 1), and an APNG, which is a PNG, for the frames it holds."""
+    with Image.open(io.BytesIO(_tagged_frame(tmp_path))) as tagged:
+        later = Image.new("RGB", (8, 8))
+        # Pillow saves each appended frame with its own encoderinfo.
+        later.encoderinfo = {"exif": tagged.info["exif"]}
+    mpo = _frame(format="MPO", save_all=True, append_images=[later])
+    assert _frame_problems(mpo) == [
+        "a MPO frame, whose end the gate cannot find: save it as JPEG or PNG"
+    ]
+    apng = _frame(format="PNG", save_all=True, append_images=[later])
+    assert "holds 2 frames" in _frame_problems(apng)
+
+
+def test_a_listed_image_pillow_raises_on_is_named(tmp_path):
+    """Claude round 9, finding 1: listed as images, some blobs crashed the gate
+    with a traceback that named no file. The gate read a frame's count before
+    its format, and on a TIFF shaped like a CR2 or ARW raw the count raises
+    TypeError; it now looks the format up first, and refuses a format it cannot
+    walk to its end before reading anything more of it. A PNG that declares
+    more pixels than Pillow's limit raises DecompressionBombError at open,
+    which the gate lets propagate, now with the fixture's path noted on it."""
+    raw, bomb = _raw_tiff(), _bomb()
+    path = "service/tests/fixtures/second.cr2"
+    assert _fixture_problems(path, raw, _listed("image", {path: raw})) == [
+        "a TIFF frame, whose end the gate cannot find: save it as JPEG or PNG"
+    ]
+    path = "service/tests/fixtures/second.png"
+    with pytest.raises(Image.DecompressionBombError) as raised:
+        _fixture_problems(path, bomb, _listed("image", {path: bomb}))
+    assert path in getattr(raised.value, "__notes__", [])
+
+
+def test_bytes_after_the_image_ends_are_refused(tmp_path):
+    """Codex round 4, finding 3: Pillow reads a frame up to where its image
+    ends, so bytes after that went unread, and a clean JPEG or PNG followed by
+    a tagged JPEG's bytes passed. A JPEG ends at the EOI that closes its
+    scans, a PNG at its IEND chunk; a JPEG or PNG that never gets there is no
+    image the gate can read, and a format whose end the gate cannot find is
+    refused whole."""
+    tagged = _tagged_frame(tmp_path)
+    for format in ("JPEG", "PNG"):
+        frame = _frame(format=format)
+        assert _frame_problems(frame + tagged) == [
+            f"{len(tagged)} bytes after the image ends"
+        ]
+        # EOI and IEND are a frame's last 2 and 12 bytes.
+        assert _frame_problems(frame[: -2 if format == "JPEG" else -12]) == [
+            UNREADABLE
+        ]
+    assert _frame_problems(_frame(format="GIF") + tagged) == [
+        "a GIF frame, whose end the gate cannot find: save it as JPEG or PNG"
+    ]
+    # IEND is empty, so a PNG ends 12 bytes after IEND starts: bytes an IEND
+    # declares it holds are after the image ends too.
+    stuffed = _frame(format="PNG")[:-12] + _png_chunk(b"IEND", tagged)
+    assert _frame_problems(stuffed) == [f"{len(tagged)} bytes after the image ends"]
+
+
+def test_a_chunk_that_draws_no_picture_is_refused(tmp_path):
+    """Codex round 4, finding 3: the gate read a frame's EXIF and nothing else
+    it carries, so a PNG holding the tagged JPEG base64-encoded in a text
+    chunk passed. A frame may carry only the chunks that draw its picture --
+    in a PNG, IHDR, PLTE, tRNS, IDAT and IEND; in a JPEG, its tables, frame
+    and scan headers, and JFIF's 16-byte APP0 header -- so a text chunk, a
+    comment, XMP, IPTC or a private chunk is refused by name, whatever it
+    holds, and so is an APP0 that holds more than JFIF's header."""
+    payload = base64.b64encode(_tagged_frame(tmp_path))
+    text, ztext, itext = (PngImagePlugin.PngInfo() for _ in range(3))
+    text.add_text("frame", payload)
+    ztext.add_text("frame", payload, zip=True)
+    itext.add_itxt("frame", payload)
+    png, jpeg = _frame(format="PNG"), _frame()
+    iptc = b"Photoshop 3.0\x008BIM\x04\x04\x00\x00" + len(payload).to_bytes(4)
+    frames = {
+        "tEXt": _frame(format="PNG", pnginfo=text),
+        "zTXt": _frame(format="PNG", pnginfo=ztext),
+        "iTXt": _frame(format="PNG", pnginfo=itext),
+        # A private chunk after IHDR, which ends 33 bytes in.
+        "prVt": png[:33] + _png_chunk(b"prVt", payload) + png[33:],
+        "COM": _frame(comment=payload),
+        "APP1": _frame(xmp=b"<x:xmpmeta>SECRET_KEYWORD</x:xmpmeta>"),
+        "APP13": _frame(extra=_jpeg_segment(0xED, iptc + payload)),
+        "APP15": _frame(extra=_jpeg_segment(0xEF, payload)),
+        # JFIF's APP0 is its 16-byte header, which ends 20 bytes in; bytes
+        # after the header ride in the segment, which Pillow reads no further.
+        "APP0": jpeg[:2] + _jpeg_segment(0xE0, jpeg[6:20] + payload) + jpeg[20:],
+    }
+    for chunk, frame in frames.items():
+        assert _frame_problems(frame) == [
+            f"carries chunks that draw no picture: {chunk}"
+        ], chunk
+
+
+def test_a_chunk_after_the_pixels_is_refused(tmp_path):
+    """Claude round 9, finding 2: the walks name every chunk on the way to the
+    image's end, and every chunk the tests refused sat before the first scan
+    or IDAT, so a walk that stopped naming chunks once the pixels began left
+    the suite green. Pillow reads a JPEG's markers only up to its first scan,
+    and a PNG's text after IDAT into `info` without raising, so only the walk
+    refuses these: a comment after a JPEG's scan, an Exif APP1 between a
+    progressive JPEG's scans, and a text chunk after a PNG's IDAT."""
+    tagged = _tagged_frame(tmp_path)
+    payload = base64.b64encode(tagged)
+    with Image.open(io.BytesIO(tagged)) as image:
+        exif = image.info["exif"]
+    jpeg, png = _frame(), _frame(format="PNG")
+    progressive = _frame(progressive=True)
+    second_scan = progressive.index(b"\xff\xda", progressive.index(b"\xff\xda") + 2)
+    frames = [
+        # EOI, a JPEG's last 2 bytes, follows its scan; IEND is a PNG's last 12.
+        ("COM", jpeg[:-2] + _jpeg_segment(0xFE, payload) + jpeg[-2:]),
+        (
+            "APP1",
+            progressive[:second_scan]
+            + _jpeg_segment(0xE1, exif)
+            + progressive[second_scan:],
+        ),
+        ("tEXt", png[:-12] + _png_chunk(b"tEXt", b"frame\0" + payload) + png[-12:]),
+    ]
+    for chunk, frame in frames:
+        assert _frame_problems(frame) == [
+            f"carries chunks that draw no picture: {chunk}"
+        ], chunk
+
+
+def test_a_frame_with_restart_markers_or_fill_bytes_passes():
+    """Claude round 9, finding 2: inside a scan, 0xFF is followed by a stuffed
+    0x00 or by a restart marker, RST0-RST7, which the walk steps over; before
+    a marker, 0xFF may be a fill byte, which it skips. No test had a frame
+    with either, so narrowing the one or dropping the other left the suite
+    green. Pillow writes restart markers every MCU with restart_marker_blocks
+    (a 64 x 64 frame has 15); a fill byte goes before the DQT."""
+    restarts = _frame(Image.new("RGB", (64, 64)), restart_marker_blocks=1)
+    assert b"\xff\xd0" in restarts
+    jpeg = _frame()
+    tables = jpeg.index(b"\xff\xdb")
+    filled = jpeg[:tables] + b"\xff" + jpeg[tables:]
+    for frame in (restarts, filled):
+        assert _frame_problems(frame) == []
+
+
+def test_a_fixture_is_judged_as_a_frame_whatever_it_is_called():
+    # A fixture listed as an image is judged as a frame, never by an allowlist
+    # of image suffixes: a frame under any other suffix is still a frame, and
+    # a raw under any suffix is still no image the gate can read.
+    frame, raw = _frame(), bytes(range(256)) * 8
+    frames = {COMMITTED_FRAME: frame, "service/tests/fixtures/second.bmp": frame}
+    raws = {f"service/tests/fixtures/second.{suffix}": raw for suffix in ("CR3", "dng")}
+    listed = _listed("image", {**frames, **raws})
+    for path in frames:
+        assert _fixture_problems(path, frame, listed) == []
+    for path in raws:
+        assert _fixture_problems(path, raw, listed) == [UNREADABLE]
+
+
+def test_camera_bytes_under_a_text_name_are_still_gated(tmp_path):
+    """A fixture is exempt for its path and its blob's hash together, never for
+    what it is called. Exempting `.txt` by name let an oversized or
+    EXIF-bearing frame be committed as second.txt and skip both checks; a frame
+    staged over a listed text fixture is not the text that was reviewed, and
+    is refused unread."""
+    tagged = _tagged_frame(tmp_path)
+    reviewed = _listed("text", {LISTED_TEXT: b"one\ntwo\n"})
+    for path in ("service/tests/fixtures/second.txt", LISTED_TEXT):
+        assert _fixture_problems(path, tagged, reviewed) == [UNLISTED]
+
+
+def test_an_ascii_frame_is_gated_whatever_it_decodes_as():
+    """Text is not evidence either. Pillow reads the ASCII Netpbm formats
+    (P1/P2/P3) and XPM, whose bytes decode as UTF-8 with no NUL, so exempting
+    every text blob let an oversized frame in under .ppm and under .txt alike.
+    Listed as an image or as text, it is held to the ceiling."""
+    ascii_frame = _ascii_frame()
+    for suffix, kind in (("ppm", "image"), ("txt", "text")):
+        path = f"service/tests/fixtures/second.{suffix}"
+        listed = _listed(kind, {path: ascii_frame})
+        problems = _fixture_problems(path, ascii_frame, listed)
+        assert any("over the" in problem for problem in problems)
+
+
+def test_text_pillow_raises_on_is_refused_by_name_unless_listed():
+    """Some ordinary text opens like an image header -- a first line of `P1 `
+    and a word matches Netpbm's magic, `SIMPLE  =  T` matches FITS' -- and
+    Pillow raises ValueError or OSError parsing the rest. Unlisted, it is
+    refused under its path, not with a traceback; listed as text, it is never
+    opened."""
+    texts = {
+        "service/tests/fixtures/plan.txt": b"P1 fix the gate\nP2 tidy the docs\n",
+        "service/tests/fixtures/header.txt": b"SIMPLE  =  T\n",
+    }
+    reviewed = _listed("text", texts)
+    for path, text in texts.items():
+        assert _fixture_problems(path, text) == [UNLISTED]
+        assert _fixture_problems(path, text, reviewed) == []
+
+
+def test_an_unlisted_fixture_is_refused_before_it_is_read():
+    """The owner's second ruling, 2026-09-28: every fixture, image or text, is
+    listed in FIXTURES by its path and its blob's SHA-256, and one that is not
+    is refused by name before anything reads it. A clean small JPEG passes
+    every strict check, and unlisted it is refused all the same; so are a
+    decompression bomb and a raw shaped like a CR2, each of which Pillow
+    raises on, because neither reaches Pillow."""
+    path = "service/tests/fixtures/second.jpg"
+    for blob in (_frame(), _bomb(), _raw_tiff()):
+        assert _fixture_problems(path, blob) == [UNLISTED]
+
+
+def test_a_listed_image_is_its_reviewed_bytes_and_still_checked(tmp_path):
+    """A listed image is committable as the bytes that were reviewed: changed,
+    it is refused by name like an unlisted file; unchanged, it must still pass
+    the strict checks, which catch what tools write."""
+    path = "service/tests/fixtures/second.jpg"
+    clean, tagged = _frame(), _tagged_frame(tmp_path)
+    changed = _frame(Image.new("RGB", (8, 8), "white"))
+    assert _fixture_problems(path, clean, _listed("image", {path: clean})) == []
+    assert _fixture_problems(path, changed, _listed("image", {path: clean})) == [
+        UNLISTED
+    ]
+    assert (
+        _fixture_problems(path, tagged, _listed("image", {path: tagged}))
+        == TAGGED_PROBLEMS
+    )
+
+
+def test_a_listed_text_fixture_is_committable_as_reviewed():
+    """The owner's ruling, 2026-09-28: a text fixture is committable once it
+    is listed in FIXTURES by its path and its blob's SHA-256, so adding one is
+    a one-line change a reviewer sees. The listing pins both: the same text
+    under another path, or changed text under the listed path, is not what
+    was reviewed, and is refused with the way in."""
+    text = b"one\ntwo\n"
+    reviewed = _listed("text", {LISTED_TEXT: text})
+    assert _fixture_problems(LISTED_TEXT, text, reviewed) == []
+    assert _fixture_problems(LISTED_TEXT, text + b"three\n", reviewed) == [UNLISTED]
+    assert _fixture_problems("service/tests/fixtures/other.txt", text, reviewed) == [
+        UNLISTED
+    ]
+    assert "review it, and list its path and SHA-256 in FIXTURES" in UNLISTED
+
+
+def test_a_listed_text_fixture_over_the_ceiling_is_refused():
+    """The ceiling is every fixture's, listed text included: size needs no
+    reader, so no encoding carries an oversized frame past it."""
+    text = b"one line of text\n" * (FRAME_CEILING // 17 + 1)
+    reviewed = _listed("text", {LISTED_TEXT: text})
+    assert _fixture_problems(LISTED_TEXT, text, reviewed) == [
+        f"{len(text)} bytes, over the {FRAME_CEILING} byte ceiling"
+    ]
+
+
+def test_an_ascii_frame_pillow_raises_on_is_gated_over_the_ceiling():
+    """Nor is an image Pillow raises on. XPM names colours (`c black`) as well
+    as spelling them `#rrggbb`, and Pillow reads only the second, so it
+    recognises this frame and raises ValueError. Exempted as text Pillow reads
+    no image in, it went in at any size. Listed as an image, it is held to the
+    ceiling, which needs no reader, and refused as unreadable as well, because
+    Pillow raises on it: the ceiling is not the one check that refuses it."""
+    width, height = 700, 600
+    rows = b"\n".join(b'"' + b"ab" * (width // 2) + b'",' for _ in range(height))
+    xpm = (
+        b'/* XPM */\nstatic char *frame[] = {\n"%d %d 2 1",\n'
+        b'"a c black",\n"b c #ffffff",\n' % (width, height)
+    ) + rows + b"\n};\n"
+    path = "service/tests/fixtures/second.xpm"
+    assert _fixture_problems(path, xpm, _listed("image", {path: xpm})) == [
+        f"{len(xpm)} bytes, over the {FRAME_CEILING} byte ceiling",
+        UNREADABLE,
+    ]
+
+
+def test_an_unlisted_text_fixture_is_refused(tmp_path):
+    """The owner's ruling, 2026-09-28: text is not decoded, it is listed. A
+    text fixture not in FIXTURES is refused under its path, whatever it
+    says, so every carrier of an image reviewers built is refused without the
+    gate knowing its encoding: a data URI (an SVG's embedded bitmap, the review
+    sheet's thumbnails, the OpenAI request body), a bare JSON string (the
+    Anthropic request body), a dump wrapped at 76 columns, that dump as a JSON
+    string, under `begin-base64`, a MIME part's headers or a heading; URL-safe
+    base64, hex, ascii85, a percent-encoded data URI, JSON that escapes `/`,
+    and uuencode. Base64 that decodes to no image is refused the same way:
+    until it is listed, text is not a fixture."""
+    tagged = _tagged_frame(tmp_path)
+    inline = base64.b64encode(tagged)
+    dump = base64.encodebytes(tagged)
+    # A JSON writer escapes each of the dump's line breaks as `\n`.
+    escaped = dump.replace(b"\n", rb"\n")
+    uuencoded = b"".join(
+        binascii.b2a_uu(tagged[i : i + 45]) for i in range(0, len(tagged), 45)
+    )
+    carriers = {
+        "service/tests/fixtures/second.svg": (
+            b'<svg xmlns="http://www.w3.org/2000/svg">'
+            b'<image href="data:image/jpeg;base64,' + inline + b'"/></svg>\n'
+        ),
+        "service/tests/fixtures/request.json": (
+            b'{"source": {"type": "base64", "media_type": "image/jpeg", '
+            b'"data": "' + inline + b'"}}\n'
+        ),
+        "service/tests/fixtures/second.b64": dump,
+        "service/tests/fixtures/wrapped.json": (
+            b'{"source": {"type": "base64", "media_type": "image/jpeg", '
+            b'"data": "' + escaped + b'"}}\n'
+        ),
+        "service/tests/fixtures/second.uu": (
+            b"begin-base64 644 second.jpg\n" + dump + b"====\n"
+        ),
+        "service/tests/fixtures/second.eml": (
+            b"Content-Type: image/jpeg\r\n"
+            b"Content-Transfer-Encoding: base64\r\n\r\n"
+            + dump.replace(b"\n", b"\r\n")
+        ),
+        "service/tests/fixtures/notes.md": b"# Frame\n\n" + dump,
+        "service/tests/fixtures/second.urlsafe": base64.urlsafe_b64encode(tagged),
+        "service/tests/fixtures/second.hex": tagged.hex().encode(),
+        "service/tests/fixtures/second.a85": base64.a85encode(tagged, wrapcol=76),
+        "service/tests/fixtures/percent.svg": (
+            b'<svg xmlns="http://www.w3.org/2000/svg"><image href="data:image/jpeg,'
+            + urllib.parse.quote_from_bytes(tagged).encode()
+            + b'"/></svg>\n'
+        ),
+        "service/tests/fixtures/slashes.json": (
+            b'{"data": "' + inline.replace(b"/", rb"\/") + b'"}\n'
+        ),
+        "service/tests/fixtures/second.uue": (
+            b"begin 644 second.jpg\n" + uuencoded + b"`\nend\n"
+        ),
+        "service/tests/fixtures/noise.b64": base64.encodebytes(bytes(range(256)) * 8),
+    }
+    for path, carrier in carriers.items():
+        assert _fixture_problems(path, carrier) == [UNLISTED], path
+
+
+def test_stray_fixture_paths_are_named():
+    tracked = [
+        COMMITTED_FRAME,
+        "service/tests/fixtures/download-lines.txt",
+        "fixtures_dev_labels.json",
+        "service/fixtures/x.jpg",
+        "plugin/fixtures/x.jpg",
+        "fixtures_full/nested/x.jpg",
+        "fixtures/x.jpg",
+        # Under the exempt folder, but inside another corpus folder nested there.
+        "service/tests/fixtures/fixtures_full/x.jpg",
+        "service/tests/fixtures/fixtures/x.jpg",
+        "",
+    ]
+    assert _stray_fixture_paths(tracked) == [
+        "service/fixtures/x.jpg",
+        "plugin/fixtures/x.jpg",
+        "fixtures_full/nested/x.jpg",
+        "fixtures/x.jpg",
+        "service/tests/fixtures/fixtures_full/x.jpg",
+        "service/tests/fixtures/fixtures/x.jpg",
+    ]
+
+
+def test_a_fixtures_folder_is_the_same_folder_whatever_its_case(tmp_path):
+    """git keeps a path's case as it was committed, and the macOS and Windows
+    disks the owner and CI check this repository out on fold it (APFS folds
+    `\ufb01` and `\u017f` too, as str.casefold does), so a frame committed from
+    a case-sensitive checkout as service/tests/Fixtures/x.jpg lands in
+    service/tests/fixtures/. The gates compared paths as git spells them: that
+    frame skipped the frame gate, and service/Fixtures/ the stray-folder gate,
+    camera record and all, with the suite green."""
+    fixtures = [
+        "service/tests/Fixtures/second.jpg",
+        "SERVICE/TESTS/FIXTURES/second.jpg",
+        "service/tests/\ufb01xtures/second.jpg",
+    ]
+    nested = "service/tests/Fixtures/Fixtures/x.jpg"
+    stray = [
+        "service/Fixtures/x.jpg",
+        "FIXTURES_FULL/x.jpg",
+        "service/\ufb01xtures/x.jpg",
+        nested,
+    ]
+    tracked = [COMMITTED_FRAME, *fixtures, *stray, "fixtures_dev_labels.json", ""]
+    assert _fixture_paths(tracked) == [COMMITTED_FRAME, *fixtures, nested]
+    assert _stray_fixture_paths(tracked) == stray
+
+    # Through git: the case a path is added in is the case the index lists.
+    repo = _throwaway_repo(tmp_path)
+    staged = repo / fixtures[0]
+    staged.parent.mkdir(parents=True)
+    staged.write_bytes(_tagged_frame(tmp_path))
+    _git("add", "--", fixtures[0], repo=repo)
+    assert _refused_fixtures(repo) == {fixtures[0]: [UNLISTED]}
+
+
+def test_a_fixture_that_passes_through_a_filter_is_refused(tmp_path):
+    """Security round 10: the gate judges the staged blob, and a filter puts
+    other bytes in the checkout. Under a Git LFS attribute the blob is a
+    pointer, which is text, and the gate's own UNREADABLE tells whoever adds
+    one to list it as text; listed so, it passed the listing and the ceiling,
+    and a fresh clone's service/tests/fixtures held the 5.7 MB camera frame
+    the pointer names, Make, Model and GPS and all. A fixture's checkout is
+    the blob that was listed, or it is refused by name."""
+    repo = _throwaway_repo(tmp_path)
+    tagged = _tagged_frame(tmp_path)
+    pointer = (
+        "version https://git-lfs.github.com/spec/v1\n"
+        f"oid sha256:{hashlib.sha256(tagged).hexdigest()}\nsize {len(tagged)}\n"
+    ).encode()
+    path = "service/tests/fixtures/second.jpg"
+    blobs = {path: pointer, LISTED_TEXT: b"one\ntwo\n"}
+    # An attribute that turns filtering off leaves the checkout the blob.
+    (repo / ".gitattributes").write_text(
+        f"{path} filter=lfs diff=lfs merge=lfs -text\n{LISTED_TEXT} -filter\n"
+    )
+    _git("add", ".gitattributes", repo=repo)
+    for staged, blob in blobs.items():
+        (repo / staged).parent.mkdir(parents=True, exist_ok=True)
+        (repo / staged).write_bytes(blob)
+        # The blob as LFS stores it: hashed as it is, with no filter run.
+        sha = _git("hash-object", "-w", "--no-filters", "--", staged, repo=repo)
+        cacheinfo = f"100644,{sha.stdout.strip()},{staged}"
+        _git("update-index", "--add", "--cacheinfo", cacheinfo, repo=repo)
+    listed = _listed("text", blobs)
+    refused = {
+        path: [
+            "passes through the lfs filter, so its checkout is not the blob "
+            "listed: remove its filter attribute"
+        ]
+    }
+    assert _refused_fixtures(repo, listed) == refused
+    # Not yet committed, the attribute is still the one `git add` reads: it
+    # stores the pointer, and a push uploads the file the pointer names.
+    _git("rm", "-q", "--cached", "--", ".gitattributes", repo=repo)
+    assert _refused_fixtures(repo, listed) == refused
+
+
+def test_no_tracked_file_sits_under_another_fixtures_folder():
+    stray = _stray_fixture_paths(_git("ls-files", "-z").stdout.split("\0"))
+    assert not stray, f"a corpus is tracked outside {FIXTURES_DIR}: {stray}"
+
+
+def test_every_committed_frame_is_small_and_exif_free():
+    tracked = _git("ls-files", "--", COMMITTED_FRAME).stdout.splitlines()
+    assert tracked == [COMMITTED_FRAME], "the smoke test's frame is not tracked"
+    refused = _refused_fixtures()
+    assert not refused, (
+        "a committed fixture is not listed as reviewed, or is listed and fails "
+        f"its checks: {refused}"
+    )
