@@ -412,6 +412,20 @@ def _fixture_paths(tracked):
     ]
 
 
+def _refused_fixtures(
+    repo: Path = REPO, listed: dict[str, tuple[str, str]] = FIXTURES
+) -> dict[str, list[str]]:
+    """The fixtures in `repo`'s index the gate refuses, each with why, each
+    judged by its staged blob against `listed`."""
+    # ls-files -z terminates each path, so the split leaves a trailing empty.
+    tracked = _git("ls-files", "-z", repo=repo).stdout.split("\0")
+    refused = {
+        path: _fixture_problems(path, _index_bytes(path, repo=repo), listed)
+        for path in _fixture_paths(tracked)
+    }
+    return {path: problems for path, problems in refused.items() if problems}
+
+
 # A text fixture's path, listed in the tests' own manifests.
 LISTED_TEXT = "service/tests/fixtures/download-lines.txt"
 
@@ -966,10 +980,7 @@ def test_a_fixtures_folder_is_the_same_folder_whatever_its_case(tmp_path):
     staged.parent.mkdir(parents=True)
     staged.write_bytes(_tagged_frame(tmp_path))
     _git("add", "--", fixtures[0], repo=repo)
-    listed = _fixture_paths(_git("ls-files", "-z", repo=repo).stdout.split("\0"))
-    blobs = {path: _index_bytes(path, repo=repo) for path in listed}
-    refused = {path: _fixture_problems(path, blob) for path, blob in blobs.items()}
-    assert refused == {fixtures[0]: [UNLISTED]}
+    assert _refused_fixtures(repo) == {fixtures[0]: [UNLISTED]}
 
 
 def test_no_tracked_file_sits_under_another_fixtures_folder():
@@ -978,12 +989,9 @@ def test_no_tracked_file_sits_under_another_fixtures_folder():
 
 
 def test_every_committed_frame_is_small_and_exif_free():
-    # ls-files -z terminates each path, so the split leaves a trailing empty.
-    tracked = _git("ls-files", "-z").stdout.split("\0")
-    blobs = {path: _index_bytes(path) for path in _fixture_paths(tracked)}
-    assert COMMITTED_FRAME in blobs, "the smoke test's frame is not tracked"
-    refused = {path: _fixture_problems(path, blob) for path, blob in blobs.items()}
-    refused = {path: problems for path, problems in refused.items() if problems}
+    tracked = _git("ls-files", "--", COMMITTED_FRAME).stdout.splitlines()
+    assert tracked == [COMMITTED_FRAME], "the smoke test's frame is not tracked"
+    refused = _refused_fixtures()
     assert not refused, (
         "a committed fixture is not listed as reviewed, or is listed and fails "
         f"its checks: {refused}"
