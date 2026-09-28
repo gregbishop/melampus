@@ -941,16 +941,55 @@ def test_the_action_pinning_gate_reads_no_comment_inside_a_scalar_that_runs_on(t
     assert "ci.yml" not in reported, reported
 
 
+def test_the_action_pinning_gate_judges_an_alias_where_it_is_written(tmp_path, monkeypatch):
+    """Round 3, Codex code 2: GitHub Actions supports YAML anchors and
+    aliases, and PyYAML composes an alias as the very node its anchor names,
+    marked where the anchor is written. So `uses: *checkout` was judged on
+    the anchor's line: a pinned, commented anchor and a commented alias
+    were two references on one line and reported, while an alias with no
+    comment passed on the anchor's. A reference is judged where it is
+    written. Each file is a whole workflow, `jobs.<id>.steps`. ci.yml here
+    has both uses commented, so it passes; x.yaml's alias has no comment,
+    so that line, and only it, is reported."""
+    sha = "11d5960a326750d5838078e36cf38b85af677262"
+    anchored = f"- uses: &checkout actions/checkout@{sha} # v4.4.0"
+    steps = f"jobs:\n  build:\n    steps:\n      {anchored}\n"
+    (tmp_path / "ci.yml").write_text(f"{steps}      - uses: *checkout # v4.4.0\n", encoding="utf-8")
+    (tmp_path / "x.yaml").write_text(f"{steps}      - uses: *checkout\n", encoding="utf-8")
+    monkeypatch.setitem(globals(), "WORKFLOWS", tmp_path)
+    with pytest.raises(AssertionError) as unpinned:
+        test_every_workflow_pins_every_action_to_a_commit_sha_with_its_version()
+    reported = str(unpinned.value)
+    assert "x.yaml: - uses: *checkout" in reported, reported
+    assert f"x.yaml: {anchored}" not in reported, reported
+    assert "ci.yml" not in reported, reported
+
+
 RELEASE_ZIPS = ("Melampus-macOS.zip", "Melampus-Windows.zip")
+
+
+class _AliasWhereWritten(yaml.SafeLoader):
+    """The safe loader, except that an alias to a scalar composes to a copy
+    of that scalar carrying the alias's own marks. PyYAML otherwise hands
+    back the anchored node itself, marked where the anchor is written, so a
+    reference written `*checkout` would be judged on another line."""
+
+    def compose_node(self, parent, index):
+        alias = self.peek_event() if self.check_event(yaml.AliasEvent) else None
+        node = super().compose_node(parent, index)
+        if alias is None or not isinstance(node, yaml.ScalarNode):
+            return node
+        return yaml.ScalarNode(node.tag, node.value, alias.start_mark, alias.end_mark, style=node.style)
 
 
 def _nodes(text: str) -> list[yaml.Node]:
     """Every node YAML composes from that workflow text, once each, carrying
     the marks of where it is written. What is a key, a value or a quoted
     scalar is the parser's to say, not a guess from the characters around
-    it. An alias is the very node it names, so a collection holding an alias
-    to itself contains itself, and the walk visits a node it has met once."""
-    nodes, pending = {}, list(yaml.compose_all(text, Loader=yaml.SafeLoader))
+    it. An alias to a collection is the very node it names, so a collection
+    holding an alias to itself contains itself, and the walk visits a node
+    it has met once."""
+    nodes, pending = {}, list(yaml.compose_all(text, Loader=_AliasWhereWritten))
     while pending:
         node = pending.pop()
         if id(node) in nodes:
