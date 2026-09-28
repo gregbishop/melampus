@@ -314,11 +314,16 @@ def _gated_fixtures(blobs: dict[str, bytes]) -> list[str]:
     image can be text -- Pillow reads the ASCII Netpbm formats and XPM -- and
     text can hold one, so only a blob that is text, no image Pillow reads, and
     carries none is exempt. A carrier is refused whole: the gate reads a frame
-    as one image, and cannot vouch for one inside another file."""
+    as one image, and cannot vouch for one inside another file. Over the
+    ceiling, text Pillow recognises an image format in is gated even when it
+    cannot read it (an XPM that names a colour): a text image carries no EXIF
+    Pillow reads, so the ceiling is the one check that could refuse it."""
     return [
         path
         for path, blob in blobs.items()
-        if _is_image(blob) or not _is_text(blob) or _embeds_image(blob)
+        if _is_image(blob, recognised=len(blob) > FRAME_CEILING)
+        or not _is_text(blob)
+        or _embeds_image(blob)
     ]
 
 
@@ -458,6 +463,27 @@ def test_text_pillow_raises_on_is_exempt():
         "service/tests/fixtures/header.txt": b"SIMPLE  =  T\n",
     }
     assert _gated_fixtures(blobs) == []
+
+
+def test_an_ascii_frame_pillow_raises_on_is_gated_over_the_ceiling():
+    """Nor is an image Pillow raises on. XPM names colours (`c black`) as well
+    as spelling them `#rrggbb`, and Pillow reads only the second, so it
+    recognises this frame and raises ValueError. Exempted as text Pillow reads
+    no image in, it went in at any size. A text image carries no EXIF Pillow
+    reads, so the ceiling is the one check that could refuse it."""
+    width, height = 700, 600
+    rows = b"\n".join(b'"' + b"ab" * (width // 2) + b'",' for _ in range(height))
+    xpm = (
+        b'/* XPM */\nstatic char *frame[] = {\n"%d %d 2 1",\n'
+        b'"a c black",\n"b c #ffffff",\n' % (width, height)
+    ) + rows + b"\n};\n"
+    named = "service/tests/fixtures/second.xpm"
+    blobs = {
+        "service/tests/fixtures/download-lines.txt": b"one\ntwo\n",
+        named: xpm,
+    }
+    assert _gated_fixtures(blobs) == [named]
+    assert any("over the" in problem for problem in _frame_problems(xpm))
 
 
 def test_an_image_carried_as_base64_text_is_gated(tmp_path):
