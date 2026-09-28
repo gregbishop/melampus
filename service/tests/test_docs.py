@@ -1841,6 +1841,21 @@ def test_docs_say_the_unchosen_default_takes_a_cloud_engine_only_for_a_key_store
         "docs/config.md's backend row does not say an environment key never picks a cloud engine")
 
 
+def test_docs_name_the_pickers_automatic_item_as_the_plugin_titles_it():
+    """Card #498: the picker's first item, the unset preference, is titled
+    for what the default now does (a local engine, else a cloud engine
+    whose key is stored), in MelampusRules.lua's engineItems.
+    docs/plugin.md's engine section names that item, so it quotes the title
+    as the plugin spells it, and a reworded label cannot leave the doc
+    promising the old default."""
+    rules = (REPO / "plugin" / "Melampus.lrplugin" / "MelampusRules.lua").read_text(encoding="utf-8")
+    titled = re.search(r"title = '(Let Melampus choose[^']*)'", rules)
+    assert titled, "MelampusRules.lua has no 'Let Melampus choose' item"
+    engine = " ".join(_section(PLUGIN_DOC.read_text(encoding="utf-8"), "The engine").split())
+    assert f"*{titled.group(1)}*" in engine, (
+        f"docs/plugin.md's engine section does not name the automatic item as the plugin titles it: {titled.group(1)}")
+
+
 def test_brief_names_ollama_as_the_windows_executables_local_option():
     """Card #406: Ollama is the local engine on Windows, as readme.md § Windows,
     docs/architecture.md and docs/config.md say. The stack contract's build
