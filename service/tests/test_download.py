@@ -67,7 +67,7 @@ from huggingface_hub.file_download import repo_folder_name
 from huggingface_hub.utils import WeakFileLock
 
 from melampus import download
-from melampus.backend import MLXBackend
+from melampus.backend import MLXBackend, VLMBackend
 from melampus.cli import main
 from melampus.config import ModelConfig
 from melampus.download import (
@@ -1231,6 +1231,44 @@ def test_cli_keeps_the_rerun_advice_on_the_line_when_the_host_serving_the_bytes_
     line = proc.stderr.splitlines()[-1]
     assert line.isprintable() and "503" in line and line.endswith(download.RERUN), line
     _assert_no_signature_on(proc.stderr)
+
+
+# The real hub's request id, as its X-Request-Id carries one: the hub
+# library puts it ahead of the hub's reason in its exception's text.
+REQUEST_ID = "Root=1-68d9c1a5-2b3c4d5e6f7a8b9c0d1e2f3a;6c0f2a1e-9b3d-4e5f-8a7b-1c2d3e4f5a6b"
+
+
+@pytest.mark.parametrize(("refusal", "reason", "advice"), [
+    pytest.param(
+        (401, {"X-Error-Message": "Invalid credentials in Authorization header", "X-Request-Id": REQUEST_ID},
+         {"error": "Invalid credentials in Authorization header"}),
+        "Invalid credentials in Authorization header", download.RERUN, id="a bad token"),
+    pytest.param(
+        (401, {"X-Error-Code": "RepoNotFound", "X-Error-Message": "Invalid username or password.",
+               "X-Request-Id": REQUEST_ID},
+         {"error": "Invalid username or password."}),
+        "make sure you are authenticated", "check [model] repo", id="a private repo, signed out"),
+])
+def test_cli_keeps_the_hubs_reason_on_the_line_when_the_hub_refuses_the_request(
+    fake_hub: FakeHub, hub_env: dict[str, str], refusal, reason: str, advice: str
+):
+    """Codex and Claude code review, round 3 (card #500). The hub library's
+    exception text puts some 250 characters (the status, the URL, the
+    request id, a pointer to the HTTP docs) ahead of the hub's reason, and
+    the line quoted it cut at MAX_QUOTED: a revoked or bad token lost
+    `Invalid credentials in Authorization header`, leaving only the advice
+    to re-run, which fails the same way, and a private repo asked for
+    signed out lost the library's hint to sign in. Given the real hub's
+    answer to each, its headers and its body, the one line on stderr
+    carries the hub's reason and the message's own advice, within
+    MAX_ERROR_BYTES, exit 3."""
+    fake_hub.refusal = refusal
+    proc = _cli(["--download-model", "--model", FAKE_REPO], hub_env)
+
+    assert proc.returncode == 3, proc.stderr[-3000:]
+    line = proc.stderr.splitlines()[-1]
+    assert line.isprintable() and len(line) <= VLMBackend.MAX_ERROR_BYTES, line
+    assert reason in line and advice in line, line
 
 
 def test_cli_names_the_file_on_stderr_and_never_the_tail_of_its_signed_url_when_the_resumed_bytes_are_the_wrong_size(

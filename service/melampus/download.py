@@ -192,20 +192,42 @@ def _without_query(text: str) -> str:
 
 
 # The most of one piece of another side's text (a file's name, a URL, the
-# hub's or its CDN's error) a DownloadError quotes. The message is one line
-# cut at MAX_ERROR_BYTES, and its own words (the reason, a size, a limit,
-# the fix) follow what it quotes: a quarter of the line a piece, so a
+# commit or the etag the hub gave) a DownloadError quotes. The message is one
+# line cut at MAX_ERROR_BYTES, and its own words (the reason, a size, a
+# limit, the fix) follow what it quotes: a quarter of the line a piece, so a
 # message quoting two keeps half the line for its own.
 MAX_QUOTED = VLMBackend.MAX_ERROR_BYTES // 4
 
+# The most of another side's text read for a URL's query, before the piece
+# is cut to its room: eight lines' worth, room for the text around a CDN's
+# signed URL (some two kilobytes) twice over. And a bound on that pattern's
+# work, which grows with the square of what it reads when the text is
+# `https://` over and over (64 KB of it took 1.5 s): an error body is the
+# hub's, or its CDN's, to make as long as it likes.
+MAX_SCANNED = VLMBackend.MAX_ERROR_BYTES * 8
 
-def _quoted(text: object) -> str:
-    """`text`, a piece another side wrote, as a DownloadError quotes it: cut
-    to MAX_QUOTED characters first, so no more than that is ever cleaned
-    (a 60 MiB error body, cleaned whole, took the run to 2 GB), then without
-    a URL's query and in printable words (`VLMBackend.plain`). The query
-    goes before the cleaning, which could part a URL from its query."""
-    return VLMBackend.plain(_without_query(str(text)[:MAX_QUOTED]))
+
+def _quoted(text: object, room: int = MAX_QUOTED) -> str:
+    """`text`, a piece another side wrote, as a DownloadError quotes it:
+    without a URL's query first, so a signed query never takes the room of
+    the words after it, read from at most MAX_SCANNED characters of it;
+    then cut to `room` characters, so no more than that is ever cleaned (a
+    60 MiB error body, cleaned whole, took the run to 2 GB); then in
+    printable words (`VLMBackend.plain`). The query goes before the
+    cleaning, which could part a URL from its query."""
+    return VLMBackend.plain(_without_query(str(text)[:MAX_SCANNED])[:max(room, 0)])
+
+
+def _quoted_in(before: str, text: object, after: str) -> str:
+    """A message quoting one long piece of another side's text, the hub
+    library's exception or Ollama's error: `before`, then `text` in all the
+    room the line has left after the message's own words (`_quoted`), then
+    `after`. The piece's reason comes after some 250 characters of the hub
+    library's own (the status, the URL, the request id), so a quarter of the
+    line lost it; the message's own advice keeps its place whatever the
+    piece's length, and the whole stays within MAX_ERROR_BYTES."""
+    room = VLMBackend.MAX_ERROR_BYTES - len(before) - len(after)
+    return f"{before}{_quoted(text, room)}{after}"
 
 
 def _redact(record: logging.LogRecord) -> bool:
@@ -813,29 +835,29 @@ def download_model(
         except GatedRepoError as exc:
             # A GatedRepoError is a RepositoryNotFoundError, but the repo exists:
             # what is missing is the user's access to it.
-            raise DownloadError(
+            raise DownloadError(_quoted_in(
                 f"the model repo {repo} on the hub at {endpoint} is gated: request access to it "
-                f"on the hub, sign in with `hf auth login` (or set HF_TOKEN), then {RERUN} ({_quoted(exc)})"
-            ) from exc
+                f"on the hub, sign in with `hf auth login` (or set HF_TOKEN), then {RERUN} (", exc, ")"
+            )) from exc
         except RepositoryNotFoundError as exc:
-            raise DownloadError(
+            raise DownloadError(_quoted_in(
                 f"the hub at {endpoint} has no model repo named {repo}: "
-                f"check [model] repo in config, or --model ({_quoted(exc)})"
-            ) from exc
+                f"check [model] repo in config, or --model (", exc, ")"
+            )) from exc
         except (httpx.TransportError, RevisionResolutionError) as exc:
             # RevisionResolutionError: the hub could not be reached to resolve
             # `main` and the cache has no refs/main to fall back on.
-            raise DownloadError(
-                f"could not reach the hub at {endpoint} ({type(exc).__name__}: {_quoted(exc)}): "
-                f"check the network, then {RERUN}"
-            ) from exc
+            raise DownloadError(_quoted_in(
+                f"could not reach the hub at {endpoint} ({type(exc).__name__}: ", exc,
+                f"): check the network, then {RERUN}"
+            )) from exc
         except Timeout as exc:
             # The repo's lock, or a blob's: a download of this model (another
             # run of this command), a load of it (the hub library's own
             # download for mlx-vlm's load) or a removal of it holds it.
             raise DownloadError(f"{HELD.format(repo=repo)}, then {RERUN} ({exc})") from exc
         except (OSError, httpx.HTTPError) as exc:
-            raise DownloadError(f"download of {repo} from {endpoint} failed: {_quoted(exc)}; {RERUN}") from exc
+            raise DownloadError(_quoted_in(f"download of {repo} from {endpoint} failed: ", exc, f"; {RERUN}")) from exc
     return path
 
 

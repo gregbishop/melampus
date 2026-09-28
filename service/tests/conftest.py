@@ -489,7 +489,10 @@ def built_executable(request: pytest.FixtureRequest) -> Path:
 # served with their first byte flipped while the etag stays the true one.
 # `gated` makes the repo one the user has no access to: it is listed, but
 # every resolve answers 403 with X-Error-Code GatedRepo, as huggingface.co
-# does until the user has accepted the repo's terms with their token. `commit`
+# does until the user has accepted the repo's terms with their token.
+# `refusal` is an answer every GET gets instead, (status, headers, JSON body),
+# as the real hub refuses a bad token or a private repo asked for signed
+# out: its X-Error-Code, X-Error-Message and X-Request-Id, its {"error"}. `commit`
 # is what `main` points at: a test moves the branch mid-run by setting it. The
 # etags are the real hub's: the sha256 of an LFS file (the weights), git's blob
 # sha1 of a regular file; `later_etag` is what every HEAD after a file's first
@@ -585,6 +588,7 @@ class FakeHub:
         self.cdn_query: str | None = None  # `Signature=...&Expires=...` on the LFS redirect's Location
         self.corrupt: set[str] = set()
         self.gated = False
+        self.refusal: tuple[int, dict[str, str], dict] | None = None
         self.commit = FAKE_COMMIT  # what `main` points at; a test moves the branch by setting it
         self.later_etag: str | None = None  # the etag of every HEAD after a file's first
         self.next_page: str | None = None  # the tree listing's `Link: rel="next"` URL
@@ -645,6 +649,10 @@ class FakeHub:
 
             def do_GET(self):  # noqa: N802 - http.server's name
                 self._record()
+                if hub.refusal:
+                    status, headers, body = hub.refusal
+                    self._json(status, body, headers)
+                    return
                 path = self.path.partition("?")[0]
                 if path == "/api/agent-harnesses":
                     self._json(200, {"standardEnvVars": ["AI_AGENT"],
