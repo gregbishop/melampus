@@ -12,10 +12,11 @@ resolves outside the repository, no tracked file names an absolute home-director
 path, and service/uv.lock is tracked. Card #441 adds the corpus gates: .gitignore
 ignores a photo corpus folder wherever it lands in the checkout, no tracked file
 sits under any other fixtures folder, and every frame in service/tests/fixtures/
-is small and EXIF-free like the first one. The frame gate reads each blob from
-the index, so it judges the bytes a push would carry, and judges every one as
-a frame -- whatever the file is called -- unless its path is listed as a
-reviewed text fixture with that blob's SHA-256.
+is small and EXIF-free like the first one. The fixture gate reads each blob
+from the index, so it judges the bytes a push would carry: every fixture,
+image or text, is listed as reviewed by its path and that blob's SHA-256, or
+it is refused before anything reads it, and a listed image is still judged as
+a frame, whatever the file is called.
 
 Two checks read the working tree instead, because each judges what the next
 commit would do rather than what the last one carried: that the lockfile is
@@ -206,34 +207,46 @@ def test_the_committed_frame_is_not_ignored(tmp_path, path):
 # on the same terms: under the ceiling and carrying no camera metadata, which
 # the secret scanner does not read. And no tracked file may sit under any other
 # fixtures folder, so a corpus cannot slip in even if the ignore rule is edited.
-# Every fixture is held to the ceiling. Beyond that, by the owner's ruling of
-# 2026-09-28, a fixture is either a text file listed in TEXT_FIXTURES by its
-# path and its blob's SHA-256, or it is judged as a frame, whatever it is
-# called: an allowlist of image suffixes would let a raw (CR3, DNG), HEIC or
-# BMP in unopened, and a raw carries the whole camera record, while an
-# exemption by suffix or by content would let the same bytes in under a .txt
-# name, as ASCII Netpbm, or base64-encoded inside text. Text is not decoded;
-# it is reviewed, and adding a text fixture is one line in TEXT_FIXTURES.
+# By the owner's rulings of 2026-09-28, every fixture, image or text, is
+# listed in FIXTURES by its path and its blob's SHA-256, and one that is not,
+# or whose blob has changed since, is refused by name before anything reads
+# it: a reviewer sees each fixture go in, as one line, and data hidden in the
+# chunks a picture is drawn from is not a class the gate has to chase. A
+# listed fixture is held to the ceiling, and a listed image, whatever it is
+# called, to the strict checks as well, which catch what tools write. Each
+# entry says whether it is an image or text; the gate never reads that from a
+# name or from the bytes, since an exemption by suffix or by content would let
+# a raw's camera record in under a .txt name, as ASCII Netpbm, or
+# base64-encoded inside text. Any kind but text is judged as an image.
 FRAME_CEILING = 400 * 1024
 CORPUS_DIRS = {"fixtures", "fixtures_full"}
-# The text fixtures, each reviewed: its path, and the SHA-256 of the blob that
-# was reviewed (`git cat-file -p :<path> | shasum -a 256`). A listed file that
-# changes is no longer the one reviewed, and is refused until its line is.
-TEXT_FIXTURES = {
+# Every fixture, each reviewed: its path, whether it is an image or text, and
+# the SHA-256 of the blob that was reviewed (`git cat-file -p :<path> |
+# shasum -a 256`). A listed file that changes is no longer the one reviewed,
+# and is refused until its line is.
+FIXTURES = {
+    "service/tests/fixtures/0A1A2829.jpg": (
+        "image",
+        "094b182022d606c57e1c099d679eb50eba21fa754ba388e86b393ca3564c83f0",
+    ),
     "service/tests/fixtures/download-lines.txt": (
-        "8d09e262af2370bd11ede8883f811aa5479df3fa3cce81e0d418d8862b8f3bc5"
+        "text",
+        "8d09e262af2370bd11ede8883f811aa5479df3fa3cce81e0d418d8862b8f3bc5",
     ),
 }
 UNREADABLE = (
-    "not an image the gate can read; if it is text, review it and list its "
-    "path and SHA-256 in TEXT_FIXTURES"
+    "not an image the gate can read; if it is text, list it in FIXTURES as text"
+)
+UNLISTED = (
+    "not listed in FIXTURES with this blob's SHA-256: review it, and list its "
+    "path and SHA-256 in FIXTURES"
 )
 
 
 # What Pillow raises on a blob it cannot read, at open or reading on from
 # there: UnidentifiedImageError (an OSError) where it recognises no format;
 # ValueError or OSError where a header matches a format's magic and then does
-# not parse (text opening `P1 fix`, a frame cut short); SyntaxError where an
+# not parse (`P6` and garbage, a frame cut short); SyntaxError where an
 # EXIF block is no TIFF structure. The gate's own walk of a JPEG or PNG raises
 # ValueError where it breaks off. DecompressionBombError is none of these, and
 # propagates.
@@ -356,17 +369,20 @@ def _frame_problems(data: bytes) -> list[str]:
 
 
 def _fixture_problems(
-    path: str, blob: bytes, reviewed: dict[str, str] = TEXT_FIXTURES
+    path: str, blob: bytes, listed: dict[str, tuple[str, str]] = FIXTURES
 ) -> list[str]:
     """Why a tracked fixture (its path, and its blob from the index) is not
-    committable. Over the ceiling, whatever it is. Then a text fixture listed
-    in `reviewed` with its blob's SHA-256 is committable as reviewed, and any
-    other fixture is judged as a frame, whatever it is called."""
+    committable. Not listed with its blob's SHA-256, it is refused unread.
+    Listed, it is held to the ceiling, and a listed image is judged as a
+    frame as well."""
+    kind, digest = listed.get(path, (None, None))
+    if digest != hashlib.sha256(blob).hexdigest():
+        return [UNLISTED]
     problems = []
     size = len(blob)
     if size > FRAME_CEILING:
         problems.append(f"{size} bytes, over the {FRAME_CEILING} byte ceiling")
-    if reviewed.get(path) != hashlib.sha256(blob).hexdigest():
+    if kind != "text":
         problems += _frame_problems(blob)
     return problems
 
@@ -402,8 +418,16 @@ def _fixture_paths(tracked):
     ]
 
 
-# A text fixture's path, listed in the tests' own `reviewed` manifests.
+# A text fixture's path, listed in the tests' own manifests.
 LISTED_TEXT = "service/tests/fixtures/download-lines.txt"
+
+
+def _listed(kind: str, blobs: dict[str, bytes]) -> dict[str, tuple[str, str]]:
+    """A manifest that lists each of `blobs` under its path as `kind`, with
+    its SHA-256, the way FIXTURES lists a reviewed fixture."""
+    return {
+        path: (kind, hashlib.sha256(blob).hexdigest()) for path, blob in blobs.items()
+    }
 
 
 def _frame(image: Image.Image | None = None, format: str = "JPEG", **save) -> bytes:
@@ -425,6 +449,36 @@ def _jpeg_segment(marker: int, data: bytes) -> bytes:
     return bytes([0xFF, marker]) + (len(data) + 2).to_bytes(2) + data
 
 
+def _bomb() -> bytes:
+    """A PNG of 65 bytes whose IHDR declares 20000 x 20000 pixels, over
+    Pillow's limit: opening it raises DecompressionBombError."""
+    header = struct.pack(">IIBBBBB", 20000, 20000, 8, 0, 0, 0, 0)
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + _png_chunk(b"IHDR", header)
+        + _png_chunk(b"IDAT", zlib.compress(b""))
+        + _png_chunk(b"IEND", b"")
+    )
+
+
+def _raw_tiff() -> bytes:
+    """A TIFF shaped like a CR2 or ARW raw: a 16 x 16 frame whose next IFD is
+    a JPEG preview found by its offset and length (tags 0x201, 0x202), with
+    no dimensions of its own. Pillow opens it, and counting its frames raises
+    TypeError."""
+    tiff = _frame(Image.new("RGB", (16, 16)), format="TIFF")
+    first = int.from_bytes(tiff[4:8], "little")
+    # The first IFD's pointer to the next follows its 12-byte entries.
+    pointer = first + 2 + 12 * int.from_bytes(tiff[first : first + 2], "little")
+    preview = [(0x103, 3, 1, 6), (0x201, 4, 1, 0), (0x202, 4, 1, 0)]
+    second = struct.pack("<H", len(preview))
+    second += b"".join(struct.pack("<HHII", *entry) for entry in preview)
+    second += bytes(4)
+    return (
+        tiff[:pointer] + len(tiff).to_bytes(4, "little") + tiff[pointer + 4 :] + second
+    )
+
+
 def _ascii_frame(size: tuple[int, int] = (300, 300)) -> bytes:
     """An ASCII Netpbm frame's bytes: an image Pillow reads whose bytes are
     also UTF-8 with no NUL, and over the ceiling at this size."""
@@ -436,7 +490,8 @@ def _ascii_frame(size: tuple[int, int] = (300, 300)) -> bytes:
 def test_a_frame_over_the_ceiling_is_refused():
     # Noise does not compress: 1200 x 800 at quality 100 is well over 1 MB.
     big = _frame(Image.effect_noise((1200, 800), 64), quality=100)
-    problems = _fixture_problems("service/tests/fixtures/second.jpg", big)
+    path = "service/tests/fixtures/second.jpg"
+    problems = _fixture_problems(path, big, _listed("image", {path: big}))
     assert any("over the" in problem for problem in problems)
 
 
@@ -488,15 +543,16 @@ def test_a_frame_the_gate_cannot_read_is_refused():
 
 def test_a_blob_pillow_raises_on_is_refused_by_name():
     """A header that matches a format's magic and then does not parse makes
-    Pillow raise ValueError or OSError, not UnidentifiedImageError. The gate
-    cannot read it, so it is refused under its path like a raw, not with a
-    traceback that names no file."""
+    Pillow raise ValueError or OSError, not UnidentifiedImageError. Listed as
+    an image, the gate cannot read it, so it is refused under its path like a
+    raw, not with a traceback that names no file."""
     blobs = {
         "service/tests/fixtures/second.ppm": b"P6\n" + bytes(range(256)) * 4,
         "service/tests/fixtures/second.jpg": _frame()[:57],
     }
+    listed = _listed("image", blobs)
     for path, blob in blobs.items():
-        assert _fixture_problems(path, blob) == [UNREADABLE]
+        assert _fixture_problems(path, blob, listed) == [UNREADABLE]
 
 
 def test_a_metadata_read_that_raises_is_refused_by_name():
@@ -595,36 +651,41 @@ def test_a_chunk_that_draws_no_picture_is_refused(tmp_path):
 
 
 def test_a_fixture_is_judged_as_a_frame_whatever_it_is_called():
-    # Every fixture but a listed text fixture is judged as a frame, never by
-    # an allowlist of image suffixes: a frame under any other suffix is still a
-    # frame, and a raw under any suffix is still no image the gate can read.
+    # A fixture listed as an image is judged as a frame, never by an allowlist
+    # of image suffixes: a frame under any other suffix is still a frame, and
+    # a raw under any suffix is still no image the gate can read.
     frame, raw = _frame(), bytes(range(256)) * 8
-    assert _fixture_problems(COMMITTED_FRAME, frame) == []
-    assert _fixture_problems("service/tests/fixtures/second.bmp", frame) == []
-    for suffix in ("CR3", "dng"):
-        path = f"service/tests/fixtures/second.{suffix}"
-        assert _fixture_problems(path, raw) == [UNREADABLE]
+    frames = {COMMITTED_FRAME: frame, "service/tests/fixtures/second.bmp": frame}
+    raws = {f"service/tests/fixtures/second.{suffix}": raw for suffix in ("CR3", "dng")}
+    listed = _listed("image", {**frames, **raws})
+    for path in frames:
+        assert _fixture_problems(path, frame, listed) == []
+    for path in raws:
+        assert _fixture_problems(path, raw, listed) == [UNREADABLE]
 
 
 def test_camera_bytes_under_a_text_name_are_still_gated(tmp_path):
     """A fixture is exempt for its path and its blob's hash together, never for
     what it is called. Exempting `.txt` by name let an oversized or
     EXIF-bearing frame be committed as second.txt and skip both checks; a frame
-    staged over a listed text fixture is not the text that was reviewed."""
+    staged over a listed text fixture is not the text that was reviewed, and
+    is refused unread."""
     tagged = _tagged_frame(tmp_path)
-    reviewed = {LISTED_TEXT: hashlib.sha256(b"one\ntwo\n").hexdigest()}
+    reviewed = _listed("text", {LISTED_TEXT: b"one\ntwo\n"})
     for path in ("service/tests/fixtures/second.txt", LISTED_TEXT):
-        assert _fixture_problems(path, tagged, reviewed) == TAGGED_PROBLEMS
+        assert _fixture_problems(path, tagged, reviewed) == [UNLISTED]
 
 
 def test_an_ascii_frame_is_gated_whatever_it_decodes_as():
     """Text is not evidence either. Pillow reads the ASCII Netpbm formats
     (P1/P2/P3) and XPM, whose bytes decode as UTF-8 with no NUL, so exempting
-    every text blob let an oversized frame in under .ppm and under .txt alike."""
+    every text blob let an oversized frame in under .ppm and under .txt alike.
+    Listed as an image or as text, it is held to the ceiling."""
     ascii_frame = _ascii_frame()
-    for suffix in ("ppm", "txt"):
+    for suffix, kind in (("ppm", "image"), ("txt", "text")):
         path = f"service/tests/fixtures/second.{suffix}"
-        problems = _fixture_problems(path, ascii_frame)
+        listed = _listed(kind, {path: ascii_frame})
+        problems = _fixture_problems(path, ascii_frame, listed)
         assert any("over the" in problem for problem in problems)
 
 
@@ -632,38 +693,68 @@ def test_text_pillow_raises_on_is_refused_by_name_unless_listed():
     """Some ordinary text opens like an image header -- a first line of `P1 `
     and a word matches Netpbm's magic, `SIMPLE  =  T` matches FITS' -- and
     Pillow raises ValueError or OSError parsing the rest. Unlisted, it is
-    refused under its path, not with a traceback; listed, it is never opened."""
+    refused under its path, not with a traceback; listed as text, it is never
+    opened."""
     texts = {
         "service/tests/fixtures/plan.txt": b"P1 fix the gate\nP2 tidy the docs\n",
         "service/tests/fixtures/header.txt": b"SIMPLE  =  T\n",
     }
-    reviewed = {path: hashlib.sha256(text).hexdigest() for path, text in texts.items()}
+    reviewed = _listed("text", texts)
     for path, text in texts.items():
-        assert _fixture_problems(path, text) == [UNREADABLE]
+        assert _fixture_problems(path, text) == [UNLISTED]
         assert _fixture_problems(path, text, reviewed) == []
+
+
+def test_an_unlisted_fixture_is_refused_before_it_is_read():
+    """The owner's second ruling, 2026-09-28: every fixture, image or text, is
+    listed in FIXTURES by its path and its blob's SHA-256, and one that is not
+    is refused by name before anything reads it. A clean small JPEG passes
+    every strict check, and unlisted it is refused all the same; so are a
+    decompression bomb and a raw shaped like a CR2, each of which Pillow
+    raises on, because neither reaches Pillow."""
+    path = "service/tests/fixtures/second.jpg"
+    for blob in (_frame(), _bomb(), _raw_tiff()):
+        assert _fixture_problems(path, blob) == [UNLISTED]
+
+
+def test_a_listed_image_is_its_reviewed_bytes_and_still_checked(tmp_path):
+    """A listed image is committable as the bytes that were reviewed: changed,
+    it is refused by name like an unlisted file; unchanged, it must still pass
+    the strict checks, which catch what tools write."""
+    path = "service/tests/fixtures/second.jpg"
+    clean, tagged = _frame(), _tagged_frame(tmp_path)
+    changed = _frame(Image.new("RGB", (8, 8), "white"))
+    assert _fixture_problems(path, clean, _listed("image", {path: clean})) == []
+    assert _fixture_problems(path, changed, _listed("image", {path: clean})) == [
+        UNLISTED
+    ]
+    assert (
+        _fixture_problems(path, tagged, _listed("image", {path: tagged}))
+        == TAGGED_PROBLEMS
+    )
 
 
 def test_a_listed_text_fixture_is_committable_as_reviewed():
     """The owner's ruling, 2026-09-28: a text fixture is committable once it
-    is listed in TEXT_FIXTURES by its path and its blob's SHA-256, so adding
-    one is a one-line change a reviewer sees. The listing pins both: the same
-    text under another path, or changed text under the listed path, is not what
+    is listed in FIXTURES by its path and its blob's SHA-256, so adding one is
+    a one-line change a reviewer sees. The listing pins both: the same text
+    under another path, or changed text under the listed path, is not what
     was reviewed, and is refused with the way in."""
     text = b"one\ntwo\n"
-    reviewed = {LISTED_TEXT: hashlib.sha256(text).hexdigest()}
+    reviewed = _listed("text", {LISTED_TEXT: text})
     assert _fixture_problems(LISTED_TEXT, text, reviewed) == []
-    assert _fixture_problems(LISTED_TEXT, text + b"three\n", reviewed) == [UNREADABLE]
+    assert _fixture_problems(LISTED_TEXT, text + b"three\n", reviewed) == [UNLISTED]
     assert _fixture_problems("service/tests/fixtures/other.txt", text, reviewed) == [
-        UNREADABLE
+        UNLISTED
     ]
-    assert "review it and list its path and SHA-256 in TEXT_FIXTURES" in UNREADABLE
+    assert "review it, and list its path and SHA-256 in FIXTURES" in UNLISTED
 
 
 def test_a_listed_text_fixture_over_the_ceiling_is_refused():
     """The ceiling is every fixture's, listed text included: size needs no
     reader, so no encoding carries an oversized frame past it."""
     text = b"one line of text\n" * (FRAME_CEILING // 17 + 1)
-    reviewed = {LISTED_TEXT: hashlib.sha256(text).hexdigest()}
+    reviewed = _listed("text", {LISTED_TEXT: text})
     assert _fixture_problems(LISTED_TEXT, text, reviewed) == [
         f"{len(text)} bytes, over the {FRAME_CEILING} byte ceiling"
     ]
@@ -681,7 +772,8 @@ def test_an_ascii_frame_pillow_raises_on_is_gated_over_the_ceiling():
         b'/* XPM */\nstatic char *frame[] = {\n"%d %d 2 1",\n'
         b'"a c black",\n"b c #ffffff",\n' % (width, height)
     ) + rows + b"\n};\n"
-    assert _fixture_problems("service/tests/fixtures/second.xpm", xpm) == [
+    path = "service/tests/fixtures/second.xpm"
+    assert _fixture_problems(path, xpm, _listed("image", {path: xpm})) == [
         f"{len(xpm)} bytes, over the {FRAME_CEILING} byte ceiling",
         UNREADABLE,
     ]
@@ -689,7 +781,7 @@ def test_an_ascii_frame_pillow_raises_on_is_gated_over_the_ceiling():
 
 def test_an_unlisted_text_fixture_is_refused(tmp_path):
     """The owner's ruling, 2026-09-28: text is not decoded, it is listed. A
-    text fixture not in TEXT_FIXTURES is refused under its path, whatever it
+    text fixture not in FIXTURES is refused under its path, whatever it
     says, so every carrier of an image reviewers built is refused without the
     gate knowing its encoding: a data URI (an SVG's embedded bitmap, the review
     sheet's thumbnails, the OpenAI request body), a bare JSON string (the
@@ -746,7 +838,7 @@ def test_an_unlisted_text_fixture_is_refused(tmp_path):
         "service/tests/fixtures/noise.b64": base64.encodebytes(bytes(range(256)) * 8),
     }
     for path, carrier in carriers.items():
-        assert _fixture_problems(path, carrier) == [UNREADABLE], path
+        assert _fixture_problems(path, carrier) == [UNLISTED], path
 
 
 def test_stray_fixture_paths_are_named():
@@ -806,7 +898,7 @@ def test_a_fixtures_folder_is_the_same_folder_whatever_its_case(tmp_path):
     listed = _fixture_paths(_git("ls-files", "-z", repo=repo).stdout.split("\0"))
     blobs = {path: _index_bytes(path, repo=repo) for path in listed}
     refused = {path: _fixture_problems(path, blob) for path, blob in blobs.items()}
-    assert refused == {fixtures[0]: TAGGED_PROBLEMS}
+    assert refused == {fixtures[0]: [UNLISTED]}
 
 
 def test_no_tracked_file_sits_under_another_fixtures_folder():
@@ -822,6 +914,6 @@ def test_every_committed_frame_is_small_and_exif_free():
     refused = {path: _fixture_problems(path, blob) for path, blob in blobs.items()}
     refused = {path: problems for path, problems in refused.items() if problems}
     assert not refused, (
-        "a committed fixture is neither a frame small and stripped like the "
-        f"first one nor a text fixture listed as reviewed: {refused}"
+        "a committed fixture is not listed as reviewed, or is listed and fails "
+        f"its checks: {refused}"
     )
