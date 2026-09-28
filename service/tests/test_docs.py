@@ -990,6 +990,55 @@ def test_the_action_pinning_gate_takes_no_at_sign_before_the_sha(tmp_path, monke
     assert "ci.yml" not in reported, reported
 
 
+def test_the_action_pinning_gate_reads_uses_only_where_github_does(tmp_path, monkeypatch):
+    """Round 3, Codex code 3 and security 2: every mapping key named `uses`
+    was taken for an action reference, so ordinary data that happens to be
+    named `uses` -- a `workflow_call` input, an `env` variable, matrix values
+    and a matrix `include`, a step's `with:` input -- failed a workflow
+    whose every action is pinned. GitHub reads a `uses:` in two places only:
+    a job's steps, `jobs.<id>.steps[*].uses`, and a job itself, calling a
+    reusable workflow, `jobs.<id>.uses`. Both files here hold all that data
+    beside a real step and a real reusable-workflow job, and reuse the whole
+    first job through an alias, `again: *build`, as GitHub's docs show; that
+    job's step is still one reference, read once. In ci.yml both references
+    are pinned, so it passes; in x.yaml both name a tag, so both are found
+    and reported, and none of the data is."""
+    sha = "11d5960a326750d5838078e36cf38b85af677262"
+    data = [
+        "uses: {type: string}",
+        "uses: ordinary-data",
+        "env: {uses: ordinary-data}",
+        "uses: [a, b]",
+        "include: [{uses: c}]",
+        "uses: an-input",
+    ]
+    def workflow(step: str, call: str) -> str:
+        return (
+            f"on:\n  workflow_call:\n    inputs:\n      {data[0]}\n"
+            f"env:\n  {data[1]}\n"
+            f"jobs:\n  build: &build\n    {data[2]}\n"
+            f"    strategy:\n      matrix:\n        {data[3]}\n        {data[4]}\n"
+            f"    steps:\n      - uses: {step}\n"
+            f"        with:\n          {data[5]}\n"
+            f"  call:\n    uses: {call}\n"
+            "  again: *build\n"
+        )
+
+    pinned = {"step": f"actions/checkout@{sha} # v4.4.0", "call": f"org/repo/.github/workflows/reusable.yml@{sha} # v1.0.0"}
+    (tmp_path / "ci.yml").write_text(workflow(**pinned), encoding="utf-8")
+    tagged = {"step": "actions/checkout@v4", "call": "org/repo/.github/workflows/reusable.yml@v1"}
+    (tmp_path / "x.yaml").write_text(workflow(**tagged), encoding="utf-8")
+    monkeypatch.setitem(globals(), "WORKFLOWS", tmp_path)
+    with pytest.raises(AssertionError) as unpinned:
+        test_every_workflow_pins_every_action_to_a_commit_sha_with_its_version()
+    reported = str(unpinned.value)
+    assert f"x.yaml: - uses: {tagged['step']}" in reported, reported
+    assert f"x.yaml: uses: {tagged['call']}" in reported, reported
+    for line in data:
+        assert f"x.yaml: {line}" not in reported, reported
+    assert "ci.yml" not in reported, reported
+
+
 RELEASE_ZIPS = ("Melampus-macOS.zip", "Melampus-Windows.zip")
 
 
@@ -1007,14 +1056,13 @@ class _AliasWhereWritten(yaml.SafeLoader):
         return yaml.ScalarNode(node.tag, node.value, alias.start_mark, alias.end_mark, style=node.style)
 
 
-def _nodes(text: str) -> list[yaml.Node]:
-    """Every node YAML composes from that workflow text, once each, carrying
-    the marks of where it is written. What is a key, a value or a quoted
-    scalar is the parser's to say, not a guess from the characters around
-    it. An alias to a collection is the very node it names, so a collection
-    holding an alias to itself contains itself, and the walk visits a node
-    it has met once."""
-    nodes, pending = {}, list(yaml.compose_all(text, Loader=_AliasWhereWritten))
+def _nodes(documents: list[yaml.Node]) -> list[yaml.Node]:
+    """Every node of those composed documents, once each, carrying the marks
+    of where it is written. What is a key, a value or a quoted scalar is the
+    parser's to say, not a guess from the characters around it. An alias to
+    a collection is the very node it names, so a collection holding an alias
+    to itself contains itself, and the walk visits a node it has met once."""
+    nodes, pending = {}, list(documents)
     while pending:
         node = pending.pop()
         if id(node) in nodes:
@@ -1027,11 +1075,24 @@ def _nodes(text: str) -> list[yaml.Node]:
     return list(nodes.values())
 
 
+def _keyed(node: yaml.Node, key: str) -> list[yaml.Node]:
+    """The values under that key, if the node is a mapping; none if not."""
+    if not isinstance(node, yaml.MappingNode):
+        return []
+    return [value for name, value in node.value if name.value == key]
+
+
 def _action_references(text: str) -> list[tuple[str, bool]]:
     """Each line of that workflow text on which an action is referenced,
     stripped, and whether it is pinned. A reference is the value of a `uses`
-    key as YAML parses it: a key counts by its value, however it is quoted,
-    and the text of a quoted scalar is never a key. What the workflow runs is
+    key where GitHub reads one: on a job under `jobs`, calling a reusable
+    workflow, and on each step of a job's `steps`. A key named `uses`
+    anywhere else, an `env` variable, a `with:` input, matrix data, a
+    `workflow_call` input, is data. A job reused through an alias is the
+    same node, read once. A key counts by its value as YAML parses it,
+    however it is quoted, and the text of a quoted scalar is never a key.
+    GitHub does not support the merge key `<<`, so a step built from one is
+    not a step it runs. What the workflow runs is
     that value, so a SHA quoted in a comment pins nothing, and all of it must
     be one string, the action and a commit SHA: a ref that merely begins
     with a SHA, `<sha>-moving`, can be moved, and a list or mapping names no
@@ -1053,14 +1114,30 @@ def _action_references(text: str) -> list[tuple[str, bool]]:
     can recurse, cannot be read for its references, so it is one line
     nothing pins, the parser's error, reported by its name."""
     try:
-        nodes = _nodes(text)
+        documents = list(yaml.compose_all(text, Loader=_AliasWhereWritten))
     except (yaml.YAMLError, RecursionError) as error:
         return [(f"does not parse as YAML: {' '.join(str(error).split())}", False)]
+    nodes = _nodes(documents)
+    jobs = [
+        job
+        for document in documents
+        for table in _keyed(document, "jobs")
+        if isinstance(table, yaml.MappingNode)
+        for _, job in table.value
+    ]
+    steps = [
+        step
+        for job in jobs
+        for sequence in _keyed(job, "steps")
+        if isinstance(sequence, yaml.SequenceNode)
+        for step in sequence.value
+    ]
+    holders = {id(holder): holder for holder in jobs + steps}
     lines = text.splitlines()
     references = {}
-    for node in nodes:
-        if isinstance(node, yaml.MappingNode):
-            for key, value in node.value:
+    for holder in holders.values():
+        if isinstance(holder, yaml.MappingNode):
+            for key, value in holder.value:
                 if key.value == "uses":
                     line = value.start_mark.line if value.start_mark.line < len(lines) else key.start_mark.line
                     references.setdefault(line, []).append(value)
