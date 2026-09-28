@@ -1039,6 +1039,25 @@ def test_the_action_pinning_gate_reads_uses_only_where_github_does(tmp_path, mon
     assert "ci.yml" not in reported, reported
 
 
+def test_the_action_pinning_gate_takes_only_a_version_as_the_comment(tmp_path, monkeypatch):
+    """Claude code round 6, 1: Done-when 1 is a SHA with the version as a
+    trailing comment, and the gate asks the comment for `# v<digit>`, but no
+    test held a SHA-pinned line whose comment is something else, so
+    loosening that to any `#` left every test green. A comment that names
+    no version, `# pinned`, tells a reader and a future bump nothing about
+    which release the SHA is. The file is a whole workflow; ci.yml here is
+    pinned with its version, so x.yaml, and only it, must be reported."""
+    sha = "11d5960a326750d5838078e36cf38b85af677262"
+    (tmp_path / "ci.yml").write_text(f"{WORKFLOW_STEPS}      - uses: actions/checkout@{sha} # v4.4.0\n", encoding="utf-8")
+    (tmp_path / "x.yaml").write_text(f"{WORKFLOW_STEPS}      - uses: actions/checkout@{sha} # pinned\n", encoding="utf-8")
+    monkeypatch.setitem(globals(), "WORKFLOWS", tmp_path)
+    with pytest.raises(AssertionError) as unpinned:
+        test_every_workflow_pins_every_action_to_a_commit_sha_with_its_version()
+    reported = str(unpinned.value)
+    assert f"x.yaml: - uses: actions/checkout@{sha} # pinned" in reported, reported
+    assert "ci.yml" not in reported, reported
+
+
 RELEASE_ZIPS = ("Melampus-macOS.zip", "Melampus-Windows.zip")
 
 
