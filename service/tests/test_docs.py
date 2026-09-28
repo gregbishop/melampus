@@ -1498,8 +1498,9 @@ def test_readme_opening_lists_the_engines_providers_offers_and_names_the_spec():
     exactly the engines a user can pick, in the picker's order: providers'
     detect_engines, read through `_picker`; and each row says what the
     engine bills, from the same module: nothing for a local engine, an API
-    key for one in KEY_VARIABLES, a subscription for a CLI. `scripted` (the
-    fake) and `command` (the seam, not in the picker) must not appear. The opening also names `AGENTS.md` and `docs/brief.md`, not
+    key for one in KEY_VARIABLES, a subscription for one in CLI_ENGINES.
+    `scripted` (the fake) and `command` (the seam, not in the picker) must
+    not appear. The opening also names `AGENTS.md` and `docs/brief.md`, not
     CLAUDE.md, as the build specification: CLAUDE.md is two includes now."""
     from melampus import providers
 
@@ -1511,10 +1512,11 @@ def test_readme_opening_lists_the_engines_providers_offers_and_names_the_spec():
     assert listed == picker, (
         f"readme.md's opening must list the engines the picker offers, in its order: {picker}, not {listed}"
     )
+    subscriptions = [cli.engine for cli in providers.CLI_ENGINES]
     for name, row in rows:
         if name in providers.KEY_VARIABLES:
             expected = "API key"
-        elif name in (providers.CLAUDE_CODE, providers.CODEX):
+        elif name in subscriptions:
             expected = "subscription"
         else:
             expected = "nothing"
@@ -1616,6 +1618,32 @@ def test_the_engine_gates_read_the_picker_detect_engines_builds(monkeypatch, tmp
         with pytest.raises(AssertionError, match=re.escape(f"['{restated}']")):
             test_only_the_readme_opening_lists_the_engines_the_other_openings_point_at_it()
     assert not asked, f"reading the picker asked Ollama at {asked}"
+
+
+def test_the_readme_billing_check_reads_the_subscription_clis_from_cli_engines(monkeypatch, tmp_path):
+    """After review round 3: the README gate's billing check named the two
+    subscription CLIs by hand, so a third, in providers.CLI_ENGINES and the
+    picker alike, fell through to "nothing" and a row saying it costs
+    nothing passed. Given a third CLI engine in both, a readme.md whose row
+    for it bills nothing fails the gate: its What it bills cell must say
+    subscription."""
+    import dataclasses
+
+    from melampus import providers
+
+    third = dataclasses.replace(providers.CODEX_CLI, engine="gemini-cli", title="Gemini CLI")
+    monkeypatch.setattr(providers, "CLI_ENGINES", (*providers.CLI_ENGINES, third))
+    detect = providers.detect_engines
+    verdict = providers.EngineVerdict(third.engine, third.title, False, "Gemini CLI is not installed")
+    monkeypatch.setattr(providers, "detect_engines", lambda *args, **kwargs: [*detect(*args, **kwargs), verdict])
+    text = README.read_text(encoding="utf-8")
+    codex_row = re.search(r"^\| `codex` \|.*\n", text, re.MULTILINE)
+    row = "| `gemini-cli` | Gemini CLI, installed and signed in | nothing |\n"
+    readme = tmp_path / "readme.md"
+    readme.write_text(text[:codex_row.end()] + row + text[codex_row.end():], encoding="utf-8")
+    monkeypatch.setitem(globals(), "README", readme)
+    with pytest.raises(AssertionError, match=re.escape("`gemini-cli` does not say it bills 'subscription'")):
+        test_readme_opening_lists_the_engines_providers_offers_and_names_the_spec()
 
 
 def test_a_doc_whose_opening_says_macos_and_windows_does_not_still_offer_linux():
