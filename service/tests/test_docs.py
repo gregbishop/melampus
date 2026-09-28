@@ -1469,15 +1469,31 @@ def test_install_docs_name_the_release_zips_and_keep_the_from_source_path():
             f"{name}'s {heading} section lost the from-source install")
 
 
+def _picker() -> list[tuple[str, str]]:
+    """The engines the plugin's picker offers, in its order, as (name, title)
+    pairs, read from providers.detect_engines, the list the picker is built
+    from (card #423): the one copy every engine gate below reads, so an
+    engine added there reaches them all. The title is the verdict's up to
+    its " — ", what the picker calls the engine. Detection stays on this
+    machine and runs nothing: Ollama is not asked (stubbed here, for the
+    call), and the subscription CLIs are not run (conftest's
+    no_ambient_subscription_cli stubs their verdicts in every test)."""
+    from melampus import providers
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(providers, "ollama_answers", lambda url=None: False)
+        verdicts = providers.detect_engines()
+    return [(verdict.engine, verdict.title.split(" — ")[0]) for verdict in verdicts]
+
+
 def test_readme_opening_lists_the_engines_providers_offers_and_names_the_spec():
     """Card #491, Done-when 1 and 3: given readme.md's first screen (everything
     before its first `## ` heading), when read, then its engine table names
     exactly the engines a user can pick, in the picker's order: providers'
-    BACKEND_CHOICES without the test fake, then the two subscription CLIs; and
-    each row says what the engine bills, from the same module: nothing for a
-    local engine, an API key for one in KEY_VARIABLES, a subscription for a
-    CLI. `scripted` (the fake) and `command` (the seam, not in the picker) must
-    not appear. The opening also names `AGENTS.md` and `docs/brief.md`, not
+    detect_engines, read through `_picker`; and each row says what the
+    engine bills, from the same module: nothing for a local engine, an API
+    key for one in KEY_VARIABLES, a subscription for a CLI. `scripted` (the
+    fake) and `command` (the seam, not in the picker) must not appear. The opening also names `AGENTS.md` and `docs/brief.md`, not
     CLAUDE.md, as the build specification: CLAUDE.md is two includes now."""
     from melampus import providers
 
@@ -1485,8 +1501,7 @@ def test_readme_opening_lists_the_engines_providers_offers_and_names_the_spec():
     opening = README.read_text(encoding="utf-8").split("\n## ", 1)[0]
     rows = re.findall(r"^\| `([\w-]+)` \|(.*)$", opening, re.MULTILINE)
     listed = [name for name, _ in rows]
-    picker = [*(b for b in providers.BACKEND_CHOICES if b != providers.SCRIPTED),
-              providers.CLAUDE_CODE, providers.CODEX]
+    picker = [name for name, _ in _picker()]
     assert listed == picker, (
         f"readme.md's opening must list the engines the picker offers, in its order: {picker}, not {listed}"
     )
@@ -1549,12 +1564,10 @@ def test_only_the_readme_opening_lists_the_engines_the_other_openings_point_at_i
     gate reads is exactly what drifted before this card. A sentence that names
     one engine to qualify a claim about it (`[model] ollama_url`, the privacy
     caveat above) is not a list and does not trip this: engine keys are read
-    as backticked tokens, titles as whole words."""
-    from melampus import providers
-
-    titles = [t.split(" — ")[0] for t in providers.ENGINE_TITLES.values()]
-    names = [*providers.ENGINE_TITLES, providers.CLAUDE_CODE, providers.CODEX]
-    words = [*titles, providers.CLAUDE_CODE_CLI.title, providers.CODEX_CLI.title]
+    as backticked tokens, titles as whole words, both from `_picker`."""
+    picker = _picker()
+    names = [name for name, _ in picker]
+    words = [title for _, title in picker]
     for doc in (BRIEF, REPO / "docs" / "architecture.md"):
         opening = _opening(doc.read_text(encoding="utf-8"))
         assert "readme.md" in opening, (
@@ -1564,6 +1577,39 @@ def test_only_the_readme_opening_lists_the_engines_the_other_openings_point_at_i
         assert not restated, (
             f"{doc.name}'s opening restates readme.md's engine list ({restated}); only the "
             "README's copy is held to providers.py, so name the shape and cite the table")
+
+
+def test_the_engine_gates_read_the_picker_detect_engines_builds(monkeypatch, tmp_path):
+    """Review round 3, finding 3: the two gates above built the picker's
+    engine list by hand, one from BACKEND_CHOICES, the other from
+    ENGINE_TITLES, both adding the two CLIs themselves; the picker is built
+    from providers.detect_engines (card #423), and a seventh verdict there
+    left both green with readme.md listing six. Given a seventh verdict,
+    readme.md's opening, which lists six, fails the first gate, and an
+    opening that names the seventh, by key or by title, fails the second.
+    And the list is read without asking Ollama: the probe here records, and
+    must not be reached."""
+    from melampus import providers
+
+    detect = providers.detect_engines
+    seventh = providers.EngineVerdict("gemini", "Gemini — cloud, needs an API key", True, "API key required")
+    monkeypatch.setattr(providers, "detect_engines", lambda ollama_at=None: [*detect(ollama_at), seventh])
+    asked = []
+    monkeypatch.setattr(providers, "ollama_answers", lambda url=None: asked.append(url) or False)
+    with pytest.raises(AssertionError, match="gemini"):
+        test_readme_opening_lists_the_engines_providers_offers_and_names_the_spec()
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "architecture.md").write_text("# Architecture\n\nThe engines are readme.md's table.\n",
+                                          encoding="utf-8")
+    monkeypatch.setitem(globals(), "REPO", tmp_path)
+    monkeypatch.setitem(globals(), "BRIEF", docs / "brief.md")
+    for restated, written in (("gemini", "`gemini`"), ("Gemini", "Gemini")):
+        (docs / "brief.md").write_text(
+            f"# brief\n\nThe engines are readme.md's table, {written} among them.\n", encoding="utf-8")
+        with pytest.raises(AssertionError, match=re.escape(f"['{restated}']")):
+            test_only_the_readme_opening_lists_the_engines_the_other_openings_point_at_it()
+    assert not asked, f"reading the picker asked Ollama at {asked}"
 
 
 def test_a_doc_whose_opening_says_macos_and_windows_does_not_still_offer_linux():
