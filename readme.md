@@ -62,16 +62,18 @@ the numbers do and don't support.
 - **An Apple Silicon Mac, or a Windows PC.** Developed on an M4 Max / 128 GB.
 - **At least one engine that runs on it.** The Settings dialog greys the ones
   that cannot, with the reason. Each needs:
-  - `mlx`: an Apple Silicon Mac (MLX is arm64-only, so never Windows), and
-    ~20 GB of disk for its default model.
+  - `mlx`: an Apple Silicon Mac (MLX is arm64-only, so never Windows). Its
+    default model is 18.3 GB of weights, on disk and held in unified memory
+    while it runs; a Mac without that much memory to spare picks a smaller
+    build (§ Available models, `[model] repo`) or `ollama`.
   - `ollama`: Ollama installed and running on this machine, macOS or Windows,
     and ~6 GB of disk for its default model.
   - `openai` or `claude`: that provider's API key.
   - `claude-code` or `codex`: Claude Code or Codex CLI installed here and
     signed in to its subscription.
 
-  On an Apple Silicon Mac `mlx` needs nothing more. On Windows a user brings
-  one of the others: Ollama, an API key, or a signed-in CLI.
+  On Windows a user brings one of the others: Ollama, an API key, or a
+  signed-in CLI.
 - **Nothing else, for a user.** The executable ships in the plugin folder
   (§ Reviewing in Lightroom). Python 3.12 and uv are for building it and
   running the tests, below — not 3.13+: the `mlx-vlm` dependency stack

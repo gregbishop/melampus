@@ -1731,11 +1731,22 @@ def test_readme_requirements_say_what_each_engine_needs():
     an API key, a CLI installed and signed in. A Windows user with only what
     the section listed had no engine that runs. So Requirements names every
     engine the picker offers (`_picker`), with what it needs, and a user on
-    either platform can see what makes at least one of them run."""
+    either platform can see what makes at least one of them run.
+
+    Review round 5, finding 2: it then said that on an Apple Silicon Mac
+    `mlx` "needs nothing more", which is false for a Mac without the memory
+    to hold the default model; detection calls `mlx` available on any Apple
+    Silicon Mac, so the dialog does not catch it either. What `mlx` needs
+    includes that model's size, the figure docs/config.md's `repo` row
+    documents, read from there so the two cannot disagree."""
     section = _section(README.read_text(encoding="utf-8"), "Requirements")
     assert section is not None, "readme.md has no ## Requirements section"
     missing = [name for name, _ in _picker() if f"`{name}`" not in section]
     assert not missing, f"readme.md's Requirements do not say what {missing} need to run"
+    size = re.search(r"\b\d+(?:\.\d+)? GB\b", _row(CONFIG_DOC.read_text(encoding="utf-8"), "repo")).group(0)
+    assert size in section, (
+        f"readme.md's Requirements do not give the default `mlx` model's size, {size}, "
+        "the figure docs/config.md's `repo` row documents")
 
 
 # A count, in digits or in the words a doc spells one out with.
