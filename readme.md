@@ -59,11 +59,19 @@ the numbers do and don't support.
 ## Requirements
 
 - **Lightroom Classic.** Developed against 15.4.1.
-- **An Apple Silicon Mac, or a Windows PC.** MLX is arm64-only, so `mlx` is the
-  Mac's local engine; `ollama` is the local engine on either. Developed on an
-  M4 Max / 128 GB.
-- **Disk for a local model.** ~20 GB for the default `mlx` model, ~6 GB for the
-  default `ollama` one. The cloud and CLI engines need none.
+- **An Apple Silicon Mac, or a Windows PC.** Developed on an M4 Max / 128 GB.
+- **At least one engine that runs on it.** The Settings dialog greys the ones
+  that cannot, with the reason. Each needs:
+  - `mlx`: an Apple Silicon Mac (MLX is arm64-only, so never Windows), and
+    ~20 GB of disk for its default model.
+  - `ollama`: Ollama installed and running on this machine, macOS or Windows,
+    and ~6 GB of disk for its default model.
+  - `openai` or `claude`: that provider's API key.
+  - `claude-code` or `codex`: Claude Code or Codex CLI installed here and
+    signed in to its subscription.
+
+  On an Apple Silicon Mac `mlx` needs nothing more. On Windows a user brings
+  one of the others: Ollama, an API key, or a signed-in CLI.
 - **Nothing else, for a user.** The executable ships in the plugin folder
   (§ Reviewing in Lightroom). Python 3.12 and uv are for building it and
   running the tests, below — not 3.13+: the `mlx-vlm` dependency stack

@@ -1706,6 +1706,21 @@ def test_a_doc_whose_opening_says_macos_and_windows_does_not_still_offer_linux()
             f"{doc.name}'s opening says macOS and Windows, but it still offers Linux: {offers}")
 
 
+def test_readme_requirements_say_what_each_engine_needs():
+    """Review round 4, finding 3 (card #491, Done-when 2): readme.md's
+    Requirements named only `mlx` and `ollama` and then said "Nothing else,
+    for a user.", which is false on Windows: `mlx` cannot run there, and
+    every other engine needs something the user brings, an Ollama server,
+    an API key, a CLI installed and signed in. A Windows user with only what
+    the section listed had no engine that runs. So Requirements names every
+    engine the picker offers (`_picker`), with what it needs, and a user on
+    either platform can see what makes at least one of them run."""
+    section = _section(README.read_text(encoding="utf-8"), "Requirements")
+    assert section is not None, "readme.md has no ## Requirements section"
+    missing = [name for name, _ in _picker() if f"`{name}`" not in section]
+    assert not missing, f"readme.md's Requirements do not say what {missing} need to run"
+
+
 # A count, in digits or in the words a doc spells one out with.
 NUMBER = r"(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)"
 # "Six engines", "(six engines)", "7 engines": a number right before the noun;
