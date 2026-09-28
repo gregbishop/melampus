@@ -82,8 +82,9 @@ function Rules.defaultSettings()
 		profile = 'wildlife',
 		-- Where inference runs (card #403): one of Rules.ENGINES, passed to the
 		-- CLI as --backend. Empty means the user has not chosen, so the CLI's
-		-- own default applies: mlx today, and the first engine that can run on
-		-- this machine once card #404's detection lands.
+		-- own default applies: the first local engine that can run on this
+		-- machine (card #404), else the cloud engine whose key is stored in
+		-- Settings, else a refusal naming the picker (card #498).
 		engine = '',
 	}
 end
@@ -235,7 +236,10 @@ end
 --- The engine a picker value comes to (card #408): the picked one, or with
 -- the preference unset the first that detection says can run here, in the
 -- owner's order, which is the executable's own default (providers
--- .default_engine). nil when nothing is picked and there is no detection.
+-- .default_engine) whenever it is a local engine, the one case a Download
+-- row asks about; with nothing local the executable takes a cloud engine
+-- only when its key is stored (card #498). nil when nothing is picked and
+-- there is no detection.
 function Rules.resolvedEngine(engine, verdicts)
 	if engine ~= nil and engine ~= '' then return engine end
 	return availableEngines(verdicts)[1]

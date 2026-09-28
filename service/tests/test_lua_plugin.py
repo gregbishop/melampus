@@ -585,6 +585,52 @@ def test_the_stored_key_reaches_the_executable_through_the_command_the_plugin_bu
         assert "needs an API key" in tail, tail
 
 
+@pytest.mark.parametrize("stored_key", ["", STORED_KEY])
+def test_with_no_engine_picked_the_executable_takes_a_local_engine_else_the_one_whose_key_is_stored(
+    built_executable: Path, tmp_path: Path, stored_key: str
+):
+    """Card #498, decision (b), at the real boundary. With the engine
+    preference unset and a key in LrPasswords, the command the plugin builds
+    carries `--default-cloud openai` (the first cloud engine with a stored
+    key) and nothing else names an engine; with no key stored it names no
+    cloud engine and sets no key. Run through the shell LrTasks.execute hands
+    it to, against dist/melampus (dist/melampus.exe on Windows) with no key
+    variable in its environment and no Ollama answering (the per-user config
+    points it at a closed port), the executable takes mlx where mlx can run,
+    else openai when the key was stored, else refuses, exit 3, naming the
+    plugin's picker. The previews folder is empty, so a picked engine stops
+    there, exit 2, before any backend is built: nothing loads and nothing is
+    sent, on the Mac runner (mlx) as on the Windows one (the other two)."""
+    plugin_dir = _plugin_folder_holding(built_executable, tmp_path)
+    previews = tmp_path / "previews"
+    previews.mkdir()
+    env = per_user_config(tmp_path, f'[model]\nollama_url = "http://127.0.0.1:{closed_port()}"\n')
+    ambient = {name for names in providers.KEY_VARIABLES.values() for name in names}
+    assert not ambient & set(env), f"a key variable is in the executable's environment: {ambient & set(env)}"
+
+    command = _command_the_plugin_builds(
+        plugin_dir, previews, previews / "results.json", tmp_path, engine="", stored_key=stored_key)
+    assert "--backend" not in command, command
+    if stored_key:
+        assert f"--default-cloud {as_the_shell_receives_it('openai')}" in command, command
+    else:
+        assert "--default-cloud" not in command and "MELAMPUS_" not in command, command
+
+    proc = run_as_lightroom_would(command, env=env, cwd=tmp_path,
+                                  capture_output=True, text=True, timeout=600)
+
+    tail = _cli_log_tail(tmp_path)
+    assert "unrecognized arguments" not in tail, f"the executable does not accept --default-cloud:\n{tail}"
+    assert not stored_key or stored_key not in tail, f"the executable printed the key:\n{tail}"
+    if providers.on_apple_silicon() or stored_key:
+        engine = "mlx" if providers.on_apple_silicon() else "openai"
+        assert proc.returncode == 2, f"exit {proc.returncode}: {proc.stderr[-2000:]}\n{tail}"
+        assert f"engine: {engine} " in tail and "no images found" in tail, tail
+    else:
+        assert proc.returncode == 3, f"exit {proc.returncode}: {proc.stderr[-2000:]}\n{tail}"
+        assert "Where identification runs" in tail and "engine: " not in tail, tail
+
+
 def test_the_detection_the_plugin_runs_reaches_the_executable_and_fills_the_picker(
     built_executable: Path, tmp_path: Path
 ):

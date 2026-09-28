@@ -475,10 +475,26 @@ function Analyze.downloadModel(engine, cancelPath, onProgress, onFinish, cancelA
 	}
 end
 
+--- The cloud engine whose key a run carries, the variable it travels in and
+-- the key (card #405): the picked engine's, when it needs one and one is
+-- stored; with no engine picked, the first engine, in the owner's order,
+-- whose key the user stored in Settings (card #498: a key typed there is a
+-- choice, so the executable's default may take that engine when nothing
+-- local can run). nil when there is none.
+local function storedKey(chosen)
+	for _, engine in ipairs(chosen and { chosen } or Rules.ENGINES) do
+		local variable = Rules.keyVariable(engine)
+		local key = variable and LrPasswords.retrieve(variable)
+		if key and key ~= '' then return engine, variable, key end
+	end
+	return nil
+end
+
 --- Run the identification pipeline over a folder of previews, writing the
 -- enriched results (quality and its rank, burst agreement, range flag,
 -- encounter) to `resultsPath` in the same run. `engine` is the engine
--- preference (Rules.ENGINES); nil or empty leaves the choice to the CLI.
+-- preference (Rules.ENGINES); nil or empty leaves the choice to the CLI,
+-- told of the cloud engine whose key is stored, if any (storedKey).
 -- Returns true plus the results path, or false plus a message.
 function Analyze.run(previewFolder, resultsPath, profile, engine)
 	local folder = pluginDir()
@@ -486,12 +502,19 @@ function Analyze.run(previewFolder, resultsPath, profile, engine)
 	if not executable then return false, missing end
 
 	-- Identification and enrichment, one process. --backend only when the
-	-- user chose an engine; otherwise the CLI decides.
+	-- user chose an engine; otherwise the CLI decides, among the local
+	-- engines, and --default-cloud names the cloud engine it may fall back
+	-- to when the user stored that engine's key in Settings (card #498).
 	local parts, chosen = engineArguments({
 		quote(executable), quote(previewFolder),
 		'--profile', quote(profile or 'wildlife'),
 	}, engine)
 	if not parts then return false, chosen end
+	local keyed, variable, key = storedKey(chosen)
+	if keyed and not chosen then
+		parts[#parts + 1] = '--default-cloud'
+		parts[#parts + 1] = quote(keyed)
+	end
 
 	local cliLog = cliLogPath()
 	local refusal = windowsPathRefusal({
@@ -515,12 +538,11 @@ function Analyze.run(previewFolder, resultsPath, profile, engine)
 
 	-- A cloud engine's key (card #405): stored by the Settings dialog through
 	-- LrPasswords, handed to the executable in the variable it reads, and
-	-- only for the engine the user picked. It is never an argument and never
+	-- only for the engine the user picked, or with none picked the one
+	-- --default-cloud names (storedKey). It is never an argument and never
 	-- logged; the log carries the line with the key blanked.
 	local logged = line
-	local variable = Rules.keyVariable(chosen)
-	local key = variable and LrPasswords.retrieve(variable)
-	if key and key ~= '' then
+	if key then
 		local keyRefusal = windowsKeyRefusal(key)
 		if keyRefusal then return false, keyRefusal end
 		line = environmentPrefix(variable, key) .. line
