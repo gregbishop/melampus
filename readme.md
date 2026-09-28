@@ -101,7 +101,7 @@ plain HTTP, so it is not affected.
 ## Windows (Ollama, or cloud inference)
 
 There is no MLX on Windows — it is Apple-Silicon-only — so on Windows
-(and on a Mac that prefers it) the primary backend is one of two things.
+(and on a Mac that prefers it) the primary backend is one of the following.
 
 **Local, through Ollama.** Install Ollama from [ollama.com/download](https://ollama.com/download),
 pull a vision model (`ollama pull qwen3-vl:8b-instruct`, the default; see

@@ -1586,10 +1586,12 @@ def test_a_doc_whose_opening_says_macos_and_windows_does_not_still_offer_linux()
 
 # A count, in digits or in the words a doc spells one out with.
 NUMBER = r"(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)"
-# "Six engines", "(six engines)", "7 engines": a number right before the noun.
-# "the two local engines" is not one: a subset qualified in place is named
-# member by member in the same sentence, so it does not move with the total.
-ENGINE_COUNT = re.compile(rf"\b{NUMBER}\s+engines\b", re.IGNORECASE)
+# "Six engines", "(six engines)", "7 engines": a number right before the noun;
+# and "one of two things", the count of ways to run one that readme.md's
+# Windows section put before the three it lists. "the two local engines" is
+# not one: a subset qualified in place is named member by member in the same
+# sentence, so it does not move with the total.
+ENGINE_COUNT = re.compile(rf"\b{NUMBER}\s+engines\b|\bone of {NUMBER}\b", re.IGNORECASE)
 
 
 def test_the_docs_card_491_rewrote_state_no_engine_count():
@@ -1600,9 +1602,15 @@ def test_the_docs_card_491_rewrote_state_no_engine_count():
     written anywhere else is wrong the day an engine is added, the reason card
     #437 took the test counts out. So these docs name the engines' shape and
     cite the table, and state no count of them, in prose, in the Status table
-    or in the diagram."""
+    or in the diagram.
+
+    Review round 3, finding 2: readme.md's Windows section said the primary
+    backend there "is one of two things" and then listed three — Ollama, a
+    subscription CLI, the cloud. The same count, in the same place a new
+    engine goes, so the same gate reads it."""
     for counted in ("Six engines, picked in the plugin's Settings dialog.",
-                    "• VLM inference (six engines)", "7 engines behind one seam"):
+                    "• VLM inference (six engines)", "7 engines behind one seam",
+                    "the primary backend is one of two things."):
         assert ENGINE_COUNT.search(counted), f"the gate misses a stated count: {counted!r}"
     subset = "On the two local engines no image leaves the machine: `mlx` and `ollama`."
     assert not ENGINE_COUNT.search(subset), f"the gate calls a named subset a count: {subset!r}"
