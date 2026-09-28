@@ -898,6 +898,49 @@ def test_the_action_pinning_gate_reports_a_workflow_nested_too_deep_to_parse(tmp
     assert "ci.yml" not in reported, reported
 
 
+def test_the_action_pinning_gate_reads_no_comment_inside_a_scalar_that_runs_on(tmp_path, monkeypatch):
+    """Round 3 (Codex code 1, security 1) and Claude code round 5, 1: the
+    comment was the text after the last node that ends on the reference's
+    line, but a quoted or plain scalar that starts on that line and runs on
+    to the next ends on neither, so its first line's text was read as the
+    comment, and a `# v4` inside a `name:` passed a step that has no version
+    comment at all. The comment now stops where the first such scalar
+    begins. A block scalar's header, `|- # v4.4.0`, is a real comment and
+    still counts. Each file is a whole workflow, `jobs.<id>.steps`. ci.yml
+    here is pinned in both spellings, so every .yaml file, and only those,
+    must be reported."""
+    sha = "11d5960a326750d5838078e36cf38b85af677262"
+    steps = "jobs:\n  build:\n    steps:\n"
+    (tmp_path / "ci.yml").write_text(
+        f"{steps}      - uses: actions/checkout@{sha} # v4.4.0\n"
+        f"      - uses: |- # v4.4.0\n          actions/checkout@{sha}\n",
+        encoding="utf-8",
+    )
+    first_lines = {
+        "double.yaml": f'- {{uses: actions/checkout@{sha}, name: "pin # v4 kept',
+        "single.yaml": f"- {{uses: actions/checkout@{sha}, name: 'pin # v4 kept",
+        "plain.yaml": f"- {{uses: actions/checkout@{sha}, name: pin#v4",
+    }
+    (tmp_path / "double.yaml").write_text(
+        f'{steps}      {first_lines["double.yaml"]}\n          for reference"}}\n', encoding="utf-8"
+    )
+    (tmp_path / "single.yaml").write_text(
+        f"{steps}      {first_lines['single.yaml']}\n          for reference'}}\n", encoding="utf-8"
+    )
+    (tmp_path / "plain.yaml").write_text(f"{steps}      {first_lines['plain.yaml']}\n          kept}}\n", encoding="utf-8")
+    first_lines["one-line-steps.yaml"] = f'steps: [{{uses: actions/checkout@{sha}}}, {{run: echo, name: "# v4'
+    (tmp_path / "one-line-steps.yaml").write_text(
+        f'jobs:\n  build:\n    {first_lines["one-line-steps.yaml"]}\n        x"}}]\n', encoding="utf-8"
+    )
+    monkeypatch.setitem(globals(), "WORKFLOWS", tmp_path)
+    with pytest.raises(AssertionError) as unpinned:
+        test_every_workflow_pins_every_action_to_a_commit_sha_with_its_version()
+    reported = str(unpinned.value)
+    for name, line in first_lines.items():
+        assert f"{name}: {line}" in reported, reported
+    assert "ci.yml" not in reported, reported
+
+
 RELEASE_ZIPS = ("Melampus-macOS.zip", "Melampus-Windows.zip")
 
 
@@ -933,15 +976,18 @@ def _action_references(text: str) -> list[tuple[str, bool]]:
     or flow collection that ends on the line, which leaves a `#` inside a
     quoted scalar, or a flow mapping's closing brace, where it belongs; a
     block collection ends where the next token begins, past any comment, so
-    it does not say where the line's text ends. A value that starts on the
-    line and runs on past it leaves nothing ending there, so that line has
-    no comment; an absent value, `? uses` at the end of the file, is placed
-    past the last line, so it is read on its key's line and names no
-    action. One trailing comment cannot name two actions' versions, so
-    a line holding two references is not pinned whatever each names. A
-    workflow that does not parse, or nests deeper than the parser can recurse,
-    cannot be read for its references, so it is one line nothing pins, the
-    parser's error, reported by its name."""
+    it does not say where the line's text ends. The comment stops where a
+    quoted or plain scalar that starts on the line and runs on past it
+    begins, since everything after that is the scalar's text; a block
+    scalar's header line, `|- # v4.4.0`, holds a real comment. A value that
+    starts on the line and runs on past it leaves nothing ending there, so
+    that line has no comment; an absent value, `? uses` at the end of the
+    file, is placed past the last line, so it is read on its key's line and
+    names no action. One trailing comment cannot name two actions'
+    versions, so a line holding two references is not pinned whatever each
+    names. A workflow that does not parse, or nests deeper than the parser
+    can recurse, cannot be read for its references, so it is one line
+    nothing pins, the parser's error, reported by its name."""
     try:
         nodes = _nodes(text)
     except (yaml.YAMLError, RecursionError) as error:
@@ -964,11 +1010,21 @@ def _action_references(text: str) -> list[tuple[str, bool]]:
             ),
             default=len(lines[line]),
         )
+        runs_on = min(
+            (
+                node.start_mark.column
+                for node in nodes
+                if isinstance(node, yaml.ScalarNode)
+                and node.style in (None, "'", '"')
+                and node.start_mark.line == line < node.end_mark.line
+            ),
+            default=len(lines[line]),
+        )
         pinned = (
             len(values) == 1
             and isinstance(values[0], yaml.ScalarNode)
             and re.fullmatch(r"\S+@[0-9a-f]{40}", values[0].value)
-            and re.search(r"#\s*v\d", lines[line][written:])
+            and re.search(r"#\s*v\d", lines[line][written:runs_on])
         )
         judged.append((lines[line].strip(), bool(pinned)))
     return judged
