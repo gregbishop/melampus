@@ -371,12 +371,17 @@ def _fixture_problems(
     return problems
 
 
+# Paths are compared casefolded: git keeps a path's case as committed, and the
+# macOS and Windows disks the owner and CI check out on fold it, so
+# service/tests/Fixtures/ from a case-sensitive checkout is this folder there.
+
+
 def _is_stray_fixture(path: str) -> bool:
     """A corpus-named directory component anywhere in the path, except the
-    one that is exactly service/tests/fixtures: a corpus folder nested under
-    the exempt folder is still another corpus folder."""
-    exempt = FIXTURES_DIR.split("/")
-    parts = path.split("/")[:-1]
+    one that is service/tests/fixtures: a corpus folder nested under the
+    exempt folder is still another corpus folder."""
+    exempt = FIXTURES_DIR.casefold().split("/")
+    parts = path.casefold().split("/")[:-1]
     return any(
         part in CORPUS_DIRS and parts[: i + 1] != exempt
         for i, part in enumerate(parts)
@@ -386,6 +391,15 @@ def _is_stray_fixture(path: str) -> bool:
 def _stray_fixture_paths(tracked):
     """Tracked paths under a fixtures folder other than service/tests/fixtures."""
     return [path for path in tracked if path and _is_stray_fixture(path)]
+
+
+def _fixture_paths(tracked):
+    """Tracked paths in service/tests/fixtures, or standing in its place: the
+    fixtures the frame gate judges."""
+    folder = FIXTURES_DIR.casefold() + "/"
+    return [
+        path for path in tracked if path and (path.casefold() + "/").startswith(folder)
+    ]
 
 
 # A text fixture's path, listed in the tests' own `reviewed` manifests.
@@ -759,6 +773,43 @@ def test_stray_fixture_paths_are_named():
     ]
 
 
+def test_a_fixtures_folder_is_the_same_folder_whatever_its_case(tmp_path):
+    """git keeps a path's case as it was committed, and the macOS and Windows
+    disks the owner and CI check this repository out on fold it (APFS folds
+    `\ufb01` and `\u017f` too, as str.casefold does), so a frame committed from
+    a case-sensitive checkout as service/tests/Fixtures/x.jpg lands in
+    service/tests/fixtures/. The gates compared paths as git spells them: that
+    frame skipped the frame gate, and service/Fixtures/ the stray-folder gate,
+    camera record and all, with the suite green."""
+    fixtures = [
+        "service/tests/Fixtures/second.jpg",
+        "SERVICE/TESTS/FIXTURES/second.jpg",
+        "service/tests/\ufb01xtures/second.jpg",
+    ]
+    nested = "service/tests/Fixtures/Fixtures/x.jpg"
+    stray = [
+        "service/Fixtures/x.jpg",
+        "FIXTURES_FULL/x.jpg",
+        "service/\ufb01xtures/x.jpg",
+        nested,
+    ]
+    tracked = [COMMITTED_FRAME, *fixtures, *stray, "fixtures_dev_labels.json", ""]
+    assert _fixture_paths(tracked) == [COMMITTED_FRAME, *fixtures, nested]
+    assert _stray_fixture_paths(tracked) == stray
+
+    # Through git: the case a commit carries is the case the index lists.
+    repo = _throwaway_repo(tmp_path)
+    frame = tmp_path / "tagged.jpg"
+    metadata_laden(frame)
+    blob = _git("hash-object", "-w", "--", str(frame), repo=repo).stdout.strip()
+    entry = f"100644,{blob},{fixtures[0]}"
+    _git("update-index", "--add", "--cacheinfo", entry, repo=repo)
+    listed = _fixture_paths(_git("ls-files", "-z", repo=repo).stdout.split("\0"))
+    blobs = {path: _index_bytes(path, repo=repo) for path in listed}
+    refused = {path: _fixture_problems(path, blob) for path, blob in blobs.items()}
+    assert refused == {fixtures[0]: TAGGED_PROBLEMS}
+
+
 def test_no_tracked_file_sits_under_another_fixtures_folder():
     stray = _stray_fixture_paths(_git("ls-files", "-z").stdout.split("\0"))
     assert not stray, f"a corpus is tracked outside {FIXTURES_DIR}: {stray}"
@@ -766,8 +817,8 @@ def test_no_tracked_file_sits_under_another_fixtures_folder():
 
 def test_every_committed_frame_is_small_and_exif_free():
     # ls-files -z terminates each path, so the split leaves a trailing empty.
-    tracked = _git("ls-files", "-z", "--", FIXTURES_DIR).stdout.split("\0")
-    blobs = {path: _index_bytes(path) for path in tracked if path}
+    tracked = _git("ls-files", "-z").stdout.split("\0")
+    blobs = {path: _index_bytes(path) for path in _fixture_paths(tracked)}
     assert COMMITTED_FRAME in blobs, "the smoke test's frame is not tracked"
     refused = {path: _fixture_problems(path, blob) for path, blob in blobs.items()}
     refused = {path: problems for path, problems in refused.items() if problems}
