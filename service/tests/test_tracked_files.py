@@ -16,13 +16,16 @@ is small and EXIF-free like the first one. The fixture gate reads each blob
 from the index, so it judges the bytes a push would carry: every fixture,
 image or text, is listed as reviewed by its path and that blob's SHA-256, or
 it is refused before anything reads it, and a listed image is still judged as
-a frame, whatever the file is called.
+a frame, whatever the file is called. A fixture that passes through a filter
+is refused too, since a checkout of it is not the blob that was judged.
 
-Two checks read the working tree instead, because each judges what the next
+Three checks read the working tree instead, because each judges what the next
 commit would do rather than what the last one carried: that the lockfile is
-current with service/pyproject.toml, and the ignore rules, which are checked
+current with service/pyproject.toml; the ignore rules, which are checked
 from the working-tree .gitignore because that is the file `git add -A` consults
-when a corpus is about to be staged. The ignore verdict is the rule git matched
+when a corpus is about to be staged; and a fixture's filter, read from the
+.gitattributes `git add` consults, whose clean filter decides there that the
+blob is a pointer and not the file. The ignore verdict is the rule git matched
 rather than its exit status, which reads the same whether a rule ignores a path
 or re-includes it.
 """
@@ -412,18 +415,46 @@ def _fixture_paths(tracked):
     ]
 
 
+def _filters(paths: list[str], repo: Path = REPO) -> dict[str, str]:
+    """The filter each of `paths` passes through, where one is set, read as
+    `git add` reads the attributes: the working tree's .gitattributes, the
+    index's where the working tree has none, and this machine's own. A
+    filter's clean stores other bytes than the file, and its smudge writes
+    other bytes than the blob: Git LFS's stores a pointer and writes the file
+    the pointer names."""
+    if not paths:
+        return {}
+    # -z: each path, attribute and value is NUL-terminated, in that order.
+    out = _git("check-attr", "-z", "filter", "--", *paths, repo=repo)
+    fields = out.stdout.split("\0")
+    return {
+        path: value
+        for path, value in zip(fields[0::3], fields[2::3])
+        if value not in ("unspecified", "unset")
+    }
+
+
 def _refused_fixtures(
     repo: Path = REPO, listed: dict[str, tuple[str, str]] = FIXTURES
 ) -> dict[str, list[str]]:
     """The fixtures in `repo`'s index the gate refuses, each with why, each
-    judged by its staged blob against `listed`."""
+    judged by its staged blob against `listed`, and refused as well if it
+    passes through a filter, since then its checkout is not that blob."""
     # ls-files -z terminates each path, so the split leaves a trailing empty.
     tracked = _git("ls-files", "-z", repo=repo).stdout.split("\0")
-    refused = {
-        path: _fixture_problems(path, _index_bytes(path, repo=repo), listed)
-        for path in _fixture_paths(tracked)
-    }
-    return {path: problems for path, problems in refused.items() if problems}
+    paths = _fixture_paths(tracked)
+    filters = _filters(paths, repo)
+    refused = {}
+    for path in paths:
+        problems = _fixture_problems(path, _index_bytes(path, repo=repo), listed)
+        if path in filters:
+            problems.append(
+                f"passes through the {filters[path]} filter, so its checkout "
+                "is not the blob listed: remove its filter attribute"
+            )
+        if problems:
+            refused[path] = problems
+    return refused
 
 
 # A text fixture's path, listed in the tests' own manifests.
@@ -981,6 +1012,48 @@ def test_a_fixtures_folder_is_the_same_folder_whatever_its_case(tmp_path):
     staged.write_bytes(_tagged_frame(tmp_path))
     _git("add", "--", fixtures[0], repo=repo)
     assert _refused_fixtures(repo) == {fixtures[0]: [UNLISTED]}
+
+
+def test_a_fixture_that_passes_through_a_filter_is_refused(tmp_path):
+    """Security round 10: the gate judges the staged blob, and a filter puts
+    other bytes in the checkout. Under a Git LFS attribute the blob is a
+    pointer, which is text, and the gate's own UNREADABLE tells whoever adds
+    one to list it as text; listed so, it passed the listing and the ceiling,
+    and a fresh clone's service/tests/fixtures held the 5.7 MB camera frame
+    the pointer names, Make, Model and GPS and all. A fixture's checkout is
+    the blob that was listed, or it is refused by name."""
+    repo = _throwaway_repo(tmp_path)
+    tagged = _tagged_frame(tmp_path)
+    pointer = (
+        "version https://git-lfs.github.com/spec/v1\n"
+        f"oid sha256:{hashlib.sha256(tagged).hexdigest()}\nsize {len(tagged)}\n"
+    ).encode()
+    path = "service/tests/fixtures/second.jpg"
+    blobs = {path: pointer, LISTED_TEXT: b"one\ntwo\n"}
+    # An attribute that turns filtering off leaves the checkout the blob.
+    (repo / ".gitattributes").write_text(
+        f"{path} filter=lfs diff=lfs merge=lfs -text\n{LISTED_TEXT} -filter\n"
+    )
+    _git("add", ".gitattributes", repo=repo)
+    for staged, blob in blobs.items():
+        (repo / staged).parent.mkdir(parents=True, exist_ok=True)
+        (repo / staged).write_bytes(blob)
+        # The blob as LFS stores it: hashed as it is, with no filter run.
+        sha = _git("hash-object", "-w", "--no-filters", "--", staged, repo=repo)
+        cacheinfo = f"100644,{sha.stdout.strip()},{staged}"
+        _git("update-index", "--add", "--cacheinfo", cacheinfo, repo=repo)
+    listed = _listed("text", blobs)
+    refused = {
+        path: [
+            "passes through the lfs filter, so its checkout is not the blob "
+            "listed: remove its filter attribute"
+        ]
+    }
+    assert _refused_fixtures(repo, listed) == refused
+    # Not yet committed, the attribute is still the one `git add` reads: it
+    # stores the pointer, and a push uploads the file the pointer names.
+    _git("rm", "-q", "--cached", "--", ".gitattributes", repo=repo)
+    assert _refused_fixtures(repo, listed) == refused
 
 
 def test_no_tracked_file_sits_under_another_fixtures_folder():
