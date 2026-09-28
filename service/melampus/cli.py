@@ -20,6 +20,7 @@ from .providers import (
     CODEX,
     COMMAND,
     KEY_VARIABLES,
+    LOCAL_ENGINES,
     OLLAMA,
     BackendUnavailable,
     apply_cloud_primary_defaults,
@@ -250,8 +251,9 @@ def _remove_model(remove: Callable[[], object]) -> int:
     return 0
 
 
-#: The engines with a local model to fetch, and so a Download button.
-MODEL_ENGINES = ("mlx", OLLAMA)
+#: The engines with a local model to fetch, and so a Download button: the
+#: local engines, the ones the default takes unasked (card #498).
+MODEL_ENGINES = LOCAL_ENGINES
 
 
 def _model_command(args: argparse.Namespace, config) -> int:

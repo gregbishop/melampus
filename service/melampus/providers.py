@@ -1176,8 +1176,10 @@ def _refuse_here(reason: str, ollama_url: str | None) -> BackendUnavailable:
     return _refusal(reason, works_here=_works_here(detect_engines(ollama_url)))
 
 
-#: The engines the default takes when nothing names one (card #498), in the
-#: owner's order: the local ones, which send nothing and bill nothing.
+#: The local engines, in the owner's order: each runs a model on this
+#: machine, with no API key to bill. The default takes one of them when
+#: nothing names an engine (card #498), and they are the engines with a
+#: model to fetch (cli.MODEL_ENGINES, cards #408, #409).
 LOCAL_ENGINES = ("mlx", OLLAMA)
 
 #: Where a refusal of the unchosen default sends the user (card #498): the
