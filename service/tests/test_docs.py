@@ -835,6 +835,28 @@ def test_the_action_pinning_gate_ends_on_an_alias_to_itself(tmp_path, monkeypatc
     assert "ci.yml" not in reported, reported
 
 
+def test_the_action_pinning_gate_reports_a_value_that_runs_past_its_first_line(tmp_path, monkeypatch):
+    """A `uses:` value may start on the line after its key and run on to
+    the next, as a plain scalar folded over two lines. Then no scalar or
+    flow collection ends on the line where it starts, so there is no text
+    after one to read a comment from, and the gate crashed with ValueError
+    instead of judging the line: it has no trailing comment, so it is not
+    pinned, and it is reported by the file's name. The folder is a stand-in
+    read at call time; ci.yml in it is pinned, so x.yaml, and only it, must
+    be reported."""
+    sha = "11d5960a326750d5838078e36cf38b85af677262"
+    (tmp_path / "ci.yml").write_text(f"      - uses: actions/checkout@{sha} # v4.4.0\n", encoding="utf-8")
+    (tmp_path / "x.yaml").write_text(
+        "      - uses:\n          actions/checkout@v4\n          continued # v4\n", encoding="utf-8"
+    )
+    monkeypatch.setitem(globals(), "WORKFLOWS", tmp_path)
+    with pytest.raises(AssertionError) as unpinned:
+        test_every_workflow_pins_every_action_to_a_commit_sha_with_its_version()
+    reported = str(unpinned.value)
+    assert "x.yaml: actions/checkout@v4" in reported, reported
+    assert "ci.yml" not in reported, reported
+
+
 RELEASE_ZIPS = ("Melampus-macOS.zip", "Melampus-Windows.zip")
 
 
@@ -870,11 +892,12 @@ def _action_references(text: str) -> list[tuple[str, bool]]:
     or flow collection that ends on the line, which leaves a `#` inside a
     quoted scalar, or a flow mapping's closing brace, where it belongs; a
     block collection ends where the next token begins, past any comment, so
-    it does not say where the line's text ends. One trailing comment cannot
-    name two actions' versions, so a line holding two references is not
-    pinned whatever each names. A workflow that does not parse cannot be
-    read for its references, so it is one line nothing pins, the parser's
-    error, reported by its name."""
+    it does not say where the line's text ends. A value that starts on the
+    line and runs on past it leaves nothing ending there, so that line has
+    no comment. One trailing comment cannot name two actions' versions, so
+    a line holding two references is not pinned whatever each names. A
+    workflow that does not parse cannot be read for its references, so it is
+    one line nothing pins, the parser's error, reported by its name."""
     try:
         nodes = _nodes(text)
     except yaml.YAMLError as error:
@@ -889,9 +912,12 @@ def _action_references(text: str) -> list[tuple[str, bool]]:
     judged = []
     for line, values in sorted(references.items()):
         written = max(
-            node.end_mark.column
-            for node in nodes
-            if node.end_mark.line == line and (isinstance(node, yaml.ScalarNode) or node.flow_style)
+            (
+                node.end_mark.column
+                for node in nodes
+                if node.end_mark.line == line and (isinstance(node, yaml.ScalarNode) or node.flow_style)
+            ),
+            default=len(lines[line]),
         )
         pinned = (
             len(values) == 1
