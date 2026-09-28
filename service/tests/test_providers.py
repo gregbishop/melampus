@@ -930,7 +930,7 @@ def test_ollama_probe_gives_up_at_its_deadline_when_the_headers_trickle(monkeypa
     port when Ollama does not could send the status line and then one header
     byte every hundred milliseconds, each within the timeout, and hold
     detection, and the CLI's startup behind it, for as long as it liked. Given
-    a server that trickles a valid 200 over two seconds, the probe reports
+    a server that trickles a valid 200 over 4.5 seconds, the probe reports
     unavailable and returns within its deadline, not after the trickle."""
     deadline = 0.3
     monkeypatch.setattr(providers, "OLLAMA_PROBE_SECONDS", deadline)
@@ -1916,7 +1916,7 @@ def test_ollama_backend_gives_up_at_its_deadline_when_the_server_trickles(tmp_pa
     server sending one byte within the timeout, then another, could hold a
     frame, and the batch behind it, for as long as it liked; the byte limit
     bounds how much, not how long. Given a server on loopback trickling a
-    valid answer over two seconds, in the headers, in a 200 body, or in a
+    valid answer over 4.5 seconds, in the headers, in a 200 body, or in a
     500 body (the error text the backend reads for its message), and a
     timeout of 0.3s, the frame fails as timed out within the deadline, not
     after the trickle."""
