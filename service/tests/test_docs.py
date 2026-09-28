@@ -776,39 +776,6 @@ def test_the_action_pinning_gate_reports_a_workflow_that_does_not_parse(tmp_path
 RELEASE_ZIPS = ("Melampus-macOS.zip", "Melampus-Windows.zip")
 
 
-USES_KEY = r"""(?:^|[\s{,])(?:uses|"uses"|'uses')\s*:"""
-
-
-def _code(line: str) -> str:
-    """That line without its comment. A `#` starts a comment where YAML says
-    it does: at the start of the line or after a space, and outside a quoted
-    scalar, so the `#` in `name: 'Checkout # source'` is part of the name and
-    the rest of the line is still code. A quote opens a quoted scalar only
-    where a scalar can begin -- the start of the line, or after `:`, `-`,
-    `{`, `,` or `[` -- so the apostrophe in the plain scalar `don't` is part
-    of the word; and inside a single-quoted scalar `''` is one apostrophe,
-    not the end of the scalar."""
-    quote = ""
-    index = 0
-    while index < len(line):
-        character = line[index]
-        if quote == '"' and character == "\\":
-            index += 2
-            continue
-        if quote == "'" and character == "'" and line[index + 1:index + 2] == "'":
-            index += 2
-            continue
-        if quote:
-            if character == quote:
-                quote = ""
-        elif character in "\"'" and line[:index].rstrip()[-1:] in ("", ":", "-", "{", ",", "["):
-            quote = character
-        elif character == "#" and (index == 0 or line[index - 1] in " \t"):
-            return line[:index]
-        index += 1
-    return line
-
-
 def _nodes(text: str) -> list[yaml.Node]:
     """Every node YAML composes from that workflow text, each carrying the
     marks of where it is written. What is a key, a value or a quoted scalar
