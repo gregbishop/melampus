@@ -1499,6 +1499,12 @@ def test_readme_opening_lists_the_engines_providers_offers_and_names_the_spec():
     detect_engines, read through `_picker`; and each row says what the
     engine bills, from the same module: nothing for a local engine, an API
     key for one in KEY_VARIABLES, a subscription for one in CLI_ENGINES.
+    An engine that bills runs its model off this machine, so its Where it
+    runs cell names whose API or servers every frame goes to (security
+    review, round 4): the subscription CLIs' cells named only the program
+    installed here, the way the `ollama` row names the server on this
+    machine, while Claude Code reads the staged frame into its conversation
+    with Anthropic and Codex attaches it to its first message to OpenAI.
     `scripted` (the fake) and `command` (the seam, not in the picker) must
     not appear. The opening also names `AGENTS.md` and `docs/brief.md`, not
     CLAUDE.md, as the build specification: CLAUDE.md is two includes now."""
@@ -1531,6 +1537,10 @@ def test_readme_opening_lists_the_engines_providers_offers_and_names_the_spec():
         assert expected in bills, (
             f"readme.md's What it bills cell for `{name}` does not say it bills "
             f"{expected!r}: {bills!r}")
+        where = cells[0]
+        assert expected == "nothing" or re.search(r"\b\w+'s (?:API|servers)\b", where), (
+            f"readme.md's Where it runs cell for `{name}` does not say whose API or servers "
+            f"every frame goes to, though it bills {expected!r}: {where!r}")
     for spec in ("`AGENTS.md`", "`docs/brief.md`"):
         assert spec in opening, f"readme.md's opening does not name {spec} as the build specification"
     assert "CLAUDE.md" not in opening, "readme.md's opening still calls CLAUDE.md the build specification"
