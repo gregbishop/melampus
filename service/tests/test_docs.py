@@ -1112,6 +1112,35 @@ def test_the_action_pinning_gate_takes_only_forty_hex_digits_as_the_sha(tmp_path
     assert "ci.yml" not in reported, reported
 
 
+def test_the_action_pinning_gate_takes_neither_a_word_nor_an_anchor_as_the_version(tmp_path, monkeypatch):
+    """Claude code round 7, 3: the version comment is `#`, then `v` and a
+    digit, and the test beside this one holds only the loosening to any
+    `#`. Dropping the digit passes a comment that is a word, `# vendored`,
+    or a bare `# v`; dropping the `#` passes a step with no comment at all
+    when an anchor on its line supplies `v` and a digit, `&v1`. Each step
+    here is pinned and none has a version comment, so each is reported;
+    ci.yml is pinned with its version and is not."""
+    sha = "11d5960a326750d5838078e36cf38b85af677262"
+    reported_lines = [
+        f"- uses: actions/checkout@{sha} # vendored",
+        f"- uses: actions/checkout@{sha} # v",
+        "- uses: &v1 |-",
+    ]
+    (tmp_path / "ci.yml").write_text(f"{WORKFLOW_STEPS}      - uses: actions/checkout@{sha} # v4.4.0\n", encoding="utf-8")
+    (tmp_path / "x.yaml").write_text(
+        f"{WORKFLOW_STEPS}      {reported_lines[0]}\n      {reported_lines[1]}\n"
+        f"      {reported_lines[2]}\n          actions/checkout@{sha}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setitem(globals(), "WORKFLOWS", tmp_path)
+    with pytest.raises(AssertionError) as unpinned:
+        test_every_workflow_pins_every_action_to_a_commit_sha_with_its_version()
+    reported = str(unpinned.value)
+    for line in reported_lines:
+        assert f"x.yaml: {line}" in reported, reported
+    assert "ci.yml" not in reported, reported
+
+
 RELEASE_ZIPS = ("Melampus-macOS.zip", "Melampus-Windows.zip")
 
 
