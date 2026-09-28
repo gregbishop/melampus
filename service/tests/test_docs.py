@@ -1513,22 +1513,31 @@ def test_readme_opening_lists_the_engines_providers_offers_and_names_the_spec():
     assert "CLAUDE.md" not in opening, "readme.md's opening still calls CLAUDE.md the build specification"
 
 
-def test_the_openings_privacy_claim_names_the_setting_that_can_send_the_image_elsewhere():
-    """Security review, round 1: given an opening that promises no image
-    leaves the machine on a local engine, when read, then it names
-    `ollama_url` in the same breath. `mlx` runs in-process, but the `ollama`
-    backend posts every staged frame to whatever `[model] ollama_url` names,
-    and docs/config.md documents setting it "for a server on another port or
-    host", https included. Unqualified, the first screen promises a
+def test_the_openings_privacy_claim_names_the_settings_that_can_send_the_image_elsewhere():
+    """Security review, rounds 1 and 3: given an opening that promises no
+    image leaves the machine on a local engine, when read, then it names
+    both settings that break the promise for `ollama`, in the same breath.
+    `mlx` runs in-process, but the `ollama` backend posts every staged frame
+    to whatever `[model] ollama_url` names, and docs/config.md documents
+    setting it "for a server on another port or host", https included
+    (round 1); and it asks for whatever `[model] ollama_model` names, "a tag
+    from ollama.com/library" by docs/config.md, where a tag may be one of
+    Ollama's cloud models, which the server on this machine runs on Ollama's
+    own under the account it is signed in to (round 3). Naming one and not
+    the other reads as the whole list, so the first screen still promises a
     confidentiality the configuration does not enforce."""
-    setting = "ollama_url"
+    settings = {
+        "ollama_url": "the setting that can point the ollama engine at another host",
+        "ollama_model": "the setting that can name one of Ollama's cloud models",
+    }
     for doc in (README, BRIEF):
         opening = _opening(doc.read_text(encoding="utf-8"))
         if "leaves the machine" not in opening:
             continue
-        assert setting in opening, (
-            f"{doc.name}'s opening promises no image leaves the machine without naming "
-            f"`{setting}`, the setting that can point the ollama engine at another host")
+        for setting, why in settings.items():
+            assert setting in opening, (
+                f"{doc.name}'s opening promises no image leaves the machine without naming "
+                f"`{setting}`, {why}")
 
 
 def test_only_the_readme_opening_lists_the_engines_the_other_openings_point_at_it():
