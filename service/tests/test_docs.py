@@ -1583,8 +1583,8 @@ def test_the_openings_privacy_claim_names_the_settings_that_can_send_the_image_e
 
 
 def test_only_the_readme_opening_lists_the_engines_the_other_openings_point_at_it():
-    """Review round 1, finding 3: readme.md's opening carries the one list of
-    the engines, and the gate above holds it to providers.py. The brief's and
+    """Review round 1, finding 3: readme.md's opening carries the engine
+    table, and the gate above holds it to providers.py. The brief's and
     architecture's openings may name the shape — local first, or a cloud API,
     or a subscription CLI — and cite that table; they may not restate the
     names, by key or by the title providers.py gives them, because a copy no

@@ -11,8 +11,8 @@ Named for the Greek seer who could understand the speech of animals — birds
 especially. *meh-LAM-pus*.
 
 Local first, or a cloud API, or a subscription CLI: the engines are picked in
-the plugin's Settings dialog. `readme.md`'s opening is the one list of them
-and of what each bills, and a test holds that list to `providers.py`. On a
+the plugin's Settings dialog. Their names, and what each bills, are
+`readme.md`'s table, which a test holds to `providers.py`. On a
 local engine no image leaves the machine — so long as `[model] ollama_url`
 is not pointed at another host and `[model] ollama_model` does not name a
 cloud model, which its server runs elsewhere; either sends every frame off
