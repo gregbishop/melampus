@@ -1030,15 +1030,22 @@ def test_hang_up_records_the_deadline_and_ends_the_stream_it_holds():
 def test_deadline_again_counts_the_bound_from_now():
     """Security (review round 4): a stream has no one exchange to bound, so
     `_Deadline.again` gives the next line the bound an exchange gets, from
-    now. Given a deadline of one second armed, 0.6s in and again, it has
-    not fired 0.6s after that (1.2s from the start: the first timer would
-    have), and fires within the bound from the re-arm."""
-    with _Deadline(1.0) as deadline:
-        time.sleep(0.6)
-        deadline.again()
-        time.sleep(0.6)
-        assert not deadline.expired.is_set(), "the deadline counted from the start, not from again()"
-        assert deadline.expired.wait(2.0), "the deadline never fired after again()"
+    now. Given a deadline of two seconds armed, one second in and again,
+    it fires no sooner than two seconds after the re-arm (the first timer
+    would fire one second after it), and within the bound plus
+    SCHEDULING_SLACK. The clock runs around the re-arm and the wait, so a
+    timer or a test thread that wakes late only moves the fire later; a
+    first second that runs past the first deadline leaves nothing to
+    re-arm, and says so."""
+    seconds = 2.0
+    with _Deadline(seconds) as deadline:
+        time.sleep(seconds / 2)
+        assert not deadline.expired.is_set(), "the first deadline passed before the re-arm: the machine held the test"
+        with _timed() as took:
+            deadline.again()
+            assert deadline.expired.wait(seconds + SCHEDULING_SLACK), "the deadline never fired after again()"
+    assert took.seconds >= seconds, (
+        f"the deadline counted from the start, not from again(): it fired {took.seconds:.2f}s after it")
 
 
 AGAIN_UNDER_A_SIGNAL = """\
