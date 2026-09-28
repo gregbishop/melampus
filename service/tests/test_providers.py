@@ -1031,19 +1031,25 @@ def test_deadline_again_counts_the_bound_from_now():
     """Security (review round 4): a stream has no one exchange to bound, so
     `_Deadline.again` gives the next line the bound an exchange gets, from
     now. Given a deadline of two seconds armed, one second in and again,
-    it fires no sooner than two seconds after the re-arm (the first timer
-    would fire one second after it), and within the bound plus
-    SCHEDULING_SLACK. The clock runs around the re-arm and the wait, so a
-    timer or a test thread that wakes late only moves the fire later; a
-    first second that runs past the first deadline leaves nothing to
-    re-arm, and says so."""
+    three times over as for three lines arriving together, it fires no
+    sooner than two seconds after the last re-arm (the first timer would
+    fire one second after it), and within the bound plus SCHEDULING_SLACK
+    (a re-arm that moved the deadline on by a bound from where it was, not
+    from now, would put it seven seconds out, and after k lines of a pull
+    k bounds out: code review, PR #34 round 1). The clock runs around the
+    last re-arm and the wait, so a timer or a test thread that wakes late
+    only moves the fire later; a first second that runs past the first
+    deadline leaves nothing to re-arm, and says so."""
     seconds = 2.0
     with _Deadline(seconds) as deadline:
         time.sleep(seconds / 2)
         assert not deadline.expired.is_set(), "the first deadline passed before the re-arm: the machine held the test"
+        deadline.again()
+        deadline.again()
         with _timed() as took:
             deadline.again()
-            assert deadline.expired.wait(seconds + SCHEDULING_SLACK), "the deadline never fired after again()"
+            assert deadline.expired.wait(seconds + SCHEDULING_SLACK), (
+                "the deadline did not fire within a bound of the last again()")
     assert took.seconds >= seconds, (
         f"the deadline counted from the start, not from again(): it fired {took.seconds:.2f}s after it")
 
@@ -1940,6 +1946,17 @@ def test_ollama_backend_gives_up_at_its_deadline_when_the_server_trickles(tmp_pa
     assert f"did not answer within {deadline:g}s" in str(err.value), str(err.value)
 
 
+class TricklingFiveLines(TricklingPull):
+    """TricklingPull with five whole lines 0.3s apart: each 0.7s inside a
+    one-second deadline, the five together (1.5s) past it, and five
+    re-arms before the trickle, so a re-arm that moved the deadline on by
+    a bound from where it was, not from now, puts it seven seconds from the
+    start, 5.5s past the last whole line (code review, PR #34 round 1)."""
+
+    LINES = 5
+    PAUSE = 0.3
+
+
 def test_ollama_backend_stream_gives_up_at_its_deadline_when_a_line_trickles():
     """Security (review round 4, download.py:784): the pull's stream was read
     a line at a time with urlopen's socket timeout alone, which bounds each
@@ -1948,23 +1965,29 @@ def test_ollama_backend_stream_gives_up_at_its_deadline_when_a_line_trickles():
     for as long as it liked (a probe: the marker written one second into a
     trickled line was read eight seconds later, at its newline). `stream`
     gives each line what `send` gives an exchange, the deadline armed again
-    for it. Given a server writing two whole lines, each after a pause
-    within the deadline and the two together past it, then a line trickled
-    well past it, the stream yields both whole lines (the deadline counts
-    per line, not per exchange) and ends as timed out within a deadline of
-    the trickle's start, not at its newline."""
+    for it, from now. Given a server writing five whole lines, each after a
+    pause within the deadline and the five together past it, then a line
+    trickled well past it, the stream yields every whole line (the deadline
+    counts per line, not per exchange) and ends as timed out within a
+    deadline, plus SCHEDULING_SLACK, of the last whole line: not at the
+    trickle's newline, and not several bounds out, where a re-arm counted
+    from the deadline before it would put the end. The clock runs from the
+    last whole line, so a server that wakes late between lines takes none
+    of the slack."""
     deadline = 1.0
-    with loopback_server(TricklingPull) as server:
+    with loopback_server(TricklingFiveLines) as server:
         url = f"http://127.0.0.1:{server.server_port}"
         backend = OllamaBackend("qwen3-vl:8b-instruct", url, timeout=deadline)
         request = urllib.request.Request(f"{url}/api/pull", data=b"{}", method="POST")
-        lines = []
-        with _timed() as took, pytest.raises(TimeoutError) as err:
+        lines, last = [], None
+        with pytest.raises(TimeoutError) as err:
             for line in backend.stream(request):
                 lines.append(line)
-    assert lines == [TricklingPull.WHOLE, TricklingPull.WHOLE]
-    ceiling = 2 * TricklingPull.PAUSE + deadline + SCHEDULING_SLACK
-    assert took.seconds < ceiling, f"the stream read past its deadline: {took.seconds:.2f}s"
+                last = time.monotonic()
+        ended = time.monotonic()
+    assert lines == [TricklingFiveLines.WHOLE] * TricklingFiveLines.LINES
+    took = ended - last
+    assert took < deadline + SCHEDULING_SLACK, f"the stream read past its deadline: {took:.2f}s after the last line"
     assert f"did not answer within {deadline:g}s" in str(err.value), str(err.value)
 
 

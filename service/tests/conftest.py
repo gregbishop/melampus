@@ -401,10 +401,10 @@ def resetting_handler(answer: bytes) -> type[socketserver.BaseRequestHandler]:
 
 
 class TricklingPull(QuietHandler):
-    """A listener answering a pull's stream (POST /api/pull) with two whole
-    lines, each after a pause within the deadline the tests give and the
-    two together past it (a deadline on the exchange alone would end the
-    stream before the second), then a line trickled a byte every tenth of
+    """A listener answering a pull's stream (POST /api/pull) with LINES whole
+    lines, each after a pause within the deadline the tests give and all
+    of them together past it (a deadline on the exchange alone would end
+    the stream before the last), then a line trickled a byte every tenth of
     a second: each byte within the socket timeout, the whole (padded to 45
     bytes, 4.5 seconds) well past the deadline plus SCHEDULING_SLACK. The
     shape that held the pull, and the cancel marker read between lines,
@@ -412,6 +412,7 @@ class TricklingPull(QuietHandler):
 
     # Each pause 0.4s inside the tests' one-second deadlines, so a loaded
     # machine can wake this thread late and the line still arrives in time.
+    LINES = 2
     PAUSE = 0.6
     WHOLE = b'{"status": "pulling manifest"}\n'
     TRICKLED = b'{"status": "success"}'.ljust(44) + b"\n"
@@ -422,7 +423,7 @@ class TricklingPull(QuietHandler):
             self.send_response(200)
             self.send_header("Content-Type", "application/x-ndjson")
             self.end_headers()
-            for _ in range(2):
+            for _ in range(self.LINES):
                 time.sleep(self.PAUSE)
                 self.wfile.write(self.WHOLE)
             trickle(self.wfile, self.TRICKLED)
