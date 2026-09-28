@@ -799,13 +799,13 @@ def _action_references(text: str) -> list[tuple[str, bool]]:
     that value, so a SHA quoted in a comment pins nothing, and all of it must
     be the action and a commit SHA: a ref that merely begins with a SHA,
     `<sha>-moving`, can be moved. The version is what the line's trailing
-    comment says. PyYAML drops comments, so the
-    comment is the text after the last node that ends on the line, which
-    leaves a `#` inside a quoted scalar, or a flow mapping's closing brace,
-    where it belongs. One trailing comment cannot name two actions' versions,
-    so a line holding two references is not pinned whatever each names. A
-    workflow that does not parse cannot be read for its references, so it is
-    one line nothing pins, the parser's error, reported by its name."""
+    comment says. PyYAML drops comments, so the comment is the text after
+    the last node that ends on the line, which leaves a `#` inside a quoted
+    scalar, or a flow mapping's closing brace, where it belongs. One trailing
+    comment cannot name two actions' versions, so a line holding two
+    references is not pinned whatever each names. A workflow that does not
+    parse cannot be read for its references, so it is one line nothing pins,
+    the parser's error, reported by its name."""
     try:
         nodes = _nodes(text)
     except yaml.YAMLError as error:
