@@ -2854,6 +2854,38 @@ def test_pull_stream_error_words_keep_none_of_the_servers_control_characters(err
     assert all(c.isprintable() for c in message), repr(message)
 
 
+# A reverse proxy's error page in front of an Ollama that is down, the shape
+# the Codex code review of round 3 measured: a 502 with 1.3 KB of HTML.
+PROXY_PAGE = (
+    b"<!DOCTYPE html><html><head><title>502 Bad Gateway</title><style>body{font-family:sans-serif;margin:2em}"
+    b"h1{color:#c00}p{max-width:40em}</style></head><body><h1>502 Bad Gateway</h1><p>The proxy server received an "
+    b"invalid response from an upstream server. The upstream server may be down or unreachable. Please contact "
+    b"your network administrator if the problem persists.</p>" + b"<p>Reference: 0123456789abcdef</p>" * 20
+    + b"</body></html>"
+)
+
+
+def test_cli_keeps_the_rerun_advice_on_the_line_when_a_proxy_answers_the_pull_with_a_long_page(
+    monkeypatch, capsys, tmp_path: Path, fake_ollama: FakeOllama
+):
+    """Codex and Claude code review, round 3, finding 2 (card #500). The
+    backend's error carries up to MAX_ERROR_BYTES of the server's body, and
+    the pull's message put the re-run advice after it, the whole line cut at
+    MAX_ERROR_BYTES: past some 950 characters of body the advice fell off.
+    Given a reverse proxy answering the pull with a 502 and its 1.3 KB error
+    page, the one line on stderr names the 502 and ends with the re-run
+    advice, within MAX_ERROR_BYTES, exit 3."""
+    monkeypatch.setattr(download, "cancel_marker_path", lambda: _marker(tmp_path))
+    fake_ollama.proxy_error = (502, PROXY_PAGE)
+
+    err = _refused_through_the_cli(capsys, "--download-model", "502", "--backend", "ollama",
+                                   "--config", str(_ollama_settings(tmp_path, fake_ollama.endpoint)))
+
+    line = err.splitlines()[-1]
+    assert line.isprintable() and len(line) <= VLMBackend.MAX_ERROR_BYTES, line
+    assert line.endswith(download.RERUN), line
+
+
 @pytest.mark.parametrize(
     "layer",
     [

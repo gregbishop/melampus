@@ -1135,14 +1135,15 @@ def _pull_error(model: str, error: object) -> DownloadError:
     has and resumes them. The words are the server's and land on stderr,
     so in the CLI log and the terminal: only their printable characters,
     by the backend's one rule for every message carrying them
-    (OllamaBackend.plain)."""
-    words = OllamaBackend.plain(str(error))
-    if "file does not exist" in words:
-        return DownloadError(
-            f"Ollama has no model named {model} ({words}): check [model] ollama_model "
-            "is a tag from ollama.com/library"
-        )
-    return DownloadError(f"Ollama could not pull {model}: {words}; {RERUN}")
+    (OllamaBackend.plain), in the room the line has left after the
+    message's own words (`_quoted_in`), so the fix stays on the line
+    however long the server's words (a proxy's error page) run."""
+    if "file does not exist" in _quoted(error, VLMBackend.MAX_ERROR_BYTES):
+        return DownloadError(_quoted_in(
+            f"Ollama has no model named {model} (", error,
+            "): check [model] ollama_model is a tag from ollama.com/library"
+        ))
+    return DownloadError(_quoted_in(f"Ollama could not pull {model}: ", error, f"; {RERUN}"))
 
 
 def _json_object(raw: bytes | str, named: str) -> dict:

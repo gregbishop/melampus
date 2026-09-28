@@ -867,6 +867,9 @@ class FakeOllama:
         self.models: dict[str, int] = {}
         self.partial: dict[tuple[str, str], int] = {}
         self.throttle: tuple[int, float] | None = None
+        # (status, HTML page) the pull is answered with instead of the stream,
+        # as a reverse proxy in front of an Ollama that is down answers it.
+        self.proxy_error: tuple[int, bytes] | None = None
         self.endpoint = ""  # set while `serve` runs
         self.server_port = 0
         self.release = threading.Event()
@@ -926,6 +929,13 @@ class FakeOllama:
 
             def _pull(self, body: dict) -> None:
                 ollama.pulls.append(body)
+                if ollama.proxy_error:
+                    code, page = ollama.proxy_error
+                    self.send_response(code)
+                    self.send_header("Content-Type", "text/html")
+                    self.end_headers()
+                    self.wfile.write(page)
+                    return
                 name = body.get("model") or ""
                 if not name:
                     self._answer(400, {"error": "invalid model name"})
