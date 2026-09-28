@@ -37,12 +37,16 @@ import pytest
 from conftest import (
     AGENT_HARNESS,
     CUT_IN_THE_SECOND_CHUNK,
+    DEEPLY_NESTED,
     BadStatusLine,
     FAKE_COMMIT,
     FAKE_FILES,
     FAKE_FOLDER,
     FAKE_REPO,
     FAKE_TOTAL,
+    NOT_UTF8,
+    THE_DECODER_REFUSES,
+    THE_DECODER_REFUSES_IDS,
     VENV_CLI,
     FakeHub,
     FakeOllama,
@@ -2578,22 +2582,6 @@ def test_pull_stream_error_line_mid_download_keeps_the_progress_so_far_and_says_
             seen.append(update)
     assert seen == [Update.progress(40, 100)]
     assert "connection reset" in str(failure.value) and "--download-model" in str(failure.value)
-
-
-# Two replies Python's JSON decoder refuses with something other than its
-# JSONDecodeError (Codex review, opposing vendor, round 1, security finding
-# 2, download.py:1153): bytes that are not UTF-8 (a UnicodeDecodeError from
-# the bytes' decoding) and an integer literal past its int-to-str limit of
-# 4300 digits (a plain ValueError, `Exceeds the limit`). Both are the
-# server's to write.
-NOT_UTF8 = b"\xff\xfe{"
-PAST_THE_DIGIT_LIMIT = b'{"status": "pulling manifest", "total": ' + b"9" * 5000 + b"}"
-# Codex review (opposing vendor) round 2, security finding (download.py:1179):
-# 20 KB, well under the reply bound, that the decoder refuses with a
-# RecursionError, a RuntimeError and not a ValueError.
-DEEPLY_NESTED = b"[" * 10_000 + b"]" * 10_000
-THE_DECODER_REFUSES = [NOT_UTF8, PAST_THE_DIGIT_LIMIT, DEEPLY_NESTED]
-THE_DECODER_REFUSES_IDS = ["not-utf-8", "an-integer-past-the-digit-limit", "arrays-nested-past-the-recursion-limit"]
 
 
 @pytest.mark.parametrize("line", [b"<html>proxy error</html>", *THE_DECODER_REFUSES],

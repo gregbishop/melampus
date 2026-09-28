@@ -824,18 +824,35 @@ class OllamaBackend(VLMBackend):
             error = None
         return cls.plain(f"{error}" if error else body or exc.reason)
 
+    @staticmethod
+    def json_object(raw: bytes | str, named: str) -> dict:
+        """`raw`, a JSON object Ollama wrote (a chat's reply, one line of the
+        pull's stream, the list's or the delete's reply), decoded; else a
+        RuntimeError naming it as `named`, bounded to its first 120 bytes:
+        "was not JSON" for what the decoder refuses, whatever it raises for
+        it, "was not a JSON object" for JSON of another shape (`[1]`,
+        `"text"`, `5`). The decoder raises a JSONDecodeError, a
+        UnicodeDecodeError for bytes that are not UTF-8 (or the UTF-16 or -32
+        a leading byte order mark names) and a plain ValueError for an integer
+        literal past Python's 4300-digit limit, all three ValueErrors; and a
+        RecursionError, a RuntimeError, for arrays or objects nested past the
+        interpreter's recursion limit (some 20 KB of `[`, well under the reply
+        bound). All four mean the reply is not JSON."""
+        try:
+            item = json.loads(raw)
+        except (ValueError, RecursionError) as exc:
+            raise RuntimeError(f"{named} was not JSON: {raw[:120]!r}") from exc
+        if not isinstance(item, dict):
+            raise RuntimeError(f"{named} was not a JSON object: {raw[:120]!r}")
+        return item
+
     def complete(self, image_path: Path, prompt: str, max_tokens: int) -> Completion:
         request = self._request(image_path, prompt, max_tokens)
         started = time.perf_counter()
         raw = self.send(request)
         elapsed = time.perf_counter() - started
-        try:
-            reply = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            raise RuntimeError(
-                f"Ollama's reply from {self.url} was not JSON: {raw[:120]!r}"
-            ) from exc
-        message = (reply.get("message") or {}) if isinstance(reply, dict) else None
+        reply = self.json_object(raw, f"Ollama's reply from {self.url}")
+        message = reply.get("message") or {}
         if not isinstance(message, dict):
             raise RuntimeError(
                 f"Ollama's reply from {self.url} was not a JSON object with a "

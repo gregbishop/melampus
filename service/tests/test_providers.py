@@ -40,6 +40,8 @@ from conftest import (
     PHOTO,
     REAL_CLAUDE_CODE_VERDICT,
     REAL_CODEX_VERDICT,
+    THE_DECODER_REFUSES,
+    THE_DECODER_REFUSES_IDS,
     BadStatusLine,
     FakeOllama,
     QuietHandler,
@@ -1603,17 +1605,21 @@ def test_ollama_backend_maps_each_failure_to_a_plain_error(tmp_path, error, expe
     "body, said",
     [
         (b"<html>proxy error</html>", "not JSON"),
+        *((body, "not JSON") for body in THE_DECODER_REFUSES),
         (b"[]", "not a JSON object"),
         (b'"text"', "not a JSON object"),
         (b'{"message": "just a string"}', "not a JSON object"),
     ],
-    ids=["html", "list", "string", "message-not-an-object"],
+    ids=["html", *THE_DECODER_REFUSES_IDS, "list", "string", "message-not-an-object"],
 )
 def test_ollama_backend_reports_a_malformed_reply(tmp_path, body, said):
     """A 200 whose body is not JSON, is JSON but not an object, or whose
     `message` is not one, is a plain message naming the address and what
     came back, never an AttributeError out of `.get`; identify() records it
-    on the frame and the batch continues."""
+    on the frame and the batch continues. Card #503: not JSON in every way
+    the pull's decoder names (a JSONDecodeError, bytes that are not UTF-8,
+    an integer past Python's digit limit, arrays nested past the recursion
+    limit), each in the same bounded words, not the decoder's own error."""
     image = tmp_path / "image.jpg"
     image.write_bytes(b"jpeg")
     backend = _ollama_backend(_FakeUrlopen(body))
@@ -1621,6 +1627,35 @@ def test_ollama_backend_reports_a_malformed_reply(tmp_path, body, said):
         backend.complete(image, "prompt", 10)
     assert said in str(err.value), str(err.value)
     assert backend.url in str(err.value), str(err.value)
+    assert len(str(err.value)) < 400, "the message is not bounded"
+
+
+@pytest.mark.parametrize("body", THE_DECODER_REFUSES, ids=THE_DECODER_REFUSES_IDS)
+def test_cli_records_a_chat_reply_the_decoder_refuses_as_not_json_on_the_frame(
+    monkeypatch, photos, tmp_path, capsys, body
+):
+    """Card #503, Done-when 2, at the real boundary: Ollama on loopback
+    answers the chat with bytes Python's JSON decoder refuses with
+    something other than its JSONDecodeError. The frame is recorded as an
+    error in the words the one decoder writes for every Ollama reply (the
+    pull's lines, the list's, the delete's): the reply named, "was not
+    JSON", its first 120 bytes; not a UnicodeDecodeError, a ValueError or
+    a RecursionError of the decoder's own. The run goes on to exit 0."""
+    from melampus.cli import main
+
+    out = tmp_path / "results.json"
+    with _fake_ollama(monkeypatch, replies=[body]) as server:
+        settings = _settings_naming_the_fake(monkeypatch, tmp_path)
+        code = main([
+            str(photos), "--backend", "ollama", "--config", str(settings),
+            "--no-local-config", "--cache", str(tmp_path / "cache.jsonl"), "--json-out", str(out),
+        ])
+
+    err = capsys.readouterr().err
+    assert code == 0, err
+    (result,) = json.loads(out.read_text(encoding="utf-8"))
+    assert result["status"] == "error", result
+    assert f"Ollama's reply from {server.endpoint} was not JSON: {body[:120]!r}" in result["error"], result["error"]
 
 
 def test_ollama_backend_stays_at_the_address_whatever_proxy_the_environment_names(
