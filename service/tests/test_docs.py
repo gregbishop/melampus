@@ -17,9 +17,14 @@ readme.md's build section, installs the extras the executable carries (card
 #434, Done-when 1 and 3); CI packages one plugin zip per platform through the
 script on every run and, on a pushed v* tag, its release job attaches both to
 the GitHub release, which the install docs name (card #402); no doc names a
-workflow file that does not exist; and no doc states a test count, because
-the suite grows with every card and CI checks no such number (card #437,
-Done-when 1).
+workflow file that does not exist; no doc states a test count, because the
+suite grows with every card and CI checks no such number (card #437,
+Done-when 1); readme.md's opening lists exactly the engines providers.py
+offers, with what each bills, and names the build specification (card #491,
+Done-when 1 and 3), and it is the only opening that lists them — the brief's
+and architecture's cite that table instead of copying it; and a page whose
+opening says this runs on macOS and Windows does not still offer Linux
+further down.
 
 The checks are deliberately dumb — substring presence of the backticked name — so
 they never argue with prose style, only with absence. The one exception runs the
@@ -215,6 +220,34 @@ def _section(text: str, heading: str) -> str | None:
     or the end of the doc; None when the doc has no such section."""
     match = re.search(rf"^## {re.escape(heading)}\n(.*?)(?=^## |\Z)", text, re.MULTILINE | re.DOTALL)
     return match.group(1) if match else None
+
+
+def _raw_opening(text: str) -> str:
+    """A doc's opening — everything before its first `## ` heading — as
+    written, lines and all. The one place an opening's end is defined:
+    `_opening` joins this, and the gate that reads readme.md's engine table
+    reads it as is, because it matches line-anchored rows."""
+    return text.split("\n## ", 1)[0]
+
+
+def _opening(text: str) -> str:
+    """A doc's opening, `_raw_opening`, as one line, its wraps normalized to
+    single spaces. Every gate that looks for a phrase in an opening reads it
+    through here: round 2's finding was a gate matching "macOS and Windows"
+    against the raw opening, which skipped docs/brief.md because the phrase
+    is wrapped there, so the Linux claim the gate exists to catch would have
+    passed."""
+    return " ".join(_raw_opening(text).split())
+
+
+def test_the_opening_reader_joins_the_lines_a_phrase_is_wrapped_across():
+    """Round 2, Codex finding: docs/brief.md's opening wraps "macOS and
+    Windows" across two lines, so a gate that read the raw opening for that
+    phrase skipped the file and the Linux claim below it. The opening reader
+    hands back one line, so a phrase is found however the paragraph happens
+    to be filled, and it still stops at the first `## ` heading."""
+    text = "# Title\n\nruns on macOS and\nWindows.\n\n## Requirements\n\nLinux too.\n"
+    assert _opening(text) == "# Title runs on macOS and Windows."
 
 
 def test_the_section_reader_takes_the_heading_literally():
@@ -1440,6 +1473,332 @@ def test_install_docs_name_the_release_zips_and_keep_the_from_source_path():
         assert not missing, f"{name}'s {heading} section does not name {missing}"
         assert "cp dist/melampus plugin/Melampus.lrplugin/" in section, (
             f"{name}'s {heading} section lost the from-source install")
+
+
+def _picker() -> list[tuple[str, str]]:
+    """The engines the plugin's picker offers, in its order, as (name, title)
+    pairs, read from providers.detect_engines, the list the picker is built
+    from (card #423): the one copy every engine gate below reads, so an
+    engine added there reaches them all. The title is the verdict's up to
+    its " — ", what the picker calls the engine. Detection stays on this
+    machine and runs nothing: Ollama is not asked (stubbed here, for the
+    call), and the subscription CLIs are not run (conftest's
+    no_ambient_subscription_cli stubs their verdicts in every test)."""
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(providers, "ollama_answers", lambda url=None: False)
+        verdicts = providers.detect_engines()
+    return [(verdict.engine, verdict.title.split(" — ")[0]) for verdict in verdicts]
+
+
+def test_readme_opening_lists_the_engines_providers_offers_and_names_the_spec():
+    """Card #491, Done-when 1 and 3: given readme.md's first screen (everything
+    before its first `## ` heading), when read, then its engine table names
+    exactly the engines a user can pick, in the picker's order: providers'
+    detect_engines, read through `_picker`; and each row says what the
+    engine bills, from the same module: nothing for a local engine, an API
+    key for one in KEY_VARIABLES, and for one in CLI_ENGINES the
+    subscription its CliEngine names (review round 4, finding 1: the word
+    "subscription" alone let the two CLIs' cells swap and stay green).
+    An engine that bills runs its model off this machine, so its Where it
+    runs cell names whose API or servers every frame goes to (security
+    review, round 4): the subscription CLIs' cells named only the program
+    installed here, the way the `ollama` row names the server on this
+    machine, while Claude Code reads the staged frame into its conversation
+    with Anthropic and Codex attaches it to its first message to OpenAI.
+    The `ollama` row's nothing is qualified with `ollama_model` (review
+    round 4, finding 2): the same opening says a cloud model there runs
+    under the Ollama account the server is signed in to, so a bare
+    "nothing" is false for that setting.
+    `scripted` (the fake) and `command` (the seam, not in the picker) must
+    not appear. The opening also names `AGENTS.md` and `docs/brief.md`, not
+    CLAUDE.md, as the build specification: CLAUDE.md is two includes now."""
+    # The raw opening, not `_opening`: the rows below are matched line by line.
+    opening = _raw_opening(README.read_text(encoding="utf-8"))
+    rows = re.findall(r"^\| `([\w-]+)` \|(.*)$", opening, re.MULTILINE)
+    listed = [name for name, _ in rows]
+    picker = [name for name, _ in _picker()]
+    assert listed == picker, (
+        f"readme.md's opening must list the engines the picker offers, in its order: {picker}, not {listed}"
+    )
+    subscriptions = {cli.engine: cli.subscription for cli in providers.CLI_ENGINES}
+    for name, row in rows:
+        if name in providers.KEY_VARIABLES:
+            expected = "API key"
+        elif name in subscriptions:
+            expected = subscriptions[name]
+        else:
+            expected = "nothing"
+        # The What it bills cell alone. Read against the whole row, the word
+        # is satisfied by the Where it runs cell that already carries it, and
+        # a row claiming a subscription CLI costs nothing stays green.
+        cells = [cell.strip() for cell in row.split("|")]
+        assert len(cells) == 3 and not cells[-1], (
+            f"readme.md's row for `{name}` is not an Engine / Where it runs / What it bills "
+            f"row: {row.strip()}")
+        bills = cells[1]
+        assert expected in bills, (
+            f"readme.md's What it bills cell for `{name}` does not say it bills "
+            f"{expected!r}: {bills!r}")
+        assert name != providers.OLLAMA or "`ollama_model`" in bills, (
+            f"readme.md's What it bills cell for `{name}` says {bills!r} without naming "
+            "`ollama_model`, which can name one of Ollama's cloud models")
+        where = cells[0]
+        assert expected == "nothing" or re.search(r"\b\w+'s (?:API|servers)\b", where), (
+            f"readme.md's Where it runs cell for `{name}` does not say whose API or servers "
+            f"every frame goes to, though it bills {expected!r}: {where!r}")
+    for spec in ("`AGENTS.md`", "`docs/brief.md`"):
+        assert spec in opening, f"readme.md's opening does not name {spec} as the build specification"
+    assert "CLAUDE.md" not in opening, "readme.md's opening still calls CLAUDE.md the build specification"
+
+
+def test_the_openings_privacy_claim_names_the_settings_that_can_send_the_image_elsewhere():
+    """Security review, rounds 1 and 3: given an opening that promises no
+    image leaves the machine on a local engine, when read, then it names
+    both settings that break the promise for `ollama`, in the same breath.
+    `mlx` runs in-process, but the `ollama` backend posts every staged frame
+    to whatever `[model] ollama_url` names, and docs/config.md documents
+    setting it "for a server on another port or host", https included
+    (round 1); and it asks for whatever `[model] ollama_model` names, "a tag
+    from ollama.com/library" by docs/config.md, where a tag may be one of
+    Ollama's cloud models, which the server on this machine runs on Ollama's
+    own under the account it is signed in to (round 3). Naming one and not
+    the other reads as the whole list, so the first screen still promises a
+    confidentiality the configuration does not enforce. The breath is the
+    sentence that makes the promise (`_sentences`): elsewhere in the
+    opening, readme.md's engine table names `ollama_model` too (round 5)."""
+    settings = {
+        "ollama_url": "the setting that can point the ollama engine at another host",
+        "ollama_model": "the setting that can name one of Ollama's cloud models",
+    }
+    for doc in (README, BRIEF):
+        for promise in _sentences(_raw_opening(doc.read_text(encoding="utf-8"))):
+            if "leaves the machine" not in promise:
+                continue
+            for setting, why in settings.items():
+                assert setting in promise, (
+                    f"{doc.name}'s opening promises no image leaves the machine without naming "
+                    f"`{setting}` in the same sentence, {why}")
+
+
+def test_the_privacy_gate_reads_the_sentence_that_makes_the_promise(monkeypatch, tmp_path):
+    """Security review, round 5: the gate above looked for each setting
+    anywhere in the opening, and since review round 4 (finding 2) the
+    `ollama` row of readme.md's engine table names `ollama_model` in its
+    What it bills cell. So a promise that named `ollama_url` alone, round
+    3's hole, stayed green: the table answered for the promise. Given an
+    opening whose table names `ollama_model` and whose promise names only
+    `ollama_url`, the gate fails on `ollama_model`."""
+    readme = tmp_path / "readme.md"
+    readme.write_text(
+        "# Melampus\n\n"
+        "| Engine | Where it runs | What it bills |\n"
+        "|---|---|---|\n"
+        "| `ollama` | on this machine | nothing, unless `ollama_model` names a cloud model |\n\n"
+        "On the local engines no image leaves the machine, unless\n"
+        "`ollama_url` is pointed at another host.\n\n"
+        "## Status\n",
+        encoding="utf-8")
+    monkeypatch.setitem(globals(), "README", readme)
+    with pytest.raises(AssertionError, match=r"^readme\.md's opening promises no image leaves the machine.*`ollama_model`"):
+        test_the_openings_privacy_claim_names_the_settings_that_can_send_the_image_elsewhere()
+
+
+def test_only_the_readme_opening_lists_the_engines_the_other_openings_point_at_it():
+    """Review round 1, finding 3: readme.md's opening carries the engine
+    table, and the gate above holds it to providers.py. The brief's and
+    architecture's openings may name the shape — local first, or a cloud API,
+    or a subscription CLI — and cite that table; they may not restate the
+    names, by key or by the title providers.py gives them, because a copy no
+    gate reads is exactly what drifted before this card. A sentence that names
+    one engine to qualify a claim about it (`[model] ollama_url`, the privacy
+    caveat above) is not a list and does not trip this: engine keys are read
+    as backticked tokens, titles as whole words, both from `_picker`."""
+    picker = _picker()
+    names = [name for name, _ in picker]
+    words = [title for _, title in picker]
+    for doc in (BRIEF, REPO / "docs" / "architecture.md"):
+        opening = _opening(doc.read_text(encoding="utf-8"))
+        assert "readme.md" in opening, (
+            f"{doc.name}'s opening does not cite readme.md, which carries the engine list")
+        restated = [n for n in names if n in re.findall(r"`([\w-]+)`", opening)]
+        restated += [w for w in words if re.search(rf"\b{re.escape(w)}\b", opening)]
+        assert not restated, (
+            f"{doc.name}'s opening restates readme.md's engine list ({restated}); only the "
+            "README's copy is held to providers.py, so name the shape and cite the table")
+
+
+def test_the_engine_gates_read_the_picker_detect_engines_builds(monkeypatch, tmp_path):
+    """Review round 3, finding 3: the two gates above built the picker's
+    engine list by hand, one from BACKEND_CHOICES, the other from
+    ENGINE_TITLES, both adding the two CLIs themselves; the picker is built
+    from providers.detect_engines (card #423), and a seventh verdict there
+    left both green with readme.md listing six. Given a seventh verdict,
+    readme.md's opening, which lists six, fails the first gate, and an
+    opening that names the seventh, by key or by title, fails the second.
+    And the list is read without asking Ollama: the probe here records, and
+    must not be reached."""
+    detect = providers.detect_engines
+    seventh = providers.EngineVerdict("gemini", "Gemini — cloud, needs an API key", True, "API key required")
+    monkeypatch.setattr(providers, "detect_engines", lambda ollama_at=None: [*detect(ollama_at), seventh])
+    asked = []
+    monkeypatch.setattr(providers, "ollama_answers", lambda url=None: asked.append(url) or False)
+    with pytest.raises(AssertionError, match="gemini"):
+        test_readme_opening_lists_the_engines_providers_offers_and_names_the_spec()
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "architecture.md").write_text("# Architecture\n\nThe engines are readme.md's table.\n",
+                                          encoding="utf-8")
+    monkeypatch.setitem(globals(), "REPO", tmp_path)
+    monkeypatch.setitem(globals(), "BRIEF", docs / "brief.md")
+    for restated, written in (("gemini", "`gemini`"), ("Gemini", "Gemini")):
+        (docs / "brief.md").write_text(
+            f"# brief\n\nThe engines are readme.md's table, {written} among them.\n", encoding="utf-8")
+        with pytest.raises(AssertionError, match=re.escape(f"['{restated}']")):
+            test_only_the_readme_opening_lists_the_engines_the_other_openings_point_at_it()
+    assert not asked, f"reading the picker asked Ollama at {asked}"
+
+
+def test_the_readme_billing_check_reads_the_subscription_clis_from_cli_engines(monkeypatch, tmp_path):
+    """After review round 3: the README gate's billing check named the two
+    subscription CLIs by hand, so a third, in providers.CLI_ENGINES and the
+    picker alike, fell through to "nothing" and a row saying it costs
+    nothing passed. Given a third CLI engine in both, a readme.md whose row
+    for it bills nothing fails the gate: its What it bills cell must name
+    that CLI's subscription."""
+    import dataclasses
+
+    third = dataclasses.replace(providers.CODEX_CLI, engine="gemini-cli", title="Gemini CLI",
+                                subscription="a Gemini subscription")
+    monkeypatch.setattr(providers, "CLI_ENGINES", (*providers.CLI_ENGINES, third))
+    detect = providers.detect_engines
+    verdict = providers.EngineVerdict(third.engine, third.title, False, "Gemini CLI is not installed")
+    monkeypatch.setattr(providers, "detect_engines", lambda *args, **kwargs: [*detect(*args, **kwargs), verdict])
+    text = README.read_text(encoding="utf-8")
+    codex_row = re.search(r"^\| `codex` \|.*\n", text, re.MULTILINE)
+    row = "| `gemini-cli` | Gemini CLI, installed and signed in | nothing |\n"
+    readme = tmp_path / "readme.md"
+    readme.write_text(text[:codex_row.end()] + row + text[codex_row.end():], encoding="utf-8")
+    monkeypatch.setitem(globals(), "README", readme)
+    with pytest.raises(AssertionError, match=re.escape(f"`gemini-cli` does not say it bills {third.subscription!r}")):
+        test_readme_opening_lists_the_engines_providers_offers_and_names_the_spec()
+
+
+def test_the_readme_billing_check_holds_each_cli_to_its_own_subscription(monkeypatch, tmp_path):
+    """Review round 4, finding 1: the billing check took only the engine
+    names from CLI_ENGINES, so any CLI row saying "subscription" passed, and
+    a readme.md whose claude-code and codex rows swap their What it bills
+    cells, Claude Code billing the ChatGPT plan, stayed green. Each CLI's
+    cell must name the subscription providers.py says it runs on
+    (`CliEngine.subscription`), so the swap fails at the first CLI's row."""
+    text = README.read_text(encoding="utf-8")
+    first, second = providers.CLI_ENGINES[:2]
+    rows = [re.search(rf"^\| `{re.escape(cli.engine)}` \|.*$", text, re.MULTILINE).group(0)
+            for cli in (first, second)]
+    cells = [row.split("|") for row in rows]
+    cells[0][3], cells[1][3] = cells[1][3], cells[0][3]
+    for row, swapped in zip(rows, cells):
+        text = text.replace(row, "|".join(swapped))
+    readme = tmp_path / "readme.md"
+    readme.write_text(text, encoding="utf-8")
+    monkeypatch.setitem(globals(), "README", readme)
+    with pytest.raises(AssertionError, match=re.escape(f"`{first.engine}` does not say it bills {first.subscription!r}")):
+        test_readme_opening_lists_the_engines_providers_offers_and_names_the_spec()
+
+
+def test_a_doc_whose_opening_says_macos_and_windows_does_not_still_offer_linux():
+    """Review round 1, finding 2: card #491 made the openings say the
+    platforms this ships on — "macOS and Windows", the owner's About — and
+    dropped Linux from readme.md's Requirements. A page whose own opening
+    says that may not, further down, still tell the reader the local engine
+    is the backend "on Windows and Linux": both sentences are in the same
+    file and only one of them can be true of what a user can install. Where
+    Ollama itself runs is a different claim, made by docs/config.md and the
+    modules, and is not this gate's business."""
+    for doc in (README, BRIEF, REPO / "docs" / "architecture.md"):
+        text = doc.read_text(encoding="utf-8")
+        if "macOS and Windows" not in _opening(text):
+            continue
+        offers = [line.strip() for line in text.splitlines() if "Linux" in line]
+        assert not offers, (
+            f"{doc.name}'s opening says macOS and Windows, but it still offers Linux: {offers}")
+
+
+def test_readme_requirements_say_what_each_engine_needs():
+    """Review round 4, finding 3 (card #491, Done-when 2): readme.md's
+    Requirements named only `mlx` and `ollama` and then said "Nothing else,
+    for a user.", which is false on Windows: `mlx` cannot run there, and
+    every other engine needs something the user brings, an Ollama server,
+    an API key, a CLI installed and signed in. A Windows user with only what
+    the section listed had no engine that runs. So Requirements names every
+    engine the picker offers (`_picker`), with what it needs, and a user on
+    either platform can see what makes at least one of them run.
+
+    Review round 5, finding 2: it then said that on an Apple Silicon Mac
+    `mlx` "needs nothing more", which is false for a Mac without the memory
+    to hold the default model; detection calls `mlx` available on any Apple
+    Silicon Mac, so the dialog does not catch it either. What `mlx` needs
+    includes that model's size, the figure docs/config.md's `repo` row
+    documents, read from there so the two cannot disagree."""
+    section = _section(README.read_text(encoding="utf-8"), "Requirements")
+    assert section is not None, "readme.md has no ## Requirements section"
+    missing = [name for name, _ in _picker() if f"`{name}`" not in section]
+    assert not missing, f"readme.md's Requirements do not say what {missing} need to run"
+    size = re.search(r"\b\d+(?:\.\d+)? GB\b", _row(CONFIG_DOC.read_text(encoding="utf-8"), "repo")).group(0)
+    assert size in section, (
+        f"readme.md's Requirements do not give the default `mlx` model's size, {size}, "
+        "the figure docs/config.md's `repo` row documents")
+
+
+# A count, in digits or in the words a doc spells one out with.
+NUMBER = r"(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)"
+# "Six engines", "(six engines)", "7 engines": a number right before the noun;
+# and "one of two things", the count of ways to run one that readme.md's
+# Windows section put before the three it lists; and "The other four bring
+# their own", the engines left once two are named, with no noun after the
+# number. "the two local engines" is not one: a subset qualified in place is
+# named member by member in the same sentence, so it does not move with the
+# total. Nor is "the other two routes": a plural noun after the number says
+# what is counted, and when that noun is engines the first form has it.
+ENGINE_COUNT = re.compile(
+    rf"\b{NUMBER}\s+engines\b|\bone of {NUMBER}\b|\bthe other {NUMBER}\b(?!\s+[a-z]+s\b)",
+    re.IGNORECASE,
+)
+
+
+def test_the_docs_card_491_rewrote_state_no_engine_count():
+    """Review round 3, finding 1: readme.md, the brief and architecture said
+    "six engines" in five places, and no gate read the number: changed to
+    seven, four or three, every gate stayed green. How many engines there are
+    is readme.md's table, which the gate above holds to providers.py; a count
+    written anywhere else is wrong the day an engine is added, the reason card
+    #437 took the test counts out. So these docs name the engines' shape and
+    cite the table, and state no count of them, in prose, in the Status table
+    or in the diagram.
+
+    Review round 3, finding 2: readme.md's Windows section said the primary
+    backend there "is one of two things" and then listed three — Ollama, a
+    subscription CLI, the cloud. The same count, in the same place a new
+    engine goes, so the same gate reads it.
+
+    After round 3: readme.md's opening, having named the two local engines,
+    said "The other four bring their own", a count of the rest that is
+    wrong the day an engine is added, the same as the total."""
+    for counted in ("Six engines, picked in the plugin's Settings dialog.",
+                    "• VLM inference (six engines)", "7 engines behind one seam",
+                    "the primary backend is one of two things.",
+                    "The other four bring their own."):
+        assert ENGINE_COUNT.search(counted), f"the gate misses a stated count: {counted!r}"
+    for uncounted in ("On the two local engines no image leaves the machine: `mlx` and `ollama`.",
+                      "`test_prompt_rejects_unapproved_context` cover the other two routes in."):
+        assert not ENGINE_COUNT.search(uncounted), f"the gate calls this an engine count: {uncounted!r}"
+    stated = [
+        f"{doc.name}: {sentence}"
+        for doc in (README, BRIEF, REPO / "docs" / "architecture.md")
+        for sentence in _sentences(doc.read_text(encoding="utf-8"))
+        if ENGINE_COUNT.search(sentence)
+    ]
+    assert not stated, f"docs state an engine count no gate checks; cite readme.md's table: {stated}"
+
 
 def test_docs_name_engine_detection_where_the_default_and_the_refusal_are_described():
     """Card #404: the backend's default is now the first engine that can run

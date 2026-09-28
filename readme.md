@@ -1,13 +1,38 @@
 # Melampus
 
-Local AI species identification and photo-quality triage for Adobe Lightroom Classic,
-running entirely on Apple Silicon via MLX. No cloud dependency in the default path, and
-no image ever leaves the machine.
+Species identification and photo-quality triage for Lightroom Classic. For the
+selected photos it names the organism, scores the frame's sharpness on the
+subject, and writes the result into the catalog. macOS and Windows.
 
 > Named for the Greek seer who, after serpents cleaned his ears as he slept, could
 > understand the speech of animals — birds especially. Pronounced *meh-LAM-pus*.
 
-`CLAUDE.md` is the build specification. This README is how to run what exists today.
+Local first, or a cloud API, or a subscription CLI. The engines are picked in
+the plugin's Settings dialog; the ones this machine cannot run are greyed with
+the reason.
+
+| Engine | Where it runs | What it bills |
+|---|---|---|
+| `mlx` | on this Mac, Apple Silicon | nothing |
+| `ollama` | on this machine, through Ollama; macOS or Windows | nothing, unless `ollama_model` names one of Ollama's cloud models, which count against the Ollama account it is signed in to |
+| `openai` | OpenAI's API | an API key, per call |
+| `claude` | Anthropic's API | an API key, per call |
+| `claude-code` | Anthropic's servers, through Claude Code installed and signed in here | a Claude subscription, the one it is signed in to |
+| `codex` | OpenAI's servers, through Codex CLI installed and signed in here | the ChatGPT plan it is signed in to |
+
+On the two local engines no image leaves the machine: `mlx` runs inside the
+executable, and `ollama` talks to the Ollama server on this machine — unless
+`ollama_url` is pointed at another host, or `ollama_model` names one of
+Ollama's cloud models, which that server runs on Ollama's own machines under
+the account it is signed in to; either sends every frame off this one
+([docs/config.md](docs/config.md) § `[model]`). The model is not bundled: the
+Settings dialog downloads it, into the HuggingFace cache for `mlx`, or has
+Ollama pull it for `ollama`. The others bring their own.
+
+The plugin is a folder with the executable inside it, `melampus` on macOS or
+`melampus.exe` on Windows, from a release zip; a user installs no Python.
+`AGENTS.md` and `docs/brief.md` are the build specification. This README is
+how to run what exists today.
 
 ---
 
@@ -17,9 +42,9 @@ no image ever leaves the machine.
 |---|---|---|
 | **1** | Local VLM species identification | **Working.** Run over a 1,743-frame corpus |
 | **2** | Quality scoring + location/season re-ranking | **Working.** Subject-localised sharpness and GBIF re-ranking both in the pipeline |
-| 3 | HTTP service + frozen binary | Not started. The CLI is the interface today |
-| **4** | Lightroom Classic plugin | **Working.** Analyses and writes to a real catalog |
-| — | Optional cloud escalation for the hard tail (§6.6) | **Working.** Off by default |
+| **3** | One-file executable | **Working.** Built and smoke-tested in CI on macOS and Windows; ships inside the plugin folder; keeps its config and caches in a per-user data directory. There is no HTTP service: the plugin runs the executable. Not yet signed or notarized (card #438) |
+| **4** | Lightroom Classic plugin | **Working.** Analyses with the executable beside it and writes to a real catalog; the engine picker and the model download in its Settings dialog. On Windows the executable and the plugin's cmd.exe command run in CI; a run inside Lightroom there is card #424 |
+| — | Optional cloud escalation for the hard tail (docs/build-spec.md §6.6) | **Working.** Off by default |
 
 The tests, Python and Lua, need no model weights and no network; one command runs
 them all — see [Tests](#tests).
@@ -33,12 +58,26 @@ the numbers do and don't support.
 
 ## Requirements
 
-- **Apple Silicon Mac** for local inference. MLX is arm64-only. Developed on an
-  M4 Max / 128 GB. (Windows and Linux work too — locally through Ollama, or
-  with cloud inference; see § Windows.)
-- **Python 3.12** — not 3.13+. The `mlx-vlm` dependency stack publishes wheels for
-  3.12; 3.13 runs ahead of parts of it.
-- ~20 GB of disk for the default model.
+- **Lightroom Classic.** Developed against 15.4.1.
+- **An Apple Silicon Mac, or a Windows PC.** Developed on an M4 Max / 128 GB.
+- **At least one engine that runs on it.** The Settings dialog greys the ones
+  that cannot, with the reason. Each needs:
+  - `mlx`: an Apple Silicon Mac (MLX is arm64-only, so never Windows). Its
+    default model is 18.3 GB of weights, on disk and held in unified memory
+    while it runs; a Mac without that much memory to spare picks a smaller
+    build (§ Available models, `[model] repo`) or `ollama`.
+  - `ollama`: Ollama installed and running on this machine, macOS or Windows,
+    and ~6 GB of disk for its default model.
+  - `openai` or `claude`: that provider's API key.
+  - `claude-code` or `codex`: Claude Code or Codex CLI installed here and
+    signed in to its subscription.
+
+  On Windows a user brings one of the others: Ollama, an API key, or a
+  signed-in CLI.
+- **Nothing else, for a user.** The executable ships in the plugin folder
+  (§ Reviewing in Lightroom). Python 3.12 and uv are for building it and
+  running the tests, below — not 3.13+: the `mlx-vlm` dependency stack
+  publishes wheels for 3.12; 3.13 runs ahead of parts of it.
 
 ## Install
 
@@ -71,8 +110,8 @@ plain HTTP, so it is not affected.
 
 ## Windows (Ollama, or cloud inference)
 
-There is no MLX on Windows — it is Apple-Silicon-only — so on Windows (and
-Linux, and a Mac that prefers it) the primary backend is one of two things.
+There is no MLX on Windows — it is Apple-Silicon-only — so on Windows
+(and on a Mac that prefers it) the primary backend is one of the following.
 
 **Local, through Ollama.** Install Ollama from [ollama.com/download](https://ollama.com/download),
 pull a vision model (`ollama pull qwen3-vl:8b-instruct`, the default; see
@@ -250,7 +289,7 @@ same individual. Judging 43 representatives labels the entire corpus in minutes.
 Encounters where the model called different species on different frames of the same
 bird are flagged **unstable** — that is where a human eye is worth the most.
 
-This is also the correction dataset CLAUDE.md §6.4 wants for prompt tuning and
+This is also the correction dataset docs/build-spec.md §6.4 wants for prompt tuning and
 eventual fine-tuning, so the effort compounds.
 
 ---
