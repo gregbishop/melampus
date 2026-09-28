@@ -475,7 +475,8 @@ def built_executable(request: pytest.FixtureRequest) -> Path:
 # 206 and Content-Range), plus the repo info the library's `resolve_revision`
 # resolves the commit from (`GET /api/models/<repo>`). The knobs that drive the resume tests: `cut_after` drops
 # the connection once that many bytes of a file have been sent and starts an
-# outage (503 until `outage` is cleared); `throttle` slows the bytes so a cancel
+# outage (503 until `outage` is cleared, its body `outage_body`, as a CDN's
+# error page, empty unless a test names one); `throttle` slows the bytes so a cancel
 # can land mid-file; `ignore_range` answers a Range request with 200 and the
 # whole file, as a CDN that ignores Range does; `short_resume` answers a Range
 # request with a body that ends that many bytes before the file's end,
@@ -574,6 +575,7 @@ class FakeHub:
         self.requests: list[HubRequest] = []
         self.cut_after: int | None = None
         self.outage = False
+        self.outage_body = b""
         self.ignore_range = False
         self.gzip_layers = 0  # times each GET gzips the bytes, Content-Encoding naming each
         self.content_range: str | None = None  # every GET's Content-Range, in place of its own
@@ -670,8 +672,9 @@ class FakeHub:
                     return
                 if hub.outage:
                     self.send_response(503)
-                    self.send_header("Content-Length", "0")
+                    self.send_header("Content-Length", str(len(hub.outage_body)))
                     self.end_headers()
+                    self.wfile.write(hub.outage_body)
                     return
                 data = hub.files[name]
                 if name in hub.corrupt:

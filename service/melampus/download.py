@@ -191,6 +191,23 @@ def _without_query(text: str) -> str:
     return _URL_QUERY.sub(r"\1", text)
 
 
+# The most of one piece of another side's text (a file's name, a URL, the
+# hub's or its CDN's error) a DownloadError quotes. The message is one line
+# cut at MAX_ERROR_BYTES, and its own words (the reason, a size, a limit,
+# the fix) follow what it quotes: a quarter of the line a piece, so a
+# message quoting two keeps half the line for its own.
+MAX_QUOTED = VLMBackend.MAX_ERROR_BYTES // 4
+
+
+def _quoted(text: object) -> str:
+    """`text`, a piece another side wrote, as a DownloadError quotes it: cut
+    to MAX_QUOTED characters first, so no more than that is ever cleaned
+    (a 60 MiB error body, cleaned whole, took the run to 2 GB), then without
+    a URL's query and in printable words (`VLMBackend.plain`). The query
+    goes before the cleaning, which could part a URL from its query."""
+    return VLMBackend.plain(_without_query(str(text)[:MAX_QUOTED]))
+
+
 def _redact(record: logging.LogRecord) -> bool:
     """A filter for the hub library's stderr handler: its retry warning
     names the full URL it is downloading from, signed query included."""
@@ -286,7 +303,10 @@ class DownloadError(Exception):
     side wrote): it carries the hub's words, a file's name among them, to
     the terminal, the plugin's download log and its failure dialog, where
     an escape sequence would retitle the terminal or erase the line and a
-    line break would fake a line of its own."""
+    line break would fake a line of its own. Each piece of another side's
+    text in it goes in through `_quoted`, bounded, so the line keeps the
+    message's own reason and fix, and the cleaning here runs over a
+    bounded message."""
 
     def __init__(self, message: str) -> None:
         super().__init__(VLMBackend.plain(_without_query(message)))
@@ -475,7 +495,7 @@ def _hub_client(endpoint: str) -> httpx.Client:
         codings = response.headers.get_list("content-encoding", split_commas=True)
         if len(codings) > 1:
             raise DownloadError(
-                f"{response.url} answered with {len(codings)} content codings, one inside another, "
+                f"{_quoted(response.url)} answered with {len(codings)} content codings, one inside another, "
                 f"which no hub sends and which would decode without bound; {NOT_A_HUB}"
             )
 
@@ -484,7 +504,7 @@ def _hub_client(endpoint: str) -> httpx.Client:
             _get_file_length_from_http_response(response)
         except ValueError as exc:
             raise DownloadError(
-                f"{response.url} answered with a Content-Range whose length is not a number, "
+                f"{_quoted(response.url)} answered with a Content-Range whose length is not a number, "
                 f"which the hub library cannot read; {NOT_A_HUB}"
             ) from exc
 
@@ -511,7 +531,7 @@ def _plan(repo: str, endpoint: str | None, cache: Path, storage: Path) -> tuple[
     # them): a name that is absolute, a drive or UNC path, or traverses is
     # refused, and the pointer must land under the snapshot folder.
     if not REGEX_COMMIT_HASH.match(commit):
-        raise DownloadError(f"the hub at {endpoint} says main of {repo} is {commit!r}, not a commit hash; {NOT_A_HUB}")
+        raise DownloadError(f"the hub at {endpoint} says main of {repo} is {_quoted(commit)!r}, not a commit hash; {NOT_A_HUB}")
     blobs = []
     for entry in api.list_repo_tree(repo, recursive=True, revision=commit):
         if not isinstance(entry, RepoFile):
@@ -521,20 +541,20 @@ def _plan(repo: str, endpoint: str | None, cache: Path, storage: Path) -> tuple[
             pointer = _get_pointer_path(str(storage), commit, os.path.join(*entry.path.split("/")))
         except ValueError as exc:
             raise DownloadError(
-                f"the hub at {endpoint} lists {entry.path!r} in {repo}, which is a path, not a file name; {NOT_A_HUB}"
+                f"the hub at {endpoint} lists {_quoted(entry.path)!r} in {repo}, which is a path, not a file name; {NOT_A_HUB}"
             ) from exc
         url = hf_hub_url(repo, entry.path, revision=commit, endpoint=endpoint)
         meta = get_hf_file_metadata(url, endpoint=endpoint)
         if meta.etag is None or meta.size is None:
-            raise DownloadError(f"the hub gave no etag or size for {entry.path}; {RERUN}")
+            raise DownloadError(f"the hub gave no etag or size for {_quoted(entry.path)}; {RERUN}")
         if not (REGEX_SHA256.match(meta.etag) or REGEX_COMMIT_HASH.match(meta.etag)):
             raise DownloadError(
-                f"the hub at {endpoint} gave {entry.path} the etag {meta.etag!r}, "
+                f"the hub at {endpoint} gave {_quoted(entry.path)} the etag {_quoted(meta.etag)!r}, "
                 f"not a sha256 or git blob checksum; {NOT_A_HUB}"
             )
         if not _is_count(meta.size):
             raise DownloadError(
-                f"the hub at {endpoint} gave {entry.path} the size {meta.size}, "
+                f"the hub at {endpoint} gave {_quoted(entry.path)} the size {_quoted(meta.size)}, "
                 f"not a non-negative integer of at most {MAX_SIZE}; {NOT_A_HUB}"
             )
         # The hub library's `http_get` refuses a file above its own limit
@@ -543,7 +563,7 @@ def _plan(repo: str, endpoint: str | None, cache: Path, storage: Path) -> tuple[
         # it sets HF_HUB_DISABLE_XET. Read at run time, the pinned library's.
         if meta.size > constants.MAX_HTTP_DOWNLOAD_SIZE:
             raise DownloadError(
-                f"the hub at {endpoint} gave {entry.path} the size {meta.size}, above "
+                f"the hub at {endpoint} gave {_quoted(entry.path)} the size {meta.size}, above "
                 f"{constants.MAX_HTTP_DOWNLOAD_SIZE}, the hub library's limit for a download over plain HTTP, "
                 "so this command cannot fetch it: check HF_ENDPOINT, and [model] repo in config or --model"
             )
@@ -569,7 +589,7 @@ def _verify(blob: _Blob) -> None:
     if digest.hexdigest() != blob.etag:
         blob.partial.unlink()
         raise DownloadError(
-            f"{blob.filename} did not match the checksum the hub gave for it; "
+            f"{_quoted(blob.filename)} did not match the checksum the hub gave for it; "
             "the partial file is discarded; re-run melampus-id --download-model to fetch it whole"
         )
 
@@ -620,7 +640,7 @@ def _fetch(blob: _Blob, progress: _Progress, headers: dict[str, str], lock_dir: 
                 raise
             except OSError as exc:
                 why = exc.strerror or f"{partial.tell()} bytes arrived where the hub said {blob.size}"
-                raise DownloadError(f"{blob.filename}: {why}; the partial file is kept; {RERUN}") from exc
+                raise DownloadError(f"{_quoted(blob.filename)}: {why}; the partial file is kept; {RERUN}") from exc
         _verify(blob)
         blob.partial.replace(blob.path)
 
@@ -795,18 +815,18 @@ def download_model(
             # what is missing is the user's access to it.
             raise DownloadError(
                 f"the model repo {repo} on the hub at {endpoint} is gated: request access to it "
-                f"on the hub, sign in with `hf auth login` (or set HF_TOKEN), then {RERUN} ({exc})"
+                f"on the hub, sign in with `hf auth login` (or set HF_TOKEN), then {RERUN} ({_quoted(exc)})"
             ) from exc
         except RepositoryNotFoundError as exc:
             raise DownloadError(
                 f"the hub at {endpoint} has no model repo named {repo}: "
-                f"check [model] repo in config, or --model ({exc})"
+                f"check [model] repo in config, or --model ({_quoted(exc)})"
             ) from exc
         except (httpx.TransportError, RevisionResolutionError) as exc:
             # RevisionResolutionError: the hub could not be reached to resolve
             # `main` and the cache has no refs/main to fall back on.
             raise DownloadError(
-                f"could not reach the hub at {endpoint} ({type(exc).__name__}: {exc}): "
+                f"could not reach the hub at {endpoint} ({type(exc).__name__}: {_quoted(exc)}): "
                 f"check the network, then {RERUN}"
             ) from exc
         except Timeout as exc:
@@ -815,7 +835,7 @@ def download_model(
             # download for mlx-vlm's load) or a removal of it holds it.
             raise DownloadError(f"{HELD.format(repo=repo)}, then {RERUN} ({exc})") from exc
         except (OSError, httpx.HTTPError) as exc:
-            raise DownloadError(f"download of {repo} from {endpoint} failed: {exc}; {RERUN}") from exc
+            raise DownloadError(f"download of {repo} from {endpoint} failed: {_quoted(exc)}; {RERUN}") from exc
     return path
 
 

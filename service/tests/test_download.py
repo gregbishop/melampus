@@ -595,6 +595,36 @@ def test_download_refusal_of_a_size_prints_no_control_character_from_the_file_na
     assert "model ]0;hub [2K .safetensors" in message, message
 
 
+# A file name as long as a hub may nest one, twenty folders deep: the
+# Codex code review of round 2 measured the refusal with 1,223 characters.
+LONG_NAME = "/".join(["folder" * 10] * 20) + "/model.safetensors"
+
+
+@pytest.mark.parametrize("fake_hub", [{"config.json": FAKE_FILES["config.json"],
+                                       LONG_NAME: FAKE_FILES["model.safetensors"]}],
+                         indirect=True, ids=["a file twenty folders deep"])
+def test_cli_refusal_of_a_size_keeps_the_size_and_the_fix_on_the_line_whatever_the_file_name(
+    fake_hub: FakeHub, hub_env: dict[str, str]
+):
+    """Codex code review, round 2 (card #500). A refusal is one printable
+    line cut at MAX_ERROR_BYTES (`VLMBackend.plain`), and the file's name,
+    the hub's text, comes before the size and the fix: a name of some 1,200
+    characters pushed both off the end, so the line named a file and
+    neither what was wrong with it nor what to check. Given a hub naming a
+    file twenty folders deep a size above the hub library's download limit,
+    the one line on stderr names the file by its start, the size, and
+    HF_ENDPOINT, exit 3."""
+    with FakeHub().serve() as cdn:
+        fake_hub.bytes_host = cdn.endpoint
+        fake_hub.sizes[LONG_NAME] = "60000000000"
+        proc = _cli(["--download-model", "--model", FAKE_REPO], hub_env)
+
+    assert proc.returncode == 3, proc.stderr[-3000:]
+    line = proc.stderr.splitlines()[-1]
+    assert line.isprintable() and LONG_NAME[:200] in line, line
+    assert "the size 60000000000" in line and "HF_ENDPOINT" in line, line
+
+
 def test_download_lays_out_the_snapshot_from_the_verified_blobs_and_asks_the_hub_nothing_more(
     fake_hub: FakeHub, tmp_path: Path
 ):
@@ -1179,6 +1209,27 @@ def test_cli_names_the_cdn_url_on_stderr_without_its_signed_query_when_the_bytes
     assert cdn.gets("model.safetensors") == [None, f"bytes={DOWNLOAD_CHUNK_SIZE}-"], "the drop was not retried by Range"
     assert "503" in proc.stderr and "--download-model" in proc.stderr
     assert f"{cdn.endpoint}/{FAKE_REPO}/resolve/{FAKE_COMMIT}/model.safetensors" in proc.stderr, "the URL's path is not named"
+    _assert_no_signature_on(proc.stderr)
+
+
+def test_cli_keeps_the_rerun_advice_on_the_line_when_the_host_serving_the_bytes_answers_a_long_error(
+    fake_hub: FakeHub, hub_env: dict[str, str]
+):
+    """Codex code review, round 2 (card #500). The hub library puts the
+    body of a host's error answer into its exception whole, and the failure
+    line quoted the exception before the re-run advice, the line cut at
+    MAX_ERROR_BYTES: an error text past some 868 characters (a realistic
+    CDN's is some 680) pushed the advice off the end, so the line said the
+    download failed and not what to do. Given a CDN answering every GET
+    with a 503 whose body is a long error text, the one line on stderr
+    names the 503 and ends with the re-run advice, exit 3, with no signed
+    query on stderr."""
+    body = b"<Error><Code>ServiceUnavailable</Code><Message>Please retry.</Message></Error>" * 60
+    _, proc = _cli_with_the_bytes_on_a_signed_cdn(fake_hub, hub_env, outage=True, outage_body=body)
+
+    assert proc.returncode == 3, proc.stderr[-3000:]
+    line = proc.stderr.splitlines()[-1]
+    assert line.isprintable() and "503" in line and line.endswith(download.RERUN), line
     _assert_no_signature_on(proc.stderr)
 
 
