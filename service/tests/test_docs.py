@@ -1141,6 +1141,35 @@ def test_the_action_pinning_gate_takes_neither_a_word_nor_an_anchor_as_the_versi
     assert "ci.yml" not in reported, reported
 
 
+def test_the_action_pinning_gate_takes_no_other_length_or_case_of_sha(tmp_path, monkeypatch):
+    """Beside round 7, 2: a commit SHA is exactly forty lowercase hex
+    digits, and the test above holds only the loosenings to any count from
+    one, to seven through forty, and to any word character. Allowing
+    thirty-nine or forty-one, any number from forty up, upper case, or a
+    letter past `f` still left every test green. None of these refs is a
+    commit SHA GitHub reads as one, so each can only be a branch or tag
+    name, which can be moved: under any of those loosenings a movable ref
+    would pass as a pin. Each has a version comment, so only the ref is
+    wrong, and each is reported; ci.yml is pinned and is not."""
+    sha = "11d5960a326750d5838078e36cf38b85af677262"
+    steps = [
+        f"- uses: actions/checkout@{sha[:-1]} # v4.4.0",
+        f"- uses: actions/checkout@{sha}0 # v4.4.0",
+        f"- uses: actions/checkout@{sha}{sha[:24]} # v4.4.0",
+        f"- uses: actions/checkout@{sha.upper()} # v4.4.0",
+        f"- uses: actions/checkout@{sha[:-1]}g # v4.4.0",
+    ]
+    (tmp_path / "ci.yml").write_text(f"{WORKFLOW_STEPS}      - uses: actions/checkout@{sha} # v4.4.0\n", encoding="utf-8")
+    (tmp_path / "x.yaml").write_text(WORKFLOW_STEPS + "".join(f"      {step}\n" for step in steps), encoding="utf-8")
+    monkeypatch.setitem(globals(), "WORKFLOWS", tmp_path)
+    with pytest.raises(AssertionError) as unpinned:
+        test_every_workflow_pins_every_action_to_a_commit_sha_with_its_version()
+    reported = str(unpinned.value)
+    for step in steps:
+        assert f"x.yaml: {step}" in reported, reported
+    assert "ci.yml" not in reported, reported
+
+
 RELEASE_ZIPS = ("Melampus-macOS.zip", "Melampus-Windows.zip")
 
 
