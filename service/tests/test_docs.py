@@ -222,16 +222,22 @@ def _section(text: str, heading: str) -> str | None:
     return match.group(1) if match else None
 
 
+def _raw_opening(text: str) -> str:
+    """A doc's opening — everything before its first `## ` heading — as
+    written, lines and all. The one place an opening's end is defined:
+    `_opening` joins this, and the gate that reads readme.md's engine table
+    reads it as is, because it matches line-anchored rows."""
+    return text.split("\n## ", 1)[0]
+
+
 def _opening(text: str) -> str:
-    """A doc's opening — everything before its first `## ` heading — as one
-    line, its wraps normalized to single spaces. Every gate that looks for a
-    phrase in an opening reads it through here: round 2's finding was a gate
-    matching "macOS and Windows" against the raw opening, which skipped
-    docs/brief.md because the phrase is wrapped there, so the Linux claim the
-    gate exists to catch would have passed. The gate that reads readme.md's
-    engine table keeps the raw opening, because it matches line-anchored rows.
-    """
-    return " ".join(text.split("\n## ", 1)[0].split())
+    """A doc's opening, `_raw_opening`, as one line, its wraps normalized to
+    single spaces. Every gate that looks for a phrase in an opening reads it
+    through here: round 2's finding was a gate matching "macOS and Windows"
+    against the raw opening, which skipped docs/brief.md because the phrase
+    is wrapped there, so the Linux claim the gate exists to catch would have
+    passed."""
+    return " ".join(_raw_opening(text).split())
 
 
 def test_the_opening_reader_joins_the_lines_a_phrase_is_wrapped_across():
@@ -1498,7 +1504,7 @@ def test_readme_opening_lists_the_engines_providers_offers_and_names_the_spec():
     from melampus import providers
 
     # The raw opening, not `_opening`: the rows below are matched line by line.
-    opening = README.read_text(encoding="utf-8").split("\n## ", 1)[0]
+    opening = _raw_opening(README.read_text(encoding="utf-8"))
     rows = re.findall(r"^\| `([\w-]+)` \|(.*)$", opening, re.MULTILINE)
     listed = [name for name, _ in rows]
     picker = [name for name, _ in _picker()]
