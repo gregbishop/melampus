@@ -368,6 +368,7 @@ cloud = [
 ]
 dev = [
     { name = "pytest" },
+    { name = "pyyaml" },
 ]
 openai = [
     { name = "openai" },
@@ -386,6 +387,7 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.9" },
     { name = "pyinstaller", marker = "extra == 'build'", specifier = "==6.22.3" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
+    { name = "pyyaml", marker = "extra == 'dev'", specifier = "==6.0.3" },
 ]
 provides-extras = ["dev", "cloud", "openai", "build"]
 

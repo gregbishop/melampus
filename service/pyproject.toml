@@ -35,7 +35,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8"]
+dev = [
+    "pytest>=8",
+    # Test-only: the action-pinning gate in tests/test_docs.py parses .github/workflows with it.
+    "pyyaml==6.0.3",
+]
 # Optional: the cloud-escalation path (CLAUDE.md §6.6). The local pipeline never
 # imports this, so a local-only install stays local-only.
 cloud = ["anthropic>=0.60"]
