@@ -30,13 +30,12 @@ import base64
 import binascii
 import hashlib
 import io
-import re
 import subprocess
 import urllib.parse
 from pathlib import Path
 
 import pytest
-from PIL import Image, UnidentifiedImageError
+from PIL import Image
 
 from conftest import FIXTURE, REPO, _load_tool, metadata_laden
 
@@ -227,46 +226,27 @@ UNREADABLE = (
     "not an image the gate can read; if it is text, review it and list its "
     "path and SHA-256 in TEXT_FIXTURES"
 )
-# A run of the base64 alphabet long enough to hold an image header, unbroken
-# (a data URI, a JSON string) or wrapped across lines (a 76-column dump).
-BASE64_RUN = re.compile(rb"[A-Za-z0-9+/\r\n]{64,}")
-# A wrapped dump's first full line. A run spans line breaks, so it also takes
-# the tail of the line above the dump (uuencode's `begin-base64 644 x.jpg`, a
-# MIME header, a heading); the dump, and the image, start at this line.
-DUMP_LINE = re.compile(rb"^[A-Za-z0-9+/]{64,}", re.MULTILINE)
 
 
-def _opened(blob: bytes) -> tuple[Image.Image | None, bool]:
-    """The image Pillow reads from `blob` (None when it reads none), and
-    whether it recognised an image format there at all. The gate's one
-    reading of what a blob is; its callers close what they open.
+def _opened(blob: bytes) -> Image.Image | None:
+    """The image Pillow reads from `blob`, or None when it reads none: the
+    gate's one reading of what a blob is; its caller closes what it opens.
 
-    Only UnidentifiedImageError means no format. A header that matches a
-    format's magic and then does not parse -- text opening `P1 fix`, a frame
-    cut short -- raises ValueError or OSError: recognised, and unreadable.
-    DecompressionBombError is neither, and propagates."""
+    A blob in which Pillow recognises no format raises UnidentifiedImageError,
+    an OSError. A header that matches a format's magic and then does not
+    parse -- text opening `P1 fix`, a frame cut short -- raises ValueError or
+    OSError. Either way the gate reads no image there. DecompressionBombError
+    is neither, and propagates."""
     try:
-        return Image.open(io.BytesIO(blob)), True
-    except UnidentifiedImageError:
-        return None, False
+        return Image.open(io.BytesIO(blob))
     except (ValueError, OSError):
-        return None, True
-
-
-def _is_image(blob: bytes, recognised: bool = False) -> bool:
-    """Whether Pillow reads an image from `blob`, whatever it decodes as; or,
-    with `recognised`, whether it recognises an image format there at all."""
-    image, known = _opened(blob)
-    if image is None:
-        return recognised and known
-    image.close()
-    return True
+        return None
 
 
 def _frame_problems(data: bytes) -> list[str]:
     """Why `data` (a blob from the index) is not a committable frame."""
     problems = []
-    image, _recognised = _opened(data)
+    image = _opened(data)
     if image is None:
         problems.append(UNREADABLE)
     else:
@@ -307,54 +287,6 @@ def _is_stray_fixture(path: str) -> bool:
 def _stray_fixture_paths(tracked):
     """Tracked paths under a fixtures folder other than service/tests/fixtures."""
     return [path for path in tracked if path and _is_stray_fixture(path)]
-
-
-def _is_text(blob: bytes) -> bool:
-    """Whether a blob decodes as text. Read from the bytes, because a name is
-    not evidence of what was committed -- and not exempting on its own, because
-    an image can be text too."""
-    try:
-        blob.decode("utf-8")
-    except UnicodeDecodeError:
-        return False
-    return b"\0" not in blob
-
-
-def _embeds_image(blob: bytes) -> bool:
-    """Whether a text blob carries an image base64-encoded: any run of the
-    alphabet, once its line breaks are dropped, in which Pillow recognises an
-    image format, readable or not. A JSON string's `\\n` escapes end a run,
-    so a wrapped dump's first run is an image cut short, which Pillow cannot
-    read: it counts, and so does random base64 that opens with a BMP, PCX or
-    SGI signature. The gate fails closed on what it cannot read. A run is
-    decoded from its first full line, so the line above a dump is not read
-    as the front of the image."""
-    for run in BASE64_RUN.findall(blob):
-        line = DUMP_LINE.search(run)
-        data = run[line.start() if line else 0 :].translate(None, b"\r\n")
-        decoded = base64.b64decode(data[: len(data) // 4 * 4])
-        if _is_image(decoded, recognised=True):
-            return True
-    return False
-
-
-def _gated_fixtures(blobs: dict[str, bytes]) -> list[str]:
-    """Tracked fixtures the frame gate opens: every one whose indexed blob is
-    an image's, or is not a text file's, or carries an image as base64. An
-    image can be text -- Pillow reads the ASCII Netpbm formats and XPM -- and
-    text can hold one, so only a blob that is text, no image Pillow reads, and
-    carries none is exempt. A carrier is refused whole: the gate reads a frame
-    as one image, and cannot vouch for one inside another file. Over the
-    ceiling, text Pillow recognises an image format in is gated even when it
-    cannot read it (an XPM that names a colour): a text image carries no EXIF
-    Pillow reads, so the ceiling is the one check that could refuse it."""
-    return [
-        path
-        for path, blob in blobs.items()
-        if _is_image(blob, recognised=len(blob) > FRAME_CEILING)
-        or not _is_text(blob)
-        or _embeds_image(blob)
-    ]
 
 
 # A text fixture's path, listed in the tests' own `reviewed` manifests.
